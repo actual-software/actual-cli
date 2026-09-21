@@ -285,8 +285,11 @@ pub struct PlanGovernanceEvent {
     pub properties: Option<PlanGovernanceEventProperties>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub insert_id: Option<String>,
+    /// Opaque idempotency key, unique per event occurrence and reused
+    /// verbatim if the same event is re-sent. Required by the proxy: PostHog
+    /// deduplicates on it, so two events sharing a key collapse into one. See
+    /// `crate::telemetry::plan_governance::new_insert_id`.
+    pub insert_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1327,7 +1330,7 @@ mod tests {
                 ..Default::default()
             }),
             timestamp: None,
-            insert_id: Some("idempotency-key-1".to_string()),
+            insert_id: "idempotency-key-1".to_string(),
         };
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["event"], "plan_governance_rule_violation");
@@ -1347,12 +1350,15 @@ mod tests {
                 distinct_id: "install-abc123".to_string(),
                 properties: None,
                 timestamp: None,
-                insert_id: None,
+                insert_id: "idempotency-key-2".to_string(),
             }],
         };
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["events"].as_array().unwrap().len(), 1);
         assert_eq!(value["events"][0]["event"], "plan_governance_check_started");
+        // The proxy rejects an event without insert_id, so it must always be
+        // on the wire.
+        assert_eq!(value["events"][0]["insert_id"], "idempotency-key-2");
     }
 
     #[test]

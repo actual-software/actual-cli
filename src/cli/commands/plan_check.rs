@@ -1039,7 +1039,7 @@ fn send_override_events(root: &Path, keys: &[String]) {
                     ..Default::default()
                 }),
                 timestamp: Some(timestamp.clone()),
-                insert_id: None,
+                insert_id: crate::telemetry::plan_governance::new_insert_id(),
             }
         })
         .collect();
@@ -4446,6 +4446,11 @@ mod tests {
             rule_ids,
             std::collections::HashSet::from(["R-A-001".to_string(), "R-A-002".to_string()])
         );
+        // Same event name, install and timestamp -- only a per-event
+        // insert_id keeps PostHog from deduplicating one override away.
+        let insert_ids: std::collections::HashSet<_> =
+            events.iter().map(|e| e.insert_id.clone()).collect();
+        assert_eq!(insert_ids.len(), 2);
     }
 
     /// The proxy rejects a batch over 100 events whole (see

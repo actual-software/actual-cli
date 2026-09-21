@@ -148,7 +148,7 @@ impl EventContext {
             distinct_id: self.distinct_id.clone(),
             properties: Some(self.base_properties()),
             timestamp: Some(Self::timestamp()),
-            insert_id: None,
+            insert_id: new_insert_id(),
         }
     }
 
@@ -167,7 +167,7 @@ impl EventContext {
             distinct_id: self.distinct_id.clone(),
             properties: Some(properties),
             timestamp: Some(Self::timestamp()),
-            insert_id: None,
+            insert_id: new_insert_id(),
         }
     }
 
@@ -189,9 +189,19 @@ impl EventContext {
             distinct_id: self.distinct_id.clone(),
             properties: Some(properties),
             timestamp: Some(Self::timestamp()),
-            insert_id: None,
+            insert_id: new_insert_id(),
         }
     }
+}
+
+/// A fresh idempotency key for one event occurrence.
+///
+/// Generate this once when the event is built and keep it on the event, so a
+/// re-send of the same event carries the same key and PostHog deduplicates
+/// it, while every new event -- including several same-timestamp rule
+/// violations from one run -- gets its own key and is counted.
+pub fn new_insert_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Send a batch of plan-governance events, fire-and-forget.
@@ -351,6 +361,54 @@ mod tests {
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
         }
+    }
+
+    #[test]
+    fn test_every_builder_sets_a_uuid_insert_id() {
+        let ctx = context();
+        for event in [
+            ctx.started_event(),
+            ctx.completed_event(PlanGovernanceDecision::Allow, 1.0, 0),
+            ctx.violation_event(
+                "R-A-002",
+                "cross-cutting-tokens",
+                PlanGovernanceDecision::Warn,
+            ),
+        ] {
+            assert!(
+                uuid::Uuid::parse_str(&event.insert_id).is_ok(),
+                "insert_id should be a UUID, got {:?}",
+                event.insert_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_same_run_events_get_distinct_insert_ids() {
+        // One run tripping several rules emits same-install, same-command
+        // violations that differ only by rule_id; each needs its own key or
+        // PostHog collapses them into one.
+        let ctx = context();
+        let ids: std::collections::HashSet<String> = [
+            ctx.started_event(),
+            ctx.completed_event(PlanGovernanceDecision::Block, 1.0, 1),
+            ctx.violation_event("R-A-001", "src", PlanGovernanceDecision::Block),
+            ctx.violation_event("R-A-002", "src", PlanGovernanceDecision::Block),
+            ctx.violation_event("R-A-002", "src", PlanGovernanceDecision::Block),
+        ]
+        .into_iter()
+        .map(|e| e.insert_id)
+        .collect();
+        assert_eq!(ids.len(), 5);
+    }
+
+    #[test]
+    fn test_resending_an_event_keeps_its_insert_id() {
+        // The key lives on the event, so a re-send of the same built event is
+        // recognizable as a retry rather than a new occurrence.
+        let event = context().started_event();
+        let resent = event.clone();
+        assert_eq!(event.insert_id, resent.insert_id);
     }
 
     #[test]
