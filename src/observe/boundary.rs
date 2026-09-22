@@ -134,6 +134,106 @@ fn is_agent_launch(payload: &serde_json::Value) -> bool {
     !prompt.is_empty() || !description.is_empty()
 }
 
+// ---------------------------------------------------------------------------
+// Kev-augmented variants — consult kev only for ambiguous cases
+// ---------------------------------------------------------------------------
+
+const PROMPT_AMBIGUOUS_LOW: usize = 10;
+const PROMPT_AMBIGUOUS_HIGH: usize = 50;
+const BASH_COMPLEXITY_THRESHOLD: usize = 80;
+
+/// Kev-augmented substantial prompt check.
+///
+/// Fast-paths short (<10 chars) to false and long (>50 chars) to true.
+/// Only consults kev for the ambiguous middle range.
+pub async fn is_substantial_prompt_v2(
+    payload: &serde_json::Value,
+    kev: Option<&super::kev::KevClient>,
+) -> bool {
+    let prompt = payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let len = prompt.len();
+
+    if len < PROMPT_AMBIGUOUS_LOW {
+        return false;
+    }
+    if len > PROMPT_AMBIGUOUS_HIGH {
+        return true;
+    }
+
+    // Ambiguous range — consult kev if available
+    if let Some(kev) = kev {
+        match kev
+            .noul(
+                prompt,
+                "Is this a substantive coding instruction that requires architectural review?",
+            )
+            .await
+        {
+            Ok(resp) => return resp.probability >= 0.5,
+            Err(_) => {} // fall through to deterministic
+        }
+    }
+
+    prompt.len() >= MIN_PROMPT_LENGTH
+}
+
+/// Kev-augmented bash mutation check.
+///
+/// Deterministic check runs first (fast path). Kev consulted only for
+/// complex commands (pipes, semicolons, >80 chars) where deterministic
+/// returned Free.
+pub async fn is_mutating_bash_v2(
+    payload: &serde_json::Value,
+    kev: Option<&super::kev::KevClient>,
+) -> bool {
+    // Fast path: deterministic check
+    if is_mutating_bash(payload) {
+        return true;
+    }
+
+    let command = payload
+        .get("tool_input")
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if command.is_empty() {
+        return false;
+    }
+
+    // Only consult kev for complex commands the deterministic check may miss
+    let is_complex = command.len() > BASH_COMPLEXITY_THRESHOLD
+        || command.contains('|')
+        || command.contains(';');
+
+    if !is_complex {
+        return false;
+    }
+
+    if let Some(kev) = kev {
+        match kev
+            .choice(
+                command,
+                "Classify this bash command's filesystem/repository impact",
+                &[
+                    ("read_only", "Only reads data, lists files, or queries state"),
+                    ("mutating", "Modifies files, repository, packages, or infrastructure"),
+                    ("ambiguous", "Could be either depending on flags or context"),
+                ],
+            )
+            .await
+        {
+            Ok(resp) => return resp.selected == "mutating" && resp.confidence >= 0.5,
+            Err(_) => {} // fall through to false (deterministic already said Free)
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +646,62 @@ mod tests {
             classify_tool_action(Some("AskUserQuestion"), &empty()),
             ToolAction::AdvisorGated,
         );
+    }
+
+    // ── Kev v2 variants (no kev = deterministic fallback) ──
+
+    #[tokio::test]
+    async fn test_v2_substantial_prompt_short_fast_path() {
+        // < 10 chars → false regardless of kev
+        let payload = prompt_payload("yes");
+        assert!(!is_substantial_prompt_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_substantial_prompt_long_fast_path() {
+        // > 50 chars → true regardless of kev
+        let text = "refactor the entire authentication module to use OAuth2 with PKCE";
+        let payload = prompt_payload(text);
+        assert!(is_substantial_prompt_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_substantial_prompt_ambiguous_no_kev() {
+        // 10-50 chars, no kev → falls back to >= 20 check
+        let payload = prompt_payload("fix the auth bug"); // 16 chars
+        assert!(!is_substantial_prompt_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_substantial_prompt_ambiguous_at_threshold() {
+        // 10-50 chars, no kev, exactly at 20 → true
+        let payload = prompt_payload("fix the auth bug now"); // 20 chars
+        assert!(is_substantial_prompt_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_mutating_bash_deterministic_catches() {
+        // rm is caught by deterministic check — kev not needed
+        let payload = json!({"tool_input": {"command": "rm -rf dist/"}});
+        assert!(is_mutating_bash_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_mutating_bash_simple_readonly() {
+        // ls is simple and short — no kev consultation
+        let payload = json!({"tool_input": {"command": "ls -la"}});
+        assert!(!is_mutating_bash_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_mutating_bash_complex_no_kev() {
+        // Complex (has pipe) but deterministic says free, no kev → false
+        let payload = json!({"tool_input": {"command": "cat file.txt | grep pattern"}});
+        assert!(!is_mutating_bash_v2(&payload, None).await);
+    }
+
+    #[tokio::test]
+    async fn test_v2_mutating_bash_empty() {
+        assert!(!is_mutating_bash_v2(&empty(), None).await);
     }
 }
