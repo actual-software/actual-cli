@@ -733,7 +733,7 @@ pub enum RulesAction {
     /// Build or refresh the scope index over `.actual/rules/`
     Index(RulesIndexArgs),
 
-    /// Select the rule documents that govern a plan
+    /// Select the rule documents that govern a plan, or a path with no plan
     Select(RulesSelectArgs),
 
     /// Score the scope index against the filename scan on a golden set
@@ -793,7 +793,11 @@ pub struct RulesSelectArgs {
     #[arg(long, value_name = "PATH")]
     pub repo: Option<std::path::PathBuf>,
 
-    /// A file or directory the plan touches. Repeatable.
+    /// A file or directory to match against the rule set. Repeatable.
+    ///
+    /// With a plan, these are the paths the plan touches. Without a plan they
+    /// are the query itself: a hook selecting for the file an agent is about
+    /// to touch has a path and no plan.
     #[arg(long = "file", value_name = "PATH")]
     pub files: Vec<String>,
 
@@ -2354,6 +2358,29 @@ mod parse_tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
         assert!(error.to_string().contains("PLAN"), "{error}");
+    }
+
+    /// `--help` is the interface a hook author reads. The path-only case has
+    /// to be on the PLAN and `--file` help, not only in a parse test.
+    #[test]
+    fn test_rules_select_help_documents_a_file_without_a_plan() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let rules = cmd.find_subcommand("rules").expect("rules");
+        let mut select = rules.find_subcommand("select").expect("select").clone();
+        let help = select.render_long_help().to_string();
+        assert!(
+            help.contains("or a path with no plan"),
+            "subcommand about does not mention a path-only query: {help}"
+        );
+        assert!(
+            help.contains("Optional when at least one `--file` is given"),
+            "PLAN help does not document the path-only case: {help}"
+        );
+        assert!(
+            help.contains("Without a plan they"),
+            "--file help does not document standing alone: {help}"
+        );
     }
 
     #[test]

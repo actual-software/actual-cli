@@ -161,12 +161,14 @@ List and rank rule documents directly:
 actual rules ls                          # list rule documents, level counts, warnings
 actual rules index --rebuild             # (re)build the local scope index
 actual rules select "Add a caching layer in front of the user repository."
+actual rules select --file src/auth/oauth/token.ts
 ```
 
-`actual rules select` supports `--file <PATH>` (repeatable) to also weigh
-files the plan touches, `--explain` to show why each document was picked, and
-`--no-rank` to skip the runner-backed second stage and return the
-deterministic prefilter alone.
+`actual rules select` takes a plan, one or more `--file` paths, or both.
+A plan is optional when `--file` is given — the hook case of a path and no
+plan. Stage 2 is skipped when there is no plan, because it ranks candidates
+against plan prose. `--explain` shows why each document was picked, and
+`--no-rank` skips the runner-backed second stage even when a plan is present.
 
 `actual plan-check` judges a plan against the documents selected for it and
 reports one of four outcomes: `conforming`, `conflicting`, `requires_decision`
@@ -253,7 +255,7 @@ actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
 actual rules ls       # list the rule documents under .actual/rules/
 actual rules index    # build or refresh the local rule scope index
-actual rules select   # select the rule documents that govern a plan
+actual rules select   # select the rule documents that govern a plan or a path
 actual plan-check     # check a plan against the rules selected for it
 actual impl-check     # check a git diff against the rules selected for it
 actual check-override # human override for a rule plan-check/impl-check denied

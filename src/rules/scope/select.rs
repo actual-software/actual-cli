@@ -71,6 +71,11 @@ pub enum Stage2 {
     NotNeeded { candidates: usize },
     /// The caller asked for stage 1 only.
     NotRequested,
+    /// There was no plan prose to rank against. Stage 2 judges candidates
+    /// against the plan, so a path-only query skips it rather than spend a
+    /// model round trip on an empty prompt. Distinct from [`Self::NotRequested`]:
+    /// the caller did not opt out; there was nothing to rank on.
+    NoPlan,
     /// No runner is configured or available. The degraded path.
     Unavailable { reason: String },
     /// A runner was available and did not produce a usable rank.
@@ -98,6 +103,7 @@ impl Stage2 {
                 "not needed — the prefilter returned {candidates} candidate(s), inside the cap"
             ),
             Stage2::NotRequested => "not requested".to_string(),
+            Stage2::NoPlan => "no plan — no plan prose to rank against".to_string(),
             Stage2::Unavailable { reason } => format!("unavailable — {reason}"),
             Stage2::Failed { reason } => format!("failed — {reason}"),
             Stage2::Applied {
@@ -1033,6 +1039,10 @@ mod tests {
         assert_eq!(Stage::Prefilter.as_str(), "prefilter");
         assert_eq!(Stage::Ranked.as_str(), "ranked");
         assert_eq!(Stage2::NotRequested.summary(), "not requested");
+        assert_eq!(
+            Stage2::NoPlan.summary(),
+            "no plan — no plan prose to rank against"
+        );
         assert!(Stage2::Failed {
             reason: "boom".to_string()
         }

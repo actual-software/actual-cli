@@ -1,9 +1,10 @@
 # Selecting rules for a plan
 
 `actual rules select` answers which committed rule documents govern a proposed
-change, and says why for each one. It runs in two stages. This document records
-what each stage is for, when the second one is paid for, what happens when it
-cannot run, and where the design is weak.
+change — a plan, one or more `--file` paths, or both — and says why for each
+one. It runs in two stages. This document records what each stage is for, when
+the second one is paid for, what happens when it cannot run, and where the
+design is weak.
 
 The retrieval stage is described in [SCOPE_INDEX.md](SCOPE_INDEX.md); this
 document covers the selection built on top of it.
@@ -17,7 +18,10 @@ sub-millisecond against a built index. It is the whole answer whenever it can be
 
 **Stage 2 is a runner-backed rank over what stage 1 retrieved.** It is asked one
 question — which of these candidates govern this change, and why — and it is
-asked only when stage 1 hands back more candidates than the caller may keep.
+asked only when stage 1 hands back more candidates than the caller may keep
+*and* the query has plan prose to judge against. A path-only query
+(`--file` with no `PLAN`) stops after stage 1: there is nothing for the model
+to read.
 
 That trigger is the latency contract. Below the cap there is nothing to discard,
 so a model call would buy nothing. Above it, something has to go, and a lexical
@@ -61,10 +65,14 @@ in wherever the ranker has not supplied one.
 Stage 2: unavailable — no runner available: claude-cli: binary not found …
 Stage 2: failed — connection refused
 Stage 2: not needed — the prefilter returned 3 candidate(s), inside the cap
+Stage 2: no plan — no plan prose to rank against
 Stage 2: ranked 10 candidate(s): 1 governs, 3 related, 6 unrelated, 0 unjudged
 ```
 
-`--no-rank` asks for stage 1 alone: offline, and exactly reproducible.
+`--no-rank` asks for stage 1 alone: offline, and exactly reproducible. A
+path-only query also skips stage 2, but that is recorded as `no plan` rather
+than `not requested` — the caller did not opt out; there was nothing to rank
+on.
 
 ## Reproducibility
 
@@ -203,13 +211,16 @@ five.
 ## Commands
 
 ```bash
-actual rules select <PLAN>... [--repo PATH] [--file PATH]... [--limit N]
+actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N]
                               [--candidates N] [--no-rank] [--runner NAME]
                               [--model NAME] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]...
                                 [--rank] [--candidates N] [--runner NAME]
                                 [--model NAME] [--json]
 ```
+
+One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
+path and no plan — and skips stage 2 because it ranks against plan prose.
 
 `--runner` and `--model` steer stage 2 only, and both fall back to the same
 config fields `actual adr-bot` uses.
