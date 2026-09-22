@@ -781,7 +781,12 @@ pub struct RulesIndexArgs {
 #[derive(Parser, Debug)]
 pub struct RulesSelectArgs {
     /// The plan to match against the rule set.
-    #[arg(value_name = "PLAN", required = true)]
+    ///
+    /// Optional when at least one `--file` is given: a hook selecting for the
+    /// file an agent is about to touch has a path and no plan, and passing
+    /// `""` to satisfy a required argument is not an interface. One of the two
+    /// is still required, because a query with neither names nothing to match.
+    #[arg(value_name = "PLAN", required_unless_present = "files")]
     pub plan: Vec<String>,
 
     /// Repository root to scan. Defaults to the current directory.
@@ -2295,6 +2300,60 @@ mod parse_tests {
             Command::PlanCheck(args) => Some(args),
             _ => None,
         }
+    }
+
+    fn rules_select_args_from(argv: &[&str]) -> Option<RulesSelectArgs> {
+        match Cli::try_parse_from(argv).ok()?.command {
+            Command::Rules(rules) => match rules.action {
+                RulesAction::Select(args) => Some(args),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The hook case: a path and no plan. This is the call `rules select`
+    /// refused before, which left `""` as the only way to ask it.
+    #[test]
+    fn test_rules_select_accepts_a_file_without_a_plan() {
+        let args = rules_select_args_from(&[
+            "actual",
+            "rules",
+            "select",
+            "--file",
+            "src/rules/scope/index.rs",
+            "--no-rank",
+        ])
+        .expect("expected a rules select command");
+        assert!(args.plan.is_empty());
+        assert_eq!(args.files, vec!["src/rules/scope/index.rs".to_string()]);
+        assert!(args.no_rank);
+    }
+
+    /// A plan alone still parses: `--file` is what became optional, not the
+    /// requirement that a query name something.
+    #[test]
+    fn test_rules_select_accepts_a_plan_without_a_file() {
+        let args = rules_select_args_from(&["actual", "rules", "select", "rotate", "the", "keys"])
+            .expect("expected a rules select command");
+        assert_eq!(
+            args.plan,
+            vec!["rotate".to_string(), "the".to_string(), "keys".to_string()]
+        );
+        assert!(args.files.is_empty());
+    }
+
+    /// Neither a plan nor a file names anything to match, so it stays a usage
+    /// error rather than selecting against an empty query.
+    #[test]
+    fn test_rules_select_requires_a_plan_or_a_file() {
+        let error = Cli::try_parse_from(["actual", "rules", "select", "--no-rank"])
+            .expect_err("expected a usage error");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("PLAN"), "{error}");
     }
 
     #[test]

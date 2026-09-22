@@ -201,7 +201,11 @@ fn run_selection(
     // it is skipped whenever stage 2 would not be asked anyway. `finish`
     // reports `NotNeeded` on its own when the prefilter already fits inside the
     // cap, so both of these produce the honest status.
-    if args.no_rank || !prefiltered.needs_rank() {
+    //
+    // A path-only query is skipped for a different reason: stage 2 judges
+    // candidates against the plan prose, and there is none to judge against, so
+    // the call would spend a model round trip to rank on nothing.
+    if args.no_rank || query.text.trim().is_empty() || !prefiltered.needs_rank() {
         return Ok(SelectionRun {
             selection: prefiltered.finish(Stage2::NotRequested),
             runner: None,
@@ -267,7 +271,11 @@ fn render_select_panel(
 ) -> String {
     let selection = &run.selection;
     let mut panel = Panel::titled("Rule selection");
-    panel = panel.kv("Plan", &truncate(&query.text, 72));
+    // A path-only selection has no plan; an empty `Plan:` row would suggest one
+    // was given and matched nothing.
+    if !query.text.trim().is_empty() {
+        panel = panel.kv("Plan", &truncate(&query.text, 72));
+    }
     let paths = query.all_paths();
     if !paths.is_empty() {
         panel = panel.kv("Paths", &paths.join(", "));
@@ -283,9 +291,14 @@ fn render_select_panel(
     }
 
     if selection.selected.is_empty() {
+        let subject = if query.text.trim().is_empty() {
+            "these paths"
+        } else {
+            "this plan"
+        };
         return panel
             .separator()
-            .line("No rule document matched this plan.")
+            .line(&format!("No rule document matched {subject}."))
             .render(width);
     }
 
@@ -1043,6 +1056,94 @@ mod tests {
             false,
         );
         assert!(out.contains("No rule document matched this plan."));
+    }
+
+    /// A path-only selection has no plan to print, and an empty `Plan:` row
+    /// would read as a plan that matched nothing.
+    #[test]
+    fn test_select_panel_omits_the_plan_row_for_a_path_only_query() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let out = select_panel(
+            root.path(),
+            "",
+            vec!["services/auth/oauth/token.ts".to_string()],
+            false,
+        );
+        assert!(!out.contains("Plan"), "{out}");
+        assert!(out.contains("services/auth/oauth/token.ts"), "{out}");
+        assert!(out.contains("cross-cutting-"), "{out}");
+    }
+
+    /// The no-match line names what was actually asked, so a path-only query
+    /// does not report on a plan nobody gave.
+    #[test]
+    fn test_select_panel_reports_no_match_for_a_path_only_query() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let out = select_panel(
+            root.path(),
+            "",
+            vec!["unrelated/tree/file.go".to_string()],
+            false,
+        );
+        assert!(
+            out.contains("No rule document matched these paths."),
+            "{out}"
+        );
+    }
+
+    /// Stage 2 ranks candidates against plan prose. A path-only query has
+    /// none, so the runner is never resolved and the status says so — asking a
+    /// model to rank on an empty plan would spend a round trip on nothing.
+    #[test]
+    fn test_path_only_selection_skips_stage_two() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        // Two documents sharing one glob, so the prefilter exceeds the cap and
+        // stage 2 would otherwise be asked.
+        let root = seed(&[
+            ("cross-cutting-token-signing-e410.md", OAUTH),
+            ("cross-cutting-token-expiry-a1b2.md", OAUTH),
+        ]);
+        let index = resolved(root.path()).index;
+        let paths = vec!["services/auth/oauth/token.ts".to_string()];
+        let args = RulesSelectArgs {
+            no_rank: false,
+            ..select_args(root.path(), 1)
+        };
+
+        let path_only = run_selection(&index, &Query::new("").with_paths(paths.clone()), &args)
+            .expect("selection succeeds");
+        assert!(
+            matches!(path_only.selection.stage2, Stage2::NotRequested),
+            "{:?}",
+            path_only.selection.stage2
+        );
+        assert!(path_only.runner.is_none());
+
+        // The same query with plan text does reach the runner-resolving path,
+        // which is what shows the skip above came from the empty plan and not
+        // from the prefilter already fitting the cap.
+        let with_plan = run_selection(
+            &index,
+            &Query::new("rotate the signing key").with_paths(paths),
+            &args,
+        )
+        .expect("selection succeeds");
+        assert!(
+            !matches!(with_plan.selection.stage2, Stage2::NotRequested),
+            "{:?}",
+            with_plan.selection.stage2
+        );
     }
 
     /// `--explain` is the diagnosability requirement: every hit must show which
