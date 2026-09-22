@@ -12,7 +12,7 @@
 //! | `scope` | the prose applicability sentence | states applicability outright, in words |
 //! | `path_terms` | words inside those operands | reaches path evidence from a plan that names no path |
 //! | `title` | the `#` heading | free, and states the subject |
-//! | `slug` | the aspect segment of the filename | the status quo's *only* signal, kept as a tiebreak |
+//! | `slug` | the aspect segment of the filename | the status quo's *only* signal, kept as the weakest field |
 //!
 //! Two properties fall out of that table and are the point of the design.
 //!
@@ -426,7 +426,7 @@ impl ScopeIndex {
         let declared_globs: HashMap<&str, usize> = self
             .documents
             .iter()
-            .map(|doc| (doc.slug.as_str(), doc.globs.len()))
+            .map(|doc| (doc.slug.as_str(), distinct_globs(doc).len()))
             .collect();
         matches.sort_by(|a, b| {
             b.score
@@ -453,8 +453,7 @@ impl ScopeIndex {
     fn glob_document_frequency(&self) -> HashMap<&str, usize> {
         let mut frequency: HashMap<&str, usize> = HashMap::new();
         for doc in &self.documents {
-            let distinct: BTreeSet<&str> = doc.globs.iter().map(String::as_str).collect();
-            for glob in distinct {
+            for glob in distinct_globs(doc) {
                 *frequency.entry(glob).or_insert(0) += 1;
             }
         }
@@ -542,8 +541,16 @@ fn rarest_matched_glob(m: &Match, glob_frequency: &HashMap<&str, usize>) -> usiz
         .unwrap_or(usize::MAX)
 }
 
-/// Second tie-break: how many globs the document declares. Fewer is narrower.
-/// A document declaring none is unscoped, not narrow, so it sorts last.
+/// Distinct glob patterns a document declares. Scoring and both tie-breaks
+/// count a repeated pattern once, so a hand-built fixture cannot buy breadth
+/// or frequency by listing the same glob twice.
+fn distinct_globs(doc: &IndexedDocument) -> BTreeSet<&str> {
+    doc.globs.iter().map(String::as_str).collect()
+}
+
+/// Second tie-break: how many distinct globs the document declares. Fewer is
+/// narrower. A document declaring none is unscoped, not narrow, so it sorts
+/// last.
 fn scope_breadth(m: &Match, declared_globs: &HashMap<&str, usize>) -> usize {
     match declared_globs.get(m.slug.as_str()).copied() {
         Some(0) | None => usize::MAX,
@@ -1324,6 +1331,66 @@ mod tests {
         assert_eq!(index.search(&api_file(), 3), hits);
     }
 
+    /// Path evidence on an equal word score outranks a match that agreed with
+    /// no query path, even when slug would put the words-only document first.
+    /// Path is zeroed so the extra glob cannot change the score.
+    #[test]
+    fn test_path_evidence_outranks_a_words_only_tie() {
+        let index = index_of(vec![
+            doc(
+                "a-words-only-aaaa",
+                "Token",
+                "These rules are ALWAYS ACTIVE for token handling.",
+                "grep -r x web/app/",
+            ),
+            doc(
+                "z-with-path-bbbb",
+                "Token",
+                "These rules are ALWAYS ACTIVE for token handling.",
+                "grep -r x services/api/handlers/",
+            ),
+            doc(
+                "decoy-cccc",
+                "Pin Terraform Providers",
+                "These rules are ALWAYS ACTIVE for Terraform configuration.",
+                "find infra/terraform -name '*.tf'",
+            ),
+        ]);
+        let query = Query::new("token").with_paths(["services/api/handlers/orders.ts".to_string()]);
+        let hits = index.search_weighted(&query, 2, &Weights::default().without(Field::Path));
+        assert_eq!(hits[0].score, hits[1].score, "fixture must tie");
+        assert_eq!(slugs(&hits), ["z-with-path-bbbb", "a-words-only-aaaa"]);
+    }
+
+    /// A document that declares a glob outranks an unscoped sibling on an
+    /// equal word score, even when neither matched a query path.
+    #[test]
+    fn test_declared_globs_outrank_an_unscoped_tie() {
+        let index = index_of(vec![
+            doc(
+                "a-unscoped-aaaa",
+                "Token",
+                "These rules are ALWAYS ACTIVE for token handling.",
+                "echo ok",
+            ),
+            doc(
+                "z-scoped-bbbb",
+                "Token",
+                "These rules are ALWAYS ACTIVE for token handling.",
+                "grep -r x services/api/",
+            ),
+            doc(
+                "decoy-cccc",
+                "Pin Terraform Providers",
+                "These rules are ALWAYS ACTIVE for Terraform configuration.",
+                "find infra/terraform -name '*.tf'",
+            ),
+        ]);
+        let hits = index.search(&Query::new("token"), 2);
+        assert_eq!(hits[0].score, hits[1].score, "fixture must tie");
+        assert_eq!(slugs(&hits), ["z-scoped-bbbb", "a-unscoped-aaaa"]);
+    }
+
     /// A match with no path evidence, and a document declaring no globs, have
     /// nothing to be specific about: both sort after anything that does.
     #[test]
@@ -1354,17 +1421,20 @@ mod tests {
         assert_eq!(scope_breadth(&words_only, &declared), usize::MAX);
     }
 
-    /// Glob frequency counts documents, not occurrences: a document repeating
-    /// a glob counts once.
+    /// Glob frequency and breadth both count distinct patterns: a document
+    /// repeating a glob counts once, so it ties a sibling that listed it once
+    /// and falls through to slug.
     #[test]
     fn test_glob_document_frequency_counts_each_document_once() {
         let index = index_with(vec![
-            globbed("a", &["services/api/**", "services/api/**"]),
-            globbed("b", &["services/api/**", "web/**"]),
+            globbed("z-duped", &["services/api/**", "services/api/**"]),
+            globbed("a-once", &["services/api/**"]),
         ]);
         let frequency = index.glob_document_frequency();
         assert_eq!(frequency.get("services/api/**"), Some(&2));
-        assert_eq!(frequency.get("web/**"), Some(&1));
+        let hits = index.search(&api_file(), 2);
+        assert_eq!(hits[0].score, hits[1].score, "fixture must tie");
+        assert_eq!(slugs(&hits), ["a-once", "z-duped"]);
     }
 
     // ── weights ──────────────────────────────────────────────────────────
