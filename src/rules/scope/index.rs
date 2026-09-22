@@ -31,8 +31,13 @@
 //! file; scoring by the number of agreeing leading segments keeps both useful
 //! and still ranks the exact hit higher.
 //!
-//! Scoring is pure and deterministic — no LLM, no network, no clock. Ties break
-//! on slug so a given index and query always produce the same order.
+//! Scoring is pure and deterministic — no LLM, no network, no clock. Equal
+//! scores are common, because sibling documents generated from one decision
+//! share their verify paths, so ties break on specificity before falling back
+//! to slug: first the rarest glob the document matched (a glob only a few
+//! documents claim says more than one many share), then how few globs the
+//! document declares (a document scoped to one tree is narrower than one
+//! spanning many). A given index and query always produce the same order.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -416,14 +421,43 @@ impl ScopeIndex {
             })
             .collect();
 
+        let glob_frequency = self.glob_document_frequency();
+        let declared_globs: HashMap<&str, usize> = self
+            .documents
+            .iter()
+            .map(|doc| (doc.slug.as_str(), doc.globs.len()))
+            .collect();
         matches.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    rarest_matched_glob(a, &glob_frequency)
+                        .cmp(&rarest_matched_glob(b, &glob_frequency))
+                })
+                .then_with(|| {
+                    scope_breadth(a, &declared_globs).cmp(&scope_breadth(b, &declared_globs))
+                })
                 .then_with(|| a.slug.cmp(&b.slug))
         });
         matches.truncate(limit);
         matches
+    }
+
+    /// Glob pattern → number of documents declaring it.
+    ///
+    /// Computed per search rather than stored: it is a pass over a few hundred
+    /// short strings, and keeping it out of the index leaves the cache format
+    /// unchanged.
+    fn glob_document_frequency(&self) -> HashMap<&str, usize> {
+        let mut frequency: HashMap<&str, usize> = HashMap::new();
+        for doc in &self.documents {
+            let distinct: BTreeSet<&str> = doc.globs.iter().map(String::as_str).collect();
+            for glob in distinct {
+                *frequency.entry(glob).or_insert(0) += 1;
+            }
+        }
+        frequency
     }
 
     fn score_document(
@@ -482,6 +516,26 @@ impl ScopeIndex {
             contributions,
             matched_globs,
         })
+    }
+}
+
+/// First tie-break: how many documents declare the rarest glob this match
+/// agreed with. Fewer is more specific. A match with no path evidence (it
+/// scored on words alone) has nothing to be specific about and sorts last.
+fn rarest_matched_glob(m: &Match, glob_frequency: &HashMap<&str, usize>) -> usize {
+    m.matched_globs
+        .iter()
+        .filter_map(|g| glob_frequency.get(g.glob.as_str()).copied())
+        .min()
+        .unwrap_or(usize::MAX)
+}
+
+/// Second tie-break: how many globs the document declares. Fewer is narrower.
+/// A document declaring none is unscoped, not narrow, so it sorts last.
+fn scope_breadth(m: &Match, declared_globs: &HashMap<&str, usize>) -> usize {
+    match declared_globs.get(m.slug.as_str()).copied() {
+        Some(0) | None => usize::MAX,
+        Some(count) => count,
     }
 }
 
@@ -1102,6 +1156,156 @@ mod tests {
     fn test_query_without_paths_is_empty() {
         assert!(Query::new("no paths here").all_paths().is_empty());
         assert_eq!(Query::default().text, "");
+    }
+
+    // ── tie-breaking ─────────────────────────────────────────────────────
+
+    /// Helper: a document declaring exactly `globs` and no terms, so a
+    /// path-only query scores it on path agreement alone and ties are exact.
+    fn globbed(slug: &str, globs: &[&str]) -> IndexedDocument {
+        IndexedDocument {
+            slug: slug.to_string(),
+            relative_path: format!(".actual/rules/{slug}.md"),
+            title: None,
+            scope: None,
+            globs: globs.iter().map(|g| g.to_string()).collect(),
+            field_terms: BTreeMap::new(),
+        }
+    }
+
+    /// Helper: an index over hand-built documents.
+    fn index_with(documents: Vec<IndexedDocument>) -> ScopeIndex {
+        ScopeIndex {
+            format_version: INDEX_FORMAT_VERSION,
+            content_digest: "fp".to_string(),
+            documents,
+            document_frequency: BTreeMap::new(),
+        }
+    }
+
+    /// Helper: a path-only query for one file under `services/api/`.
+    fn api_file() -> Query {
+        Query::new("").with_paths(["services/api/handlers/orders.ts".to_string()])
+    }
+
+    /// Among equal scores, a document whose matched glob few documents declare
+    /// outranks one whose glob many share — even when its slug sorts last.
+    #[test]
+    fn test_ties_prefer_the_rarest_matched_glob() {
+        let index = index_with(vec![
+            globbed("a-shared-one", &["services/api/**"]),
+            globbed("b-shared-two", &["services/api/**"]),
+            globbed("z-rare", &["services/api/*/*.ts"]),
+        ]);
+        let hits = index.search(&api_file(), 3);
+        assert!(
+            hits.iter().all(|h| h.score == hits[0].score),
+            "fixture must tie"
+        );
+        assert_eq!(slugs(&hits), ["z-rare", "a-shared-one", "b-shared-two"]);
+    }
+
+    /// Among equal scores and equally rare globs, the document declaring fewer
+    /// globs is narrower and ranks first.
+    #[test]
+    fn test_ties_prefer_the_narrower_document() {
+        let index = index_with(vec![
+            globbed("a-broad", &["services/api/**", "infra/**", "web/**"]),
+            globbed("z-narrow", &["services/api/**"]),
+        ]);
+        let hits = index.search(&api_file(), 2);
+        assert_eq!(hits[0].score, hits[1].score, "fixture must tie");
+        assert_eq!(slugs(&hits), ["z-narrow", "a-broad"]);
+    }
+
+    /// Rarity is the first tie-break and breadth the second: a rare glob on a
+    /// broad document still beats a common glob on a narrow one.
+    #[test]
+    fn test_glob_rarity_outranks_document_breadth() {
+        let index = index_with(vec![
+            globbed("a-common-narrow", &["services/api/**"]),
+            globbed("b-common-narrow", &["services/api/**"]),
+            globbed(
+                "z-rare-broad",
+                &["services/api/*/*.ts", "infra/**", "web/**"],
+            ),
+        ]);
+        let hits = index.search(&api_file(), 3);
+        assert_eq!(slugs(&hits)[0], "z-rare-broad");
+    }
+
+    /// Tie-breaks never override score: a deeper, better-agreeing glob wins
+    /// regardless of how common it is.
+    #[test]
+    fn test_tie_breaks_never_override_a_higher_score() {
+        let index = index_with(vec![
+            globbed("a-deep-common", &["services/api/handlers/**"]),
+            globbed("b-deep-common", &["services/api/handlers/**"]),
+            globbed("z-shallow-rare", &["services/**"]),
+        ]);
+        let hits = index.search(&api_file(), 3);
+        assert!(hits[0].score > hits[2].score);
+        assert_eq!(
+            slugs(&hits),
+            ["a-deep-common", "b-deep-common", "z-shallow-rare"]
+        );
+    }
+
+    /// When every tie-break is equal, slug still decides, so order stays
+    /// deterministic.
+    #[test]
+    fn test_full_ties_fall_back_to_slug() {
+        let index = index_with(vec![
+            globbed("c-third", &["services/api/**"]),
+            globbed("a-first", &["services/api/**"]),
+            globbed("b-second", &["services/api/**"]),
+        ]);
+        let hits = index.search(&api_file(), 3);
+        assert_eq!(slugs(&hits), ["a-first", "b-second", "c-third"]);
+        assert_eq!(index.search(&api_file(), 3), hits);
+    }
+
+    /// A match with no path evidence, and a document declaring no globs, have
+    /// nothing to be specific about: both sort after anything that does.
+    #[test]
+    fn test_unscoped_matches_sort_last_on_tie_breaks() {
+        let frequency: HashMap<&str, usize> = HashMap::from([("services/api/**", 2)]);
+        let declared: HashMap<&str, usize> = HashMap::from([("scoped", 1), ("unscoped", 0)]);
+        let with_path = Match {
+            slug: "scoped".to_string(),
+            relative_path: String::new(),
+            title: None,
+            score: 1.0,
+            contributions: Vec::new(),
+            matched_globs: vec![GlobMatch {
+                glob: "services/api/**".to_string(),
+                query_path: "services/api/x.ts".to_string(),
+                segments: 2,
+                exact: true,
+            }],
+        };
+        let words_only = Match {
+            slug: "unscoped".to_string(),
+            matched_globs: Vec::new(),
+            ..with_path.clone()
+        };
+        assert_eq!(rarest_matched_glob(&with_path, &frequency), 2);
+        assert_eq!(rarest_matched_glob(&words_only, &frequency), usize::MAX);
+        assert_eq!(scope_breadth(&with_path, &declared), 1);
+        assert_eq!(scope_breadth(&words_only, &declared), usize::MAX);
+    }
+
+    /// Glob frequency counts documents, not occurrences: a document repeating
+    /// a glob counts once.
+    #[test]
+    fn test_glob_document_frequency_counts_each_document_once() {
+        let index = index_with(vec![
+            globbed("a", &["services/api/**", "services/api/**"]),
+            globbed("b", &["services/api/**", "web/**"]),
+        ]);
+        let frequency = index.glob_document_frequency();
+        assert_eq!(frequency.get("services/api/**"), Some(&2));
+        assert_eq!(frequency.get("web/**"), Some(&1));
     }
 
     // ── weights ──────────────────────────────────────────────────────────
