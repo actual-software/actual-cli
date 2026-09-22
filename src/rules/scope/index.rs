@@ -34,10 +34,11 @@
 //! Scoring is pure and deterministic — no LLM, no network, no clock. Equal
 //! scores are common, because sibling documents generated from one decision
 //! share their verify paths, so ties break on specificity before falling back
-//! to slug: first the rarest glob the document matched (a glob only a few
-//! documents claim says more than one many share), then how few globs the
-//! document declares (a document scoped to one tree is narrower than one
-//! spanning many). A given index and query always produce the same order.
+//! to slug: first the rarest glob among those that reached the document's best
+//! path coverage (a glob only a few documents claim says more than one many
+//! share), then how few globs the document declares (a document scoped to one
+//! tree is narrower than one spanning many). A given index and query always
+//! produce the same order.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -519,12 +520,23 @@ impl ScopeIndex {
     }
 }
 
-/// First tie-break: how many documents declare the rarest glob this match
-/// agreed with. Fewer is more specific. A match with no path evidence (it
-/// scored on words alone) has nothing to be specific about and sorts last.
+/// First tie-break: how many documents declare the rarest glob that reached
+/// this match's best path coverage. Fewer is more specific. A weaker agreeing
+/// glob did not produce the score, so it does not count. A match with no
+/// positive path evidence (it scored on words alone) has nothing to be
+/// specific about and sorts last.
 fn rarest_matched_glob(m: &Match, glob_frequency: &HashMap<&str, usize>) -> usize {
+    let best = m
+        .matched_globs
+        .iter()
+        .map(|g| glob_match_coverage(g.segments, g.exact))
+        .fold(0.0, f64::max);
+    if best <= 0.0 {
+        return usize::MAX;
+    }
     m.matched_globs
         .iter()
+        .filter(|g| glob_match_coverage(g.segments, g.exact) == best)
         .filter_map(|g| glob_frequency.get(g.glob.as_str()).copied())
         .min()
         .unwrap_or(usize::MAX)
@@ -589,6 +601,18 @@ fn term_coverage(
     )
 }
 
+/// Coverage of one glob agreement. Depth saturates, and partial agreement is
+/// discounted. Scoring and the rarity tie-break both use this, so a glob that
+/// did not produce the score cannot win a tie.
+fn glob_match_coverage(segments: usize, exact: bool) -> f64 {
+    let depth = (segments as f64 / PATH_SATURATION_SEGMENTS as f64).min(1.0);
+    if exact {
+        depth
+    } else {
+        depth * CONTAINMENT_DISCOUNT
+    }
+}
+
 /// Path agreement between a document's globs and the paths a query names.
 ///
 /// Returns a 0..1 coverage and the glob matches behind it. Coverage is the best
@@ -634,12 +658,7 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
             } else {
                 agreeing
             };
-            let depth = (segments as f64 / PATH_SATURATION_SEGMENTS as f64).min(1.0);
-            let coverage = if exact {
-                depth
-            } else {
-                depth * CONTAINMENT_DISCOUNT
-            };
+            let coverage = glob_match_coverage(segments, exact);
             best = best.max(coverage);
             matches.push(GlobMatch {
                 glob: glob.pattern.clone(),
@@ -1203,6 +1222,46 @@ mod tests {
             "fixture must tie"
         );
         assert_eq!(slugs(&hits), ["z-rare", "a-shared-one", "b-shared-two"]);
+    }
+
+    /// When two globs tie for the coverage that produced the score, the rarer
+    /// one still wins the tie-break.
+    #[test]
+    fn test_rarity_counts_every_glob_that_tied_for_best_coverage() {
+        let index = index_with(vec![
+            globbed("a-shared", &["services/api/**"]),
+            globbed("b-shared", &["services/api/**"]),
+            globbed("z-both", &["services/api/**", "services/api/*/*.ts"]),
+        ]);
+        let hits = index.search(&api_file(), 3);
+        assert!(
+            hits.iter().all(|h| h.score == hits[0].score),
+            "fixture must tie"
+        );
+        assert_eq!(slugs(&hits)[0], "z-both");
+    }
+
+    /// A rarer glob that agrees more weakly than the glob behind the score does
+    /// not win the tie. Breadth then demotes the document that declared it.
+    #[test]
+    fn test_rarity_ignores_a_weaker_matching_glob() {
+        let index = index_with(vec![
+            globbed("a-shared", &["services/api/handlers/**"]),
+            globbed("b-shared", &["services/api/handlers/**"]),
+            globbed(
+                "z-shared-plus-parent",
+                &["services/api/handlers/**", "services/**"],
+            ),
+        ]);
+        let hits = index.search(&api_file(), 3);
+        assert!(
+            hits.iter().all(|h| h.score == hits[0].score),
+            "fixture must tie"
+        );
+        assert_eq!(
+            slugs(&hits),
+            ["a-shared", "b-shared", "z-shared-plus-parent"]
+        );
     }
 
     /// Among equal scores and equally rare globs, the document declaring fewer
