@@ -372,7 +372,7 @@ fn render_select_panel(
         // two answers look different for a reason that is not the selector.
         let scan = baseline::select(index, &query.text, selection.limit);
         if scan.is_empty() {
-            panel = panel.line("  nothing — no filename segment matched the plan");
+            panel = panel.line("  nothing — no filename segment matched");
         } else {
             for hit in &scan {
                 panel = panel.line(&format!(
@@ -1079,7 +1079,7 @@ mod tests {
             vec!["services/auth/oauth/token.ts".to_string()],
             false,
         );
-        assert!(!out.contains("Plan"), "{out}");
+        assert!(!out.contains("Plan:"), "{out}");
         assert!(out.contains("services/auth/oauth/token.ts"), "{out}");
         assert!(out.contains("cross-cutting-"), "{out}");
     }
@@ -1231,7 +1231,7 @@ mod tests {
         let root = sample();
         // `issuance` appears in the scope prose but in no filename.
         let out = select_panel(root.path(), "issuance", Vec::new(), true);
-        assert!(out.contains("nothing — no filename segment matched the plan"));
+        assert!(out.contains("nothing — no filename segment matched"));
     }
 
     #[test]
