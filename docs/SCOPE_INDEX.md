@@ -152,13 +152,16 @@ this one.
 
 ```bash
 actual rules index [PATH] [--rebuild] [--clear] [--json]
-actual rules select <PLAN>... [--repo PATH] [--file PATH]... [--limit N] [--explain] [--json]
+actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]... [--rebuild] [--json]
 ```
 
-`--explain` prints, per hit, which signal carried it and on which terms, the
-globs that matched a named path, the terms the corpus made worthless, and what
-the filename scan would have chosen instead at the same `--limit` — so a wrong
+One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
+path and no plan, the hook case — and is the whole answer from this stage;
+stage 2 is skipped then because it ranks against plan prose. `--explain`
+prints, per hit, which signal carried it and on which terms, the globs that
+matched a named path, the terms the corpus made worthless, and what the
+filename scan would have chosen instead at the same `--limit` — so a wrong
 selection is diagnosable rather than mysterious. `--no-rank` holds
-`rules select` to this stage alone; the stage-2 flags are documented in
-[RULE_SELECTION.md](RULE_SELECTION.md).
+`rules select` to this stage alone even when a plan is present; the stage-2
+flags are documented in [RULE_SELECTION.md](RULE_SELECTION.md).

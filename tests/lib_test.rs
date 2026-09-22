@@ -654,7 +654,8 @@ fn test_cli_parse_rules_eval_rank() {
     assert_eq!(eval.model.as_deref(), Some("gpt-5.2"));
 }
 
-/// `rules select` without a plan is a usage error, not an empty selection.
+/// `rules select` without a plan or a `--file` is a usage error, not an
+/// empty selection.
 #[test]
 fn test_cli_parse_rules_select_requires_a_plan() {
     assert!(Cli::try_parse_from(["actual", "rules", "select"]).is_err());

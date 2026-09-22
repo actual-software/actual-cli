@@ -204,10 +204,16 @@ fn run_selection(
     //
     // A path-only query is skipped for a different reason: stage 2 judges
     // candidates against the plan prose, and there is none to judge against, so
-    // the call would spend a model round trip to rank on nothing.
+    // the call would spend a model round trip to rank on nothing. `--no-rank`
+    // stays `NotRequested`; the empty plan is `NoPlan`.
     if args.no_rank || query.text.trim().is_empty() || !prefiltered.needs_rank() {
+        let stage2 = if !args.no_rank && query.text.trim().is_empty() {
+            Stage2::NoPlan
+        } else {
+            Stage2::NotRequested
+        };
         return Ok(SelectionRun {
-            selection: prefiltered.finish(Stage2::NotRequested),
+            selection: prefiltered.finish(stage2),
             runner: None,
         });
     }
@@ -1124,11 +1130,24 @@ mod tests {
         let path_only = run_selection(&index, &Query::new("").with_paths(paths.clone()), &args)
             .expect("selection succeeds");
         assert!(
-            matches!(path_only.selection.stage2, Stage2::NotRequested),
+            matches!(path_only.selection.stage2, Stage2::NoPlan),
             "{:?}",
             path_only.selection.stage2
         );
         assert!(path_only.runner.is_none());
+
+        // `--no-rank` is the caller's request, so it stays `NotRequested`
+        // even when the query is also path-only.
+        let skipped = run_selection(
+            &index,
+            &Query::new("").with_paths(paths.clone()),
+            &RulesSelectArgs {
+                no_rank: true,
+                ..select_args(root.path(), 1)
+            },
+        )
+        .expect("selection succeeds");
+        assert_eq!(skipped.selection.stage2, Stage2::NotRequested);
 
         // The same query with plan text does reach the runner-resolving path,
         // which is what shows the skip above came from the empty plan and not
@@ -1140,7 +1159,10 @@ mod tests {
         )
         .expect("selection succeeds");
         assert!(
-            !matches!(with_plan.selection.stage2, Stage2::NotRequested),
+            !matches!(
+                with_plan.selection.stage2,
+                Stage2::NoPlan | Stage2::NotRequested
+            ),
             "{:?}",
             with_plan.selection.stage2
         );
