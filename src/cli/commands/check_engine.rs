@@ -549,7 +549,7 @@ pub(super) fn render_panel(
 ) -> String {
     let copy = artifact_copy(kind);
     let mut panel = Panel::titled(copy.panel_title);
-    panel = panel.kv(copy.artifact_label, &truncate(text, 72));
+    panel = panel.kv(copy.artifact_label, &truncate_line(text, 72));
     panel = panel.kv("Rules dir", &rules_dir.display().to_string());
 
     match outcome {
@@ -626,8 +626,8 @@ fn render_verdict_line(panel: Panel, label: &str, rule: &CheckedRule) -> Panel {
         label,
         &format!("{} ({})", rule.rule_id, rule.level.as_str()),
     );
-    let panel = panel.line(&format!("      {}", truncate(&rule.reason, 68)));
-    panel.line(&format!("      \"{}\"", truncate(&rule.span, 68)))
+    let panel = panel.line(&format!("      {}", truncate_line(&rule.reason, 68)));
+    panel.line(&format!("      \"{}\"", truncate_line(&rule.span, 68)))
 }
 
 #[derive(Serialize)]
@@ -1585,6 +1585,17 @@ fn truncate(text: &str, width: usize) -> String {
     format!("{kept}…")
 }
 
+/// [`truncate`] for a single panel row: a panel row is one terminal line, so
+/// a raw newline (a diff, a multi-line plan, a span quoted across lines) would
+/// break the box borders. Runs of whitespace, newlines and tabs included,
+/// collapse to one space before shortening.
+fn truncate_line(text: &str, width: usize) -> String {
+    truncate(
+        &text.split_whitespace().collect::<Vec<_>>().join(" "),
+        width,
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2524,6 +2535,62 @@ pub(crate) mod tests {
         let s = "é".repeat(200);
         let truncated = truncate(&s, 10);
         assert_eq!(truncated.chars().count(), 10);
+    }
+
+    #[test]
+    fn test_truncate_line_collapses_newlines_and_tabs() {
+        assert_eq!(
+            truncate_line("diff --git a/x b/x\nindex 1..2\n\t+line", 72),
+            "diff --git a/x b/x index 1..2 +line"
+        );
+        assert_eq!(truncate_line("a\n\nbcdef", 4), "a b…");
+    }
+
+    /// The gap this guards: the direct-mode impl-check panel printed the
+    /// diff's raw newlines (and those in a multi-line quoted span), which
+    /// broke the box borders. Every rendered line must stay framed.
+    #[test]
+    fn test_render_panel_keeps_multiline_diff_and_span_inside_the_box() {
+        let selection = Selection {
+            plan: "p".to_string(),
+            paths: Vec::new(),
+            indexed_documents: 1,
+            limit: 10,
+            selected: Vec::new(),
+            stage2: Stage2::NotRequested,
+        };
+        let outcome = Outcome::Verdicts {
+            selection,
+            verdicts: vec![checked(
+                "R-A-001",
+                Verdict::Conflicting,
+                "+let key =\n+    \"sk-live\";",
+                "hardcodes\na secret",
+            )],
+            runner_label: None,
+            partial: None,
+        };
+        let panel = render_panel(
+            &outcome,
+            "diff --git a/x.rs b/x.rs\nindex 1..2 100644\n--- a/x.rs",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Diff,
+        );
+        let plain = console::strip_ansi_codes(&panel);
+        let lines: Vec<&str> = plain.lines().collect();
+        for line in &lines[1..lines.len() - 1] {
+            assert!(
+                line.starts_with('│') || line.starts_with('├'),
+                "unframed line {line:?} in:\n{plain}"
+            );
+        }
+        assert!(
+            plain.contains("diff --git a/x.rs b/x.rs index 1..2"),
+            "{plain}"
+        );
+        assert!(plain.contains("+let key = + \"sk-live\";"), "{plain}");
+        assert!(plain.contains("hardcodes a secret"), "{plain}");
     }
 
     #[test]
