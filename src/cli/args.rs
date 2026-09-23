@@ -762,6 +762,54 @@ pub enum RulesAction {
 
     /// Score the scope index against the filename scan on a golden set
     Eval(RulesEvalArgs),
+
+    /// The rules governing one file, for a Claude Code hook
+    Brief(RulesBriefArgs),
+}
+
+/// Arguments for `rules brief`
+///
+/// The hook this serves runs on every file an agent reads, so every default
+/// here is a budget: `--limit` counts decisions, and `--rules-per-decision`
+/// caps what each one contributes.
+#[derive(Parser, Debug)]
+pub struct RulesBriefArgs {
+    /// Read a Claude Code hook envelope from stdin and emit the hook's JSON
+    /// contract on stdout.
+    ///
+    /// `PostToolUse` on `Read` is the main path: context delivered there
+    /// reaches the model before its first edit. `PreToolUse` on `Edit` or
+    /// `Write` is the reminder for files that were never read. Every failure
+    /// degrades to empty stdout and exit 0.
+    #[arg(long)]
+    pub claude_hook: bool,
+
+    /// The file to brief, in direct mode. Ignored under `--claude-hook`,
+    /// which takes the path from the envelope.
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<String>,
+
+    /// Repository root. Defaults to the envelope's `cwd` under
+    /// `--claude-hook`, else the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Rule directory, when it is not `<repo>/.actual/rules`.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: Option<std::path::PathBuf>,
+
+    /// Maximum number of decisions to brief.
+    #[arg(long, default_value_t = 2)]
+    pub limit: usize,
+
+    /// Maximum number of rules to carry per decision.
+    #[arg(long, default_value_t = 8)]
+    pub rules_per_decision: usize,
+
+    /// Score a document must reach to be briefed at all. Defaults to the
+    /// `rules_min_score` config key, or to no floor.
+    #[arg(long, value_name = "SCORE")]
+    pub min_score: Option<f64>,
 }
 
 /// Arguments for `rules ls`
