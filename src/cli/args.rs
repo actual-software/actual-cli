@@ -273,6 +273,23 @@ fn parse_budget(s: &str) -> Result<f64, String> {
     Ok(val)
 }
 
+/// Parse and validate a rule-selection score floor.
+///
+/// `NaN` is especially dangerous here: every `score >= NaN` comparison is
+/// false, so accepting it would turn a successful selection into a silent
+/// empty answer.
+fn parse_min_score(s: &str) -> Result<f64, String> {
+    let val: f64 = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid number"))?;
+    if val < 0.0 || !val.is_finite() {
+        return Err(format!(
+            "minimum score must be a non-negative finite number, got {val}"
+        ));
+    }
+    Ok(val)
+}
+
 /// Parse and validate `--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS`, rejecting
 /// anything under 1.
 ///
@@ -830,7 +847,12 @@ pub struct RulesSelectArgs {
     /// Selection otherwise returns its cap whenever anything scored above
     /// zero, so a file no rule governs still gets the least bad few. Defaults
     /// to the `rules_min_score` config key, or to no floor.
-    #[arg(long, value_name = "SCORE")]
+    #[arg(
+        long,
+        value_name = "SCORE",
+        value_parser = parse_min_score,
+        allow_hyphen_values = true
+    )]
     pub min_score: Option<f64>,
 
     /// Group the result by the decision each document belongs to, and count
@@ -894,7 +916,13 @@ pub struct RulesEvalArgs {
     ///
     /// Here it is a measurement knob: the floor trades recall for abstention
     /// on cases nothing governs, and this is where that trade is priced.
-    #[arg(long, value_name = "SCORE", default_value_t = 0.0)]
+    #[arg(
+        long,
+        value_name = "SCORE",
+        default_value_t = 0.0,
+        value_parser = parse_min_score,
+        allow_hyphen_values = true
+    )]
     pub min_score: f64,
 
     /// Number of documents each selector may return.
@@ -2424,6 +2452,39 @@ mod parse_tests {
         let plain = rules_select_args_from(&["actual", "rules", "select", "a plan"])
             .expect("expected a rules select command");
         assert_eq!(plain.min_score, None);
+    }
+
+    /// A non-finite floor can silently reject every document (`score >= NaN`
+    /// is always false), while a negative floor is nonsensical. Both commands
+    /// that expose the knob reject those values at the CLI boundary.
+    #[test]
+    fn test_rules_score_floor_rejects_negative_and_non_finite_values() {
+        for value in ["-1", "NaN", "inf", "-inf"] {
+            for argv in [
+                vec![
+                    "actual",
+                    "rules",
+                    "select",
+                    "--file",
+                    "src/lib.rs",
+                    "--min-score",
+                    value,
+                ],
+                vec![
+                    "actual",
+                    "rules",
+                    "eval",
+                    "--golden",
+                    "golden.json",
+                    "--min-score",
+                    value,
+                ],
+            ] {
+                let error = Cli::try_parse_from(argv).expect_err("invalid floor must be rejected");
+                assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+                assert!(error.to_string().contains("non-negative finite"), "{error}");
+            }
+        }
     }
 
     /// Covers the helper's two non-select fallback arms.

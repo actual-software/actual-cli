@@ -150,10 +150,11 @@ fn render_index_json(resolved: &ResolvedIndex) -> String {
 
 pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
+    let min_score = min_score(args)?;
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" "))
         .with_paths(args.files.clone())
-        .with_min_score(min_score(args));
+        .with_min_score(min_score);
 
     if args.by_adr {
         let groups = resolved.index.search_adrs(&query, args.limit);
@@ -381,11 +382,20 @@ fn render_adr_panel(
 ///
 /// An unreadable config is not a reason to refuse a selection — the same
 /// reasoning `run_selection` applies to stage 2 — so it degrades to no floor,
-/// which returns more rather than silently returning nothing.
-fn min_score(args: &RulesSelectArgs) -> f64 {
-    args.min_score
+/// which returns more rather than silently returning nothing. A configured
+/// floor that was read successfully must still be valid: `NaN` would silently
+/// reject every document because every comparison against it is false.
+fn min_score(args: &RulesSelectArgs) -> Result<f64, ActualError> {
+    let score = args
+        .min_score
         .or_else(|| crate::config::paths::load().ok()?.rules_min_score)
-        .unwrap_or(0.0)
+        .unwrap_or(0.0);
+    if score < 0.0 || !score.is_finite() {
+        return Err(ActualError::ConfigError(format!(
+            "rules_min_score must be a non-negative finite number, got {score}"
+        )));
+    }
+    Ok(score)
 }
 
 /// A selection, and the runner that shaped it.
@@ -2062,20 +2072,39 @@ mod tests {
         let _guards = isolated_config(&home);
         let root = sample();
 
-        assert_eq!(min_score(&select_args(root.path(), 5)), 0.0);
+        assert_eq!(min_score(&select_args(root.path(), 5)).unwrap(), 0.0);
 
         let mut cfg = crate::config::paths::load().unwrap_or_default();
         cfg.rules_min_score = Some(1.5);
         crate::config::paths::save(&cfg).unwrap();
 
-        assert_eq!(min_score(&select_args(root.path(), 5)), 1.5);
+        assert_eq!(min_score(&select_args(root.path(), 5)).unwrap(), 1.5);
         assert_eq!(
             min_score(&RulesSelectArgs {
                 min_score: Some(2.25),
                 ..select_args(root.path(), 5)
-            }),
+            })
+            .unwrap(),
             2.25
         );
+    }
+
+    /// Config is user-edited YAML and bypasses clap's value parser. Reject an
+    /// invalid persisted floor rather than letting `NaN` silently empty every
+    /// selection.
+    #[test]
+    fn test_min_score_rejects_an_invalid_configured_value() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+
+        let mut cfg = crate::config::paths::load().unwrap_or_default();
+        cfg.rules_min_score = Some(f64::NAN);
+        crate::config::paths::save(&cfg).unwrap();
+
+        let error = min_score(&select_args(root.path(), 5)).unwrap_err();
+        assert!(error.to_string().contains("non-negative finite"), "{error}");
     }
 
     /// A floor in force is printed, so an empty selection is attributable to
