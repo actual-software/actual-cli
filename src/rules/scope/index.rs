@@ -195,10 +195,18 @@ pub struct ScopeIndex {
 /// `text` is the plan prose. `paths` are files or directories the plan already
 /// names, when the caller has them; they are optional precisely because at plan
 /// time there is usually no diff.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `min_score` is the floor a document must clear to be worth returning at
+/// all. It rides on the query rather than on each search call so that every
+/// path — `rules select`, the prefilter feeding stage 2, the grouped search,
+/// and the evaluation harness — inherits it from the one place the request is
+/// built, and none of them can forget to apply it.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Query {
     pub text: String,
     pub paths: Vec<String>,
+    /// Documents scoring below this are dropped. Zero, the default, keeps
+    /// everything that scored at all.
+    pub min_score: f64,
 }
 
 impl Query {
@@ -206,7 +214,20 @@ impl Query {
         Self {
             text: text.into(),
             paths: Vec::new(),
+            min_score: 0.0,
         }
+    }
+
+    /// Drop documents scoring below `min_score`.
+    ///
+    /// Abstention is the point: a file no rule really governs should get an
+    /// empty answer rather than the least bad few. Without a floor a selection
+    /// always returns its cap whenever anything scored above zero, which for a
+    /// hook means briefing an agent on rules that do not apply to the file it
+    /// is editing.
+    pub fn with_min_score(mut self, min_score: f64) -> Self {
+        self.min_score = min_score;
+        self
     }
 
     pub fn with_paths(mut self, paths: impl IntoIterator<Item = String>) -> Self {
@@ -445,6 +466,10 @@ impl ScopeIndex {
             .filter_map(|doc| {
                 self.score_document(doc, &query_terms, &idf, total_idf, &query_paths, weights)
             })
+            // Applied here rather than inside the cap so it is a statement
+            // about the match, not about the budget: a document below the
+            // floor is dropped whether or not there is room for it.
+            .filter(|hit| hit.score >= query.min_score)
             .collect();
 
         let glob_frequency = self.glob_document_frequency();
@@ -1287,6 +1312,83 @@ mod tests {
     fn test_query_without_paths_is_empty() {
         assert!(Query::new("no paths here").all_paths().is_empty());
         assert_eq!(Query::default().text, "");
+    }
+
+    // ── the score floor ──────────────────────────────────────────────────
+
+    /// Helper: the scores a path-only query produces against the sample
+    /// corpus, so a floor can be set relative to real numbers rather than
+    /// guessed.
+    fn oauth_path_query() -> Query {
+        Query::new("").with_paths(["services/auth/oauth/token.ts".to_string()])
+    }
+
+    /// A floor above everything returns nothing: abstention, not the least
+    /// bad few.
+    #[test]
+    fn test_min_score_above_every_score_selects_nothing() {
+        let index = sample_index();
+        let top = index.search(&oauth_path_query(), 5)[0].score;
+
+        let hits = index.search(&oauth_path_query().with_min_score(top + 0.01), 5);
+
+        assert!(hits.is_empty());
+    }
+
+    /// The floor is inclusive, so a document scoring exactly the floor is
+    /// kept. A floor set from an observed score would otherwise drop the very
+    /// document it was read from.
+    #[test]
+    fn test_min_score_keeps_a_document_scoring_exactly_the_floor() {
+        let index = sample_index();
+        let top = index.search(&oauth_path_query(), 5)[0].score;
+
+        let hits = index.search(&oauth_path_query().with_min_score(top), 5);
+
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.score >= top));
+    }
+
+    /// A floor between the best and worst score keeps the better documents
+    /// and drops the rest.
+    #[test]
+    fn test_min_score_drops_only_what_scores_below_it() {
+        let index = sample_index();
+        let query = Query::new("OAuth token signing and terraform providers");
+        let all = index.search(&query, index.len());
+        assert!(all.len() > 1, "fixture must spread scores");
+        let floor = all[all.len() - 1].score + 0.001;
+
+        let hits = index.search(&query.clone().with_min_score(floor), index.len());
+
+        assert_eq!(hits.len(), all.len() - 1);
+        assert!(hits.iter().all(|hit| hit.score >= floor));
+    }
+
+    /// Zero, the default, is not a floor: everything that scored at all is
+    /// still returned.
+    #[test]
+    fn test_min_score_of_zero_keeps_every_scoring_document() {
+        let index = sample_index();
+        let query = Query::new("OAuth token signing");
+
+        assert_eq!(
+            index.search(&query, 5),
+            index.search(&query.clone().with_min_score(0.0), 5)
+        );
+    }
+
+    /// The floor applies before grouping too, so a decision whose documents
+    /// all fall below it does not appear.
+    #[test]
+    fn test_min_score_applies_to_grouped_selection() {
+        let index = sample_index();
+        let top = index.search(&oauth_path_query(), 5)[0].score;
+
+        assert!(!index.search_adrs(&oauth_path_query(), 5).is_empty());
+        assert!(index
+            .search_adrs(&oauth_path_query().with_min_score(top + 0.01), 5)
+            .is_empty());
     }
 
     // ── decisions ────────────────────────────────────────────────────────
