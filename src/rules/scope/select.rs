@@ -299,6 +299,15 @@ impl Prefiltered {
             // status: no model was wanted, rather than none being available.
             return self.finish(Stage2::NotRequested);
         }
+        if self.plan().trim().is_empty() {
+            // A path-only query has no prose for the ranker to judge
+            // candidates against, so the call would spend a model round trip
+            // ranking on nothing. This belongs here rather than only in the
+            // command, so `rules eval --rank` measures the path the command
+            // takes instead of a ranked answer `rules select --file` never
+            // returns.
+            return self.finish(Stage2::NoPlan);
+        }
         match rank::rank(
             runner,
             self.plan(),
@@ -825,6 +834,40 @@ mod tests {
         assert!(runner.was_called());
         assert!(selection.stage2.is_applied());
         assert_eq!(selection.selected[0].slug, slug);
+    }
+
+    /// A path-only query with a surplus still must not reach the runner:
+    /// there is no plan prose to judge candidates against. Asserted here, on
+    /// the shared trigger, because `rules eval --rank` reaches stage 2 through
+    /// this method without passing the command's own check.
+    #[tokio::test]
+    async fn test_rank_with_skips_the_runner_for_a_path_only_query() {
+        // Two documents sharing one verify path, so a path-only query has a
+        // surplus. The shared corpus gives verify paths to one document only.
+        let root = tempdir().unwrap();
+        let dir = rules_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "cross-cutting-signing-1c57.md",
+            "cross-cutting-keys-2d68.md",
+        ] {
+            std::fs::write(dir.join(name), OAUTH).unwrap();
+        }
+        let report = load_rule_set(root.path()).unwrap();
+        let index = ScopeIndex::build(&report, root.path(), "test".to_string());
+        let query = Query::new("").with_paths(["services/auth/oauth/token.ts".to_string()]);
+        let prefiltered = prefilter(&index, &query, 1, DEFAULT_CANDIDATES);
+        assert!(prefiltered.needs_rank(), "fixture must have a surplus");
+        let runner = FakeRunner::ok(verdicts(&[]));
+
+        let selection = prefiltered.rank_with(&runner, None, None).await;
+
+        assert!(
+            !runner.was_called(),
+            "stage 2 must not run without plan prose"
+        );
+        assert_eq!(selection.stage2, Stage2::NoPlan);
+        assert_eq!(selection.selected.len(), 1);
     }
 
     #[tokio::test]
