@@ -289,6 +289,17 @@ pub(crate) fn resolve_output(
     }
 }
 
+/// Environment variable set to `"1"` on every `claude` subprocess this CLI
+/// spawns, so actual-skill's hooks can recognize one and stay silent.
+///
+/// A backstop for `InvocationOptions::to_args`'s `disableAllHooks`: if that
+/// setting ever fails to take effect (a Claude Code version that ignores it,
+/// a managed policy that overrides it), the subprocess's own `Stop` hook would
+/// otherwise rerun `actual impl-check`, which spawns another subprocess, and
+/// recurse. `hooks/lib/bootstrap.sh`'s `inside_actual_subprocess` checks this
+/// exact name and value.
+pub(crate) const SUBPROCESS_MARKER_ENV: &str = "ACTUAL_CLI_SUBPROCESS";
+
 /// Spawn the binary, wait with timeout, and parse JSON output.
 ///
 /// Extracted from the `ClaudeRunner` impl so the trait method is a
@@ -307,6 +318,7 @@ async fn run_subprocess<T: DeserializeOwned>(
     cmd.kill_on_drop(true);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    cmd.env(SUBPROCESS_MARKER_ENV, "1");
 
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -458,6 +470,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     cmd.kill_on_drop(true);
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    cmd.env(SUBPROCESS_MARKER_ENV, "1");
 
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1165,6 +1178,48 @@ mod tests {
 
         let (message, _) = subprocess_failed(result.unwrap_err());
         assert!(message.contains("unknown"));
+    }
+
+    /// Both spawn paths mark the subprocess with `SUBPROCESS_MARKER_ENV=1`,
+    /// the value actual-skill's hooks check before doing anything. Missing it
+    /// on either path is how a nested judge's `Stop` hook recurses.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_both_spawn_paths_mark_the_subprocess() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join("captured-env.txt");
+        let script = dir.path().join("fake-claude.sh");
+
+        for (label, output) in [
+            ("run_subprocess", r#"{"ok":true}"#.to_string()),
+            (
+                "run_subprocess_streaming",
+                stream_result_line(serde_json::json!({"ok": true})),
+            ),
+        ] {
+            let script_content = format!(
+                "#!/bin/sh\nprintf '%s' \"${{{SUBPROCESS_MARKER_ENV}:-unset}}\" > \"{}\"\necho '{}'\n",
+                env_file.display(),
+                output
+            );
+            std::fs::write(&script, script_content).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_file(&env_file);
+
+            let result: serde_json::Value = if label == "run_subprocess" {
+                run_subprocess(&script, Duration::from_secs(10), &[]).await
+            } else {
+                run_subprocess_streaming(&script, Duration::from_secs(10), &[], None).await
+            }
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_eq!(result["ok"], true, "{label}");
+            assert_eq!(
+                std::fs::read_to_string(&env_file).unwrap(),
+                "1",
+                "{label} did not set {SUBPROCESS_MARKER_ENV}"
+            );
+        }
     }
 
     #[tokio::test]
