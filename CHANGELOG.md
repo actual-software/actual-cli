@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-23
+
+### Added
+- `actual rules select --file <path>` no longer requires a plan (AK-786): a hook selecting rules for the file an agent is about to touch can pass only a path. A path-only query skips the stage-2 rank rather than ranking against empty prose, reports why it skipped, and the panel drops its `Plan:` row; a call naming neither a plan nor a path is still a usage error
+
+### Changed
+- Scope-index ties are now broken by the rarest glob a document matched, then by how few distinct globs it declares, and only then by slug (AK-785), so sibling rule documents generated from one decision no longer rank alphabetically on path-only queries. Scores, the index format and the cache are unchanged
+
+### Fixed
+- `claude --print` subprocesses spawned by the CLI now run with hooks disabled, so `impl-check --claude-hook` no longer recurses through the user's own `Stop` hook (e.g. `impl-gate.sh`), times out, or leaves orphaned nested judge calls running
+- Multi-line diffs, verdict reasons and quoted spans no longer break the box borders of the `plan-check` / `impl-check` panel
+
 ## [0.4.0] - 2026-09-22
 
 ### Added
