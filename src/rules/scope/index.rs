@@ -499,8 +499,9 @@ impl ScopeIndex {
     /// de-duplicate, and it measured worse: the documents that genuinely govern
     /// an edit are usually siblings, so dropping them loses real hits.
     ///
-    /// A decision ranks at its best document's score, and its documents stay in
-    /// document rank order, so this reorders nothing — it only groups.
+    /// A decision ranks where its best document ranked, and documents retain
+    /// their relative rank within that decision. Making each group contiguous
+    /// can change the flattened document order when decisions were interleaved.
     pub fn search_adrs(&self, query: &Query, limit: usize) -> Vec<AdrGroup> {
         self.search_adrs_weighted(query, limit, &Weights::default())
     }
@@ -517,26 +518,7 @@ impl ScopeIndex {
         // below any number of documents of the first.
         let matches = self.search_weighted(query, self.documents.len(), weights);
 
-        let mut groups: Vec<AdrGroup> = Vec::new();
-        for hit in matches {
-            // A document whose title names no decision is its own group, keyed
-            // by slug: pooling every such document under one heading would
-            // present unrelated rules as one subject.
-            let key = hit.adr.clone().unwrap_or_else(|| hit.slug.clone());
-            match groups.iter_mut().find(|group| group.key == key) {
-                Some(group) => group.documents.push(hit),
-                None => groups.push(AdrGroup {
-                    key,
-                    // The first hit of a group is its best, because `matches`
-                    // is already in rank order.
-                    score: hit.score,
-                    title: hit.adr.clone(),
-                    documents: vec![hit],
-                }),
-            }
-        }
-        groups.truncate(limit);
-        groups
+        group_matches(matches, limit)
     }
 
     fn score_document(
@@ -597,6 +579,35 @@ impl ScopeIndex {
             matched_globs,
         })
     }
+}
+
+/// Partition ranked documents into contiguous decision groups.
+///
+/// Groups appear where their best document first appeared. Documents preserve
+/// their relative order within a group, but flattening the groups can differ
+/// from the original global document order: `A1, B1, A2` becomes
+/// `A=[A1, A2], B=[B1]`.
+fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
+    let mut groups: Vec<AdrGroup> = Vec::new();
+    for hit in matches {
+        // A document whose title names no decision is its own group, keyed by
+        // slug: pooling every such document under one heading would present
+        // unrelated rules as one subject.
+        let key = hit.adr.clone().unwrap_or_else(|| hit.slug.clone());
+        match groups.iter_mut().find(|group| group.key == key) {
+            Some(group) => group.documents.push(hit),
+            None => groups.push(AdrGroup {
+                key,
+                // The first hit of a group is its best, because `matches` is
+                // already in rank order.
+                score: hit.score,
+                title: hit.adr.clone(),
+                documents: vec![hit],
+            }),
+        }
+    }
+    groups.truncate(limit);
+    groups
 }
 
 /// First tie-break: how many documents declare the rarest glob that reached
@@ -1395,22 +1406,46 @@ mod tests {
         }
     }
 
-    /// Grouping reorders nothing: decisions appear in the order their best
-    /// documents did, and a repeated call gives the same answer.
+    /// Decisions appear where their best document ranked, while later
+    /// documents preserve their relative order inside that decision. Making
+    /// groups contiguous deliberately changes a flattened interleaved order.
     #[test]
-    fn test_search_adrs_preserves_document_rank_order() {
-        let index = sample_index();
-        let query = Query::new("OAuth token signing");
-        let documents = index.search(&query, index.len());
-        let groups = index.search_adrs(&query, 5);
+    fn test_group_matches_preserves_group_and_within_group_rank_order() {
+        let hit = |slug: &str, adr: &str, score: f64| Match {
+            slug: slug.to_string(),
+            relative_path: format!(".actual/rules/{slug}.md"),
+            title: Some(format!("{adr}: aspect")),
+            adr: Some(adr.to_string()),
+            score,
+            contributions: Vec::new(),
+            matched_globs: Vec::new(),
+        };
+        let matches = vec![
+            hit("a-first", "Decision A", 3.0),
+            hit("b-first", "Decision B", 2.0),
+            hit("a-second", "Decision A", 1.0),
+        ];
 
-        let regrouped: Vec<&str> = groups
-            .iter()
-            .flat_map(|group| group.documents.iter().map(|d| d.slug.as_str()))
-            .collect();
-        let first_seen: Vec<&str> = documents.iter().map(|d| d.slug.as_str()).collect();
-        assert_eq!(regrouped.len(), first_seen.len());
-        assert_eq!(groups, index.search_adrs(&query, 5));
+        let groups = group_matches(matches.clone(), 5);
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Decision A", "Decision B"]
+        );
+        assert_eq!(
+            groups[0]
+                .documents
+                .iter()
+                .map(|document| document.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-first", "a-second"]
+        );
+        assert_eq!(groups[0].score, 3.0);
+        assert_eq!(groups[1].documents[0].slug, "b-first");
+        assert_eq!(groups, group_matches(matches, 5));
     }
 
     /// Nothing matching means no groups, not an empty group.
