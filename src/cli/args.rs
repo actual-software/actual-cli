@@ -820,7 +820,12 @@ pub struct RulesBriefArgs {
 
     /// Score a document must reach to be briefed at all. Defaults to the
     /// `rules_min_score` config key, or to no floor.
-    #[arg(long, value_name = "SCORE")]
+    #[arg(
+        long,
+        value_name = "SCORE",
+        value_parser = parse_min_score,
+        allow_hyphen_values = true
+    )]
     pub min_score: Option<f64>,
 }
 
@@ -2511,7 +2516,7 @@ mod parse_tests {
     }
 
     /// A non-finite floor can silently reject every document (`score >= NaN`
-    /// is always false), while a negative floor is nonsensical. Both commands
+    /// is always false), while a negative floor is nonsensical. All commands
     /// that expose the knob reject those values at the CLI boundary.
     #[test]
     fn test_rules_score_floor_rejects_negative_and_non_finite_values() {
@@ -2532,6 +2537,15 @@ mod parse_tests {
                     "eval",
                     "--golden",
                     "golden.json",
+                    "--min-score",
+                    value,
+                ],
+                vec![
+                    "actual",
+                    "rules",
+                    "brief",
+                    "--file",
+                    "src/lib.rs",
                     "--min-score",
                     value,
                 ],

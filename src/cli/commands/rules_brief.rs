@@ -273,11 +273,15 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
 
 /// The score floor for this invocation: the flag, else the config key, else
 /// none. An unreadable config degrades to no floor, the same way
-/// `rules select` treats it.
+/// `rules select` treats it. A manually edited config can bypass the validated
+/// `config set` path, so validate again at consumption; an invalid value also
+/// degrades to no floor rather than silently rejecting every document.
 fn min_score(args: &RulesBriefArgs) -> f64 {
-    args.min_score
+    let score = args
+        .min_score
         .or_else(|| crate::config::paths::load().ok()?.rules_min_score)
-        .unwrap_or(0.0)
+        .unwrap_or(0.0);
+    crate::config::types::validate_rules_min_score(score).unwrap_or(0.0)
 }
 
 /// The path as the rule set names it: relative to the repository root, with
@@ -597,6 +601,26 @@ mod tests {
 
         a.min_score = Some(2.25);
         assert_eq!(min_score(&a), 2.25);
+    }
+
+    /// A manually edited config can bypass `config set` validation. The hook
+    /// must fail open to no floor rather than let NaN reject every document.
+    #[test]
+    fn test_min_score_ignores_an_invalid_config_value() {
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _dir =
+            crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _file = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
+        let root = repo();
+        let mut a = args(root.path());
+        a.min_score = None;
+
+        let mut cfg = crate::config::paths::load().unwrap_or_default();
+        cfg.rules_min_score = Some(f64::NAN);
+        crate::config::paths::save(&cfg).unwrap();
+
+        assert_eq!(min_score(&a), 0.0);
     }
 
     /// A floor above everything silences the hook, which is how a file that
