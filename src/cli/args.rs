@@ -805,6 +805,16 @@ pub struct RulesSelectArgs {
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
 
+    /// Group the result by the decision each document belongs to, and count
+    /// `--limit` in decisions rather than documents.
+    ///
+    /// A generated rule set splits one decision across many near-identical
+    /// documents, so a document-level cap can spend itself on aspects of a
+    /// single subject. Stage 1 only: the rank judges documents, and what is
+    /// being capped here is decisions.
+    #[arg(long = "by-adr")]
+    pub by_adr: bool,
+
     /// How many candidates the deterministic prefilter retrieves before stage 2
     /// judges them. Raised to `--limit` when smaller.
     #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
@@ -2314,6 +2324,29 @@ mod parse_tests {
             },
             _ => None,
         }
+    }
+
+    /// `--by-adr` changes what `--limit` counts, so it has to survive parsing
+    /// alongside it rather than being read from a default.
+    #[test]
+    fn test_rules_select_parses_by_adr() {
+        let args = rules_select_args_from(&[
+            "actual",
+            "rules",
+            "select",
+            "--file",
+            "src/lib.rs",
+            "--by-adr",
+            "--limit",
+            "2",
+        ])
+        .expect("expected a rules select command");
+        assert!(args.by_adr);
+        assert_eq!(args.limit, 2);
+
+        let plain = rules_select_args_from(&["actual", "rules", "select", "a plan"])
+            .expect("expected a rules select command");
+        assert!(!plain.by_adr);
     }
 
     /// Covers the helper's two non-select fallback arms.
