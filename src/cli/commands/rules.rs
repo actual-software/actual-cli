@@ -428,6 +428,7 @@ mod tests {
 
         let select = RulesArgs {
             action: RulesAction::Select(RulesSelectArgs {
+                by_adr: false,
                 plan: vec!["a".to_string(), "rule".to_string()],
                 repo: Some(root.path().to_path_buf()),
                 files: Vec::new(),

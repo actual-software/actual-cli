@@ -599,6 +599,7 @@ mod tests {
     fn test_candidate_from_a_match_carries_the_title_and_globs() {
         let hit = Match {
             slug: "slug".to_string(),
+            adr: None,
             relative_path: ".actual/rules/slug.md".to_string(),
             title: Some("Title".to_string()),
             score: 1.0,

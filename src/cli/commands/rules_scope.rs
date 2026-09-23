@@ -26,7 +26,7 @@ use crate::error::ActualError;
 use crate::rules::scope::{
     self, baseline,
     eval::{CaseResult, EvaluationReport, GoldenCase, Scores},
-    index::{Field, Match, Query, ScopeIndex, Weights},
+    index::{AdrGroup, Field, Match, Query, ScopeIndex, Weights},
     select::{self, Selection, Stage2},
     IndexSource, ResolvedIndex,
 };
@@ -152,6 +152,27 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" ")).with_paths(args.files.clone());
+
+    if args.by_adr {
+        let groups = resolved.index.search_adrs(&query, args.limit);
+        println!(
+            "{}",
+            if args.json {
+                render_adr_json(&resolved.index, &query, &groups, args.limit, args.explain)
+            } else {
+                render_adr_panel(
+                    &resolved.index,
+                    &query,
+                    &groups,
+                    args.limit,
+                    args.explain,
+                    term_size::terminal_width(),
+                )
+            }
+        );
+        return Ok(());
+    }
+
     let run = run_selection(&resolved.index, &query, args)?;
 
     if args.json {
@@ -172,6 +193,182 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
         );
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct JsonAdrSelection<'a> {
+    plan: &'a str,
+    paths: Vec<String>,
+    indexed_documents: usize,
+    /// Counted in decisions, not documents, under `--by-adr`.
+    limit: usize,
+    decisions: &'a [AdrGroup],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explain: Option<JsonAdrExplain<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonAdrExplain<'a> {
+    ubiquitous_terms: Vec<&'a str>,
+    /// The status quo regrouped to the same decision-level unit and cap.
+    filename_scan: Vec<AdrBaselineGroup>,
+}
+
+#[derive(Serialize)]
+struct AdrBaselineGroup {
+    key: String,
+    title: Option<String>,
+    documents: Vec<JsonBaselineHit>,
+}
+
+fn render_adr_json(
+    index: &ScopeIndex,
+    query: &Query,
+    groups: &[AdrGroup],
+    limit: usize,
+    explain: bool,
+) -> String {
+    to_json(&JsonAdrSelection {
+        plan: &query.text,
+        paths: query.all_paths(),
+        indexed_documents: index.len(),
+        limit,
+        decisions: groups,
+        explain: explain.then(|| JsonAdrExplain {
+            ubiquitous_terms: index.ubiquitous_terms(),
+            filename_scan: adr_filename_scan(index, &query.text, limit),
+        }),
+    })
+}
+
+/// The filename-only baseline regrouped by decision.
+///
+/// The ordinary baseline cap counts documents. Grouped selection counts
+/// decisions, so comparing the two at the same numeric cap first retrieves
+/// every filename hit, partitions them in baseline rank order, and only then
+/// applies the decision cap.
+fn adr_filename_scan(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<AdrBaselineGroup> {
+    let mut groups: Vec<AdrBaselineGroup> = Vec::new();
+    for hit in baseline::select(index, query_text, index.len()) {
+        let document = index
+            .documents
+            .iter()
+            .find(|doc| doc.slug == hit.slug)
+            .expect("a filename-scan hit is always present in the index that produced it");
+        let key = document
+            .adr
+            .clone()
+            .unwrap_or_else(|| document.slug.clone());
+        let baseline_hit = JsonBaselineHit {
+            slug: hit.slug,
+            matched_terms: hit.matched_terms,
+        };
+        match groups.iter_mut().find(|group| group.key == key) {
+            Some(group) => group.documents.push(baseline_hit),
+            None => groups.push(AdrBaselineGroup {
+                key,
+                title: document.adr.clone(),
+                documents: vec![baseline_hit],
+            }),
+        }
+    }
+    groups.truncate(limit);
+    groups
+}
+
+/// The `--by-adr` panel: one block per decision, its documents beneath it.
+///
+/// The document count is printed per decision because it is the number the
+/// caller is trading against — a decision carrying eleven near-identical
+/// documents costs eleven documents' worth of a brief, and the grouped view
+/// would otherwise hide that behind one heading.
+fn render_adr_panel(
+    index: &ScopeIndex,
+    query: &Query,
+    groups: &[AdrGroup],
+    limit: usize,
+    explain: bool,
+    width: usize,
+) -> String {
+    let mut panel = Panel::titled("Rule selection by decision");
+    if !query.text.trim().is_empty() {
+        panel = panel.kv("Plan", &truncate(&query.text, 72));
+    }
+    let paths = query.all_paths();
+    if !paths.is_empty() {
+        panel = panel.kv("Paths", &paths.join(", "));
+    }
+    panel = panel.kv("Indexed documents", &index.len().to_string());
+
+    if groups.is_empty() {
+        let subject = if query.text.trim().is_empty() {
+            "these paths"
+        } else {
+            "this plan"
+        };
+        return panel
+            .separator()
+            .line(&format!("No rule document matched {subject}."))
+            .render(width);
+    }
+
+    panel = panel.separator();
+    for group in groups {
+        panel = panel.kv(
+            &format!("{:.2}", group.score),
+            &truncate(group.title.as_deref().unwrap_or(&group.key), 64),
+        );
+        for document in &group.documents {
+            panel = panel.line(&format!("{STAGE2_INDENT}{}", document.slug));
+            if explain {
+                panel = append_match_evidence(panel, document, "             ");
+            }
+        }
+    }
+
+    if explain {
+        let ubiquitous = index.ubiquitous_terms();
+        panel = panel.separator();
+        panel = panel.line(&format!(
+            "Terms carrying no signal in this corpus: {}",
+            if ubiquitous.is_empty() {
+                "none".to_string()
+            } else {
+                ubiquitous.join(", ")
+            }
+        ));
+        panel = panel.separator().line(&format!(
+            "Filename scan grouped by decision would have chosen (cap {} decisions):",
+            limit
+        ));
+        let scan = adr_filename_scan(index, &query.text, limit);
+        if scan.is_empty() {
+            panel = panel.line("  nothing — no filename segment matched");
+        } else {
+            for group in scan {
+                panel = panel.line(&format!(
+                    "  {}",
+                    group.title.as_deref().unwrap_or(&group.key)
+                ));
+                for document in group.documents {
+                    panel = panel.line(&format!(
+                        "    {} ({})",
+                        document.slug,
+                        document.matched_terms.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    let documents: usize = groups.iter().map(|group| group.documents.len()).sum();
+    panel
+        .separator()
+        .line(&format!(
+            "{} decision(s), {documents} document(s) shown",
+            groups.len()
+        ))
+        .render(width)
 }
 
 /// A selection, and the runner that shaped it.
@@ -323,32 +520,7 @@ fn render_select_panel(
         if !explain {
             continue;
         }
-        if let Some(title) = &rule.title {
-            panel = panel.line(&format!("      {}", truncate(title, 68)));
-        }
-        let hit = &evidence[position];
-        for contribution in &hit.contributions {
-            let detail = if contribution.matched.is_empty() {
-                String::new()
-            } else {
-                format!(" — {}", contribution.matched.join(", "))
-            };
-            panel = panel.line(&format!(
-                "      {:<11} {:.2}{}",
-                contribution.field.as_str(),
-                contribution.weighted,
-                detail
-            ));
-        }
-        for glob in hit.matched_globs.iter().take(3) {
-            panel = panel.line(&format!(
-                "      glob        {} ~ {} ({} segments{})",
-                glob.glob,
-                glob.query_path,
-                glob.segments,
-                if glob.exact { ", exact" } else { "" }
-            ));
-        }
+        panel = append_match_evidence(panel, &evidence[position], "      ");
     }
 
     if explain {
@@ -390,6 +562,39 @@ fn render_select_panel(
         index.len()
     ));
     panel.render(width)
+}
+
+/// Add one stage-1 match's title, weighted signals and strongest path evidence.
+///
+/// Both document and decision views use the same evidence; only indentation
+/// differs because grouped documents sit one level beneath their decision.
+fn append_match_evidence(mut panel: Panel, hit: &Match, indent: &str) -> Panel {
+    if let Some(title) = &hit.title {
+        panel = panel.line(&format!("{indent}{}", truncate(title, 68)));
+    }
+    for contribution in &hit.contributions {
+        let detail = if contribution.matched.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", contribution.matched.join(", "))
+        };
+        panel = panel.line(&format!(
+            "{indent}{:<11} {:.2}{}",
+            contribution.field.as_str(),
+            contribution.weighted,
+            detail
+        ));
+    }
+    for glob in hit.matched_globs.iter().take(3) {
+        panel = panel.line(&format!(
+            "{indent}glob        {} ~ {} ({} segments{})",
+            glob.glob,
+            glob.query_path,
+            glob.segments,
+            if glob.exact { ", exact" } else { "" }
+        ));
+    }
+    panel
 }
 
 /// Aligns a wrapped stage-2 line under the `Stage 2: ` label.
@@ -843,6 +1048,13 @@ mod tests {
             out.contains("Terms carrying no signal in this corpus: none"),
             "{out}"
         );
+
+        let groups = index.search_adrs(&query, 5);
+        let grouped = render_adr_panel(&index, &query, &groups, 5, true, 100);
+        assert!(
+            grouped.contains("Terms carrying no signal in this corpus: none"),
+            "{grouped}"
+        );
     }
 
     const OAUTH: &str = "# Adopt RS256: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token issuance and token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n\n### Verify\n\n```bash\ngrep -r \"jwt.sign\" services/auth/oauth/ --include=\"*.ts\"\n```\n";
@@ -1255,6 +1467,129 @@ mod tests {
         assert!(out.contains("Paths: services/auth/oauth/token.ts"));
         assert!(out.contains("services/auth/oauth/**"));
         assert!(out.contains("exact"));
+    }
+
+    /// The `--by-adr` panel groups siblings under one heading and reports both
+    /// counts, because the document count is what a brief actually spends.
+    #[test]
+    fn test_adr_panel_groups_documents_under_their_decision() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = seed(&[
+            ("cross-cutting-token-signing-e410.md", OAUTH),
+            ("cross-cutting-token-expiry-a1b2.md", OAUTH),
+        ]);
+        let index = resolved(root.path()).index;
+        let query = Query::new("").with_paths(vec!["services/auth/oauth/token.ts".to_string()]);
+        let groups = index.search_adrs(&query, 2);
+
+        let out = render_adr_panel(&index, &query, &groups, 2, false, 110);
+
+        assert!(out.contains("Rule selection by decision"), "{out}");
+        assert!(out.contains("Adopt RS256"), "{out}");
+        assert!(out.contains("cross-cutting-token-signing-e410"), "{out}");
+        assert!(out.contains("cross-cutting-token-expiry-a1b2"), "{out}");
+        assert!(out.contains("1 decision(s), 2 document(s) shown"), "{out}");
+    }
+
+    /// Nothing matching reports it the same way the document panel does, and
+    /// names what was actually asked.
+    #[test]
+    fn test_adr_panel_reports_no_match() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("").with_paths(vec!["unrelated/tree/file.go".to_string()]);
+
+        let out = render_adr_panel(&index, &query, &[], 2, false, 110);
+        assert!(
+            out.contains("No rule document matched these paths."),
+            "{out}"
+        );
+
+        let planned = Query::new("kubernetes ingress controller");
+        let out = render_adr_panel(&index, &planned, &[], 2, false, 110);
+        assert!(out.contains("No rule document matched this plan."), "{out}");
+        assert!(out.contains("Plan"), "{out}");
+    }
+
+    /// The JSON shape a hook will read: decisions, each with its documents,
+    /// and a limit counted in decisions.
+    #[test]
+    fn test_adr_json_carries_decisions_and_their_documents() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = seed(&[
+            ("cross-cutting-token-signing-e410.md", OAUTH),
+            ("cross-cutting-token-expiry-a1b2.md", OAUTH),
+        ]);
+        let index = resolved(root.path()).index;
+        let query = Query::new("").with_paths(vec!["services/auth/oauth/token.ts".to_string()]);
+        let groups = index.search_adrs(&query, 2);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_adr_json(&index, &query, &groups, 2, false)).unwrap();
+
+        assert_eq!(value["indexed_documents"], 2);
+        assert_eq!(value["limit"], 2);
+        assert_eq!(value["decisions"][0]["title"], "Adopt RS256");
+        assert_eq!(
+            value["decisions"][0]["documents"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(value["decisions"][0]["documents"][0]["adr"], "Adopt RS256");
+        assert!(value["decisions"][0]["score"].is_number());
+        assert!(value.get("explain").is_none());
+    }
+
+    /// Grouped `--explain` keeps the per-document attribution and compares it
+    /// with a filename scan regrouped under the same decision-level cap.
+    #[test]
+    fn test_adr_panel_and_json_explain_grouped_evidence() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = seed(&[
+            ("cross-cutting-token-signing-e410.md", OAUTH),
+            ("cross-cutting-token-expiry-a1b2.md", OAUTH),
+        ]);
+        let index = resolved(root.path()).index;
+        let query = Query::new("token signing")
+            .with_paths(vec!["services/auth/oauth/token.ts".to_string()]);
+        let groups = index.search_adrs(&query, 2);
+
+        let panel = render_adr_panel(&index, &query, &groups, 2, true, 110);
+        assert!(panel.contains("Adopt RS256: Token Signing"), "{panel}");
+        assert!(panel.contains("services/auth/oauth/**"), "{panel}");
+        assert!(
+            panel.contains("Filename scan grouped by decision would have chosen (cap 2 decisions)"),
+            "{panel}"
+        );
+        assert!(panel.contains("Terms carrying no signal"), "{panel}");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_adr_json(&index, &query, &groups, 2, true)).unwrap();
+        assert!(value["explain"]["ubiquitous_terms"].is_array());
+        assert_eq!(value["explain"]["filename_scan"][0]["title"], "Adopt RS256");
+        assert!(value["explain"]["filename_scan"][0]["documents"]
+            .as_array()
+            .is_some_and(|documents| !documents.is_empty()));
+
+        let path_only = Query::new("").with_paths(vec!["services/auth/oauth/token.ts".to_string()]);
+        let path_groups = index.search_adrs(&path_only, 2);
+        let panel = render_adr_panel(&index, &path_only, &path_groups, 2, true, 110);
+        assert!(
+            panel.contains("nothing — no filename segment matched"),
+            "{panel}"
+        );
     }
 
     #[test]
@@ -1680,12 +2015,33 @@ mod tests {
         }
     }
 
+    /// `--by-adr` takes its own path out of `exec_select`, in both renderings.
+    #[test]
+    fn test_exec_select_renders_both_formats_by_adr() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        for json in [false, true] {
+            let args = RulesSelectArgs {
+                files: vec!["services/auth/oauth/token.ts".to_string()],
+                by_adr: true,
+                json,
+                rebuild: true,
+                ..select_args(root.path(), 2)
+            };
+            assert!(exec_select(&args).is_ok());
+        }
+    }
+
     // ── rules eval ───────────────────────────────────────────────────────
 
     /// Helper: `rules select` arguments with stage 2 off, so a test that is
     /// about rendering never reaches for a runner.
     fn select_args(root: &Path, limit: usize) -> RulesSelectArgs {
         RulesSelectArgs {
+            by_adr: false,
             plan: vec![
                 "rotate".to_string(),
                 "signing".to_string(),

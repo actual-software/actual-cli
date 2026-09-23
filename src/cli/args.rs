@@ -316,6 +316,18 @@ fn parse_rule_key(s: &str) -> Result<String, String> {
     }
 }
 
+/// A plan or path that only occupies an argv slot still names no selection
+/// subject. Keep the original text for matching, but reject values whose
+/// trimmed form is empty so `rules select ""` cannot bypass its plan-or-file
+/// requirement.
+fn parse_non_empty_selection_value(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("value must not be empty or whitespace".to_string())
+    } else {
+        Ok(s.to_string())
+    }
+}
+
 /// Parse and validate a model name, rejecting flag-like values and shell metacharacters.
 ///
 /// Allowed: alphanumeric start, then alphanumeric, dots, underscores, slashes, or hyphens.
@@ -786,7 +798,11 @@ pub struct RulesSelectArgs {
     /// file an agent is about to touch has a path and no plan, and passing
     /// `""` to satisfy a required argument is not an interface. One of the two
     /// is still required, because a query with neither names nothing to match.
-    #[arg(value_name = "PLAN", required_unless_present = "files")]
+    #[arg(
+        value_name = "PLAN",
+        required_unless_present = "files",
+        value_parser = parse_non_empty_selection_value
+    )]
     pub plan: Vec<String>,
 
     /// Repository root to scan. Defaults to the current directory.
@@ -798,16 +814,34 @@ pub struct RulesSelectArgs {
     /// With a plan, these are the paths the plan touches. Without a plan they
     /// are the query itself: a hook selecting for the file an agent is about
     /// to touch has a path and no plan.
-    #[arg(long = "file", value_name = "PATH")]
+    #[arg(
+        long = "file",
+        value_name = "PATH",
+        value_parser = parse_non_empty_selection_value
+    )]
     pub files: Vec<String>,
 
     /// Maximum number of rule documents to return.
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
 
+    /// Group the result by the decision each document belongs to, and count
+    /// `--limit` in decisions rather than documents.
+    ///
+    /// A generated rule set splits one decision across many near-identical
+    /// documents, so a document-level cap can spend itself on aspects of a
+    /// single subject. Stage 1 only: the rank judges documents, and what is
+    /// being capped here is decisions.
+    #[arg(long = "by-adr")]
+    pub by_adr: bool,
+
     /// How many candidates the deterministic prefilter retrieves before stage 2
     /// judges them. Raised to `--limit` when smaller.
-    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    #[arg(
+        long,
+        default_value_t = crate::rules::scope::DEFAULT_CANDIDATES,
+        conflicts_with = "by_adr"
+    )]
     pub candidates: usize,
 
     /// Skip stage 2 and return the deterministic prefilter alone. Offline, and
@@ -816,11 +850,11 @@ pub struct RulesSelectArgs {
     pub no_rank: bool,
 
     /// Runner to use for stage 2. Probed automatically when omitted.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with = "by_adr")]
     pub runner: Option<RunnerChoice>,
 
     /// Model for stage 2, overriding the configured one.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "by_adr")]
     pub model: Option<String>,
 
     /// Show the signal behind every hit, and what the filename scan would have
@@ -2316,6 +2350,46 @@ mod parse_tests {
         }
     }
 
+    /// `--by-adr` changes what `--limit` counts, so it has to survive parsing
+    /// alongside it rather than being read from a default.
+    #[test]
+    fn test_rules_select_parses_by_adr() {
+        let args = rules_select_args_from(&[
+            "actual",
+            "rules",
+            "select",
+            "--file",
+            "src/lib.rs",
+            "--by-adr",
+            "--limit",
+            "2",
+        ])
+        .expect("expected a rules select command");
+        assert!(args.by_adr);
+        assert_eq!(args.limit, 2);
+
+        let plain = rules_select_args_from(&["actual", "rules", "select", "a plan"])
+            .expect("expected a rules select command");
+        assert!(!plain.by_adr);
+    }
+
+    /// Grouped selection is stage 1 only, so accepting stage-2 tuning flags
+    /// would imply they shape an answer that never consults them.
+    #[test]
+    fn test_rules_select_by_adr_rejects_stage_two_tuning_flags() {
+        for (flag, value) in [
+            ("--candidates", "12"),
+            ("--runner", "anthropic-api"),
+            ("--model", "claude-sonnet-4-6"),
+        ] {
+            let error = Cli::try_parse_from([
+                "actual", "rules", "select", "a plan", "--by-adr", flag, value,
+            ])
+            .expect_err("stage-2 tuning must conflict with --by-adr");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
     /// Covers the helper's two non-select fallback arms.
     #[test]
     fn test_rules_select_args_from_other_commands_is_none() {
@@ -2365,6 +2439,27 @@ mod parse_tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
         assert!(error.to_string().contains("PLAN"), "{error}");
+    }
+
+    /// An argv value that is empty after trimming does not name a plan or a
+    /// path, so it cannot satisfy the command's subject requirement.
+    #[test]
+    fn test_rules_select_rejects_empty_plan_and_file_values() {
+        for argv in [
+            vec!["actual", "rules", "select", ""],
+            vec!["actual", "rules", "select", "   "],
+            vec!["actual", "rules", "select", "--file", ""],
+            vec!["actual", "rules", "select", "--file", " \t "],
+        ] {
+            let error = Cli::try_parse_from(argv).expect_err("expected an invalid value");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(
+                error
+                    .to_string()
+                    .contains("must not be empty or whitespace"),
+                "{error}"
+            );
+        }
     }
 
     /// `--help` is the interface a hook author reads. The path-only case has

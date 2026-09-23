@@ -49,7 +49,7 @@ use crate::rules::{RuleDocument, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 3;
+pub const INDEX_FORMAT_VERSION: u32 = 5;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -143,6 +143,15 @@ pub struct IndexedDocument {
     /// same rule set is identical on any machine.
     pub relative_path: String,
     pub title: Option<String>,
+    /// The decision this document is one aspect of, when its title names one.
+    ///
+    /// A generated rule set splits one decision across many documents whose
+    /// titles share a prefix — `Adopt Pydantic Models…: Database Interactions`
+    /// and `Adopt Pydantic Models…: Activity Inputs` are aspects of a single
+    /// ADR. The prefix is the only machine-readable link between them the
+    /// published files carry, so it is the key here, derived at build time so
+    /// the parse happens once rather than per query.
+    pub adr: Option<String>,
     pub scope: Option<String>,
     pub globs: Vec<String>,
     /// Terms per field with how often each occurs in that field.
@@ -247,11 +256,27 @@ pub struct Match {
     pub slug: String,
     pub relative_path: String,
     pub title: Option<String>,
+    /// The decision this document belongs to, when its title names one.
+    pub adr: Option<String>,
     pub score: f64,
     pub contributions: Vec<FieldContribution>,
     /// Document globs that matched a path the query named, with the number of
     /// agreeing leading segments.
     pub matched_globs: Vec<GlobMatch>,
+}
+
+/// One decision a query matched, and the documents that carry it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdrGroup {
+    /// What documents were grouped on: the decision name, or the slug of a
+    /// document whose title names none.
+    pub key: String,
+    /// The decision's name, absent for a document that stands alone.
+    pub title: Option<String>,
+    /// The best score among this group's documents, which is what it ranks at.
+    pub score: f64,
+    /// Its matching documents, in document rank order.
+    pub documents: Vec<Match>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +485,42 @@ impl ScopeIndex {
         frequency
     }
 
+    /// Rank the *decisions* a query matches, best first, keeping at most
+    /// `limit` of them with every document each one matched.
+    ///
+    /// The unit matters as much as the ranking. A generated rule set splits one
+    /// decision across many near-identical documents that share their verify
+    /// paths, so a document-level top five can be five aspects of the same
+    /// decision while the second relevant decision never appears. Ranking
+    /// decisions and keeping their documents puts the caller's budget on
+    /// distinct subjects, which is what a brief wants.
+    ///
+    /// Keeping *one* document per decision would be the other way to
+    /// de-duplicate, and it measured worse: the documents that genuinely govern
+    /// an edit are usually siblings, so dropping them loses real hits.
+    ///
+    /// A decision ranks where its best document ranked, and documents retain
+    /// their relative rank within that decision. Making each group contiguous
+    /// can change the flattened document order when decisions were interleaved.
+    pub fn search_adrs(&self, query: &Query, limit: usize) -> Vec<AdrGroup> {
+        self.search_adrs_weighted(query, limit, &Weights::default())
+    }
+
+    /// [`Self::search_adrs`] with explicit weights, for ablation measurements.
+    pub fn search_adrs_weighted(
+        &self,
+        query: &Query,
+        limit: usize,
+        weights: &Weights,
+    ) -> Vec<AdrGroup> {
+        // Every scoring document, not the top `limit`: the cap counts
+        // decisions here, and the documents of the second decision can sit
+        // below any number of documents of the first.
+        let matches = self.search_weighted(query, self.documents.len(), weights);
+
+        group_matches(matches, limit)
+    }
+
     fn score_document(
         &self,
         doc: &IndexedDocument,
@@ -512,11 +573,41 @@ impl ScopeIndex {
             slug: doc.slug.clone(),
             relative_path: doc.relative_path.clone(),
             title: doc.title.clone(),
+            adr: doc.adr.clone(),
             score,
             contributions,
             matched_globs,
         })
     }
+}
+
+/// Partition ranked documents into contiguous decision groups.
+///
+/// Groups appear where their best document first appeared. Documents preserve
+/// their relative order within a group, but flattening the groups can differ
+/// from the original global document order: `A1, B1, A2` becomes
+/// `A=[A1, A2], B=[B1]`.
+fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
+    let mut groups: Vec<AdrGroup> = Vec::new();
+    for hit in matches {
+        // A document whose title names no decision is its own group, keyed by
+        // slug: pooling every such document under one heading would present
+        // unrelated rules as one subject.
+        let key = hit.adr.clone().unwrap_or_else(|| hit.slug.clone());
+        match groups.iter_mut().find(|group| group.key == key) {
+            Some(group) => group.documents.push(hit),
+            None => groups.push(AdrGroup {
+                key,
+                // The first hit of a group is its best, because `matches` is
+                // already in rank order.
+                score: hit.score,
+                title: hit.adr.clone(),
+                documents: vec![hit],
+            }),
+        }
+    }
+    groups.truncate(limit);
+    groups
 }
 
 /// First tie-break: how many documents declare the rarest glob that reached
@@ -702,10 +793,24 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
             .display()
             .to_string(),
         title: doc.title.clone(),
+        adr: adr_key(doc.title.as_deref()),
         scope: doc.scope.clone(),
         globs: extracted.globs.into_iter().map(|g| g.pattern).collect(),
         field_terms,
     }
+}
+
+/// The decision a document's title names, which is everything before the last
+/// colon.
+///
+/// The aspect suffix is the last segment, so an earlier colon can remain part
+/// of the decision's own name. A title with no colon names no decision — the
+/// document stands alone. [`ScopeIndex::search_adrs`] groups it under its own
+/// slug rather than inventing a shared key that would pool unrelated documents.
+fn adr_key(title: Option<&str>) -> Option<String> {
+    let (decision, _) = title?.rsplit_once(':')?;
+    let decision = decision.trim();
+    (!decision.is_empty()).then(|| decision.to_string())
 }
 
 /// Count occurrences into a sorted map — so a stored index is byte-stable for a
@@ -1184,6 +1289,174 @@ mod tests {
         assert_eq!(Query::default().text, "");
     }
 
+    // ── decisions ────────────────────────────────────────────────────────
+
+    /// A title's decision name is everything before the last colon; the
+    /// aspect suffix after it is what distinguishes siblings.
+    #[test]
+    fn test_adr_key_is_the_title_prefix() {
+        assert_eq!(
+            adr_key(Some("Adopt RS256: Token Signing")).as_deref(),
+            Some("Adopt RS256")
+        );
+    }
+
+    /// A colon inside the decision title is part of its identity, not the
+    /// aspect separator. Splitting at the first colon would merge distinct
+    /// decisions such as `Cache: Use Redis` and `Cache: Use Memcached`.
+    #[test]
+    fn test_adr_key_preserves_colons_in_the_decision_title() {
+        assert_eq!(
+            adr_key(Some("Cache: Use Redis: Reads")).as_deref(),
+            Some("Cache: Use Redis")
+        );
+        assert_eq!(
+            adr_key(Some("Cache: Use Memcached: Reads")).as_deref(),
+            Some("Cache: Use Memcached")
+        );
+    }
+
+    /// A title naming no decision, or none at all, yields no key — the
+    /// document stands alone rather than joining a pool of unrelated rules.
+    #[test]
+    fn test_adr_key_is_absent_without_a_named_decision() {
+        assert_eq!(adr_key(Some("Pin Terraform Providers")), None);
+        assert_eq!(adr_key(Some(":  aspect only")), None);
+        assert_eq!(adr_key(None), None);
+    }
+
+    /// Building an index derives the key once per document, so a query never
+    /// re-parses titles.
+    #[test]
+    fn test_build_derives_the_decision_key() {
+        let index = sample_index();
+        let keyed: Vec<(&str, Option<&str>)> = index
+            .documents
+            .iter()
+            .map(|d| (d.slug.as_str(), d.adr.as_deref()))
+            .collect();
+        assert_eq!(
+            keyed,
+            vec![
+                // `Pin Terraform Providers` names no decision: no colon.
+                ("cross-cutting-provider-pinning-c3d4", None),
+                ("cross-cutting-token-expiry-a1b2", Some("Adopt RS256")),
+                ("cross-cutting-token-signing-e410", Some("Adopt RS256")),
+            ]
+        );
+    }
+
+    /// Sibling documents of one decision collapse into a single group, ranked
+    /// at their best document's score, and the group keeps every one of them.
+    #[test]
+    fn test_search_adrs_groups_siblings_of_one_decision() {
+        let index = sample_index();
+        let groups = index.search_adrs(&Query::new("OAuth token signing"), 5);
+
+        assert_eq!(groups[0].title.as_deref(), Some("Adopt RS256"));
+        assert_eq!(groups[0].documents.len(), 2);
+        assert_eq!(groups[0].score, groups[0].documents[0].score);
+        assert!(groups[0].documents[0].score >= groups[0].documents[1].score);
+    }
+
+    /// The cap counts decisions, not documents: one decision's siblings can
+    /// fill any number of document slots without crowding out the next
+    /// decision, which is the whole point of grouping.
+    #[test]
+    fn test_search_adrs_limit_counts_decisions() {
+        let index = sample_index();
+        // A path both RS256 siblings glob, so one decision holds two documents.
+        let query = Query::new("").with_paths(["services/auth/oauth/token.ts".to_string()]);
+        let groups = index.search_adrs(&query, 1);
+
+        assert_eq!(groups.len(), 1);
+        // The one decision keeps both its siblings: the cap did not spend
+        // itself on documents.
+        assert_eq!(groups[0].documents.len(), 2);
+    }
+
+    /// A document whose title names no decision is its own group, keyed by
+    /// slug, rather than pooled with every other unnamed document.
+    #[test]
+    fn test_search_adrs_gives_an_unnamed_document_its_own_group() {
+        let index = index_of(vec![
+            doc(
+                "cross-cutting-standalone-a1b2",
+                "Pin Terraform Providers",
+                "These rules are ALWAYS ACTIVE for Terraform configuration in infra/terraform/.",
+                "find infra/terraform -name '*.tf'",
+            ),
+            doc(
+                "cross-cutting-other-c3d4",
+                "Lock Terraform State",
+                "These rules are ALWAYS ACTIVE for Terraform state in infra/terraform/.",
+                "find infra/terraform -name '*.tfstate'",
+            ),
+        ]);
+        // Matched on the path both documents glob: `terraform` is in every
+        // title here, so its IDF is zero and a word query would match nothing.
+        let query = Query::new("").with_paths(["infra/terraform/main.tf".to_string()]);
+        let groups = index.search_adrs(&query, 5);
+
+        assert_eq!(groups.len(), 2);
+        for group in &groups {
+            assert_eq!(group.title, None);
+            assert_eq!(group.documents.len(), 1);
+            assert_eq!(group.key, group.documents[0].slug);
+        }
+    }
+
+    /// Decisions appear where their best document ranked, while later
+    /// documents preserve their relative order inside that decision. Making
+    /// groups contiguous deliberately changes a flattened interleaved order.
+    #[test]
+    fn test_group_matches_preserves_group_and_within_group_rank_order() {
+        let hit = |slug: &str, adr: &str, score: f64| Match {
+            slug: slug.to_string(),
+            relative_path: format!(".actual/rules/{slug}.md"),
+            title: Some(format!("{adr}: aspect")),
+            adr: Some(adr.to_string()),
+            score,
+            contributions: Vec::new(),
+            matched_globs: Vec::new(),
+        };
+        let matches = vec![
+            hit("a-first", "Decision A", 3.0),
+            hit("b-first", "Decision B", 2.0),
+            hit("a-second", "Decision A", 1.0),
+        ];
+
+        let groups = group_matches(matches.clone(), 5);
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Decision A", "Decision B"]
+        );
+        assert_eq!(
+            groups[0]
+                .documents
+                .iter()
+                .map(|document| document.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-first", "a-second"]
+        );
+        assert_eq!(groups[0].score, 3.0);
+        assert_eq!(groups[1].documents[0].slug, "b-first");
+        assert_eq!(groups, group_matches(matches, 5));
+    }
+
+    /// Nothing matching means no groups, not an empty group.
+    #[test]
+    fn test_search_adrs_returns_nothing_when_no_document_matches() {
+        let index = sample_index();
+        assert!(index
+            .search_adrs(&Query::new("kubernetes ingress"), 5)
+            .is_empty());
+    }
+
     // ── tie-breaking ─────────────────────────────────────────────────────
 
     /// Helper: a document declaring exactly `globs` and no terms, so a
@@ -1193,6 +1466,7 @@ mod tests {
             slug: slug.to_string(),
             relative_path: format!(".actual/rules/{slug}.md"),
             title: None,
+            adr: None,
             scope: None,
             globs: globs.iter().map(|g| g.to_string()).collect(),
             field_terms: BTreeMap::new(),
@@ -1401,6 +1675,7 @@ mod tests {
             slug: "scoped".to_string(),
             relative_path: String::new(),
             title: None,
+            adr: None,
             score: 1.0,
             contributions: Vec::new(),
             matched_globs: vec![GlobMatch {

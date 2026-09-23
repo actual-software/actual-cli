@@ -152,7 +152,7 @@ this one.
 
 ```bash
 actual rules index [PATH] [--rebuild] [--clear] [--json]
-actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--explain] [--json]
+actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--by-adr] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]... [--rebuild] [--json]
 ```
 
@@ -165,3 +165,28 @@ filename scan would have chosen instead at the same `--limit` — so a wrong
 selection is diagnosable rather than mysterious. `--no-rank` holds
 `rules select` to this stage alone even when a plan is present; the stage-2
 flags are documented in [RULE_SELECTION.md](RULE_SELECTION.md).
+
+`--by-adr` changes the unit: it groups the result by the decision each
+document belongs to, ranks decisions at their best document's score, and
+counts `--limit` in decisions rather than documents. A generated rule set
+splits one decision across many near-identical documents that share their
+verify paths, so a document-level cap can spend itself on aspects of a single
+subject while the next relevant decision never appears. The decision name is
+the title prefix before the last colon, derived at index time so colons within
+the decision title remain part of its identity; a document
+whose title has no colon names no decision and forms its own group rather
+than pooling with other unnamed ones. Decisions appear where their best
+document ranked, and documents retain their relative rank within each
+decision. Making each group contiguous can change the flattened document
+order when decisions were interleaved. Grouping is stage 1 only, since what
+is being capped is decisions while the rank judges documents. Measured on the
+425-document reference corpus, over the edited files of 35 merged pull
+requests: the top two decisions reach 38% precision at 56% recall, against
+31%/30% for the top five documents.
+
+Because grouped selection is stage 1 only, `--runner`, `--model`, and
+`--candidates` conflict with `--by-adr` instead of being silently ignored.
+`--no-rank` remains valid and explicit. `--explain` shows each grouped
+document's signal attribution and path evidence, then compares it with the
+filename scan regrouped and capped in decisions so both sides use the same
+unit.
