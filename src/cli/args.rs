@@ -817,7 +817,11 @@ pub struct RulesSelectArgs {
 
     /// How many candidates the deterministic prefilter retrieves before stage 2
     /// judges them. Raised to `--limit` when smaller.
-    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    #[arg(
+        long,
+        default_value_t = crate::rules::scope::DEFAULT_CANDIDATES,
+        conflicts_with = "by_adr"
+    )]
     pub candidates: usize,
 
     /// Skip stage 2 and return the deterministic prefilter alone. Offline, and
@@ -826,11 +830,11 @@ pub struct RulesSelectArgs {
     pub no_rank: bool,
 
     /// Runner to use for stage 2. Probed automatically when omitted.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with = "by_adr")]
     pub runner: Option<RunnerChoice>,
 
     /// Model for stage 2, overriding the configured one.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "by_adr")]
     pub model: Option<String>,
 
     /// Show the signal behind every hit, and what the filename scan would have
@@ -2347,6 +2351,23 @@ mod parse_tests {
         let plain = rules_select_args_from(&["actual", "rules", "select", "a plan"])
             .expect("expected a rules select command");
         assert!(!plain.by_adr);
+    }
+
+    /// Grouped selection is stage 1 only, so accepting stage-2 tuning flags
+    /// would imply they shape an answer that never consults them.
+    #[test]
+    fn test_rules_select_by_adr_rejects_stage_two_tuning_flags() {
+        for (flag, value) in [
+            ("--candidates", "12"),
+            ("--runner", "anthropic-api"),
+            ("--model", "claude-sonnet-4-6"),
+        ] {
+            let error = Cli::try_parse_from([
+                "actual", "rules", "select", "a plan", "--by-adr", flag, value,
+            ])
+            .expect_err("stage-2 tuning must conflict with --by-adr");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     /// Covers the helper's two non-select fallback arms.

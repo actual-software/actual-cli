@@ -180,3 +180,10 @@ capped is decisions while the rank judges documents. Measured on the
 425-document reference corpus, over the edited files of 35 merged pull
 requests: the top two decisions reach 38% precision at 56% recall, against
 31%/30% for the top five documents.
+
+Because grouped selection is stage 1 only, `--runner`, `--model`, and
+`--candidates` conflict with `--by-adr` instead of being silently ignored.
+`--no-rank` remains valid and explicit. `--explain` shows each grouped
+document's signal attribution and path evidence, then compares it with the
+filename scan regrouped and capped in decisions so both sides use the same
+unit.
