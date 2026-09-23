@@ -175,9 +175,11 @@ subject while the next relevant decision never appears. The decision name is
 the title prefix before the last colon, derived at index time so colons within
 the decision title remain part of its identity; a document
 whose title has no colon names no decision and forms its own group rather
-than pooling with other unnamed ones. Grouping reorders nothing — it is the
-document ranking, partitioned — and it is stage 1 only, since what is being
-capped is decisions while the rank judges documents. Measured on the
+than pooling with other unnamed ones. Decisions appear where their best
+document ranked, and documents retain their relative rank within each
+decision. Making each group contiguous can change the flattened document
+order when decisions were interleaved. Grouping is stage 1 only, since what
+is being capped is decisions while the rank judges documents. Measured on the
 425-document reference corpus, over the edited files of 35 merged pull
 requests: the top two decisions reach 38% precision at 56% recall, against
 31%/30% for the top five documents.
