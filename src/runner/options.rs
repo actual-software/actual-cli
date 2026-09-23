@@ -49,6 +49,11 @@ pub struct InvocationOptions {
 /// See `sync_wiring.rs` for the API runner defaults.
 const DEFAULT_MODEL: &str = "sonnet";
 
+/// Inline settings layered onto every subprocess via `--settings`, turning
+/// off all hooks from the user's, project's, and plugins' own settings. See
+/// [`InvocationOptions::to_args`] for why.
+const DISABLE_HOOKS_SETTINGS: &str = r#"{"disableAllHooks":true}"#;
+
 impl InvocationOptions {
     /// Create options for ADR tailoring.
     ///
@@ -129,6 +134,18 @@ impl InvocationOptions {
         // Prevent the subprocess from initialising any MCP servers defined in
         // project / user settings — those can hang on connection if not running.
         args.push("--strict-mcp-config".to_string());
+        // Keep the subprocess from running the user's own hooks. Without this,
+        // a plugin's `Stop` hook (actual-skill's `impl-gate.sh`) fires when the
+        // subprocess finishes its one turn, runs `actual impl-check`, which
+        // spawns another subprocess, whose own `Stop` hook does the same — an
+        // unbounded chain. The caller sees it as the judge using its whole
+        // `CHECK_BUDGET` (measured: answer ready at ~30s, result withheld until
+        // the nested hook's own 150s timeout), and the timed-out chain's
+        // orphaned hooks keep spawning model calls after the caller has given
+        // up. These subprocesses are internal model calls; no user hook is
+        // meant for them.
+        args.push("--settings".to_string());
+        args.push(DISABLE_HOOKS_SETTINGS.to_string());
         args.push("--tools".to_string());
         args.push(self.tools.clone());
 
@@ -278,6 +295,28 @@ mod tests {
         assert_arg_value(&args, "--tools", "");
         // No tool is granted, so there is nothing to allow.
         assert!(!args.contains(&"--allowedTools".to_string()));
+    }
+
+    /// Every profile disables hooks. A subprocess that ran the user's `Stop`
+    /// hook would re-enter `actual impl-check` from inside its own judge call
+    /// and recurse; a profile added later is exactly the one nobody remembers
+    /// to check.
+    #[test]
+    fn test_every_profile_disables_hooks() {
+        let profiles = [
+            ("for_tailoring", InvocationOptions::for_tailoring(None)),
+            ("for_selection", InvocationOptions::for_selection(None)),
+        ];
+        for (name, opts) in &profiles {
+            let args = opts.to_args();
+            let settings = args
+                .iter()
+                .position(|a| a == "--settings")
+                .and_then(|i| args.get(i + 1))
+                .unwrap_or_else(|| panic!("{name} passes no --settings: {args:?}"));
+            let parsed: serde_json::Value = serde_json::from_str(settings).unwrap();
+            assert_eq!(parsed["disableAllHooks"], true, "{name}: {settings}");
+        }
     }
 
     #[test]
