@@ -154,7 +154,22 @@ this one.
 actual rules index [PATH] [--rebuild] [--clear] [--json]
 actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--min-score S] [--by-adr] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--ablate SIGNAL]... [--rebuild] [--json]
+actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--min-score S]
+actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--min-score S]
 ```
+
+`rules brief` is the hook's form of a selection: given the file an agent is
+about to touch, it names the decisions that govern it and their MUST rules.
+Under `--claude-hook` it reads a Claude Code envelope from stdin and answers
+with `hookSpecificOutput.additionalContext` naming the event it was sent —
+`PostToolUse` on `Read`, which reaches the model before its first edit, or
+`PreToolUse` on `Edit`/`Write`, the reminder for files that were never read.
+It never emits a `permissionDecision`: the output type has no such field, so
+the hook cannot grant or deny a tool call even by mistake. It is stage 1 only
+— no runner, no network — and every failure (an unreadable envelope, a path
+outside the repository, a missing rule set) is empty stdout and exit 0, so a
+broken brief never breaks an agent's edit loop. `--file` runs the same
+selection at a terminal and prints the brief as text.
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;

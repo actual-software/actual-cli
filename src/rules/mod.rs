@@ -18,6 +18,7 @@
 //!   use to interpolate the developer's plan into a prompt without letting an
 //!   imitated section header close the block early.
 
+pub mod brief;
 pub mod check;
 pub mod discover;
 pub mod parse;

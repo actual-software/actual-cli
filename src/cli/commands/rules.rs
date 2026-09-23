@@ -24,12 +24,13 @@ use crate::rules::{
 };
 
 pub fn exec(args: &RulesArgs) -> Result<(), ActualError> {
-    use crate::cli::commands::rules_scope;
+    use crate::cli::commands::{rules_brief, rules_scope};
     match &args.action {
         RulesAction::Ls(ls) => exec_ls(ls),
         RulesAction::Index(index) => rules_scope::exec_index(index),
         RulesAction::Select(select) => rules_scope::exec_select(select),
         RulesAction::Eval(eval) => rules_scope::exec_eval(eval),
+        RulesAction::Brief(brief) => rules_brief::exec(brief),
     }
 }
 
@@ -475,5 +476,30 @@ mod tests {
 
         let err = exec(&ls_args(root.path(), false)).unwrap_err();
         assert!(matches!(err, ActualError::IoError(_)));
+    }
+
+    #[cfg(test)]
+    mod brief_dispatch_tests {
+        use super::*;
+        use crate::cli::args::{RulesAction, RulesArgs, RulesBriefArgs};
+
+        /// `rules brief` is reachable through the subcommand dispatch, in the
+        /// direct mode a person would use at a terminal.
+        #[test]
+        fn test_exec_dispatches_brief() {
+            let root = tempfile::tempdir().unwrap();
+            let args = RulesArgs {
+                action: RulesAction::Brief(RulesBriefArgs {
+                    claude_hook: false,
+                    file: Some("src/main.rs".to_string()),
+                    repo: Some(root.path().to_path_buf()),
+                    rules_dir: None,
+                    limit: 2,
+                    rules_per_decision: 8,
+                    min_score: Some(0.0),
+                }),
+            };
+            assert!(exec(&args).is_ok());
+        }
     }
 }

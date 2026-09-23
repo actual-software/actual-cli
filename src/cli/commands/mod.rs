@@ -23,6 +23,7 @@ pub mod models;
 pub mod plan_check;
 mod plan_check_hook;
 pub mod rules;
+pub mod rules_brief;
 pub mod rules_rank;
 pub mod rules_scope;
 pub mod runners;
