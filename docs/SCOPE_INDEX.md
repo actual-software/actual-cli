@@ -152,8 +152,8 @@ this one.
 
 ```bash
 actual rules index [PATH] [--rebuild] [--clear] [--json]
-actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--by-adr] [--explain] [--json]
-actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]... [--rebuild] [--json]
+actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--min-score S] [--by-adr] [--explain] [--json]
+actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--ablate SIGNAL]... [--rebuild] [--json]
 ```
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
@@ -165,6 +165,40 @@ filename scan would have chosen instead at the same `--limit` — so a wrong
 selection is diagnosable rather than mysterious. `--no-rank` holds
 `rules select` to this stage alone even when a plan is present; the stage-2
 flags are documented in [RULE_SELECTION.md](RULE_SELECTION.md).
+
+`--min-score` is the floor a document must reach to be returned at all.
+Without one a selection returns its cap whenever anything scored above zero,
+so a file no rule governs still gets the least bad few — for a hook, that is a
+brief about rules that do not apply. The floor is what lets a selection answer
+"nothing". It rides on the query, so every path applies it: the command, the
+prefilter feeding stage 2, the grouped search and `rules eval`. It defaults to
+the `rules_min_score` config key, and the panel prints it whenever one is in
+force, so an empty answer is attributable to the floor rather than looking
+like an index that found nothing. JSON selections always include the effective
+`min_score`, including `0.0` when no floor is active, and evaluation output
+records the same value so its metrics are reproducible.
+
+Persist a corpus-specific floor with the validated config interface:
+
+```bash
+actual config set rules_min_score 1.5
+```
+
+Scores are sums of weighted 0..1 coverages, so a useful floor is
+corpus-dependent and belongs in config rather than in a constant. Measured on
+the 425-document reference corpus over the edited files of 35 merged pull
+requests, at cap 5 by document:
+
+| floor | precision | recall | files with no governing rule that still get a brief |
+|---|---|---|---|
+| none | 31% | 30% | 19 of 33 |
+| 1.5 | 40% | 30% | 13 of 33 |
+| 2.0 | 34% | 23% | 10 of 33 |
+| 2.5 | 45% | 12% | 2 of 33 |
+
+A floor of 1.5 buys the abstention for nothing: recall is unchanged. Past it,
+recall is what is being spent. Combined with `--by-adr` at two decisions, the
+same corpus gives 53% precision at 56% recall.
 
 `--by-adr` changes the unit: it groups the result by the decision each
 document belongs to, ranks decisions at their best document's score, and

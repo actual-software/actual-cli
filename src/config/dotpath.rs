@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::cli::commands::models::known_model_names;
-use crate::config::types::{Config, TelemetryConfig};
+use crate::config::types::{validate_rules_min_score, Config, TelemetryConfig};
 use crate::error::ActualError;
 use crate::generation::OutputFormat;
 
@@ -81,6 +81,7 @@ define_config_keys! {
     (OpenaiApiKey,          "openai_api_key"),
     (CursorApiKey,          "cursor_api_key"),
     (MaxTurns,              "max_turns"),
+    (RulesMinScore,         "rules_min_score"),
 }
 
 /// Get a config value by dotpath, returning its string representation.
@@ -164,6 +165,10 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::MaxTurns => config
             .max_turns
+            .map(|v| v.to_string())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::RulesMinScore => config
+            .rules_min_score
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
     }
@@ -342,6 +347,15 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<Option<String
             }
             config.max_turns = Some(v);
         }
+        ConfigKey::RulesMinScore => {
+            let v = value.parse::<f64>().map_err(|_| {
+                ActualError::ConfigError(format!(
+                    "invalid value for {path}: expected f64, got \"{value}\""
+                ))
+            })?;
+            config.rules_min_score =
+                Some(validate_rules_min_score(v).map_err(ActualError::ConfigError)?);
+        }
     }
     Ok(None)
 }
@@ -377,6 +391,14 @@ mod tests {
         let mut config = Config::default();
         set(&mut config, "max_budget_usd", "0.50").unwrap();
         assert_eq!(config.max_budget_usd, Some(0.50));
+    }
+
+    #[test]
+    fn test_set_and_get_rules_min_score() {
+        let mut config = Config::default();
+        set(&mut config, "rules_min_score", "1.5").unwrap();
+        assert_eq!(config.rules_min_score, Some(1.5));
+        assert_eq!(get(&config, "rules_min_score").unwrap(), "1.5");
     }
 
     #[test]
@@ -874,6 +896,23 @@ mod tests {
         assert_eq!(config.max_budget_usd, Some(0.01));
     }
 
+    #[test]
+    fn test_set_rules_min_score_rejects_negative_and_non_finite_values() {
+        for value in ["-1", "NaN", "inf", "-inf"] {
+            let mut config = Config::default();
+            let error = set(&mut config, "rules_min_score", value)
+                .expect_err("invalid score floor must be rejected");
+            assert!(error.to_string().contains("non-negative finite"), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_set_rules_min_score_accepts_zero() {
+        let mut config = Config::default();
+        set(&mut config, "rules_min_score", "0").unwrap();
+        assert_eq!(config.rules_min_score, Some(0.0));
+    }
+
     // --- Category empty string tests ---
 
     #[test]
@@ -985,6 +1024,7 @@ mod tests {
             ("openai_api_key", "sk-openai-test"),
             ("cursor_api_key", "cursor-test-key"),
             ("max_turns", "10"),
+            ("rules_min_score", "1.5"),
         ];
 
         // Sanity-check: valid_values must cover every variant in ConfigKey::ALL.

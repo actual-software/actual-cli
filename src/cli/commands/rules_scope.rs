@@ -150,8 +150,11 @@ fn render_index_json(resolved: &ResolvedIndex) -> String {
 
 pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
+    let min_score = min_score(args)?;
     let resolved = scope::resolve(&root, args.rebuild)?;
-    let query = Query::new(args.plan.join(" ")).with_paths(args.files.clone());
+    let query = Query::new(args.plan.join(" "))
+        .with_paths(args.files.clone())
+        .with_min_score(min_score);
 
     if args.by_adr {
         let groups = resolved.index.search_adrs(&query, args.limit);
@@ -202,6 +205,8 @@ struct JsonAdrSelection<'a> {
     indexed_documents: usize,
     /// Counted in decisions, not documents, under `--by-adr`.
     limit: usize,
+    /// The effective floor after flag/config/default resolution.
+    min_score: f64,
     decisions: &'a [AdrGroup],
     #[serde(skip_serializing_if = "Option::is_none")]
     explain: Option<JsonAdrExplain<'a>>,
@@ -233,6 +238,7 @@ fn render_adr_json(
         paths: query.all_paths(),
         indexed_documents: index.len(),
         limit,
+        min_score: query.min_score,
         decisions: groups,
         explain: explain.then(|| JsonAdrExplain {
             ubiquitous_terms: index.ubiquitous_terms(),
@@ -299,6 +305,9 @@ fn render_adr_panel(
         panel = panel.kv("Paths", &paths.join(", "));
     }
     panel = panel.kv("Indexed documents", &index.len().to_string());
+    if query.min_score > 0.0 {
+        panel = panel.kv("Minimum score", &format!("{:.2}", query.min_score));
+    }
 
     if groups.is_empty() {
         let subject = if query.text.trim().is_empty() {
@@ -369,6 +378,22 @@ fn render_adr_panel(
             groups.len()
         ))
         .render(width)
+}
+
+/// The score floor for this invocation: the flag, else the config key, else
+/// none.
+///
+/// An unreadable config is not a reason to refuse a selection — the same
+/// reasoning `run_selection` applies to stage 2 — so it degrades to no floor,
+/// which returns more rather than silently returning nothing. A configured
+/// floor that was read successfully must still be valid: `NaN` would silently
+/// reject every document because every comparison against it is false.
+fn min_score(args: &RulesSelectArgs) -> Result<f64, ActualError> {
+    let score = args
+        .min_score
+        .or_else(|| crate::config::paths::load().ok()?.rules_min_score)
+        .unwrap_or(0.0);
+    crate::config::types::validate_rules_min_score(score).map_err(ActualError::ConfigError)
 }
 
 /// A selection, and the runner that shaped it.
@@ -484,6 +509,9 @@ fn render_select_panel(
         panel = panel.kv("Paths", &paths.join(", "));
     }
     panel = panel.kv("Indexed documents", &index.len().to_string());
+    if query.min_score > 0.0 {
+        panel = panel.kv("Minimum score", &format!("{:.2}", query.min_score));
+    }
     let (headline, rest) = stage2_rows(&selection.stage2.summary(), width);
     panel = panel.kv("Stage 2", &headline);
     for line in rest {
@@ -645,6 +673,8 @@ fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> V
 struct JsonSelection<'a> {
     #[serde(flatten)]
     selection: &'a Selection,
+    /// The effective floor after flag/config/default resolution.
+    min_score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     runner: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -673,6 +703,7 @@ fn render_select_json(
 ) -> String {
     let payload = JsonSelection {
         selection: &run.selection,
+        min_score: query.min_score,
         runner: run.runner.as_deref(),
         explain: explain.then(|| JsonExplain {
             ubiquitous_terms: index.ubiquitous_terms(),
@@ -696,7 +727,13 @@ pub fn exec_eval(args: &RulesEvalArgs) -> Result<(), ActualError> {
     let cases = load_golden_set(&args.golden)?;
     let resolved = scope::resolve(&root, args.rebuild)?;
     let weights = ablated_weights(&args.ablate)?;
-    let mut comparison = run_evaluation(&resolved.index, &cases, args.limit, &weights);
+    let mut comparison = run_evaluation(
+        &resolved.index,
+        &cases,
+        args.limit,
+        args.min_score,
+        &weights,
+    );
     if args.rank {
         comparison.two_stage = Some(evaluate_two_stage(&resolved.index, &cases, args)?);
     }
@@ -756,6 +793,8 @@ pub(crate) fn load_golden_set(path: &Path) -> Result<Vec<GoldenCase>, ActualErro
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Comparison {
     pub(crate) limit: usize,
+    /// The floor used by the scope index and the optional two-stage selector.
+    pub(crate) min_score: f64,
     pub(crate) cases: usize,
     pub(crate) weights: Weights,
     pub(crate) scope_index: EvaluationReport,
@@ -784,13 +823,16 @@ pub(crate) fn run_evaluation(
     index: &ScopeIndex,
     cases: &[GoldenCase],
     limit: usize,
+    min_score: f64,
     weights: &Weights,
 ) -> Comparison {
     let mut index_cases = Vec::with_capacity(cases.len());
     let mut scan_cases = Vec::with_capacity(cases.len());
 
     for case in cases {
-        let query = Query::new(case.plan.clone()).with_paths(case.paths.clone());
+        let query = Query::new(case.plan.clone())
+            .with_paths(case.paths.clone())
+            .with_min_score(min_score);
         let selected: Vec<String> = index
             .search_weighted(&query, limit, weights)
             .into_iter()
@@ -817,6 +859,7 @@ pub(crate) fn run_evaluation(
 
     Comparison {
         limit,
+        min_score,
         cases: cases.len(),
         weights: *weights,
         scope_index: EvaluationReport::new("scope-index", index_cases),
@@ -850,7 +893,9 @@ fn evaluate_two_stage(
 
     let mut results = Vec::with_capacity(cases.len());
     for case in cases {
-        let query = Query::new(case.plan.clone()).with_paths(case.paths.clone());
+        let query = Query::new(case.plan.clone())
+            .with_paths(case.paths.clone())
+            .with_min_score(args.min_score);
         let prefiltered = select::prefilter(index, &query, args.limit, args.candidates);
         // The same call `rules select` makes, gate included. A measurement that
         // ranked cases the command would have left alone would be reporting a
@@ -883,6 +928,9 @@ fn render_eval_panel(comparison: &Comparison, width: usize) -> String {
     let mut panel = Panel::titled("Scope index evaluation");
     panel = panel.kv("Cases", &comparison.cases.to_string());
     panel = panel.kv("Documents per selection", &comparison.limit.to_string());
+    if comparison.min_score > 0.0 {
+        panel = panel.kv("Minimum score", &format!("{:.2}", comparison.min_score));
+    }
     let disabled: Vec<&str> = Field::ALL
         .iter()
         .filter(|field| comparison.weights.get(**field) == 0.0)
@@ -989,7 +1037,7 @@ mod tests {
             expected: vec!["cross-cutting-token-signing-e410".to_string()],
         }];
 
-        let comparison = run_evaluation(&index, &cases, 5, &Weights::default());
+        let comparison = run_evaluation(&index, &cases, 5, 0.0, &Weights::default());
         assert!(comparison.index_wins(), "{comparison:?}");
         let out = render_eval_panel(&comparison, 100);
         assert!(out.contains("Scope index beats the filename scan"), "{out}");
@@ -1531,7 +1579,9 @@ mod tests {
             ("cross-cutting-token-expiry-a1b2.md", OAUTH),
         ]);
         let index = resolved(root.path()).index;
-        let query = Query::new("").with_paths(vec!["services/auth/oauth/token.ts".to_string()]);
+        let query = Query::new("")
+            .with_paths(vec!["services/auth/oauth/token.ts".to_string()])
+            .with_min_score(1.5);
         let groups = index.search_adrs(&query, 2);
 
         let value: serde_json::Value =
@@ -1539,6 +1589,7 @@ mod tests {
 
         assert_eq!(value["indexed_documents"], 2);
         assert_eq!(value["limit"], 2);
+        assert_eq!(value["min_score"], 1.5);
         assert_eq!(value["decisions"][0]["title"], "Adopt RS256");
         assert_eq!(
             value["decisions"][0]["documents"].as_array().unwrap().len(),
@@ -1605,6 +1656,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&render_select_json(&index, &query, &run, true)).unwrap();
         assert_eq!(value["indexed_documents"], 2);
+        assert_eq!(value["min_score"], 0.0);
         assert_eq!(
             value["selected"][0]["slug"],
             "cross-cutting-token-signing-e410"
@@ -1843,7 +1895,13 @@ mod tests {
         };
         let comparison = {
             let cases = load_golden_set(&args.golden).unwrap();
-            let mut c = run_evaluation(&index, &cases, args.limit, &Weights::default());
+            let mut c = run_evaluation(
+                &index,
+                &cases,
+                args.limit,
+                args.min_score,
+                &Weights::default(),
+            );
             c.two_stage = Some(evaluate_two_stage(&index, &cases, &args).unwrap());
             c
         };
@@ -2015,6 +2073,106 @@ mod tests {
         }
     }
 
+    /// Precedence: the flag wins, the config key answers when the flag is
+    /// absent, and no floor is the default. The corpus decides what a useful
+    /// floor is, so it has to be settable without passing a flag every call.
+    #[test]
+    fn test_min_score_prefers_the_flag_then_the_config() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+
+        assert_eq!(min_score(&select_args(root.path(), 5)).unwrap(), 0.0);
+
+        let mut cfg = crate::config::paths::load().unwrap_or_default();
+        cfg.rules_min_score = Some(1.5);
+        crate::config::paths::save(&cfg).unwrap();
+
+        assert_eq!(min_score(&select_args(root.path(), 5)).unwrap(), 1.5);
+        assert_eq!(
+            min_score(&RulesSelectArgs {
+                min_score: Some(2.25),
+                ..select_args(root.path(), 5)
+            })
+            .unwrap(),
+            2.25
+        );
+    }
+
+    /// Config is user-edited YAML and bypasses clap's value parser. Reject an
+    /// invalid persisted floor rather than letting `NaN` silently empty every
+    /// selection.
+    #[test]
+    fn test_min_score_rejects_an_invalid_configured_value() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+
+        let mut cfg = crate::config::paths::load().unwrap_or_default();
+        cfg.rules_min_score = Some(f64::NAN);
+        crate::config::paths::save(&cfg).unwrap();
+
+        let error = min_score(&select_args(root.path(), 5)).unwrap_err();
+        assert!(error.to_string().contains("non-negative finite"), "{error}");
+    }
+
+    /// A floor in force is printed, so an empty selection is attributable to
+    /// it rather than looking like an index that found nothing.
+    #[test]
+    fn test_select_panel_reports_an_active_floor() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key").with_min_score(1.5);
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+        };
+
+        let out = render_select_panel(&index, &query, &run, false, 110);
+        assert!(out.contains("Minimum score"), "{out}");
+        assert!(out.contains("1.50"), "{out}");
+        let json: serde_json::Value =
+            serde_json::from_str(&render_select_json(&index, &query, &run, false)).unwrap();
+        assert_eq!(json["min_score"], 1.5);
+
+        // No floor, no row: the common case stays uncluttered.
+        let plain = Query::new("rotate the OAuth signing key");
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &plain, 5, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+        };
+        assert!(
+            !render_select_panel(&index, &plain, &run, false, 110).contains("Minimum score"),
+            "an inactive floor must not be advertised"
+        );
+    }
+
+    /// The grouped panel reports the floor the same way.
+    #[test]
+    fn test_adr_panel_reports_an_active_floor() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("")
+            .with_paths(vec!["services/auth/oauth/token.ts".to_string()])
+            .with_min_score(1.5);
+        let groups = index.search_adrs(&query, 2);
+
+        let out = render_adr_panel(&index, &query, &groups, 2, false, 110);
+        assert!(out.contains("Minimum score"), "{out}");
+    }
+
     /// `--by-adr` takes its own path out of `exec_select`, in both renderings.
     #[test]
     fn test_exec_select_renders_both_formats_by_adr() {
@@ -2041,6 +2199,7 @@ mod tests {
     /// about rendering never reaches for a runner.
     fn select_args(root: &Path, limit: usize) -> RulesSelectArgs {
         RulesSelectArgs {
+            min_score: None,
             by_adr: false,
             plan: vec![
                 "rotate".to_string(),
@@ -2063,6 +2222,7 @@ mod tests {
     /// Helper: `rules eval` arguments with the ranked column off.
     fn eval_args(root: &Path, golden: PathBuf) -> RulesEvalArgs {
         RulesEvalArgs {
+            min_score: 0.0,
             golden,
             repo: Some(root.to_path_buf()),
             limit: 5,
@@ -2103,10 +2263,12 @@ mod tests {
             &resolved(root.path()).index,
             &[oauth_case()],
             2,
+            0.0,
             &Weights::default(),
         );
         assert_eq!(comparison.cases, 1);
         assert_eq!(comparison.limit, 2);
+        assert_eq!(comparison.min_score, 0.0);
         assert_eq!(comparison.scope_index.cases.len(), 1);
         assert_eq!(comparison.filename_scan.cases.len(), 1);
         assert_eq!(comparison.scope_index.micro.true_positives, 1);
@@ -2127,6 +2289,7 @@ mod tests {
             &resolved(root.path()).index,
             &[oauth_case(), miss],
             2,
+            0.0,
             &Weights::default(),
         );
         let out = render_eval_panel(&comparison, 110);
@@ -2148,9 +2311,39 @@ mod tests {
         let weights = Weights::default()
             .without(Field::Scope)
             .without(Field::Title);
-        let comparison = run_evaluation(&resolved(root.path()).index, &[oauth_case()], 2, &weights);
+        let comparison = run_evaluation(
+            &resolved(root.path()).index,
+            &[oauth_case()],
+            2,
+            0.0,
+            &weights,
+        );
         let out = render_eval_panel(&comparison, 110);
         assert!(out.contains("Signals switched off: scope, title"));
+    }
+
+    /// Evaluation output records the floor that shaped its metrics, in both
+    /// human and machine-readable forms.
+    #[test]
+    fn test_eval_output_reports_an_active_floor() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let comparison = run_evaluation(
+            &resolved(root.path()).index,
+            &[oauth_case()],
+            2,
+            1.5,
+            &Weights::default(),
+        );
+
+        let panel = render_eval_panel(&comparison, 110);
+        assert!(panel.contains("Minimum score: 1.50"), "{panel}");
+        let json: serde_json::Value =
+            serde_json::from_str(&to_json(&comparison)).expect("comparison JSON");
+        assert_eq!(json["min_score"], 1.5);
     }
 
     #[test]
