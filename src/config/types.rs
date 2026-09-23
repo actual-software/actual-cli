@@ -181,6 +181,21 @@ pub struct Config {
     pub rules_min_score: Option<f64>,
 }
 
+/// Validate the score floor shared by CLI flags, config mutation and config
+/// consumption.
+///
+/// Zero disables the floor. Negative and non-finite values are invalid; in
+/// particular, comparing any document score with `NaN` would silently reject
+/// every document.
+pub(crate) fn validate_rules_min_score(value: f64) -> Result<f64, String> {
+    if value < 0.0 || !value.is_finite() {
+        return Err(format!(
+            "rules_min_score must be a non-negative finite number, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {

@@ -390,12 +390,7 @@ fn min_score(args: &RulesSelectArgs) -> Result<f64, ActualError> {
         .min_score
         .or_else(|| crate::config::paths::load().ok()?.rules_min_score)
         .unwrap_or(0.0);
-    if score < 0.0 || !score.is_finite() {
-        return Err(ActualError::ConfigError(format!(
-            "rules_min_score must be a non-negative finite number, got {score}"
-        )));
-    }
-    Ok(score)
+    crate::config::types::validate_rules_min_score(score).map_err(ActualError::ConfigError)
 }
 
 /// A selection, and the runner that shaped it.

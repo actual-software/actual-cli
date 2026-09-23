@@ -282,12 +282,7 @@ fn parse_min_score(s: &str) -> Result<f64, String> {
     let val: f64 = s
         .parse()
         .map_err(|_| format!("'{s}' is not a valid number"))?;
-    if val < 0.0 || !val.is_finite() {
-        return Err(format!(
-            "minimum score must be a non-negative finite number, got {val}"
-        ));
-    }
-    Ok(val)
+    crate::config::types::validate_rules_min_score(val)
 }
 
 /// Parse and validate `--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS`, rejecting
