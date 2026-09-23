@@ -428,6 +428,7 @@ mod tests {
 
         let select = RulesArgs {
             action: RulesAction::Select(RulesSelectArgs {
+                min_score: None,
                 by_adr: false,
                 plan: vec!["a".to_string(), "rule".to_string()],
                 repo: Some(root.path().to_path_buf()),
@@ -450,6 +451,7 @@ mod tests {
         std::fs::write(&golden, "[]").unwrap();
         let eval = RulesArgs {
             action: RulesAction::Eval(RulesEvalArgs {
+                min_score: 0.0,
                 golden,
                 repo: Some(root.path().to_path_buf()),
                 limit: 5,
