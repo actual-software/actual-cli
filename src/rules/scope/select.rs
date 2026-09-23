@@ -947,6 +947,7 @@ mod tests {
     fn test_reason_names_the_matched_glob_and_the_terms() {
         let hit = Match {
             slug: "slug".to_string(),
+            adr: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -984,6 +985,7 @@ mod tests {
         };
         let hit = Match {
             slug: "slug".to_string(),
+            adr: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -1000,6 +1002,7 @@ mod tests {
     fn test_reason_says_contains_for_a_partial_path_agreement() {
         let hit = Match {
             slug: "slug".to_string(),
+            adr: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -1018,6 +1021,7 @@ mod tests {
     fn test_reason_caps_the_terms_it_names() {
         let hit = Match {
             slug: "slug".to_string(),
+            adr: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -1039,6 +1043,7 @@ mod tests {
     fn test_reason_for_a_hit_with_no_attributable_signal() {
         let hit = Match {
             slug: "slug".to_string(),
+            adr: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
