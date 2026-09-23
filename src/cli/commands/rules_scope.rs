@@ -1122,8 +1122,13 @@ mod tests {
         ]);
         let index = resolved(root.path()).index;
         let paths = vec!["services/auth/oauth/token.ts".to_string()];
+        // Naming the backend keeps the plan case below hermetic: left to probe,
+        // it would find a machine-local claude install and spend a real rank
+        // call proving a point about which branch was taken.
+        let _no_key = EnvGuard::remove("ANTHROPIC_API_KEY");
         let args = RulesSelectArgs {
             no_rank: false,
+            runner: Some(crate::cli::args::RunnerChoice::AnthropicApi),
             ..select_args(root.path(), 1)
         };
 
