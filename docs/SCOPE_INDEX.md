@@ -176,6 +176,12 @@ the `rules_min_score` config key, and the panel prints it whenever one is in
 force, so an empty answer is attributable to the floor rather than looking
 like an index that found nothing.
 
+Persist a corpus-specific floor with the validated config interface:
+
+```bash
+actual config set rules_min_score 1.5
+```
+
 Scores are sums of weighted 0..1 coverages, so a useful floor is
 corpus-dependent and belongs in config rather than in a constant. Measured on
 the 425-document reference corpus over the edited files of 35 merged pull
