@@ -172,7 +172,8 @@ counts `--limit` in decisions rather than documents. A generated rule set
 splits one decision across many near-identical documents that share their
 verify paths, so a document-level cap can spend itself on aspects of a single
 subject while the next relevant decision never appears. The decision name is
-the title prefix before the first colon, derived at index time; a document
+the title prefix before the last colon, derived at index time so colons within
+the decision title remain part of its identity; a document
 whose title has no colon names no decision and forms its own group rather
 than pooling with other unnamed ones. Grouping reorders nothing — it is the
 document ranking, partitioned — and it is stage 1 only, since what is being
