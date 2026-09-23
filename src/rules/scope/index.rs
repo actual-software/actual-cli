@@ -49,7 +49,7 @@ use crate::rules::{RuleDocument, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 4;
+pub const INDEX_FORMAT_VERSION: u32 = 5;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -789,16 +789,15 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
     }
 }
 
-/// The decision a document's title names, which is everything before the first
+/// The decision a document's title names, which is everything before the last
 /// colon.
 ///
-/// Split on the *first* colon rather than the last: an aspect suffix is the
-/// last segment, so anything earlier belongs to the decision's own name. A
-/// title with no colon names no decision — the document stands alone, and
-/// [`ScopeIndex::search_adrs`] groups it under its own slug rather than
-/// inventing a shared key that would pool unrelated documents.
+/// The aspect suffix is the last segment, so an earlier colon can remain part
+/// of the decision's own name. A title with no colon names no decision — the
+/// document stands alone. [`ScopeIndex::search_adrs`] groups it under its own
+/// slug rather than inventing a shared key that would pool unrelated documents.
 fn adr_key(title: Option<&str>) -> Option<String> {
-    let (decision, _) = title?.split_once(':')?;
+    let (decision, _) = title?.rsplit_once(':')?;
     let decision = decision.trim();
     (!decision.is_empty()).then(|| decision.to_string())
 }
@@ -1281,13 +1280,28 @@ mod tests {
 
     // ── decisions ────────────────────────────────────────────────────────
 
-    /// A title's decision name is everything before the first colon; the
+    /// A title's decision name is everything before the last colon; the
     /// aspect suffix after it is what distinguishes siblings.
     #[test]
     fn test_adr_key_is_the_title_prefix() {
         assert_eq!(
             adr_key(Some("Adopt RS256: Token Signing")).as_deref(),
             Some("Adopt RS256")
+        );
+    }
+
+    /// A colon inside the decision title is part of its identity, not the
+    /// aspect separator. Splitting at the first colon would merge distinct
+    /// decisions such as `Cache: Use Redis` and `Cache: Use Memcached`.
+    #[test]
+    fn test_adr_key_preserves_colons_in_the_decision_title() {
+        assert_eq!(
+            adr_key(Some("Cache: Use Redis: Reads")).as_deref(),
+            Some("Cache: Use Redis")
+        );
+        assert_eq!(
+            adr_key(Some("Cache: Use Memcached: Reads")).as_deref(),
+            Some("Cache: Use Memcached")
         );
     }
 
