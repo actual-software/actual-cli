@@ -825,6 +825,14 @@ pub struct RulesSelectArgs {
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
 
+    /// Score a document must reach to be returned at all.
+    ///
+    /// Selection otherwise returns its cap whenever anything scored above
+    /// zero, so a file no rule governs still gets the least bad few. Defaults
+    /// to the `rules_min_score` config key, or to no floor.
+    #[arg(long, value_name = "SCORE")]
+    pub min_score: Option<f64>,
+
     /// Group the result by the decision each document belongs to, and count
     /// `--limit` in decisions rather than documents.
     ///
@@ -881,6 +889,13 @@ pub struct RulesEvalArgs {
     /// Repository root holding the rule set the golden set refers to.
     #[arg(long, value_name = "PATH")]
     pub repo: Option<std::path::PathBuf>,
+
+    /// Score a document must reach to be selected, as `rules select --min-score`.
+    ///
+    /// Here it is a measurement knob: the floor trades recall for abstention
+    /// on cases nothing governs, and this is where that trade is priced.
+    #[arg(long, value_name = "SCORE", default_value_t = 0.0)]
+    pub min_score: f64,
 
     /// Number of documents each selector may return.
     #[arg(long, default_value_t = 5)]
@@ -2388,6 +2403,27 @@ mod parse_tests {
             .expect_err("stage-2 tuning must conflict with --by-adr");
             assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
         }
+    }
+
+    /// `--min-score` parses as a float and is absent by default, so the
+    /// config key decides when the flag is not given.
+    #[test]
+    fn test_rules_select_parses_min_score() {
+        let args = rules_select_args_from(&[
+            "actual",
+            "rules",
+            "select",
+            "--file",
+            "src/lib.rs",
+            "--min-score",
+            "1.5",
+        ])
+        .expect("expected a rules select command");
+        assert_eq!(args.min_score, Some(1.5));
+
+        let plain = rules_select_args_from(&["actual", "rules", "select", "a plan"])
+            .expect("expected a rules select command");
+        assert_eq!(plain.min_score, None);
     }
 
     /// Covers the helper's two non-select fallback arms.

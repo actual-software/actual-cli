@@ -168,6 +168,17 @@ pub struct Config {
     /// with many ADRs. Only applies to the `anthropic-api` runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+
+    /// Score a rule document must reach before `rules select` will return it.
+    ///
+    /// Selection returns its cap whenever anything scored above zero, which on
+    /// a file no rule really governs means returning the least bad few. This
+    /// floor is what lets a selection answer "nothing". It is corpus-dependent
+    /// — scores are sums of weighted 0..1 coverages, so a rule set with deeper
+    /// verify paths scores higher throughout — hence configurable rather than
+    /// a constant. `--min-score` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_min_score: Option<f64>,
 }
 
 impl Default for Config {
@@ -195,6 +206,7 @@ impl Default for Config {
             cursor_api_key: None,
             max_turns: None,
             max_tokens: None,
+            rules_min_score: None,
         }
     }
 }
@@ -365,6 +377,7 @@ mod tests {
             cursor_api_key: None,
             max_turns: Some(10),
             max_tokens: Some(32768),
+            rules_min_score: Some(1.5),
         };
 
         let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
