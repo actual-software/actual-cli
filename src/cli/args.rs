@@ -2316,6 +2316,13 @@ mod parse_tests {
         }
     }
 
+    /// Covers the helper's two non-select fallback arms.
+    #[test]
+    fn test_rules_select_args_from_other_commands_is_none() {
+        assert!(rules_select_args_from(&["actual", "rules", "ls"]).is_none());
+        assert!(rules_select_args_from(&["actual", "status"]).is_none());
+    }
+
     /// The hook case: a path and no plan. This is the call `rules select`
     /// refused before, which left `""` as the only way to ask it.
     #[test]
