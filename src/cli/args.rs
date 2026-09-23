@@ -316,6 +316,18 @@ fn parse_rule_key(s: &str) -> Result<String, String> {
     }
 }
 
+/// A plan or path that only occupies an argv slot still names no selection
+/// subject. Keep the original text for matching, but reject values whose
+/// trimmed form is empty so `rules select ""` cannot bypass its plan-or-file
+/// requirement.
+fn parse_non_empty_selection_value(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("value must not be empty or whitespace".to_string())
+    } else {
+        Ok(s.to_string())
+    }
+}
+
 /// Parse and validate a model name, rejecting flag-like values and shell metacharacters.
 ///
 /// Allowed: alphanumeric start, then alphanumeric, dots, underscores, slashes, or hyphens.
@@ -786,7 +798,11 @@ pub struct RulesSelectArgs {
     /// file an agent is about to touch has a path and no plan, and passing
     /// `""` to satisfy a required argument is not an interface. One of the two
     /// is still required, because a query with neither names nothing to match.
-    #[arg(value_name = "PLAN", required_unless_present = "files")]
+    #[arg(
+        value_name = "PLAN",
+        required_unless_present = "files",
+        value_parser = parse_non_empty_selection_value
+    )]
     pub plan: Vec<String>,
 
     /// Repository root to scan. Defaults to the current directory.
@@ -798,7 +814,11 @@ pub struct RulesSelectArgs {
     /// With a plan, these are the paths the plan touches. Without a plan they
     /// are the query itself: a hook selecting for the file an agent is about
     /// to touch has a path and no plan.
-    #[arg(long = "file", value_name = "PATH")]
+    #[arg(
+        long = "file",
+        value_name = "PATH",
+        value_parser = parse_non_empty_selection_value
+    )]
     pub files: Vec<String>,
 
     /// Maximum number of rule documents to return.
@@ -2419,6 +2439,27 @@ mod parse_tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
         assert!(error.to_string().contains("PLAN"), "{error}");
+    }
+
+    /// An argv value that is empty after trimming does not name a plan or a
+    /// path, so it cannot satisfy the command's subject requirement.
+    #[test]
+    fn test_rules_select_rejects_empty_plan_and_file_values() {
+        for argv in [
+            vec!["actual", "rules", "select", ""],
+            vec!["actual", "rules", "select", "   "],
+            vec!["actual", "rules", "select", "--file", ""],
+            vec!["actual", "rules", "select", "--file", " \t "],
+        ] {
+            let error = Cli::try_parse_from(argv).expect_err("expected an invalid value");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(
+                error
+                    .to_string()
+                    .contains("must not be empty or whitespace"),
+                "{error}"
+            );
+        }
     }
 
     /// `--help` is the interface a hook author reads. The path-only case has
