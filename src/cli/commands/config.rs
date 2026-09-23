@@ -147,6 +147,23 @@ mod tests {
     }
 
     #[test]
+    fn test_set_rules_min_score_persists() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        let args = ConfigArgs {
+            action: ConfigAction::Set(ConfigSetArgs {
+                key: "rules_min_score".to_string(),
+                value: "1.5".to_string(),
+            }),
+        };
+
+        run_with_path(&args, &config_file).unwrap();
+
+        let config = config::paths::load_from(&config_file).unwrap();
+        assert_eq!(config.rules_min_score, Some(1.5));
+    }
+
+    #[test]
     fn test_exec_error_show() {
         with_invalid_config(|| {
             let args = ConfigArgs {
