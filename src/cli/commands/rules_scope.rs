@@ -219,6 +219,8 @@ struct JsonAdrSelection<'a> {
     indexed_documents: usize,
     /// Counted in decisions, not documents, under `--by-adr`.
     limit: usize,
+    /// The effective floor after flag/config/default resolution.
+    min_score: f64,
     decisions: &'a [AdrGroup],
     #[serde(skip_serializing_if = "Option::is_none")]
     explain: Option<JsonAdrExplain<'a>>,
@@ -250,6 +252,7 @@ fn render_adr_json(
         paths: query.all_paths(),
         indexed_documents: index.len(),
         limit,
+        min_score: query.min_score,
         decisions: groups,
         explain: explain.then(|| JsonAdrExplain {
             ubiquitous_terms: index.ubiquitous_terms(),
@@ -836,6 +839,8 @@ fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> V
 struct JsonSelection<'a> {
     #[serde(flatten)]
     selection: &'a Selection,
+    /// The effective floor after flag/config/default resolution.
+    min_score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     runner: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -864,6 +869,7 @@ fn render_select_json(
 ) -> String {
     let payload = JsonSelection {
         selection: &run.selection,
+        min_score: query.min_score,
         runner: run.runner.as_deref(),
         explain: explain.then(|| JsonExplain {
             ubiquitous_terms: index.ubiquitous_terms(),
@@ -953,6 +959,8 @@ pub(crate) fn load_golden_set(path: &Path) -> Result<Vec<GoldenCase>, ActualErro
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Comparison {
     pub(crate) limit: usize,
+    /// The floor used by the scope index and the optional two-stage selector.
+    pub(crate) min_score: f64,
     pub(crate) cases: usize,
     pub(crate) weights: Weights,
     pub(crate) scope_index: EvaluationReport,
@@ -1017,6 +1025,7 @@ pub(crate) fn run_evaluation(
 
     Comparison {
         limit,
+        min_score,
         cases: cases.len(),
         weights: *weights,
         scope_index: EvaluationReport::new("scope-index", index_cases),
@@ -1085,6 +1094,9 @@ fn render_eval_panel(comparison: &Comparison, width: usize) -> String {
     let mut panel = Panel::titled("Scope index evaluation");
     panel = panel.kv("Cases", &comparison.cases.to_string());
     panel = panel.kv("Documents per selection", &comparison.limit.to_string());
+    if comparison.min_score > 0.0 {
+        panel = panel.kv("Minimum score", &format!("{:.2}", comparison.min_score));
+    }
     let disabled: Vec<&str> = Field::ALL
         .iter()
         .filter(|field| comparison.weights.get(**field) == 0.0)
@@ -1912,7 +1924,9 @@ mod tests {
             ("cross-cutting-token-expiry-a1b2.md", OAUTH),
         ]);
         let index = resolved(root.path()).index;
-        let query = Query::new("").with_paths(vec!["services/auth/oauth/token.ts".to_string()]);
+        let query = Query::new("")
+            .with_paths(vec!["services/auth/oauth/token.ts".to_string()])
+            .with_min_score(1.5);
         let groups = index.search_adrs(&query, 2);
 
         let value: serde_json::Value =
@@ -1920,6 +1934,7 @@ mod tests {
 
         assert_eq!(value["indexed_documents"], 2);
         assert_eq!(value["limit"], 2);
+        assert_eq!(value["min_score"], 1.5);
         assert_eq!(value["decisions"][0]["title"], "Adopt RS256");
         assert_eq!(
             value["decisions"][0]["documents"].as_array().unwrap().len(),
@@ -1986,6 +2001,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&render_select_json(&index, &query, &run, true)).unwrap();
         assert_eq!(value["indexed_documents"], 2);
+        assert_eq!(value["min_score"], 0.0);
         assert_eq!(
             value["selected"][0]["slug"],
             "cross-cutting-token-signing-e410"
@@ -2636,6 +2652,9 @@ mod tests {
         let out = render_select_panel(&index, &query, &run, false, 110);
         assert!(out.contains("Minimum score"), "{out}");
         assert!(out.contains("1.50"), "{out}");
+        let json: serde_json::Value =
+            serde_json::from_str(&render_select_json(&index, &query, &run, false)).unwrap();
+        assert_eq!(json["min_score"], 1.5);
 
         // No floor, no row: the common case stays uncluttered.
         let plain = Query::new("rotate the OAuth signing key");
@@ -2764,6 +2783,7 @@ mod tests {
         );
         assert_eq!(comparison.cases, 1);
         assert_eq!(comparison.limit, 2);
+        assert_eq!(comparison.min_score, 0.0);
         assert_eq!(comparison.scope_index.cases.len(), 1);
         assert_eq!(comparison.filename_scan.cases.len(), 1);
         assert_eq!(comparison.scope_index.micro.true_positives, 1);
@@ -2815,6 +2835,30 @@ mod tests {
         );
         let out = render_eval_panel(&comparison, 110);
         assert!(out.contains("Signals switched off: scope, title"));
+    }
+
+    /// Evaluation output records the floor that shaped its metrics, in both
+    /// human and machine-readable forms.
+    #[test]
+    fn test_eval_output_reports_an_active_floor() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let comparison = run_evaluation(
+            &resolved(root.path()).index,
+            &[oauth_case()],
+            2,
+            1.5,
+            &Weights::default(),
+        );
+
+        let panel = render_eval_panel(&comparison, 110);
+        assert!(panel.contains("Minimum score: 1.50"), "{panel}");
+        let json: serde_json::Value =
+            serde_json::from_str(&to_json(&comparison)).expect("comparison JSON");
+        assert_eq!(json["min_score"], 1.5);
     }
 
     #[test]

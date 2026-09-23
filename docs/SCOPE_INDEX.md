@@ -174,7 +174,9 @@ brief about rules that do not apply. The floor is what lets a selection answer
 prefilter feeding stage 2, the grouped search and `rules eval`. It defaults to
 the `rules_min_score` config key, and the panel prints it whenever one is in
 force, so an empty answer is attributable to the floor rather than looking
-like an index that found nothing.
+like an index that found nothing. JSON selections always include the effective
+`min_score`, including `0.0` when no floor is active, and evaluation output
+records the same value so its metrics are reproducible.
 
 Persist a corpus-specific floor with the validated config interface:
 
