@@ -52,3 +52,7 @@ benches/*_results*.json
 # Session recordings
 *.cast
 
+# Gas City
+.beads/*
+!.beads/config.yaml
+!.beads/metadata.json
