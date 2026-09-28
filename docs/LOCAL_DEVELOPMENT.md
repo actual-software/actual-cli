@@ -104,7 +104,7 @@ exclusions CI uses:
 cargo install cargo-llvm-cov   # one-time install
 
 cargo llvm-cov --workspace \
-  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
   --lcov --output-path lcov.info
 ```
 
@@ -112,7 +112,7 @@ For an HTML report you can open in a browser:
 
 ```bash
 cargo llvm-cov --workspace \
-  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
   --html --open
 ```
 
