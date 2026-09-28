@@ -15,6 +15,7 @@ use crate::api::types::{
 };
 use crate::config::types::Config;
 use crate::rules::check::Verdict;
+use crate::telemetry::identity::IdentityEnvelope;
 use crate::telemetry::opt_out;
 use crate::telemetry::reporter::SERVICE_KEY;
 
@@ -109,6 +110,9 @@ pub struct EventContext {
     pub command: String,
     pub repo_hash: Option<String>,
     pub repo_url_hash: Option<String>,
+    /// Identity + timestamp envelope (hashed user/org/repo ids, or a synthetic
+    /// fallback org id when anonymous). Never carries raw identifiers.
+    pub identity: IdentityEnvelope,
 }
 
 impl EventContext {
@@ -119,6 +123,10 @@ impl EventContext {
             command: command.into(),
             repo_hash: None,
             repo_url_hash: None,
+            identity: IdentityEnvelope {
+                datetime_utc: IdentityEnvelope::now_utc(),
+                ..Default::default()
+            },
         }
     }
 
@@ -128,12 +136,23 @@ impl EventContext {
         self
     }
 
+    /// Attach the hashed identity envelope (user/org/repo hashes or fallback org).
+    pub fn with_identity(mut self, identity: IdentityEnvelope) -> Self {
+        self.identity = identity;
+        self
+    }
+
     fn base_properties(&self) -> PlanGovernanceEventProperties {
         PlanGovernanceEventProperties {
             cli_version: Some(self.cli_version.clone()),
             command: Some(self.command.clone()),
             repo_hash: self.repo_hash.clone(),
             repo_url_hash: self.repo_url_hash.clone(),
+            user_id_hash: self.identity.user_id_hash.clone(),
+            org_id_hash: self.identity.org_id_hash.clone(),
+            repo_id_hash: self.identity.repo_id_hash.clone(),
+            org_id: self.identity.org_id.clone(),
+            datetime_utc: Some(self.identity.datetime_utc.clone()),
             ..Default::default()
         }
     }
@@ -360,6 +379,13 @@ mod tests {
             command: "plan-check".to_string(),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            identity: IdentityEnvelope {
+                user_id_hash: Some("c".repeat(64)),
+                org_id_hash: Some("d".repeat(64)),
+                repo_id_hash: Some("e".repeat(64)),
+                org_id: None,
+                datetime_utc: "2026-09-28T00:00:00+00:00".to_string(),
+            },
         }
     }
 
@@ -425,6 +451,25 @@ mod tests {
         assert_eq!(props.command.as_deref(), Some("plan-check"));
         assert_eq!(props.repo_hash.as_deref(), Some("a".repeat(64).as_str()));
         assert!(props.decision.is_none());
+    }
+
+    #[test]
+    fn test_events_carry_identity_envelope_and_no_raw_ids() {
+        let ctx = context();
+        for event in [
+            ctx.started_event(),
+            ctx.completed_event(PlanGovernanceDecision::Allow, 1.0, 0),
+            ctx.violation_event("R-A-001", "src", PlanGovernanceDecision::Warn),
+        ] {
+            let props = event.properties.unwrap();
+            assert_eq!(props.user_id_hash.as_deref(), Some("c".repeat(64).as_str()));
+            assert_eq!(props.org_id_hash.as_deref(), Some("d".repeat(64).as_str()));
+            assert_eq!(props.repo_id_hash.as_deref(), Some("e".repeat(64).as_str()));
+            assert_eq!(
+                props.datetime_utc.as_deref(),
+                Some("2026-09-28T00:00:00+00:00")
+            );
+        }
     }
 
     #[test]

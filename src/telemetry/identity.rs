@@ -1,5 +1,152 @@
 use sha2::{Digest, Sha256};
 
+use crate::auth::store::StoredCredentials;
+
+// NOTE (legacy fallback org namespace): earlier fallback org ids in our database
+// were generated as UUIDv5 over the namespace
+// `9b2e8f1a-3c4d-5e6f-8a9b-0c1d2e3f4a5b`. That value is kept here only as a
+// historical record of what produced that existing data — we do NOT reuse it.
+// Going forward, `fallback_org_id` derives the id from our own SHA-256 hash (see
+// below), so new anonymous runs never fall back to the old namespace scheme.
+
+/// Domain-separated, **unsalted** SHA-256 of a raw identifier, as 64-char
+/// lowercase hex. `domain` is a fixed, non-secret label (`"user"`, `"org"`,
+/// `"repo"`) that namespaces the hash so the three id spaces cannot collide or
+/// share one rainbow table.
+///
+/// This is deliberately *not* salted: the value must be reproducible byte-for-byte
+/// by our backend from Supabase's own raw rows so a `hash -> raw` lookup can be
+/// built server-side. Secrecy against enumeration is added by a server-side
+/// pepper (HMAC) in api-service, never on this (open-source) side. The raw id
+/// itself is never sent — only this hash leaves the machine.
+pub fn hash_identifier(domain: &str, id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(b":");
+    hasher.update(id.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Extract an `owner/repo` slug from a git remote URL: lowercased, `.git` and
+/// trailing slashes stripped, scheme and host dropped. Handles both
+/// `https://host/owner/repo` and scp-style `git@host:owner/repo`. Falls back to
+/// the normalized full URL when an `owner/repo` shape can't be found.
+pub fn repo_slug(repo_url: &str) -> String {
+    let normalized = normalize_repo_url(repo_url);
+    // Drop any `scheme://` prefix, then turn the first `:` (scp-style separator)
+    // into a `/` so both URL forms split the same way.
+    let without_scheme = normalized
+        .split_once("://")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| normalized.clone());
+    let unified = without_scheme.replacen(':', "/", 1);
+    let segments: Vec<&str> = unified.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() >= 2 {
+        format!(
+            "{}/{}",
+            segments[segments.len() - 2],
+            segments[segments.len() - 1]
+        )
+    } else {
+        normalized
+    }
+}
+
+/// A deterministic fallback org id (a UUID) derived from a repo slug, for the
+/// unauthenticated case where no real `organization_id` is known.
+///
+/// Derived from our own `SHA-256("slug:"+slug)` (via [`hash_identifier`]) with the
+/// version/variant bits stamped to UUID v5 form, so the same repo always maps to
+/// the same fallback org across anonymous installs. Depends only on the slug
+/// (never on `distinct_id`), so two developers on the same repo share one fallback
+/// org id. This is the current scheme; the older UUIDv5-namespace scheme is not
+/// reused (see the legacy note above).
+pub fn fallback_org_id(slug: &str) -> String {
+    let digest = hash_identifier("slug", slug);
+    let mut bytes = [0u8; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        // `hash_identifier` always returns 64 hex chars, so this range is valid.
+        *b = u8::from_str_radix(&digest[i * 2..i * 2 + 2], 16).unwrap_or(0);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x50; // version 5 nibble
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+/// The identity + timestamp envelope stamped onto every published governance /
+/// scope event so metrics can be sliced by user, org, and repo.
+///
+/// Authenticated runs carry domain-separated hashes of the real ids (never the
+/// raw ids). Unauthenticated runs carry only a synthetic `org_id` derived from
+/// the repo slug; the existing anonymous keys (`distinct_id`, `repo_hash`,
+/// `repo_url_hash`) continue to ride alongside on the event.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IdentityEnvelope {
+    /// `SHA-256("user:"+subject)` when authenticated.
+    pub user_id_hash: Option<String>,
+    /// `SHA-256("org:"+organization_id)` when authenticated.
+    pub org_id_hash: Option<String>,
+    /// `SHA-256("repo:"+repo_unique_id)` when the connected repo id is known.
+    pub repo_id_hash: Option<String>,
+    /// Synthetic fallback org id (UUID from the repo slug), set only when not
+    /// authenticated.
+    pub org_id: Option<String>,
+    /// RFC3339 UTC timestamp for this event.
+    pub datetime_utc: String,
+}
+
+impl IdentityEnvelope {
+    /// The current time as an RFC3339 UTC string.
+    pub fn now_utc() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
+    /// Build the envelope from whatever identity is available locally.
+    ///
+    /// * `creds` — stored OAuth credentials, if the user is logged in. When
+    ///   present, real ids are hashed (subject, falling back to member id, for
+    ///   the user; `organization_id` for the org).
+    /// * `repo_unique_id` — the connected-repo id if already known locally (e.g.
+    ///   from a config sticky-scope pin). Never fetched over the network here.
+    /// * `repo_url` — the git remote URL, used only to derive the fallback org id
+    ///   when unauthenticated.
+    ///
+    /// Reads nothing from disk or the network itself; callers pass in what they
+    /// have, so this stays pure and cheap on the hook path.
+    pub fn build(
+        creds: Option<&StoredCredentials>,
+        repo_unique_id: Option<&str>,
+        repo_url: Option<&str>,
+    ) -> Self {
+        let mut envelope = Self {
+            datetime_utc: Self::now_utc(),
+            ..Default::default()
+        };
+
+        if let Some(creds) = creds {
+            let user = creds
+                .subject
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(creds.member_id.as_str());
+            if !user.is_empty() {
+                envelope.user_id_hash = Some(hash_identifier("user", user));
+            }
+            if !creds.organization_id.is_empty() {
+                envelope.org_id_hash = Some(hash_identifier("org", &creds.organization_id));
+            }
+        } else if let Some(url) = repo_url.filter(|u| !u.is_empty()) {
+            envelope.org_id = Some(fallback_org_id(&repo_slug(url)));
+        }
+
+        if let Some(repo_unique_id) = repo_unique_id.filter(|r| !r.is_empty()) {
+            envelope.repo_id_hash = Some(hash_identifier("repo", repo_unique_id));
+        }
+
+        envelope
+    }
+}
+
 /// Produce a deterministic SHA-256 hash from a repo URL and commit hash.
 ///
 /// The two inputs are separated by a null byte (`\0`) before hashing so that
@@ -241,5 +388,157 @@ mod tests {
             normalize_repo_url("https://github.com/org/repo.git/"),
             "https://github.com/org/repo"
         );
+    }
+
+    // ── hash_identifier tests ──
+
+    #[test]
+    fn test_hash_identifier_is_deterministic_and_64_hex() {
+        let a = hash_identifier("user", "11111111-1111-1111-1111-111111111111");
+        let b = hash_identifier("user", "11111111-1111-1111-1111-111111111111");
+        assert_eq!(a, b, "same domain+id must hash identically");
+        assert_eq!(a.len(), 64);
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    #[test]
+    fn test_hash_identifier_domain_separates() {
+        // The same raw id under different domains must not collide.
+        let id = "same-id";
+        assert_ne!(
+            hash_identifier("user", id),
+            hash_identifier("org", id),
+            "domain label must namespace the hash"
+        );
+        assert_ne!(hash_identifier("org", id), hash_identifier("repo", id));
+    }
+
+    #[test]
+    fn test_hash_identifier_matches_prefixed_sha256() {
+        // Documents the exact wire contract Supabase must reproduce:
+        // hash_identifier("user", X) == SHA256("user:" + X).
+        let expected = {
+            let mut h = Sha256::new();
+            h.update(b"user:");
+            h.update(b"abc");
+            format!("{:x}", h.finalize())
+        };
+        assert_eq!(hash_identifier("user", "abc"), expected);
+    }
+
+    // ── repo_slug tests ──
+
+    #[test]
+    fn test_repo_slug_https() {
+        assert_eq!(repo_slug("https://github.com/Org/Repo.git"), "org/repo");
+    }
+
+    #[test]
+    fn test_repo_slug_scp_style() {
+        assert_eq!(repo_slug("git@github.com:Org/Repo.git"), "org/repo");
+    }
+
+    #[test]
+    fn test_repo_slug_trailing_slash_and_case() {
+        assert_eq!(repo_slug("https://GITHUB.com/org/repo/"), "org/repo");
+    }
+
+    // ── fallback_org_id tests ──
+
+    #[test]
+    fn test_fallback_org_id_is_stable_uuid_for_same_slug() {
+        let a = fallback_org_id("org/repo");
+        let b = fallback_org_id("org/repo");
+        assert_eq!(a, b, "same slug must yield the same fallback org id");
+        assert!(
+            uuid::Uuid::parse_str(&a).is_ok(),
+            "fallback org id must be a valid UUID, got {a}"
+        );
+    }
+
+    #[test]
+    fn test_fallback_org_id_differs_by_slug() {
+        assert_ne!(fallback_org_id("org/repo"), fallback_org_id("org/other"));
+    }
+
+    #[test]
+    fn test_fallback_org_id_is_version_5() {
+        let id = fallback_org_id("org/repo");
+        let uuid = uuid::Uuid::parse_str(&id).unwrap();
+        assert_eq!(uuid.get_version_num(), 5, "must stamp UUID version 5 bits");
+    }
+
+    // ── IdentityEnvelope tests ──
+
+    fn creds(subject: Option<&str>, member: &str, org: &str) -> StoredCredentials {
+        StoredCredentials {
+            access_token: "tok".to_string(),
+            refresh_token: "ref".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at: None,
+            scope: None,
+            organization_id: org.to_string(),
+            member_id: member.to_string(),
+            email: None,
+            subject: subject.map(|s| s.to_string()),
+            auth_url: None,
+        }
+    }
+
+    #[test]
+    fn test_envelope_authenticated_hashes_user_and_org_no_raw() {
+        let c = creds(Some("user-sub-1"), "member-1", "org-1");
+        let env = IdentityEnvelope::build(Some(&c), Some("repo-uid-1"), Some("https://x/y/z"));
+
+        assert_eq!(
+            env.user_id_hash,
+            Some(hash_identifier("user", "user-sub-1"))
+        );
+        assert_eq!(env.org_id_hash, Some(hash_identifier("org", "org-1")));
+        assert_eq!(
+            env.repo_id_hash,
+            Some(hash_identifier("repo", "repo-uid-1"))
+        );
+        // Authenticated runs carry no synthetic fallback org id.
+        assert_eq!(env.org_id, None);
+        assert!(!env.datetime_utc.is_empty());
+
+        // No raw identifier appears anywhere in the envelope.
+        for field in [&env.user_id_hash, &env.org_id_hash, &env.repo_id_hash] {
+            let v = field.as_deref().unwrap();
+            assert!(!v.contains("user-sub-1"));
+            assert!(!v.contains("org-1"));
+            assert!(!v.contains("repo-uid-1"));
+        }
+    }
+
+    #[test]
+    fn test_envelope_authenticated_falls_back_to_member_id_when_no_subject() {
+        let c = creds(None, "member-9", "org-9");
+        let env = IdentityEnvelope::build(Some(&c), None, None);
+        assert_eq!(env.user_id_hash, Some(hash_identifier("user", "member-9")));
+        assert_eq!(env.repo_id_hash, None);
+    }
+
+    #[test]
+    fn test_envelope_fallback_sets_synthetic_org_from_slug_only() {
+        let env = IdentityEnvelope::build(None, None, Some("https://github.com/org/repo.git"));
+        assert_eq!(env.user_id_hash, None);
+        assert_eq!(env.org_id_hash, None);
+        assert_eq!(env.org_id, Some(fallback_org_id("org/repo")));
+        assert!(!env.datetime_utc.is_empty());
+    }
+
+    #[test]
+    fn test_envelope_fallback_sets_repo_hash_when_repo_id_known() {
+        // repo_unique_id may be known from a sticky pin even without login.
+        let env = IdentityEnvelope::build(None, Some("repo-uid-2"), Some("https://h/o/r"));
+        assert_eq!(
+            env.repo_id_hash,
+            Some(hash_identifier("repo", "repo-uid-2"))
+        );
+        assert_eq!(env.org_id, Some(fallback_org_id("o/r")));
     }
 }

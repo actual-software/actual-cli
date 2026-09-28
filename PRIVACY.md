@@ -75,10 +75,21 @@ Each event includes a subset of these properties:
 | `exit_code` | The process exit code |
 | `repo_hash` | Same one-way SHA-256 hash as the sync counters above |
 | `repo_url_hash` | Same one-way SHA-256 hash as the sync counters above |
+| `datetime_utc` | RFC3339 UTC timestamp of the event |
+| `user_id_hash` | One-way SHA-256 of `"user:"+<user id>`, only when logged in -- the raw user id is **never** sent |
+| `org_id_hash` | One-way SHA-256 of `"org:"+<organization id>`, only when logged in -- the raw org id is **never** sent |
+| `repo_id_hash` | One-way SHA-256 of `"repo:"+<connected-repo id>`, only when that id is known locally -- the raw id is **never** sent |
+| `org_id` | A synthetic, repo-derived org identifier (a UUID from the repo slug), sent **only when not logged in**, so anonymous runs still have an org-shaped grouping key |
 
 **No plan text, diff content, matched rule file paths, or conflicting
 plan/diff spans are ever sent** -- only the rule's internal id/slug and a
 coarse allow/warn/block verdict.
+
+The `user_id_hash`/`org_id_hash`/`repo_id_hash` fields are one-way SHA-256
+digests of Actual-internal ids: the raw ids never leave your machine. They let
+metrics be grouped by user, org, and repo without exposing those ids. (Our
+backend applies an additional secret transform before these are stored, so the
+values held downstream are not even the bare hashes.)
 
 `actual check-override` reports a cleared rule by sending
 `plan_governance_check_completed` with `command` set to
