@@ -109,6 +109,9 @@ pub struct EventContext {
     pub command: String,
     pub repo_hash: Option<String>,
     pub repo_url_hash: Option<String>,
+    /// `--claude-hook` revision-loop position `(round_index, round_total)`, set
+    /// only on the hook path; `None` for direct/CLI runs, which have no loop.
+    pub rounds: Option<(u32, u32)>,
 }
 
 impl EventContext {
@@ -119,12 +122,20 @@ impl EventContext {
             command: command.into(),
             repo_hash: None,
             repo_url_hash: None,
+            rounds: None,
         }
     }
 
     pub fn with_repo_hashes(mut self, repo_hash: String, repo_url_hash: String) -> Self {
         self.repo_hash = Some(repo_hash);
         self.repo_url_hash = Some(repo_url_hash);
+        self
+    }
+
+    /// Record the `--claude-hook` revision-loop position on this context, so the
+    /// completed event can report round-loop convergence.
+    pub fn with_rounds(mut self, round_index: u32, round_total: u32) -> Self {
+        self.rounds = Some((round_index, round_total));
         self
     }
 
@@ -162,6 +173,10 @@ impl EventContext {
         properties.decision = Some(decision);
         properties.duration_ms = Some(duration_ms);
         properties.exit_code = Some(exit_code);
+        if let Some((round_index, round_total)) = self.rounds {
+            properties.round_index = Some(round_index);
+            properties.round_total = Some(round_total);
+        }
         PlanGovernanceEvent {
             event: PlanGovernanceEventName::PlanGovernanceCheckCompleted,
             distinct_id: self.distinct_id.clone(),
@@ -360,6 +375,7 @@ mod tests {
             command: "plan-check".to_string(),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            rounds: None,
         }
     }
 
@@ -439,6 +455,22 @@ mod tests {
         assert_eq!(props.decision, Some(PlanGovernanceDecision::Block));
         assert_eq!(props.duration_ms, Some(42.5));
         assert_eq!(props.exit_code, Some(1));
+        // No rounds set on the base context -> the hook-only fields are absent.
+        assert_eq!(props.round_index, None);
+        assert_eq!(props.round_total, None);
+    }
+
+    #[test]
+    fn test_completed_event_carries_round_counts_when_set() {
+        let ctx = context().with_rounds(2, 5);
+        let event = ctx.completed_event(PlanGovernanceDecision::Warn, 10.0, 0);
+        let props = event.properties.unwrap();
+        assert_eq!(props.round_index, Some(2));
+        assert_eq!(props.round_total, Some(5));
+        // Rounds are a completion dimension only -- the started event omits them.
+        let started = ctx.started_event().properties.unwrap();
+        assert_eq!(started.round_index, None);
+        assert_eq!(started.round_total, None);
     }
 
     #[test]

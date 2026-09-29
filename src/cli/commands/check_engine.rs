@@ -817,6 +817,7 @@ pub(super) fn send_governance_events(
     decision: crate::api::types::PlanGovernanceDecision,
     exit_code: i32,
     violations: &[(&str, &str, crate::api::types::PlanGovernanceDecision)],
+    rounds: Option<(u32, u32)>,
 ) {
     use crate::telemetry::plan_governance::EventContext;
 
@@ -826,7 +827,10 @@ pub(super) fn send_governance_events(
     }
 
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
-    let ctx = EventContext::new(command).with_repo_hashes(repo_hash, repo_url_hash);
+    let mut ctx = EventContext::new(command).with_repo_hashes(repo_hash, repo_url_hash);
+    if let Some((round_index, round_total)) = rounds {
+        ctx = ctx.with_rounds(round_index, round_total);
+    }
     // `duration_ms` uses the precise monotonic elapsed time; both events'
     // `timestamp` fields are stamped at send time rather than backdating the
     // started event to when the check actually began -- for this stream's
@@ -929,6 +933,8 @@ pub(super) fn send_hook_governance_events(
     decision: crate::api::types::PlanGovernanceDecision,
     verdicts: &[CheckedRule],
     blocked: bool,
+    // `(round_index, round_total)` for the `--claude-hook` revision loop.
+    rounds: (u32, u32),
 ) {
     let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
         .iter()
@@ -944,7 +950,15 @@ pub(super) fn send_hook_governance_events(
     // The hook's own contract never returns a non-zero exit -- `exec()`
     // always returns `Ok(())` after `exec_hook` -- so `exit_code` is always
     // 0 here regardless of `decision`.
-    send_governance_events(command, root, started_at, decision, 0, &violations);
+    send_governance_events(
+        command,
+        root,
+        started_at,
+        decision,
+        0,
+        &violations,
+        Some(rounds),
+    );
 }
 
 /// True when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set in this
@@ -1439,6 +1453,7 @@ fn finish_verdicts(
                     crate::api::types::PlanGovernanceDecision::Warn,
                     &verdicts,
                     false,
+                    (session.loop_state(kind).rounds, run.max_rounds),
                 );
                 return;
             }
@@ -1461,6 +1476,7 @@ fn finish_verdicts(
             crate::api::types::PlanGovernanceDecision::Block,
             &verdicts,
             true,
+            (session.loop_state(kind).rounds, run.max_rounds),
         );
         return;
     }
@@ -1527,6 +1543,7 @@ fn finish_verdicts(
             decision,
             &verdicts,
             false,
+            (session.loop_state(kind).rounds, run.max_rounds),
         );
     }
 }
@@ -3262,6 +3279,36 @@ pub(crate) mod tests {
             );
             assert_eq!(untouched.rounds, 0);
         }
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_finish_hook_completed_event_carries_round_counts() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let mut session = GovernanceSession::default();
+        let run = hook_run(check::ArtifactKind::Plan, Some("s-rounds"), rules.path(), 3);
+
+        let events = with_captured_plan_governance_events(|| {
+            finish_hook(
+                &run,
+                &mut session,
+                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+            );
+        });
+
+        let completed = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a completed event");
+        let props = completed.properties.as_ref().unwrap();
+        // One judged round completed, out of a 3-round budget.
+        assert_eq!(props.round_index, Some(1));
+        assert_eq!(props.round_total, Some(3));
     }
 
     #[test]

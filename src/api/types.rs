@@ -266,6 +266,15 @@ pub struct PlanGovernanceEventProperties {
     pub duration_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// `--claude-hook` revision loop: which round this completion is (1-based,
+    /// counting judged rounds), for measuring round-loop convergence. Only set on
+    /// the hook path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_index: Option<u32>,
+    /// `--claude-hook` revision loop: the maximum rounds allowed for this run
+    /// (`max_rounds`). Only set on the hook path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_total: Option<u32>,
     /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_hash` tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_hash: Option<String>,
@@ -1305,6 +1314,7 @@ mod tests {
             exit_code: Some(1),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            ..Default::default()
         };
         let value = serde_json::to_value(&props).unwrap();
         assert_eq!(value["cli_version"], "1.2.3");
