@@ -152,7 +152,15 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" ")).with_paths(args.files.clone());
+    let started = std::time::Instant::now();
     let run = run_selection(&resolved.index, &query, args)?;
+    #[cfg(feature = "telemetry")]
+    emit_scope_telemetry(
+        &root,
+        &resolved,
+        &run,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
 
     if args.json {
         println!(
@@ -182,6 +190,81 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
 pub struct SelectionRun {
     pub selection: Selection,
     pub runner: Option<String>,
+}
+
+/// Derive the scope-telemetry stage-2 signals from a [`Stage2`] status:
+/// `(stage2_invoked, stage2_status, stage1_candidates)`. `selected` is the
+/// fallback stage-1 candidate count for statuses that do not carry their own
+/// (only `NotNeeded`/`Applied` record the pre-cap candidate count).
+#[cfg(feature = "telemetry")]
+fn scope_stage_stats(stage2: &Stage2, selected: u32) -> (bool, &'static str, u32) {
+    match stage2 {
+        Stage2::NotNeeded { candidates } => (false, "not-needed", *candidates as u32),
+        Stage2::NotRequested => (false, "not-requested", selected),
+        Stage2::NoPlan => (false, "no-plan", selected),
+        Stage2::Unavailable { .. } => (false, "unavailable", selected),
+        Stage2::Failed { .. } => (false, "failed", selected),
+        Stage2::Applied { candidates, .. } => (true, "applied", *candidates as u32),
+    }
+}
+
+/// Publish one `scope_select` event for this run, fire-and-forget, through the
+/// PostHog proxy path. Honors the opt-out gate and never blocks or fails the
+/// command (a slow/failed send is swallowed) — same contract as the governance
+/// stream. Reads repo identity locally (no network beyond the git subprocess the
+/// rest of the pipeline already runs).
+#[cfg(feature = "telemetry")]
+fn emit_scope_telemetry(
+    root: &std::path::Path,
+    resolved: &ResolvedIndex,
+    run: &SelectionRun,
+    duration_ms: f64,
+) {
+    use crate::telemetry::scope::{new_scope_run_id, ScopeMetrics};
+
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    if crate::telemetry::opt_out::is_disabled(&cfg) {
+        return;
+    }
+
+    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
+    let commit = crate::analysis::cache::get_git_head(root).unwrap_or_default();
+    let repo_hash = crate::telemetry::identity::hash_repo_identity(&repo_url, &commit);
+    let repo_url_hash = crate::telemetry::identity::hash_repo_url(&repo_url);
+
+    let selection = &run.selection;
+    let selected = selection.selected.len() as u32;
+    let (stage2_invoked, stage2_status, stage1_candidates) =
+        scope_stage_stats(&selection.stage2, selected);
+
+    let metrics = ScopeMetrics {
+        scope_run_id: new_scope_run_id(),
+        rules_scanned: resolved.index.len() as u32,
+        stage1_candidates,
+        stage2_invoked,
+        stage2_status: stage2_status.to_string(),
+        selected,
+        cache_hit: matches!(resolved.source, IndexSource::Cached),
+        duration_ms,
+        runner: run.runner.clone(),
+        repo_hash: Some(repo_hash),
+        repo_url_hash: Some(repo_url_hash),
+    };
+
+    let api_url = cfg
+        .api_url
+        .clone()
+        .unwrap_or_else(|| crate::api::client::DEFAULT_API_URL.to_string());
+    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        rt.block_on(crate::telemetry::plan_governance::send_events(
+            vec![metrics.to_event()],
+            &cfg,
+            &api_url,
+        ));
+    }
 }
 
 /// Run both stages, degrading to stage 1 whenever stage 2 cannot help.
@@ -740,6 +823,54 @@ mod tests {
     // Only the tests build verdicts by hand; the command paths reach stage 2
     // through `Prefiltered::rank_with`.
     use crate::rules::scope::rank;
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_scope_stage_stats_maps_every_stage2_status() {
+        // `applied` is the only invoked case, and it plus `not-needed` carry the
+        // real stage-1 candidate count; the degraded statuses fall back to the
+        // selected count.
+        assert_eq!(
+            scope_stage_stats(
+                &Stage2::Applied {
+                    candidates: 30,
+                    governs: 3,
+                    related: 2,
+                    unrelated: 1,
+                    unjudged: 24
+                },
+                8
+            ),
+            (true, "applied", 30)
+        );
+        assert_eq!(
+            scope_stage_stats(&Stage2::NotNeeded { candidates: 5 }, 5),
+            (false, "not-needed", 5)
+        );
+        assert_eq!(
+            scope_stage_stats(&Stage2::NotRequested, 7),
+            (false, "not-requested", 7)
+        );
+        assert_eq!(scope_stage_stats(&Stage2::NoPlan, 7), (false, "no-plan", 7));
+        assert_eq!(
+            scope_stage_stats(
+                &Stage2::Unavailable {
+                    reason: "no runner".into()
+                },
+                7
+            ),
+            (false, "unavailable", 7)
+        );
+        assert_eq!(
+            scope_stage_stats(
+                &Stage2::Failed {
+                    reason: "bad json".into()
+                },
+                7
+            ),
+            (false, "failed", 7)
+        );
+    }
 
     use tempfile::{tempdir, TempDir};
 

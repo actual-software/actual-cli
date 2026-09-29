@@ -239,6 +239,10 @@ pub enum PlanGovernanceEventName {
     PlanGovernanceCheckStarted,
     PlanGovernanceCheckCompleted,
     PlanGovernanceRuleViolation,
+    /// One local-ADR scope-selection run (`rules select` / the signals workflow).
+    /// Carries a `scope_run_id` so a selection can later be joined to the
+    /// governance decision it produced.
+    PlanGovernanceScopeSelect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -272,6 +276,33 @@ pub struct PlanGovernanceEventProperties {
     /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_url_hash` tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_url_hash: Option<String>,
+    // --- Scope selection (scope_select events) ---
+    /// A random per-run correlation id, shared with the governance decision the
+    /// selection feeds. Not derived from any customer data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_run_id: Option<String>,
+    /// Number of local rule documents scanned (the index size).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules_scanned: Option<u32>,
+    /// Stage-1 (lexical prefilter) candidate count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage1_candidates: Option<u32>,
+    /// Whether stage 2 (the LLM rank) actually shaped this selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage2_invoked: Option<bool>,
+    /// Stage-2 status / degradation reason (e.g. `applied`, `not-needed`,
+    /// `not-requested`, `no-plan`, `unavailable`, `failed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage2_status: Option<String>,
+    /// How many rules the selection ultimately kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<u32>,
+    /// Whether the scope index was served from cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
+    /// The rank runner label, when stage 2 ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1305,6 +1336,7 @@ mod tests {
             exit_code: Some(1),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            ..Default::default()
         };
         let value = serde_json::to_value(&props).unwrap();
         assert_eq!(value["cli_version"], "1.2.3");
