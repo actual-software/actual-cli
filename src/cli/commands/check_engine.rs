@@ -845,26 +845,26 @@ pub(super) fn send_governance_events(
     dispatch_governance_events(events);
 }
 
-/// Emit one `plan_governance_check_completed`-shaped event per rule an
-/// `actual check-override` call clears, with `command =
-/// "check-override"` distinguishing it from a real check run's
-/// completion — so "overrides recorded" (one of AK-678's candidate
-/// counters) is `count(command == "check-override")` in PostHog,
-/// without a new event name or schema field. `keys` are already
-/// `"<doc-slug>::<rule-id>"` strings (see `governance_session::key`),
-/// validated against the rule corpus by [`validate_override_rules`] before
-/// this is ever called.
+/// Emit one `plan_governance_rule_override` event per rule an
+/// `actual check-override` call clears — a first-class event name (not a
+/// `check_completed` with `command="check-override"`) so overrides are cleanly
+/// separable from real check completions and override rate has an unambiguous
+/// denominator. Each event also carries a privacy-preserving summary of the
+/// override `reason` (category/length/hash — never the text; see `reason_summary`
+/// and `PRIVACY.md`). `keys` are already `"<doc-slug>::<rule-id>"` strings (see
+/// `governance_session::key`), validated against the rule corpus by
+/// [`validate_override_rules`] before this is ever called.
 ///
 /// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
 /// `distinct_id()` — see `send_governance_events`'s doc comment for why
 /// that ordering matters.
 #[cfg(feature = "telemetry")]
-fn send_override_events(root: &Path, keys: &[String]) {
+fn send_override_events(root: &Path, keys: &[String], reason: &str) {
     use crate::api::types::{
         PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
         PlanGovernanceEventProperties,
     };
-    use crate::telemetry::plan_governance::distinct_id;
+    use crate::telemetry::plan_governance::{distinct_id, reason_summary};
 
     let cfg = crate::config::paths::load().unwrap_or_default();
     if crate::telemetry::opt_out::is_disabled(&cfg) {
@@ -875,13 +875,16 @@ fn send_override_events(root: &Path, keys: &[String]) {
     let id = distinct_id();
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
+    // The reason is customer free text: only its length bucket, length, and a
+    // one-way hash are sent -- never the text itself (see `PRIVACY.md`).
+    let (reason_category, reason_len, reason_hash) = reason_summary(reason);
 
     let events: Vec<PlanGovernanceEvent> = keys
         .iter()
         .map(|key| {
             let (rule_source, rule_id) = key.split_once("::").unwrap_or((key.as_str(), ""));
             PlanGovernanceEvent {
-                event: PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+                event: PlanGovernanceEventName::PlanGovernanceRuleOverride,
                 distinct_id: id.clone(),
                 properties: Some(PlanGovernanceEventProperties {
                     cli_version: Some(cli_version.clone()),
@@ -892,6 +895,9 @@ fn send_override_events(root: &Path, keys: &[String]) {
                     exit_code: Some(0),
                     repo_hash: Some(repo_hash.clone()),
                     repo_url_hash: Some(repo_url_hash.clone()),
+                    reason_category: Some(reason_category),
+                    reason_len: Some(reason_len),
+                    reason_hash: reason_hash.clone(),
                     ..Default::default()
                 }),
                 timestamp: Some(timestamp.clone()),
@@ -1112,7 +1118,7 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     validate_override_rules(&rules_dir, &args.rules)?;
     governance_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
     #[cfg(feature = "telemetry")]
-    send_override_events(&root, &args.rules);
+    send_override_events(&root, &args.rules, &args.reason);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", &args.session);
@@ -3457,9 +3463,11 @@ pub(crate) mod tests {
 
         assert_eq!(events.len(), 2);
         for event in &events {
+            // Overrides are a first-class event, distinct from check completions,
+            // so override rate has a clean denominator.
             assert_eq!(
                 event.event,
-                crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+                crate::api::types::PlanGovernanceEventName::PlanGovernanceRuleOverride
             );
             let props = event.properties.as_ref().unwrap();
             assert_eq!(props.command.as_deref(), Some("check-override"));
@@ -3468,6 +3476,19 @@ pub(crate) mod tests {
                 Some(crate::api::types::PlanGovernanceDecision::Allow)
             );
             assert_eq!(props.rule_source.as_deref(), Some("doc"));
+            // The reason rides only as privacy-preserving summaries.
+            assert_eq!(props.reason_len, Some("reviewed and accepted".len() as u32));
+            assert_eq!(
+                props.reason_category,
+                Some(crate::api::types::PlanGovernanceReasonCategory::Medium)
+            );
+            assert!(props.reason_hash.as_deref().is_some_and(|h| h.len() == 64));
+            // The raw reason text must never appear anywhere in the payload.
+            let serialized = serde_json::to_string(props).unwrap();
+            assert!(
+                !serialized.contains("reviewed and accepted"),
+                "raw override reason must never be serialized"
+            );
         }
         let rule_ids: std::collections::HashSet<_> = events
             .iter()

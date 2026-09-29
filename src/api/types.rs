@@ -239,6 +239,10 @@ pub enum PlanGovernanceEventName {
     PlanGovernanceCheckStarted,
     PlanGovernanceCheckCompleted,
     PlanGovernanceRuleViolation,
+    /// One rule cleared by an explicit `actual check-override`. A first-class
+    /// event (rather than a `check_completed` with `command="check-override"`) so
+    /// overrides are cleanly separable from real check completions.
+    PlanGovernanceRuleOverride,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -247,6 +251,17 @@ pub enum PlanGovernanceDecision {
     Allow,
     Warn,
     Block,
+}
+
+/// A coarse, privacy-preserving bucket for an override reason's substance. Derived
+/// from the reason's length only -- it never carries the reason text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanGovernanceReasonCategory {
+    Empty,
+    Short,
+    Medium,
+    Long,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -272,6 +287,19 @@ pub struct PlanGovernanceEventProperties {
     /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_url_hash` tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_url_hash: Option<String>,
+    // --- Override reason (rule_override events only) ---
+    // The override reason is customer free text and never leaves the machine raw;
+    // only these privacy-preserving summaries are sent.
+    /// Coarse length bucket of the override reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_category: Option<PlanGovernanceReasonCategory>,
+    /// Character length of the override reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_len: Option<u32>,
+    /// Unsalted SHA-256 hex of the override reason (peppered server-side before
+    /// PostHog). Lets identical reasons be grouped without exposing the text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1305,6 +1333,7 @@ mod tests {
             exit_code: Some(1),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            ..Default::default()
         };
         let value = serde_json::to_value(&props).unwrap();
         assert_eq!(value["cli_version"], "1.2.3");

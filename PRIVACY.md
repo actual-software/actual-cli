@@ -59,8 +59,9 @@ only describes verdicts that were actually reached.
 | Event | Sent when |
 |-------|-----------|
 | `plan_governance_check_started` | Built alongside `plan_governance_check_completed` and sent in the same batch, once a run has reached a verdict -- not emitted separately at the actual start of the check |
-| `plan_governance_check_completed` | A `plan-check` or `impl-check` run reaches a verdict, or `check-override` records an override (see below -- overrides reuse this same event, distinguished only by `command`) |
+| `plan_governance_check_completed` | A `plan-check` or `impl-check` run reaches a verdict |
 | `plan_governance_rule_violation` | One rule did not conform (once per violating rule) |
+| `plan_governance_rule_override` | `check-override` clears a rule (once per cleared rule) |
 
 Each event includes a subset of these properties:
 
@@ -75,18 +76,20 @@ Each event includes a subset of these properties:
 | `exit_code` | The process exit code |
 | `repo_hash` | Same one-way SHA-256 hash as the sync counters above |
 | `repo_url_hash` | Same one-way SHA-256 hash as the sync counters above |
+| `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
+| `reason_len` | `check-override` only: the character length of the override reason |
+| `reason_hash` | `check-override` only: a one-way SHA-256 of the override reason (peppered server-side before PostHog) -- lets identical reasons group without exposing the text |
 
 **No plan text, diff content, matched rule file paths, or conflicting
 plan/diff spans are ever sent** -- only the rule's internal id/slug and a
 coarse allow/warn/block verdict.
 
-`actual check-override` reports a cleared rule by sending
-`plan_governance_check_completed` with `command` set to
-`"check-override"` rather than a distinct event type -- it is not a
-real check's completion, and it carries no `duration_ms`. A query over
-`plan_governance_check_completed` that counts "checks run" or averages
-`duration_ms` must filter `command != "check-override"`, or it will mix
-override records into those aggregates.
+`actual check-override` reports a cleared rule by sending a dedicated
+`plan_governance_rule_override` event (one per cleared rule), distinct from a
+real check's completion so overrides are cleanly separable and override rate has
+an unambiguous denominator. **The override reason is customer free text and is
+never sent raw** -- only `reason_category`, `reason_len`, and a one-way
+`reason_hash` (see above) leave the machine.
 
 Each event also carries a `distinct_id`: a random, opaque identifier
 generated once on first use and stored locally
