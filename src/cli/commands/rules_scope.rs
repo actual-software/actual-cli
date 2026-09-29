@@ -251,6 +251,20 @@ fn emit_scope_telemetry(
         repo_url_hash: Some(repo_url_hash),
     };
 
+    dispatch_scope_event(metrics.to_event(), &cfg);
+}
+
+/// Send one scope event, fire-and-forget, on a throwaway current-thread runtime.
+///
+/// Like `check_engine`'s governance dispatch, the real network send is
+/// `not(test)`-only and the `#[cfg(test)]` twin below captures into a thread-local
+/// instead — so unit tests never egress and the network lines are not counted
+/// against coverage. Never blocks the caller past the short internal send timeout.
+#[cfg(all(feature = "telemetry", not(test)))]
+fn dispatch_scope_event(
+    event: crate::api::types::PlanGovernanceEvent,
+    cfg: &crate::config::types::Config,
+) {
     let api_url = cfg
         .api_url
         .clone()
@@ -260,11 +274,19 @@ fn emit_scope_telemetry(
         .build()
     {
         rt.block_on(crate::telemetry::plan_governance::send_events(
-            vec![metrics.to_event()],
-            &cfg,
+            vec![event],
+            cfg,
             &api_url,
         ));
     }
+}
+
+#[cfg(all(feature = "telemetry", test))]
+fn dispatch_scope_event(
+    event: crate::api::types::PlanGovernanceEvent,
+    _cfg: &crate::config::types::Config,
+) {
+    tests::CAPTURED_SCOPE_EVENTS.with(|cell| cell.borrow_mut().push(event));
 }
 
 /// Run both stages, degrading to stage 1 whenever stage 2 cannot help.
@@ -870,6 +892,78 @@ mod tests {
             ),
             (false, "failed", 7)
         );
+    }
+
+    // Hermetic capture for scope telemetry: `dispatch_scope_event`'s `#[cfg(test)]`
+    // twin pushes here instead of hitting the network, so no unit test ever egresses.
+    #[cfg(feature = "telemetry")]
+    thread_local! {
+        pub(super) static CAPTURED_SCOPE_EVENTS:
+            std::cell::RefCell<Vec<crate::api::types::PlanGovernanceEvent>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn with_captured_scope_events(f: impl FnOnce()) -> Vec<crate::api::types::PlanGovernanceEvent> {
+        CAPTURED_SCOPE_EVENTS.with(|cell| cell.borrow_mut().clear());
+        f();
+        CAPTURED_SCOPE_EVENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_opt_out_captures_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_tel = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 1.0)
+        });
+        assert!(events.is_empty(), "opted-out run must emit nothing");
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_emits_a_scope_select_event() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _tel_on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 42.0)
+        });
+        assert_eq!(events.len(), 1);
+        let props = events[0].properties.as_ref().unwrap();
+        assert_eq!(
+            events[0].event,
+            crate::api::types::PlanGovernanceEventName::PlanGovernanceScopeSelect
+        );
+        assert_eq!(props.command.as_deref(), Some("rules select"));
+        assert_eq!(props.duration_ms, Some(42.0));
+        assert!(props.scope_run_id.is_some());
+        assert!(props.rules_scanned.is_some());
+        assert!(props.stage2_status.is_some());
     }
 
     use tempfile::{tempdir, TempDir};
