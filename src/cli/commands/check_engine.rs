@@ -756,6 +756,34 @@ fn repo_identity_hashes(root: &Path) -> (String, String) {
     )
 }
 
+/// Build the hashed identity + timestamp envelope for a governance event.
+///
+/// Reads only local sources — stored OAuth credentials and a config sticky-scope
+/// pin — so it never adds a network call on the hook path. When logged in, the
+/// user/org (and repo, if a sticky pin records the connected-repo id) ids are
+/// hashed; otherwise only a synthetic fallback org id (from the repo slug) is set.
+/// Never carries a raw identifier.
+#[cfg(feature = "telemetry")]
+fn identity_envelope(
+    cfg: &crate::config::types::Config,
+    repo_url: &str,
+) -> crate::telemetry::identity::IdentityEnvelope {
+    use crate::telemetry::identity::IdentityEnvelope;
+    let creds = crate::auth::store::load().ok().flatten();
+    // Match `sync::cache::compute_repo_key`'s sticky key (raw SHA-256 of the origin
+    // URL) without re-spawning git: we already have the URL in hand.
+    let repo_unique_id = if repo_url.is_empty() {
+        None
+    } else {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(repo_url.as_bytes());
+        let repo_key = format!("{:x}", hasher.finalize());
+        crate::config::sticky::get_scope(cfg, &repo_key).and_then(|s| s.repo_unique_id)
+    };
+    IdentityEnvelope::build(creds.as_ref(), repo_unique_id.as_deref(), Some(repo_url))
+}
+
 /// Send a batch of already-built plan-governance events, fire-and-forget.
 ///
 /// Never blocks the caller past its own short internal timeout (see
@@ -825,8 +853,12 @@ pub(super) fn send_governance_events(
         return;
     }
 
+    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
-    let ctx = EventContext::new(command).with_repo_hashes(repo_hash, repo_url_hash);
+    let identity = identity_envelope(&cfg, &repo_url);
+    let ctx = EventContext::new(command)
+        .with_repo_hashes(repo_hash, repo_url_hash)
+        .with_identity(identity);
     // `duration_ms` uses the precise monotonic elapsed time; both events'
     // `timestamp` fields are stamped at send time rather than backdating the
     // started event to when the check actually began -- for this stream's
@@ -3482,6 +3514,43 @@ pub(crate) mod tests {
         let insert_ids: std::collections::HashSet<_> =
             events.iter().map(|e| e.insert_id.clone()).collect();
         assert_eq!(insert_ids.len(), 2);
+    }
+
+    /// Every plan/impl-check governance event carries the identity + timestamp
+    /// envelope. In an isolated config there are no stored credentials, so the
+    /// run is anonymous: `datetime_utc` is always stamped, and no raw-id hashes
+    /// (and certainly no raw ids) appear.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_send_governance_events_stamps_identity_envelope() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let events = with_captured_plan_governance_events(|| {
+            send_governance_events(
+                "plan-check",
+                repo.path(),
+                std::time::Instant::now(),
+                crate::api::types::PlanGovernanceDecision::Allow,
+                0,
+                &[],
+            );
+        });
+
+        // started + completed.
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            let props = event.properties.as_ref().unwrap();
+            assert!(
+                props.datetime_utc.as_deref().is_some_and(|s| !s.is_empty()),
+                "every governance event must carry datetime_utc"
+            );
+            // Anonymous run (no creds in the isolated config dir).
+            assert!(props.user_id_hash.is_none());
+            assert!(props.org_id_hash.is_none());
+        }
     }
 
     /// The proxy rejects a batch over 100 events whole (see

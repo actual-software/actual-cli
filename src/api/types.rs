@@ -272,6 +272,25 @@ pub struct PlanGovernanceEventProperties {
     /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_url_hash` tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_url_hash: Option<String>,
+    // --- Identity envelope (see `crate::telemetry::identity::IdentityEnvelope`) ---
+    // Domain-separated, unsalted SHA-256 of the raw ids (never the raw ids). The
+    // api-service proxy peppers these (HMAC) before forwarding to PostHog.
+    /// `SHA-256("user:"+subject)`, present on authenticated runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id_hash: Option<String>,
+    /// `SHA-256("org:"+organization_id)`, present on authenticated runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id_hash: Option<String>,
+    /// `SHA-256("repo:"+repo_unique_id)`, present when the connected-repo id is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id_hash: Option<String>,
+    /// Synthetic fallback org id (a UUID derived from the repo slug), present only
+    /// on unauthenticated runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// RFC3339 UTC timestamp for this event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datetime_utc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1305,6 +1324,7 @@ mod tests {
             exit_code: Some(1),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            ..Default::default()
         };
         let value = serde_json::to_value(&props).unwrap();
         assert_eq!(value["cli_version"], "1.2.3");
