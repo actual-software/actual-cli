@@ -445,6 +445,14 @@ mod tests {
         assert_eq!(repo_slug("https://GITHUB.com/org/repo/"), "org/repo");
     }
 
+    #[test]
+    fn test_repo_slug_falls_back_to_normalized_when_no_owner_repo() {
+        // Fewer than two path segments (no owner/repo shape) -> the normalized
+        // URL is returned as-is.
+        assert_eq!(repo_slug("singleword"), "singleword");
+        assert_eq!(repo_slug(""), "");
+    }
+
     // ── fallback_org_id tests ──
 
     #[test]
