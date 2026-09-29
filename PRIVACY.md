@@ -61,20 +61,26 @@ only describes verdicts that were actually reached.
 | `plan_governance_check_started` | Built alongside `plan_governance_check_completed` and sent in the same batch, once a run has reached a verdict -- not emitted separately at the actual start of the check |
 | `plan_governance_check_completed` | A `plan-check` or `impl-check` run reaches a verdict, or `check-override` records an override (see below -- overrides reuse this same event, distinguished only by `command`) |
 | `plan_governance_rule_violation` | One rule did not conform (once per violating rule) |
+| `plan_governance_scope_select` | A `rules select` / signals-workflow run selected which local ADRs apply (once per run) |
 
 Each event includes a subset of these properties:
 
 | Property | Description |
 |----------|--------------|
 | `cli_version` | CLI version string |
-| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"impl-check"`, `"impl-check --claude-hook"`, `"check-override"`) |
+| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"impl-check"`, `"impl-check --claude-hook"`, `"check-override"`, `"rules select"`) |
 | `rule_id` | The internal id of the specific rule involved -- an Actual-internal identifier, same category as `adr_ids` above, not a file path |
 | `rule_source` | The rule document's internal slug, derived from its filename -- not a filesystem path |
 | `decision` | `allow`, `warn`, or `block` -- the outcome for this rule or run |
-| `duration_ms` | How long the check took |
+| `duration_ms` | How long the check or selection took |
 | `exit_code` | The process exit code |
 | `repo_hash` | Same one-way SHA-256 hash as the sync counters above |
 | `repo_url_hash` | Same one-way SHA-256 hash as the sync counters above |
+| `scope_run_id` | `rules select` only: a random per-run correlation id (not derived from any data) |
+| `rules_scanned` / `stage1_candidates` / `selected` | `rules select` only: counts of rules scanned, stage-1 candidates, and rules finally selected -- numbers only |
+| `stage2_invoked` / `stage2_status` | `rules select` only: whether the LLM rank ran, and its status/degradation (`applied`/`not-needed`/`unavailable`/…) |
+| `cache_hit` | `rules select` only: whether the scope index came from cache |
+| `runner` | `rules select` only: the rank runner label when stage 2 ran |
 
 **No plan text, diff content, matched rule file paths, or conflicting
 plan/diff spans are ever sent** -- only the rule's internal id/slug and a

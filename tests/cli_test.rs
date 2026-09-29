@@ -676,6 +676,66 @@ fn test_plan_check_verdict_survives_a_refused_telemetry_endpoint() {
     assert!(fixture.config_dir.path().join("telemetry-id").is_file());
 }
 
+/// `rules select` publishes one `plan_governance_scope_select` event to the
+/// configured `api_url` — the real scope dispatcher, at the one layer that runs
+/// it (a unit test captures instead of sending). `--no-rank` keeps stage 2 (and
+/// any runner probe) out of it, so the run is hermetic.
+#[cfg(unix)]
+#[test]
+fn test_rules_select_sends_a_scope_event_to_the_configured_api() {
+    let mut server = mockito::Server::new();
+    let recorded = server
+        .mock("POST", "/plan-governance/record")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("^Bearer .+".to_string()),
+        )
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::Regex(r#""event":"plan_governance_scope_select""#.to_string()),
+            mockito::Matcher::Regex(r#""command":"rules select""#.to_string()),
+            mockito::Matcher::Regex(r#""rules_scanned":"#.to_string()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"recorded":1,"failed":0}"#)
+        .expect(1)
+        .create();
+
+    let repo = tempfile::tempdir().unwrap();
+    let rules = repo.path().join(".actual/rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(
+        rules.join("cross-cutting-token-signing-1c57.md"),
+        "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+    )
+    .unwrap();
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config_dir.path().join("config.yaml"),
+        format!("api_url: \"{}\"\n", server.url()),
+    )
+    .unwrap();
+
+    cmd()
+        .args([
+            "rules",
+            "select",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--no-rank",
+            "Sign access tokens with RS256",
+        ])
+        .env("ACTUAL_CONFIG_DIR", config_dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("ACTUAL_NO_TELEMETRY")
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+
+    recorded.assert();
+}
+
 // ── plan-check-override: the interactive-terminal gate ──────────────────
 //
 // `exec_override` refuses unless stdin is a real terminal *and*
