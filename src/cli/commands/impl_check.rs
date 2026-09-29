@@ -192,6 +192,7 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
             decision,
             exit_code,
             &violations,
+            None,
         );
     }
 

@@ -263,6 +263,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
             decision,
             exit_code,
             &violations,
+            None,
         );
     }
 
