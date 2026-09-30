@@ -676,6 +676,74 @@ fn test_plan_check_verdict_survives_a_refused_telemetry_endpoint() {
     assert!(fixture.config_dir.path().join("telemetry-id").is_file());
 }
 
+/// `rules select` publishes one `plan_governance_scope_select` event to the
+/// configured `api_url`. Delivery is owned by the detached uploader process the
+/// command spawns (APR-004), not the command itself, so the assertion polls until
+/// that process has posted the event. `--no-rank` keeps stage 2 (and any runner
+/// probe) out of it, so the run is hermetic.
+#[cfg(unix)]
+#[test]
+fn test_rules_select_sends_a_scope_event_to_the_configured_api() {
+    let mut server = mockito::Server::new();
+    let recorded = server
+        .mock("POST", "/plan-governance/record")
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("^Bearer .+".to_string()),
+        )
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::Regex(r#""event":"plan_governance_scope_select""#.to_string()),
+            mockito::Matcher::Regex(r#""command":"rules select""#.to_string()),
+            mockito::Matcher::Regex(r#""rules_scanned":"#.to_string()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"recorded":1,"failed":0}"#)
+        .expect(1)
+        .create();
+
+    let repo = tempfile::tempdir().unwrap();
+    let rules = repo.path().join(".actual/rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(
+        rules.join("cross-cutting-token-signing-1c57.md"),
+        "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+    )
+    .unwrap();
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config_dir.path().join("config.yaml"),
+        format!("api_url: \"{}\"\n", server.url()),
+    )
+    .unwrap();
+
+    cmd()
+        .args([
+            "rules",
+            "select",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--no-rank",
+            "Sign access tokens with RS256",
+        ])
+        .env("ACTUAL_CONFIG_DIR", config_dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("ACTUAL_NO_TELEMETRY")
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+
+    // The uploader delivers after the command returns; wait for it.
+    for _ in 0..100 {
+        if recorded.matched() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    recorded.assert();
+}
+
 // ── plan-check-override: the interactive-terminal gate ──────────────────
 //
 // `exec_override` refuses unless stdin is a real terminal *and*
@@ -1137,4 +1205,196 @@ fn test_check_override_is_gated_the_same_way_for_a_session_impl_check_denied() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("interactively"));
+}
+
+// ── scope telemetry spool (APR-004) ────────────────────────────────────────
+//
+// These drive the real `actual` binary through the process boundary and observe
+// delivery only through the two supported boundaries — the durable spool file
+// and the HTTP proxy — never through internals. The invariant under test: an
+// opted-in scope event is either delivered or durably retained, while the
+// command exits promptly regardless of the endpoint's health.
+
+/// The scope-telemetry spool file inside a config dir (mirrors
+/// `telemetry::spool::SPOOL_FILE`).
+#[cfg(feature = "telemetry")]
+fn scope_spool(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir.join("scope-telemetry-spool.jsonl")
+}
+
+/// A throwaway repo with one rule document, so `rules select` has something to
+/// scan and emits a scope event.
+#[cfg(feature = "telemetry")]
+fn repo_with_a_rule() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let rules = repo.path().join(".actual").join("rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(
+        rules.join("cross-cutting-signing-a1b2.md"),
+        "# Adopt RS256: Token Signing\n\nThese rules are ALWAYS ACTIVE for token signing in \
+         `services/auth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+    )
+    .unwrap();
+    repo
+}
+
+/// Run `actual rules select --no-rank` against `api_url`, opted in, with an
+/// isolated config dir. Returns how long the command took.
+#[cfg(feature = "telemetry")]
+fn run_rules_select(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    api_url: &str,
+) -> std::time::Duration {
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        format!("api_url: {api_url}\n"),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    cmd()
+        .args([
+            "rules",
+            "select",
+            "rotate the signing key",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--no-rank",
+        ])
+        .env("ACTUAL_CONFIG_DIR", config_dir)
+        .env_remove("ACTUAL_NO_TELEMETRY")
+        .assert()
+        .success();
+    started.elapsed()
+}
+
+/// A slow/unreachable endpoint: `rules select` still exits promptly, and the
+/// event is durably queued in the spool rather than lost when the process exits.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_rules_select_durably_spools_scope_event_when_endpoint_is_slow() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_a_rule();
+
+    // Bind but never respond: the kernel completes the handshake from the
+    // backlog, so the uploader connects and then waits out its own timeout.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let elapsed = run_rules_select(config_dir.path(), repo.path(), &format!("http://{addr}"));
+
+    // Prompt exit: the command never waits on the telemetry endpoint. Generous
+    // to stay robust on slow CI while still catching a true blocking hang.
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "rules select took {elapsed:?}"
+    );
+
+    // Durably retained: the event survived process exit on disk. Delivery could
+    // not complete against the silent endpoint, so it must still be queued.
+    let spool = scope_spool(config_dir.path());
+    let contents = std::fs::read_to_string(&spool).expect("spool file must exist");
+    assert!(contents.contains("scope_select"), "{contents}");
+    assert!(contents.contains("rules_scanned"), "{contents}");
+    // Privacy: the plan text never reaches the durable queue.
+    assert!(
+        !contents.contains("rotate the signing key"),
+        "raw plan text must never be spooled: {contents}"
+    );
+
+    drop(listener);
+}
+
+/// With a healthy endpoint the spooled event is eventually delivered by the
+/// uploader that outlives the command, and drained from the spool.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_rules_select_scope_event_is_delivered_when_endpoint_is_up() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_a_rule();
+
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/plan-governance/record")
+        .with_status(200)
+        .with_body(r#"{"recorded":1,"failed":0}"#)
+        .expect_at_least(1)
+        .create();
+
+    run_rules_select(config_dir.path(), repo.path(), &server.url());
+
+    // The uploader is a separate process that outlives the command; poll until
+    // it has delivered and drained the spool (or a generous timeout).
+    let spool = scope_spool(config_dir.path());
+    let mut drained = false;
+    for _ in 0..100 {
+        let queued = std::fs::read_to_string(&spool).unwrap_or_default();
+        if queued.trim().is_empty() {
+            drained = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    mock.assert();
+    assert!(drained, "the spool must drain once the event is delivered");
+}
+
+/// Opted out: no event is written to the spool, and nothing is sent.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_rules_select_does_not_spool_when_opted_out() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_a_rule();
+
+    std::fs::write(
+        config_dir.path().join("config.yaml"),
+        "api_url: http://127.0.0.1:1\n",
+    )
+    .unwrap();
+    cmd()
+        .args([
+            "rules",
+            "select",
+            "rotate the signing key",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--no-rank",
+        ])
+        .env("ACTUAL_CONFIG_DIR", config_dir.path())
+        .env("ACTUAL_NO_TELEMETRY", "1")
+        .assert()
+        .success();
+
+    assert!(
+        !scope_spool(config_dir.path()).exists(),
+        "an opted-out run must not write the spool"
+    );
+}
+
+/// A refused endpoint: delivery fails, but the event is retained in the spool
+/// for a later flush rather than dropped.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_rules_select_retains_spool_on_failed_delivery() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_a_rule();
+
+    // Port 1 refuses immediately, so the uploader fails fast without delivering.
+    run_rules_select(config_dir.path(), repo.path(), "http://127.0.0.1:1");
+
+    // Give the uploader a moment to attempt and fail, then confirm retention.
+    let spool = scope_spool(config_dir.path());
+    let mut retained = false;
+    for _ in 0..30 {
+        if std::fs::read_to_string(&spool)
+            .unwrap_or_default()
+            .contains("scope_select")
+        {
+            retained = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(retained, "a failed delivery must keep the event queued");
 }

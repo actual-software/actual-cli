@@ -152,7 +152,16 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" ")).with_paths(args.files.clone());
+    #[cfg(feature = "telemetry")]
+    let started = std::time::Instant::now();
     let run = run_selection(&resolved.index, &query, args)?;
+    #[cfg(feature = "telemetry")]
+    emit_scope_telemetry(
+        &root,
+        &resolved,
+        &run,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
 
     if args.json {
         println!(
@@ -182,6 +191,152 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
 pub struct SelectionRun {
     pub selection: Selection,
     pub runner: Option<String>,
+    /// The number of candidates the deterministic stage-1 prefilter produced,
+    /// BEFORE the selection is capped to `limit`. Captured here because the
+    /// selection itself only records the pre-cap count on the `NotNeeded`/`Applied`
+    /// stage-2 statuses; degraded statuses (`NotRequested`/`NoPlan`/`Unavailable`/
+    /// `Failed`) would otherwise lose it, and the capped `selected` length is a
+    /// wrong substitute for `stage1_candidates` telemetry.
+    pub stage1_candidates: usize,
+}
+
+/// Derive the scope-telemetry stage-2 signals from a [`Stage2`] status:
+/// `(stage2_invoked, stage2_status)`. The stage-1 candidate count is NOT derived
+/// here — it comes from `SelectionRun::stage1_candidates` (the true pre-cap
+/// prefilter length), so a degraded status never reports the capped selection.
+#[cfg(feature = "telemetry")]
+fn scope_stage_stats(stage2: &Stage2) -> (bool, &'static str) {
+    match stage2 {
+        Stage2::NotNeeded { .. } => (false, "not-needed"),
+        Stage2::NotRequested => (false, "not-requested"),
+        Stage2::NoPlan => (false, "no-plan"),
+        Stage2::Unavailable { .. } => (false, "unavailable"),
+        Stage2::Failed { .. } => (false, "failed"),
+        Stage2::Applied { .. } => (true, "applied"),
+    }
+}
+
+/// Publish one `scope_select` event for this run, fire-and-forget, through the
+/// PostHog proxy path. Honors the opt-out gate and never blocks or fails the
+/// command (a slow/failed send is swallowed) — same contract as the governance
+/// stream. Reads repo identity locally (no network beyond the git subprocess the
+/// rest of the pipeline already runs).
+#[cfg(feature = "telemetry")]
+fn emit_scope_telemetry(
+    root: &std::path::Path,
+    resolved: &ResolvedIndex,
+    run: &SelectionRun,
+    duration_ms: f64,
+) {
+    use crate::telemetry::scope::{new_scope_run_id, ScopeMetrics};
+
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    if crate::telemetry::opt_out::is_disabled(&cfg) {
+        return;
+    }
+
+    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
+    let commit = crate::analysis::cache::get_git_head(root).unwrap_or_default();
+    let repo_hash = crate::telemetry::identity::hash_repo_identity(&repo_url, &commit);
+    let repo_url_hash = crate::telemetry::identity::hash_repo_url(&repo_url);
+
+    let selection = &run.selection;
+    let selected = selection.selected.len() as u32;
+    let (stage2_invoked, stage2_status) = scope_stage_stats(&selection.stage2);
+
+    let metrics = ScopeMetrics {
+        scope_run_id: new_scope_run_id(),
+        rules_scanned: resolved.index.len() as u32,
+        // The true pre-cap prefilter count, never the capped selection length.
+        stage1_candidates: run.stage1_candidates as u32,
+        stage2_invoked,
+        stage2_status: stage2_status.to_string(),
+        selected,
+        cache_hit: matches!(resolved.source, IndexSource::Cached),
+        duration_ms,
+        runner: run.runner.clone(),
+        repo_hash: Some(repo_hash),
+        repo_url_hash: Some(repo_url_hash),
+        // Same local-only identity/timestamp envelope every governance event carries.
+        identity: crate::telemetry::identity::IdentityEnvelope::resolve(&cfg, &repo_url),
+    };
+
+    // `cfg` is no longer needed past this point; dispatch persists the event and
+    // hands delivery to a process that outlives this command.
+    drop(cfg);
+    dispatch_scope_event(metrics.to_event());
+}
+
+/// Spawn the detached uploader child process that drains the telemetry spool
+/// (APR-004).
+///
+/// A detached OS thread is not guaranteed to outlive `main`, so a background
+/// *thread* could be terminated before its send finished, silently dropping the
+/// event. A child *process* is reparented on the parent's exit rather than killed
+/// with it, so it is a delivery owner that survives this short-lived command. The
+/// parent does not wait for it — `spawn` returns immediately and the handle is
+/// dropped — so the selection result and the command's exit never depend on the
+/// send. `stdin`/`stdout`/`stderr` are detached to null so the child cannot touch
+/// the user's terminal.
+#[cfg(all(feature = "telemetry", not(test)))]
+fn spawn_uploader() {
+    spawn_uploader_from(std::env::current_exe());
+}
+
+/// Spawn the detached uploader for a resolved executable path, or do nothing
+/// when the path could not be resolved.
+///
+/// Split from [`spawn_uploader`] so the `current_exe()` failure branch — which
+/// cannot be provoked in situ — is exercised deterministically by passing an
+/// `Err` (and a bogus `Ok` path, whose `spawn` fails harmlessly) in tests.
+#[cfg(feature = "telemetry")]
+fn spawn_uploader_from(exe: std::io::Result<std::path::PathBuf>) {
+    let Ok(exe) = exe else {
+        return;
+    };
+    let _ = std::process::Command::new(exe)
+        .arg("__telemetry-flush")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Dispatch one scope event: persist it best-effort, then kick off delivery.
+///
+/// The event is first appended to the on-disk spool — an owner that survives this
+/// process — so an event the spool accepts is not lost even if delivery cannot
+/// complete before exit (APR-004). Spooling is best-effort: if the spool's
+/// coordination lock cannot be acquired the append fails open and the event is
+/// dropped rather than written unlocked (APR-007); that outcome is observed here,
+/// not silently ignored, and never blocks or fails the command. Delivery is then
+/// handed to a detached uploader process via [`spawn_uploader`], which the command
+/// does not wait for (APR-003). The `#[cfg(test)]` twin below captures into a
+/// thread-local instead, so in-process unit tests neither write the real spool nor
+/// spawn a child — the real path is exercised by the subprocess integration test
+/// and the spool's own unit tests.
+#[cfg(all(feature = "telemetry", not(test)))]
+fn dispatch_scope_event(event: crate::api::types::PlanGovernanceEvent) {
+    // Persist first: durability does not depend on the send completing.
+    observe_spool_result(crate::telemetry::spool::append(&event));
+    // Then hand delivery to a process that outlives this command.
+    spawn_uploader();
+}
+
+/// Record the outcome of a best-effort spool append so a dropped event is an
+/// observed event, not a silent one. A lock-unavailable fail-open (APR-007) is
+/// logged at debug and otherwise ignored — the event is intentionally dropped,
+/// never retried unlocked, and the command is never failed by telemetry.
+#[cfg(feature = "telemetry")]
+fn observe_spool_result(result: std::io::Result<()>) {
+    if let Err(e) = result {
+        tracing::debug!("scope telemetry: event not spooled, dropped (best-effort): {e}");
+    }
+}
+
+#[cfg(all(feature = "telemetry", test))]
+fn dispatch_scope_event(event: crate::api::types::PlanGovernanceEvent) {
+    tests::CAPTURED_SCOPE_EVENTS.with(|cell| cell.borrow_mut().push(event));
 }
 
 /// Run both stages, degrading to stage 1 whenever stage 2 cannot help.
@@ -196,6 +351,9 @@ fn run_selection(
     args: &RulesSelectArgs,
 ) -> Result<SelectionRun, ActualError> {
     let prefiltered = select::prefilter(index, query, args.limit, args.candidates);
+    // The pre-cap stage-1 count, preserved across every branch below (including
+    // the degraded ones) so telemetry reports it rather than the capped selection.
+    let stage1_candidates = prefiltered.len();
 
     // Resolving a runner probes the environment and can spawn a subprocess, so
     // it is skipped whenever stage 2 would not be asked anyway. `finish`
@@ -215,6 +373,7 @@ fn run_selection(
         return Ok(SelectionRun {
             selection: prefiltered.finish(stage2),
             runner: None,
+            stage1_candidates,
         });
     }
 
@@ -233,6 +392,7 @@ fn run_selection(
             return Ok(SelectionRun {
                 selection: prefiltered.finish(Stage2::Unavailable { reason }),
                 runner: None,
+                stage1_candidates,
             })
         }
     };
@@ -240,6 +400,7 @@ fn run_selection(
     Ok(SelectionRun {
         runner: Some(resolved_runner.label()),
         selection: rank_with(&resolved_runner, &prefiltered)?,
+        stage1_candidates,
     })
 }
 
@@ -741,6 +902,182 @@ mod tests {
     // through `Prefiltered::rank_with`.
     use crate::rules::scope::rank;
 
+    /// Both arms of the uploader's executable-path resolution: a failed
+    /// `current_exe()` (`Err`) must be a silent no-op, and a resolved path whose
+    /// `spawn` fails (a bogus executable) must be swallowed too — neither may
+    /// panic or block. This covers the error branch `spawn_uploader` cannot reach
+    /// in situ, `current_exe()` being effectively infallible in the live process.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_spawn_uploader_from_is_a_silent_noop_on_any_unresolvable_exe() {
+        // current_exe() failed: nothing is spawned, nothing panics.
+        spawn_uploader_from(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no current exe",
+        )));
+        // A resolved but non-executable path: spawn returns Err, which is
+        // swallowed exactly like the success case.
+        spawn_uploader_from(Ok(std::path::PathBuf::from(
+            "/nonexistent/actual-cli-uploader-bogus",
+        )));
+    }
+
+    /// Both outcomes of a best-effort spool append are observed without panicking
+    /// or failing the command: a success is a no-op, and a lock-unavailable
+    /// fail-open drop (APR-007) is recorded and swallowed.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_observe_spool_result_handles_success_and_dropped_event() {
+        observe_spool_result(Ok(()));
+        observe_spool_result(Err(std::io::Error::other(
+            "spool lock unavailable; dropping event (best-effort)",
+        )));
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_scope_stage_stats_maps_every_stage2_status() {
+        // `applied` is the only invoked case; the rest are skipped/degraded.
+        // The stage-1 candidate count is no longer derived here (it comes from
+        // SelectionRun::stage1_candidates), so this only maps invoked + status.
+        assert_eq!(
+            scope_stage_stats(&Stage2::Applied {
+                candidates: 30,
+                governs: 3,
+                related: 2,
+                unrelated: 1,
+                unjudged: 24,
+            }),
+            (true, "applied")
+        );
+        assert_eq!(
+            scope_stage_stats(&Stage2::NotNeeded { candidates: 5 }),
+            (false, "not-needed")
+        );
+        assert_eq!(
+            scope_stage_stats(&Stage2::NotRequested),
+            (false, "not-requested")
+        );
+        assert_eq!(scope_stage_stats(&Stage2::NoPlan), (false, "no-plan"));
+        assert_eq!(
+            scope_stage_stats(&Stage2::Unavailable {
+                reason: "no runner".into()
+            }),
+            (false, "unavailable")
+        );
+        assert_eq!(
+            scope_stage_stats(&Stage2::Failed {
+                reason: "bad json".into()
+            }),
+            (false, "failed")
+        );
+    }
+
+    // Hermetic capture for scope telemetry: `dispatch_scope_event`'s `#[cfg(test)]`
+    // twin pushes here instead of hitting the network, so no unit test ever egresses.
+    #[cfg(feature = "telemetry")]
+    thread_local! {
+        pub(super) static CAPTURED_SCOPE_EVENTS:
+            std::cell::RefCell<Vec<crate::api::types::PlanGovernanceEvent>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn with_captured_scope_events(f: impl FnOnce()) -> Vec<crate::api::types::PlanGovernanceEvent> {
+        CAPTURED_SCOPE_EVENTS.with(|cell| cell.borrow_mut().clear());
+        f();
+        CAPTURED_SCOPE_EVENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_opt_out_captures_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_tel = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 1.0)
+        });
+        assert!(events.is_empty(), "opted-out run must emit nothing");
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_emits_a_scope_select_event() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _tel_on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 42.0)
+        });
+        assert_eq!(events.len(), 1);
+        let props = events[0].properties.as_ref().unwrap();
+        assert_eq!(
+            events[0].event,
+            crate::api::types::PlanGovernanceEventName::PlanGovernanceScopeSelect
+        );
+        assert_eq!(props.command.as_deref(), Some("rules select"));
+        assert_eq!(props.duration_ms, Some(42.0));
+        assert!(props.scope_run_id.is_some());
+        assert!(props.rules_scanned.is_some());
+        assert!(props.stage2_status.is_some());
+    }
+
+    /// Privacy regression at the command layer: an event built over a plan that
+    /// carries a sentinel string must not carry that text — only counts, enums,
+    /// ids and hashes are ever handed off for delivery. (The non-blocking dispatch
+    /// and durable delivery are exercised end to end by the subprocess test in
+    /// `tests/cli_test.rs` and the spool's own unit tests.)
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_hands_off_no_raw_selection_text() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _tel_on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key SENTINEL-PLAN-TEXT"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 1.0)
+        });
+        assert_eq!(events.len(), 1);
+        assert!(
+            !serde_json::to_string(&events[0])
+                .unwrap()
+                .contains("SENTINEL-PLAN-TEXT"),
+            "raw plan text must never reach the wire"
+        );
+    }
+
     use tempfile::{tempdir, TempDir};
 
     use crate::rules::scope::eval::GoldenCase;
@@ -837,6 +1174,7 @@ mod tests {
             selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
                 .finish(Stage2::NotRequested),
             runner: None,
+            stage1_candidates: 0,
         };
         let out = render_select_panel(&index, &query, &run, true, 100);
         assert!(
@@ -1019,6 +1357,7 @@ mod tests {
             selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
                 .finish(Stage2::NotRequested),
             runner: None,
+            stage1_candidates: 0,
         };
         (index, query, run)
     }
@@ -1213,6 +1552,7 @@ mod tests {
             selection: select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES)
                 .finish(Stage2::NotRequested),
             runner: None,
+            stage1_candidates: 0,
         };
 
         let panel = render_select_panel(&index, &query, &run, true, 110);
@@ -1397,6 +1737,7 @@ mod tests {
                 },
             ),
             runner: None,
+            stage1_candidates: 0,
         };
 
         let panel = render_select_panel(&index, &query, &run, false, 90);
@@ -1590,6 +1931,144 @@ mod tests {
         assert!(run.runner.is_none());
     }
 
+    // The pre-cap stage-1 count is the same fact across every degraded stage-2
+    // status, so the four tests below share one shape: a run whose prefilter
+    // finds two candidates while the cap keeps one. `stage1_candidates` must
+    // report the two the prefilter found, never the one the cap kept -- the
+    // capped `selected` length is a wrong substitute (it would read `1`). Only
+    // `needs_rank()` runs reach these statuses; a run that already fits the cap
+    // is rewritten to `NotNeeded` by `finish`, so each case really does exercise
+    // candidates-greater-than-limit.
+
+    /// `--no-rank` (`Stage2::NotRequested`): the surplus is not ranked, but it
+    /// was still found.
+    #[test]
+    fn test_stage1_candidates_is_pre_cap_when_rank_not_requested() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        // Both documents match, so stage 1 finds two candidates and the cap of
+        // one leaves a surplus to rank -- the gap the count must not collapse.
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let run = run_selection(&index, &query, &select_args(root.path(), 1)).unwrap();
+
+        assert_eq!(run.selection.stage2, Stage2::NotRequested);
+        assert_eq!(run.stage1_candidates, 2);
+        assert_eq!(run.selection.selected.len(), 1);
+    }
+
+    /// A path-only query (`Stage2::NoPlan`): no prose to rank against, but the
+    /// paths still matched two documents.
+    #[test]
+    fn test_stage1_candidates_is_pre_cap_with_no_plan() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        // Empty plan, but one path into each cluster, so both documents match
+        // and the surplus survives to be counted.
+        let query = Query::new("").with_paths([
+            "services/auth/oauth/token.ts".to_string(),
+            "infra/terraform/main.tf".to_string(),
+        ]);
+        let args = RulesSelectArgs {
+            no_rank: false,
+            ..select_args(root.path(), 1)
+        };
+        let run = run_selection(&index, &query, &args).unwrap();
+
+        assert_eq!(run.selection.stage2, Stage2::NoPlan);
+        assert_eq!(run.stage1_candidates, 2);
+        assert_eq!(run.selection.selected.len(), 1);
+    }
+
+    /// No runner resolves (`Stage2::Unavailable`): the rank never ran, so the
+    /// only honest candidate count is the prefilter's.
+    #[test]
+    fn test_stage1_candidates_is_pre_cap_when_runner_unavailable() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        // The Anthropic probe reads only an env var, so no subprocess is spawned.
+        let _no_key = EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let args = RulesSelectArgs {
+            limit: 1,
+            no_rank: false,
+            runner: Some(crate::cli::args::RunnerChoice::AnthropicApi),
+            ..select_args(root.path(), 1)
+        };
+        let run = run_selection(&index, &query, &args).unwrap();
+
+        assert!(
+            matches!(run.selection.stage2, Stage2::Unavailable { .. }),
+            "{:?}",
+            run.selection.stage2
+        );
+        assert_eq!(run.stage1_candidates, 2);
+        assert_eq!(run.selection.selected.len(), 1);
+    }
+
+    /// The runner resolves but its answer fails validation (`Stage2::Failed`):
+    /// the prefilter count is still the true stage-1 total.
+    #[test]
+    #[cfg(unix)]
+    fn test_stage1_candidates_is_pre_cap_when_runner_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        // Authenticates, then answers with the wrong shape, so the rank fails
+        // validation rather than the transport -- a `Failed`, not `Unavailable`.
+        let bin = tempdir().unwrap();
+        let script = bin.path().join("fake-claude.sh");
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": {"nonsense": true},
+        })
+        .to_string();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let args = RulesSelectArgs {
+            limit: 1,
+            no_rank: false,
+            runner: Some(crate::cli::args::RunnerChoice::ClaudeCli),
+            ..select_args(root.path(), 1)
+        };
+        let run = run_selection(&index, &query, &args).unwrap();
+
+        assert!(
+            matches!(run.selection.stage2, Stage2::Failed { .. }),
+            "{:?}",
+            run.selection.stage2
+        );
+        assert_eq!(run.stage1_candidates, 2);
+        assert_eq!(run.selection.selected.len(), 1);
+    }
+
     /// A ranked selection prints the verdict and the ranker's own reason.
     /// A long stage-2 reason wraps rather than being truncated. It carries the
     /// only explanation of why the answer is degraded, so losing its tail to an
@@ -1645,9 +2124,11 @@ mod tests {
         )
         .unwrap();
 
+        let stage1_candidates = prefiltered.len();
         let run = SelectionRun {
             selection: prefiltered.apply(&verdicts),
             runner: Some("anthropic-api (claude-sonnet-4-6)".to_string()),
+            stage1_candidates,
         };
         let out = render_select_panel(&index, &query, &run, false, 110);
         assert!(out.contains("governs"));

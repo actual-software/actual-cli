@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-29
+
+### Added
+- Plan-governance and scope telemetry now carry a hashed identity + timestamp envelope so metrics can be sliced by user, org and repo without any raw identifier ever leaving the machine: `user_id_hash`/`org_id_hash`/`repo_id_hash` (unsalted, domain-separated SHA-256 of the logged-in ids), a synthetic repo-slug-derived `org_id` on anonymous runs, and `datetime_utc`. Ids are read locally (stored credentials + a config sticky-scope pin) with no network call on the hook path; the backend applies a secret pepper before anything reaches PostHog
+- `rules select` / the signals scope workflow now emit a `plan_governance_scope_select` event (narrative 6) describing each local-ADR selection — rules scanned, stage-1 candidates, whether stage 2 (the LLM rank) ran and its status/degradation, selected count, cache hit/miss, rank latency and runner — plus a random `scope_run_id` correlation id. Only counts, enums, ids and hashes are sent, never plan or rule text
+- `check-override` now emits a first-class `plan_governance_rule_override` event (narrative 4) instead of a plain completion, so overrides are cleanly separable and override rate has an unambiguous denominator. The override reason is captured privacy-preservingly as `reason_category`/`reason_len`/`reason_hash` — never the raw text
+- `plan-check --claude-hook` / `impl-check --claude-hook` completion events now carry `round_index`/`round_total` (narrative 5) for measuring revision-loop convergence
+
+### Changed
+- `PRIVACY.md` documents every new telemetry field; all remain opt-out and fire-and-forget, and no raw identifiers, plan text, diff content or reason text are ever sent
+
+### Fixed
+- `rules select` no longer waits on the scope-telemetry network send, and no longer risks losing the event when the process exits: the event is written to a small durable local spool (owner-readable only, bounded, never plan/rule text) and delivered by a separate best-effort uploader process that outlives the command, retrying on a later run until the proxy confirms it. A slow or unreachable endpoint can never delay, fail, or block the selection result or the command's exit, and an opted-out run still spools and sends nothing
+
 ## [0.5.0] - 2026-09-23
 
 ### Added

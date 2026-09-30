@@ -200,7 +200,7 @@ on first run. All fields are optional — missing fields use sensible defaults.
 | `exclude_categories` | list | — | ADR categories to always exclude |
 | `include_general` | boolean | — | Whether to include language-agnostic ADRs |
 | `max_per_framework` | integer | — | Max ADRs per framework |
-| `telemetry.enabled` | boolean | `true` | Enable/disable anonymous telemetry |
+| `telemetry.enabled` | boolean | `true` | Enable/disable telemetry (see [PRIVACY.md](../PRIVACY.md)) |
 
 ### Example config
 

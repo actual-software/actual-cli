@@ -10,3 +10,6 @@ pub mod metrics;
 pub mod opt_out;
 pub mod plan_governance;
 pub mod reporter;
+pub mod scope;
+#[cfg(feature = "telemetry")]
+pub mod spool;
