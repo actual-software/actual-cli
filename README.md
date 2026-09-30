@@ -277,10 +277,18 @@ overrides.
 
 ## Privacy & Telemetry
 
-Actual CLI collects minimal, anonymous telemetry (aggregate counters only —
-no PII, source code, or file paths). Telemetry can be disabled via
-environment variable (`ACTUAL_NO_TELEMETRY=1`), config file, or compile-time
-feature flag. See [PRIVACY.md](PRIVACY.md) for full details.
+Actual CLI collects minimal telemetry to improve the product. When you are
+logged in, plan-governance events carry **first-party, identity-linked** one-way
+hashes that Actual can attribute to your account. Logged-out events are
+**pseudonymous, not anonymous**: they still carry a persistent per-installation
+id (and repository-derived hashes), which Actual can tie back to an account once
+that installation has sent any logged-in event. Raw ids, source code, and file
+paths are never sent; the identity hashes are peppered before our third-party
+analytics processor so it cannot recover raw ids, though repository-derived
+hashes reaching it stay recomputable from a known repository. Telemetry can be
+disabled via environment variable (`ACTUAL_NO_TELEMETRY=1`), config file, or
+compile-time feature flag. See [PRIVACY.md](PRIVACY.md) for full details,
+including who can attribute the data and its retention.
 
 ## Contributing
 

@@ -756,6 +756,22 @@ fn repo_identity_hashes(root: &Path) -> (String, String) {
     )
 }
 
+/// Build the hashed identity + timestamp envelope for a governance event.
+///
+/// Reads only local sources — stored OAuth credentials and a config sticky-scope
+/// pin — so it never adds a network call on the hook path. When logged in, the
+/// user/org (and repo, if a sticky pin records the connected-repo id) ids are
+/// hashed; otherwise only a synthetic fallback org id (from the repo slug) is set.
+/// Never carries a raw identifier.
+#[cfg(feature = "telemetry")]
+fn identity_envelope(
+    cfg: &crate::config::types::Config,
+    repo_url: &str,
+) -> crate::telemetry::identity::IdentityEnvelope {
+    // Single local-only identity lookup shared with the scope-select emitter.
+    crate::telemetry::identity::IdentityEnvelope::resolve(cfg, repo_url)
+}
+
 /// Send a batch of already-built plan-governance events, fire-and-forget.
 ///
 /// Never blocks the caller past its own short internal timeout (see
@@ -817,6 +833,7 @@ pub(super) fn send_governance_events(
     decision: crate::api::types::PlanGovernanceDecision,
     exit_code: i32,
     violations: &[(&str, &str, crate::api::types::PlanGovernanceDecision)],
+    rounds: Option<(u32, u32)>,
 ) {
     use crate::telemetry::plan_governance::EventContext;
 
@@ -825,8 +842,15 @@ pub(super) fn send_governance_events(
         return;
     }
 
+    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
-    let ctx = EventContext::new(command).with_repo_hashes(repo_hash, repo_url_hash);
+    let identity = identity_envelope(&cfg, &repo_url);
+    let mut ctx = EventContext::new(command)
+        .with_repo_hashes(repo_hash, repo_url_hash)
+        .with_identity(identity);
+    if let Some((round_index, round_total)) = rounds {
+        ctx = ctx.with_rounds(round_index, round_total);
+    }
     // `duration_ms` uses the precise monotonic elapsed time; both events'
     // `timestamp` fields are stamped at send time rather than backdating the
     // started event to when the check actually began -- for this stream's
@@ -845,55 +869,66 @@ pub(super) fn send_governance_events(
     dispatch_governance_events(events);
 }
 
-/// Emit one `plan_governance_check_completed`-shaped event per rule an
-/// `actual check-override` call clears, with `command =
-/// "check-override"` distinguishing it from a real check run's
-/// completion — so "overrides recorded" (one of AK-678's candidate
-/// counters) is `count(command == "check-override")` in PostHog,
-/// without a new event name or schema field. `keys` are already
-/// `"<doc-slug>::<rule-id>"` strings (see `governance_session::key`),
-/// validated against the rule corpus by [`validate_override_rules`] before
-/// this is ever called.
+/// Emit one `plan_governance_rule_override` event per rule an
+/// `actual check-override` call clears — a first-class event name (not a
+/// `check_completed` with `command="check-override"`) so overrides are cleanly
+/// separable from real check completions and override rate has an unambiguous
+/// denominator. Each event also carries a privacy-preserving summary of the
+/// override `reason` (category/length/hash — never the text; see `reason_summary`
+/// and `PRIVACY.md`). `keys` are already `"<doc-slug>::<rule-id>"` strings (see
+/// `governance_session::key`), validated against the rule corpus by
+/// [`validate_override_rules`] before this is ever called.
 ///
 /// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
 /// `distinct_id()` — see `send_governance_events`'s doc comment for why
 /// that ordering matters.
 #[cfg(feature = "telemetry")]
-fn send_override_events(root: &Path, keys: &[String]) {
+fn send_override_events(root: &Path, keys: &[String], reason: &str) {
     use crate::api::types::{
         PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
         PlanGovernanceEventProperties,
     };
-    use crate::telemetry::plan_governance::distinct_id;
+    use crate::telemetry::plan_governance::{distinct_id, reason_summary};
 
     let cfg = crate::config::paths::load().unwrap_or_default();
     if crate::telemetry::opt_out::is_disabled(&cfg) {
         return;
     }
 
+    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
+    // Same hashed identity/timestamp envelope every other governance event carries.
+    let identity = identity_envelope(&cfg, &repo_url);
     let id = distinct_id();
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
+    // The reason is customer free text: only its length bucket, length, and a
+    // one-way hash are sent -- never the text itself (see `PRIVACY.md`).
+    let (reason_category, reason_len, reason_hash) = reason_summary(reason);
 
     let events: Vec<PlanGovernanceEvent> = keys
         .iter()
         .map(|key| {
             let (rule_source, rule_id) = key.split_once("::").unwrap_or((key.as_str(), ""));
+            let mut properties = PlanGovernanceEventProperties {
+                cli_version: Some(cli_version.clone()),
+                command: Some("check-override".to_string()),
+                rule_id: Some(rule_id.to_string()),
+                rule_source: Some(rule_source.to_string()),
+                decision: Some(PlanGovernanceDecision::Allow),
+                exit_code: Some(0),
+                repo_hash: Some(repo_hash.clone()),
+                repo_url_hash: Some(repo_url_hash.clone()),
+                reason_category: Some(reason_category),
+                reason_len: Some(reason_len),
+                reason_hash: reason_hash.clone(),
+                ..Default::default()
+            };
+            identity.apply_to(&mut properties);
             PlanGovernanceEvent {
-                event: PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+                event: PlanGovernanceEventName::PlanGovernanceRuleOverride,
                 distinct_id: id.clone(),
-                properties: Some(PlanGovernanceEventProperties {
-                    cli_version: Some(cli_version.clone()),
-                    command: Some("check-override".to_string()),
-                    rule_id: Some(rule_id.to_string()),
-                    rule_source: Some(rule_source.to_string()),
-                    decision: Some(PlanGovernanceDecision::Allow),
-                    exit_code: Some(0),
-                    repo_hash: Some(repo_hash.clone()),
-                    repo_url_hash: Some(repo_url_hash.clone()),
-                    ..Default::default()
-                }),
+                properties: Some(properties),
                 timestamp: Some(timestamp.clone()),
                 insert_id: crate::telemetry::plan_governance::new_insert_id(),
             }
@@ -929,6 +964,8 @@ pub(super) fn send_hook_governance_events(
     decision: crate::api::types::PlanGovernanceDecision,
     verdicts: &[CheckedRule],
     blocked: bool,
+    // `(round_index, round_total)` for the `--claude-hook` revision loop.
+    rounds: (u32, u32),
 ) {
     let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
         .iter()
@@ -944,7 +981,15 @@ pub(super) fn send_hook_governance_events(
     // The hook's own contract never returns a non-zero exit -- `exec()`
     // always returns `Ok(())` after `exec_hook` -- so `exit_code` is always
     // 0 here regardless of `decision`.
-    send_governance_events(command, root, started_at, decision, 0, &violations);
+    send_governance_events(
+        command,
+        root,
+        started_at,
+        decision,
+        0,
+        &violations,
+        Some(rounds),
+    );
 }
 
 /// True when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set in this
@@ -1112,7 +1157,7 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     validate_override_rules(&rules_dir, &args.rules)?;
     governance_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
     #[cfg(feature = "telemetry")]
-    send_override_events(&root, &args.rules);
+    send_override_events(&root, &args.rules, &args.reason);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", &args.session);
@@ -1439,6 +1484,7 @@ fn finish_verdicts(
                     crate::api::types::PlanGovernanceDecision::Warn,
                     &verdicts,
                     false,
+                    (session.loop_state(kind).rounds, run.max_rounds),
                 );
                 return;
             }
@@ -1461,6 +1507,7 @@ fn finish_verdicts(
             crate::api::types::PlanGovernanceDecision::Block,
             &verdicts,
             true,
+            (session.loop_state(kind).rounds, run.max_rounds),
         );
         return;
     }
@@ -1527,6 +1574,7 @@ fn finish_verdicts(
             decision,
             &verdicts,
             false,
+            (session.loop_state(kind).rounds, run.max_rounds),
         );
     }
 }
@@ -3264,6 +3312,36 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_finish_hook_completed_event_carries_round_counts() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let mut session = GovernanceSession::default();
+        let run = hook_run(check::ArtifactKind::Plan, Some("s-rounds"), rules.path(), 3);
+
+        let events = with_captured_plan_governance_events(|| {
+            finish_hook(
+                &run,
+                &mut session,
+                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+            );
+        });
+
+        let completed = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a completed event");
+        let props = completed.properties.as_ref().unwrap();
+        // One judged round completed, out of a 3-round budget.
+        assert_eq!(props.round_index, Some(1));
+        assert_eq!(props.round_total, Some(3));
+    }
+
     #[test]
     fn test_finish_hook_does_not_count_a_round_when_no_judge_ran() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -3457,9 +3535,11 @@ pub(crate) mod tests {
 
         assert_eq!(events.len(), 2);
         for event in &events {
+            // Overrides are a first-class event, distinct from check completions,
+            // so override rate has a clean denominator.
             assert_eq!(
                 event.event,
-                crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+                crate::api::types::PlanGovernanceEventName::PlanGovernanceRuleOverride
             );
             let props = event.properties.as_ref().unwrap();
             assert_eq!(props.command.as_deref(), Some("check-override"));
@@ -3468,6 +3548,27 @@ pub(crate) mod tests {
                 Some(crate::api::types::PlanGovernanceDecision::Allow)
             );
             assert_eq!(props.rule_source.as_deref(), Some("doc"));
+            // The reason rides only as privacy-preserving summaries.
+            assert_eq!(props.reason_len, Some("reviewed and accepted".len() as u32));
+            assert_eq!(
+                props.reason_category,
+                Some(crate::api::types::PlanGovernanceReasonCategory::Medium)
+            );
+            assert!(props.reason_hash.as_deref().is_some_and(|h| h.len() == 64));
+            // The identity envelope is applied to override events too: anonymous
+            // run (no creds) -> datetime_utc set, no user/org identity hashes.
+            assert!(
+                props.datetime_utc.as_deref().is_some_and(|s| !s.is_empty()),
+                "override event must carry datetime_utc"
+            );
+            assert!(props.user_id_hash.is_none());
+            assert!(props.org_id_hash.is_none());
+            // The raw reason text must never appear anywhere in the payload.
+            let serialized = serde_json::to_string(props).unwrap();
+            assert!(
+                !serialized.contains("reviewed and accepted"),
+                "raw override reason must never be serialized"
+            );
         }
         let rule_ids: std::collections::HashSet<_> = events
             .iter()
@@ -3482,6 +3583,94 @@ pub(crate) mod tests {
         let insert_ids: std::collections::HashSet<_> =
             events.iter().map(|e| e.insert_id.clone()).collect();
         assert_eq!(insert_ids.len(), 2);
+    }
+
+    /// Authenticated override: stored credentials make the override events carry
+    /// the hashed user/org identity (never the raw ids), same envelope the check
+    /// events use — the fix for APR-001 P2.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_authenticated_carries_identity_envelope() {
+        use crate::telemetry::identity::hash_identifier;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        // A logged-in session: resolve() reads this and hashes the ids.
+        std::fs::write(
+            home.path().join("credentials.yaml"),
+            "access_token: t\nrefresh_token: r\ntoken_type: Bearer\norganization_id: org-abc\nmember_id: m-1\nsubject: user-sub-xyz\n",
+        )
+        .unwrap();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-auth-override-1".to_string(),
+            rules: vec![governance_session::key("doc", "R-A-001")],
+            reason: "false positive: validated in middleware".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+
+        let events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+
+        assert_eq!(events.len(), 1);
+        let props = events[0].properties.as_ref().unwrap();
+        // Authenticated -> hashed user/org identity present, matching the CLI hash.
+        assert_eq!(
+            props.user_id_hash.as_deref(),
+            Some(hash_identifier("user", "user-sub-xyz").as_str())
+        );
+        assert_eq!(
+            props.org_id_hash.as_deref(),
+            Some(hash_identifier("org", "org-abc").as_str())
+        );
+        assert!(props.datetime_utc.as_deref().is_some_and(|s| !s.is_empty()));
+        // No fallback org id on an authenticated run.
+        assert_eq!(props.org_id, None);
+        // Raw ids and raw reason must never be serialized.
+        let serialized = serde_json::to_string(props).unwrap();
+        assert!(!serialized.contains("user-sub-xyz"));
+        assert!(!serialized.contains("org-abc"));
+        assert!(!serialized.contains("false positive"));
+    }
+
+    /// Every plan/impl-check governance event carries the identity + timestamp
+    /// envelope. In an isolated config there are no stored credentials, so the
+    /// run is anonymous: `datetime_utc` is always stamped, and no raw-id hashes
+    /// (and certainly no raw ids) appear.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_send_governance_events_stamps_identity_envelope() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let events = with_captured_plan_governance_events(|| {
+            send_governance_events(
+                "plan-check",
+                repo.path(),
+                std::time::Instant::now(),
+                crate::api::types::PlanGovernanceDecision::Allow,
+                0,
+                &[],
+                None,
+            );
+        });
+
+        // started + completed.
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            let props = event.properties.as_ref().unwrap();
+            assert!(
+                props.datetime_utc.as_deref().is_some_and(|s| !s.is_empty()),
+                "every governance event must carry datetime_utc"
+            );
+            // Anonymous run (no creds in the isolated config dir).
+            assert!(props.user_id_hash.is_none());
+            assert!(props.org_id_hash.is_none());
+        }
     }
 
     /// The proxy rejects a batch over 100 events whole (see

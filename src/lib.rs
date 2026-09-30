@@ -47,6 +47,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::PlanCheck(args) => cli::commands::plan_check::exec(args),
         Command::PlanCheckOverride(args) => cli::commands::check_engine::exec_override(args),
         Command::ImplCheck(args) => cli::commands::impl_check::exec(args),
+        Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
     }
 }
 

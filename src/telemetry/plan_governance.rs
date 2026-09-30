@@ -15,6 +15,7 @@ use crate::api::types::{
 };
 use crate::config::types::Config;
 use crate::rules::check::Verdict;
+use crate::telemetry::identity::IdentityEnvelope;
 use crate::telemetry::opt_out;
 use crate::telemetry::reporter::SERVICE_KEY;
 
@@ -109,6 +110,12 @@ pub struct EventContext {
     pub command: String,
     pub repo_hash: Option<String>,
     pub repo_url_hash: Option<String>,
+    /// Identity + timestamp envelope (hashed user/org/repo ids, or a synthetic
+    /// fallback org id when anonymous). Never carries raw identifiers.
+    pub identity: IdentityEnvelope,
+    /// `--claude-hook` revision-loop position `(round_index, round_total)`, set
+    /// only on the hook path; `None` for direct/CLI runs, which have no loop.
+    pub rounds: Option<(u32, u32)>,
 }
 
 impl EventContext {
@@ -119,6 +126,11 @@ impl EventContext {
             command: command.into(),
             repo_hash: None,
             repo_url_hash: None,
+            identity: IdentityEnvelope {
+                datetime_utc: IdentityEnvelope::now_utc(),
+                ..Default::default()
+            },
+            rounds: None,
         }
     }
 
@@ -128,14 +140,31 @@ impl EventContext {
         self
     }
 
+    /// Attach the hashed identity envelope (user/org/repo hashes or fallback org).
+    pub fn with_identity(mut self, identity: IdentityEnvelope) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// Record the `--claude-hook` revision-loop position on this context, so the
+    /// completed event can report round-loop convergence.
+    pub fn with_rounds(mut self, round_index: u32, round_total: u32) -> Self {
+        self.rounds = Some((round_index, round_total));
+        self
+    }
+
     fn base_properties(&self) -> PlanGovernanceEventProperties {
-        PlanGovernanceEventProperties {
+        let mut props = PlanGovernanceEventProperties {
             cli_version: Some(self.cli_version.clone()),
             command: Some(self.command.clone()),
             repo_hash: self.repo_hash.clone(),
             repo_url_hash: self.repo_url_hash.clone(),
             ..Default::default()
-        }
+        };
+        // Single source of truth for the identity/timestamp envelope, shared with
+        // the scope-select and rule-override events so none can bypass it.
+        self.identity.apply_to(&mut props);
+        props
     }
 
     fn timestamp() -> String {
@@ -162,6 +191,10 @@ impl EventContext {
         properties.decision = Some(decision);
         properties.duration_ms = Some(duration_ms);
         properties.exit_code = Some(exit_code);
+        if let Some((round_index, round_total)) = self.rounds {
+            properties.round_index = Some(round_index);
+            properties.round_total = Some(round_total);
+        }
         PlanGovernanceEvent {
             event: PlanGovernanceEventName::PlanGovernanceCheckCompleted,
             distinct_id: self.distinct_id.clone(),
@@ -204,6 +237,93 @@ pub fn new_insert_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// A privacy-preserving summary of an override reason: its length bucket, its
+/// character length, and an unsalted SHA-256 of the text. **The reason text
+/// itself is never returned or sent** — only these summaries, so identical
+/// reasons can be grouped without exporting customer decision text (see
+/// `PRIVACY.md`). Returns `hash = None` for an empty reason.
+pub fn reason_summary(
+    reason: &str,
+) -> (
+    crate::api::types::PlanGovernanceReasonCategory,
+    u32,
+    Option<String>,
+) {
+    use crate::api::types::PlanGovernanceReasonCategory as Cat;
+    use sha2::{Digest, Sha256};
+
+    let trimmed = reason.trim();
+    let len = trimmed.chars().count() as u32;
+    let category = match len {
+        0 => Cat::Empty,
+        1..=19 => Cat::Short,
+        20..=99 => Cat::Medium,
+        _ => Cat::Long,
+    };
+    let hash = if trimmed.is_empty() {
+        None
+    } else {
+        let mut hasher = Sha256::new();
+        hasher.update(trimmed.as_bytes());
+        Some(format!("{:x}", hasher.finalize()))
+    };
+    (category, len, hash)
+}
+
+/// The outcome of one delivery attempt, for callers that must know whether a
+/// batch was accepted — chiefly the scope-telemetry spool, which removes events
+/// from its durable queue only once they are confirmed delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Every event in the batch was recorded server-side.
+    Delivered,
+    /// Nothing was attempted — the batch was empty or telemetry is opted out.
+    Skipped,
+    /// The send was attempted but did not fully succeed (transport error,
+    /// client build failure, or a server-side partial/total rejection). The
+    /// caller should keep the batch for a later retry; the proxy deduplicates on
+    /// `insert_id`, so retrying an event that did land is harmless.
+    Failed,
+}
+
+/// Attempt to deliver a batch and report the outcome. The single place the
+/// governance/scope transport lives — same short timeouts, service key and
+/// opt-out gate for every caller (fire-and-forget sends and the durable spool
+/// alike), so no path can drift onto a different contract.
+pub(crate) async fn deliver_events(
+    events: Vec<PlanGovernanceEvent>,
+    config: &Config,
+    api_url: &str,
+) -> Delivery {
+    if events.is_empty() || opt_out::is_disabled(config) {
+        return Delivery::Skipped;
+    }
+
+    let Ok(client) = ActualApiClient::new_with_timeout(api_url, SEND_TIMEOUT, SEND_CONNECT_TIMEOUT)
+    else {
+        return Delivery::Failed;
+    };
+    let request = PlanGovernanceEventRequest { events };
+    match client
+        .post_plan_governance_events(&request, SERVICE_KEY)
+        .await
+    {
+        Ok(resp) if resp.failed == 0 => Delivery::Delivered,
+        Ok(resp) => {
+            tracing::debug!(
+                "plan-governance telemetry: {} of {} events failed server-side",
+                resp.failed,
+                resp.recorded + resp.failed
+            );
+            Delivery::Failed
+        }
+        Err(e) => {
+            tracing::debug!("plan-governance telemetry: {e}");
+            Delivery::Failed
+        }
+    }
+}
+
 /// Send a batch of plan-governance events, fire-and-forget.
 ///
 /// Honors both runtime opt-outs (env var, config) identically to the sync
@@ -211,29 +331,7 @@ pub fn new_insert_id() -> String {
 /// is logged at debug level and discarded, so it can never fail or slow a
 /// plan-check run. No-op on an empty batch.
 pub async fn send_events(events: Vec<PlanGovernanceEvent>, config: &Config, api_url: &str) {
-    if events.is_empty() || opt_out::is_disabled(config) {
-        return;
-    }
-
-    let Ok(client) = ActualApiClient::new_with_timeout(api_url, SEND_TIMEOUT, SEND_CONNECT_TIMEOUT)
-    else {
-        return;
-    };
-    let request = PlanGovernanceEventRequest { events };
-    match client
-        .post_plan_governance_events(&request, SERVICE_KEY)
-        .await
-    {
-        Ok(resp) if resp.failed > 0 => {
-            tracing::debug!(
-                "plan-governance telemetry: {} of {} events failed server-side",
-                resp.failed,
-                resp.recorded + resp.failed
-            );
-        }
-        Err(e) => tracing::debug!("plan-governance telemetry: {e}"),
-        _ => {}
-    }
+    let _ = deliver_events(events, config, api_url).await;
 }
 
 #[cfg(test)]
@@ -286,6 +384,47 @@ mod tests {
             rule_decision(Verdict::RequiresDecision, false),
             PlanGovernanceDecision::Warn
         );
+    }
+
+    // --- reason_summary ---
+
+    #[test]
+    fn test_reason_summary_empty_is_empty_category_no_hash() {
+        use crate::api::types::PlanGovernanceReasonCategory as Cat;
+        let (cat, len, hash) = reason_summary("   ");
+        assert_eq!(cat, Cat::Empty);
+        assert_eq!(len, 0);
+        assert_eq!(hash, None, "an empty reason must not produce a hash");
+    }
+
+    #[test]
+    fn test_reason_summary_length_buckets() {
+        use crate::api::types::PlanGovernanceReasonCategory as Cat;
+        assert_eq!(reason_summary("ok").0, Cat::Short);
+        assert_eq!(reason_summary(&"x".repeat(50)).0, Cat::Medium);
+        assert_eq!(reason_summary(&"x".repeat(200)).0, Cat::Long);
+    }
+
+    #[test]
+    fn test_reason_summary_hash_is_deterministic_64hex_and_hides_text() {
+        let reason = "false positive: the token is validated in middleware";
+        let (_, len, hash) = reason_summary(reason);
+        let hash = hash.expect("a non-empty reason must hash");
+        assert_eq!(hash.len(), 64);
+        assert!(hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        // Deterministic and length is the char count.
+        assert_eq!(reason_summary(reason).2.unwrap(), hash);
+        assert_eq!(len, reason.chars().count() as u32);
+        // The hash never contains the raw text.
+        assert!(!hash.contains("token"));
+    }
+
+    #[test]
+    fn test_reason_summary_trims_before_hashing() {
+        // Leading/trailing whitespace must not change the identity of a reason.
+        assert_eq!(reason_summary("  same  ").2, reason_summary("same").2);
     }
 
     // --- distinct_id ---
@@ -360,6 +499,14 @@ mod tests {
             command: "plan-check".to_string(),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            identity: IdentityEnvelope {
+                user_id_hash: Some("c".repeat(64)),
+                org_id_hash: Some("d".repeat(64)),
+                repo_id_hash: Some("e".repeat(64)),
+                org_id: None,
+                datetime_utc: "2026-09-28T00:00:00+00:00".to_string(),
+            },
+            rounds: None,
         }
     }
 
@@ -428,6 +575,25 @@ mod tests {
     }
 
     #[test]
+    fn test_events_carry_identity_envelope_and_no_raw_ids() {
+        let ctx = context();
+        for event in [
+            ctx.started_event(),
+            ctx.completed_event(PlanGovernanceDecision::Allow, 1.0, 0),
+            ctx.violation_event("R-A-001", "src", PlanGovernanceDecision::Warn),
+        ] {
+            let props = event.properties.unwrap();
+            assert_eq!(props.user_id_hash.as_deref(), Some("c".repeat(64).as_str()));
+            assert_eq!(props.org_id_hash.as_deref(), Some("d".repeat(64).as_str()));
+            assert_eq!(props.repo_id_hash.as_deref(), Some("e".repeat(64).as_str()));
+            assert_eq!(
+                props.datetime_utc.as_deref(),
+                Some("2026-09-28T00:00:00+00:00")
+            );
+        }
+    }
+
+    #[test]
     fn test_completed_event_carries_decision_duration_exit_code() {
         let ctx = context();
         let event = ctx.completed_event(PlanGovernanceDecision::Block, 42.5, 1);
@@ -439,6 +605,22 @@ mod tests {
         assert_eq!(props.decision, Some(PlanGovernanceDecision::Block));
         assert_eq!(props.duration_ms, Some(42.5));
         assert_eq!(props.exit_code, Some(1));
+        // No rounds set on the base context -> the hook-only fields are absent.
+        assert_eq!(props.round_index, None);
+        assert_eq!(props.round_total, None);
+    }
+
+    #[test]
+    fn test_completed_event_carries_round_counts_when_set() {
+        let ctx = context().with_rounds(2, 5);
+        let event = ctx.completed_event(PlanGovernanceDecision::Warn, 10.0, 0);
+        let props = event.properties.unwrap();
+        assert_eq!(props.round_index, Some(2));
+        assert_eq!(props.round_total, Some(5));
+        // Rounds are a completion dimension only -- the started event omits them.
+        let started = ctx.started_event().properties.unwrap();
+        assert_eq!(started.round_index, None);
+        assert_eq!(started.round_total, None);
     }
 
     #[test]

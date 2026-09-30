@@ -410,6 +410,14 @@ pub enum Command {
     /// command from a separate, ordinary terminal instead.
     #[command(name = "check-override", visible_alias = "plan-check-override")]
     PlanCheckOverride(PlanCheckOverrideArgs),
+
+    /// Internal: drain the scope-telemetry spool once, then exit.
+    ///
+    /// Spawned as a detached child process by `rules select` so telemetry
+    /// delivery has an owner that survives the parent command (APR-004). Hidden
+    /// from `--help`; not a user-facing command.
+    #[command(name = "__telemetry-flush", hide = true)]
+    TelemetryFlush,
 }
 
 /// Arguments for the `advisor` command

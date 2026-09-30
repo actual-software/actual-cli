@@ -233,15 +233,23 @@ pub struct TelemetryMetric {
 // is the correct place to enforce the payload shape on this side of the
 // wire.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanGovernanceEventName {
     PlanGovernanceCheckStarted,
     PlanGovernanceCheckCompleted,
     PlanGovernanceRuleViolation,
+    /// One rule cleared by an explicit `actual check-override`. A first-class
+    /// event (rather than a `check_completed` with `command="check-override"`) so
+    /// overrides are cleanly separable from real check completions.
+    PlanGovernanceRuleOverride,
+    /// One local-ADR scope-selection run (`rules select` / the signals workflow).
+    /// Carries a `scope_run_id` so a selection can later be joined to the
+    /// governance decision it produced.
+    PlanGovernanceScopeSelect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanGovernanceDecision {
     Allow,
@@ -249,7 +257,18 @@ pub enum PlanGovernanceDecision {
     Block,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+/// A coarse, privacy-preserving bucket for an override reason's substance. Derived
+/// from the reason's length only -- it never carries the reason text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanGovernanceReasonCategory {
+    Empty,
+    Short,
+    Medium,
+    Long,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlanGovernanceEventProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,15 +285,83 @@ pub struct PlanGovernanceEventProperties {
     pub duration_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// `--claude-hook` revision loop: which round this completion is (1-based,
+    /// counting judged rounds), for measuring round-loop convergence. Only set on
+    /// the hook path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_index: Option<u32>,
+    /// `--claude-hook` revision loop: the maximum rounds allowed for this run
+    /// (`max_rounds`). Only set on the hook path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_total: Option<u32>,
     /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_hash` tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_hash: Option<String>,
     /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_url_hash` tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_url_hash: Option<String>,
+    // --- Identity envelope (see `crate::telemetry::identity::IdentityEnvelope`) ---
+    // Domain-separated, unsalted SHA-256 of the raw ids (never the raw ids). The
+    // api-service proxy peppers these (HMAC) before forwarding to PostHog.
+    /// `SHA-256("user:"+subject)`, present on authenticated runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id_hash: Option<String>,
+    /// `SHA-256("org:"+organization_id)`, present on authenticated runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id_hash: Option<String>,
+    /// `SHA-256("repo:"+repo_unique_id)`, present when the connected-repo id is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id_hash: Option<String>,
+    /// Synthetic fallback org id (a UUID derived from the repo slug), present only
+    /// on unauthenticated runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// RFC3339 UTC timestamp for this event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datetime_utc: Option<String>,
+    // --- Override reason (rule_override events only) ---
+    // The override reason is customer free text and never leaves the machine raw;
+    // only these privacy-preserving summaries are sent.
+    /// Coarse length bucket of the override reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_category: Option<PlanGovernanceReasonCategory>,
+    /// Character length of the override reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_len: Option<u32>,
+    /// Unsalted SHA-256 hex of the override reason (peppered server-side before
+    /// PostHog). Lets identical reasons be grouped without exposing the text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_hash: Option<String>,
+    // --- Scope selection (scope_select events) ---
+    /// A random per-run correlation id, shared with the governance decision the
+    /// selection feeds. Not derived from any customer data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_run_id: Option<String>,
+    /// Number of local rule documents scanned (the index size).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules_scanned: Option<u32>,
+    /// Stage-1 (lexical prefilter) candidate count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage1_candidates: Option<u32>,
+    /// Whether stage 2 (the LLM rank) actually shaped this selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage2_invoked: Option<bool>,
+    /// Stage-2 status / degradation reason (e.g. `applied`, `not-needed`,
+    /// `not-requested`, `no-plan`, `unavailable`, `failed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage2_status: Option<String>,
+    /// How many rules the selection ultimately kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<u32>,
+    /// Whether the scope index was served from cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
+    /// The rank runner label, when stage 2 ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlanGovernanceEvent {
     pub event: PlanGovernanceEventName,
@@ -1305,6 +1392,7 @@ mod tests {
             exit_code: Some(1),
             repo_hash: Some("a".repeat(64)),
             repo_url_hash: Some("b".repeat(64)),
+            ..Default::default()
         };
         let value = serde_json::to_value(&props).unwrap();
         assert_eq!(value["cli_version"], "1.2.3");
