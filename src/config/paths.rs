@@ -917,7 +917,7 @@ mod tests {
         let config_file = dir.path().join("config.yaml");
 
         // Write invalid UTF-8 bytes
-        std::fs::write(&config_file, &[0xFF, 0xFE, 0x00, 0x01]).unwrap();
+        std::fs::write(&config_file, [0xFF, 0xFE, 0x00, 0x01]).unwrap();
 
         let err = load_from(&config_file).unwrap_err();
         assert!(

@@ -1538,7 +1538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_closed_semaphore_returns_internal_error() {
-        let projects = vec![make_project("solo")];
+        let projects = [make_project("solo")];
         let adrs = vec![make_adr("adr-001")];
 
         // Use a semaphore with 0 permits and close it immediately so that

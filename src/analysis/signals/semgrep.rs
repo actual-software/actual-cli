@@ -649,7 +649,7 @@ mod tests {
         let files = vec![(PathBuf::from(""), "content".to_string())];
         let (_temp_dir, file_map) = SemgrepScanner::prepare_temp_files(&files).unwrap();
         assert_eq!(file_map.len(), 1);
-        for (temp_path, _) in &file_map {
+        for temp_path in file_map.keys() {
             assert_eq!(temp_path.file_name().unwrap(), "file.txt");
         }
     }
@@ -666,7 +666,7 @@ mod tests {
         let content = "function hello() { return 42; }";
         let files = vec![(PathBuf::from("test.js"), content.to_string())];
         let (_temp_dir, file_map) = SemgrepScanner::prepare_temp_files(&files).unwrap();
-        for (temp_path, _) in &file_map {
+        for temp_path in file_map.keys() {
             let read_back = std::fs::read_to_string(temp_path).unwrap();
             assert_eq!(read_back, content);
         }

@@ -316,8 +316,7 @@ mod tests {
             3
         );
         assert_eq!(
-            ActualError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "test"))
-                .exit_code(),
+            ActualError::IoError(std::io::Error::other("test")).exit_code(),
             5
         );
         assert_eq!(
@@ -502,8 +501,7 @@ mod tests {
             "expected 'empty content' in: {msg}"
         );
 
-        let msg = ActualError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
-            .to_string();
+        let msg = ActualError::IoError(std::io::Error::other("disk full")).to_string();
         assert!(msg.contains("I/O error"), "expected 'I/O error' in: {msg}");
         assert!(msg.contains("disk full"), "expected 'disk full' in: {msg}");
 

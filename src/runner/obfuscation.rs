@@ -156,7 +156,7 @@ mod tests {
         // so it won't surface in `strings` output.
         for &b in KEY {
             assert!(
-                b < 0x20 || b > 0x7E,
+                !(0x20..=0x7E).contains(&b),
                 "key byte 0x{b:02X} is printable ASCII — change it"
             );
         }
