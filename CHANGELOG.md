@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-01
+
+### Fixed
+- npm publishing: the platform packages (`@actualai/actual-{darwin,linux}-{arm64,x64}`) now declare `repository` metadata, which OIDC trusted publishing requires to generate and validate build provenance. Without it the 0.6.1 npm publish was rejected (`E422`, provenance repository mismatch), so 0.6.1 never reached npm. No functional changes to the CLI itself since 0.6.0.
+
 ## [0.6.1] - 2026-10-01
 
 ### Fixed
