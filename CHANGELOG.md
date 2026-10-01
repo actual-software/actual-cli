@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-01
+
+### Fixed
+- Release pipeline: npm packages are now published correctly via OIDC trusted publishing. 0.6.0 shipped to GitHub Releases and Homebrew, but its npm publish failed (CI installed an npm version incompatible with the runner's Node), so 0.6.0 never reached npm. There are no functional changes to the CLI itself since 0.6.0.
+
 ## [0.6.0] - 2026-10-01
 
 ### Added
