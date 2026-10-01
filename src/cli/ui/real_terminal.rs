@@ -107,26 +107,26 @@ mod tests {
     #[test]
     fn confirm_returns_true_for_yes_input() {
         let mock = MockTerminal::new(vec!["y"]);
-        assert_eq!(mock.confirm("proceed?").unwrap(), true);
+        assert!(mock.confirm("proceed?").unwrap());
     }
 
     #[test]
     fn confirm_returns_true_for_yes_long_input() {
         let mock = MockTerminal::new(vec!["yes"]);
-        assert_eq!(mock.confirm("proceed?").unwrap(), true);
+        assert!(mock.confirm("proceed?").unwrap());
     }
 
     #[test]
     fn confirm_returns_false_for_no_input() {
         let mock = MockTerminal::new(vec!["n"]);
-        assert_eq!(mock.confirm("proceed?").unwrap(), false);
+        assert!(!mock.confirm("proceed?").unwrap());
     }
 
     #[test]
     fn confirm_returns_false_for_unrecognised_input() {
         // Unrecognised input defaults to false (safe rejection).
         let mock = MockTerminal::new(vec!["maybe"]);
-        assert_eq!(mock.confirm("proceed?").unwrap(), false);
+        assert!(!mock.confirm("proceed?").unwrap());
     }
 
     #[test]

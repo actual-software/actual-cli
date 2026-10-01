@@ -586,10 +586,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("model-cache.yaml");
 
-        let mut cache = ModelCacheFile::default();
-        cache.openai = ProviderCache {
-            fetched_at: Some(Utc::now()),
-            models: vec!["gpt-4o".to_string(), "gpt-5.2".to_string()],
+        let cache = ModelCacheFile {
+            openai: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["gpt-4o".to_string(), "gpt-5.2".to_string()],
+            },
+            ..Default::default()
         };
 
         save_cache_file(&path, &cache);
@@ -1299,10 +1301,12 @@ mod tests {
         let path = dir.path().join("model-cache.yaml");
 
         // Write only the openai section
-        let mut cache = ModelCacheFile::default();
-        cache.openai = ProviderCache {
-            fetched_at: Some(Utc::now()),
-            models: vec!["gpt-4o".to_string()],
+        let cache = ModelCacheFile {
+            openai: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["gpt-4o".to_string()],
+            },
+            ..Default::default()
         };
         save_cache_file(&path, &cache);
 

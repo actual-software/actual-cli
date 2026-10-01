@@ -851,7 +851,7 @@ mod tests {
     fn test_runtime_build_error_helper() {
         // Exercises the runtime_build_error() conversion function, which is the
         // only reachable coverage of that code path without OS-level trickery.
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic error");
+        let io_err = std::io::Error::other("synthetic error");
         let err = runtime_build_error(io_err);
         assert!(matches!(
             err,

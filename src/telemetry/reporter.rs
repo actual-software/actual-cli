@@ -51,6 +51,10 @@ async fn try_report_metrics(
 
 #[cfg(test)]
 mod tests {
+    // These async tests hold `ENV_MUTEX` (a std Mutex) across `.await` points on
+    // purpose: it is an env-serialization latch held across await points by design,
+    // serializing tests that mutate process-global env vars so they never race.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
     use crate::config::types::TelemetryConfig;
     use crate::testutil::{EnvGuard, ENV_MUTEX};

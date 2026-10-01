@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn cmd() -> Command {
-    Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"))
+    assert_cmd::cargo::cargo_bin_cmd!("actual")
 }
 
 #[test]

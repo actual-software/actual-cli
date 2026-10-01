@@ -2062,7 +2062,7 @@ mod tests {
     #[test]
     fn test_resolve_cwd_returns_path() {
         let cwd = resolve_cwd();
-        assert!(cwd.is_absolute() || cwd == std::path::PathBuf::from("."));
+        assert!(cwd.is_absolute() || cwd == std::path::Path::new("."));
     }
 
     #[cfg(unix)]
@@ -6335,7 +6335,7 @@ mod tests {
 
         let result =
             handle_confirm_action(ConfirmAction::Accept, &mut analysis, &mut pipeline, &term);
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -6391,7 +6391,7 @@ mod tests {
         let result =
             handle_confirm_action(ConfirmAction::Change, &mut analysis, &mut pipeline, &term);
         // Change returns Ok(false) to continue the loop
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
 
         // Verify selection was updated to Rust
         let sel = analysis.projects[0].selection.as_ref().unwrap();

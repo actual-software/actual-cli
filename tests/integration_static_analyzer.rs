@@ -565,8 +565,8 @@ fn empty_directory() {
 fn binary_files_only() {
     let dir = tempfile::tempdir().unwrap();
     // Write some binary content
-    std::fs::write(dir.path().join("image.png"), &[0x89, 0x50, 0x4E, 0x47]).unwrap();
-    std::fs::write(dir.path().join("data.bin"), &[0x00, 0xFF, 0xFE, 0xFD]).unwrap();
+    std::fs::write(dir.path().join("image.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
+    std::fs::write(dir.path().join("data.bin"), [0x00, 0xFF, 0xFE, 0xFD]).unwrap();
 
     let result = run_static_analysis(dir.path()).unwrap();
 

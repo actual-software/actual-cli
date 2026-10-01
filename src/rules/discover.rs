@@ -620,10 +620,7 @@ mod tests {
         let mut errors: Vec<RuleFileError> = Vec::new();
         let files = collect_rule_files(
             Path::new("/x/.actual/rules"),
-            std::iter::once(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "entry vanished",
-            ))),
+            std::iter::once(Err(std::io::Error::other("entry vanished"))),
             &mut errors,
         );
         assert!(files.is_empty());

@@ -66,8 +66,7 @@ mod tests {
 
     #[test]
     fn normalize_size_returns_fallback_on_error() {
-        let err: Result<(u16, u16), io::Error> =
-            Err(io::Error::new(io::ErrorKind::Other, "no tty"));
+        let err: Result<(u16, u16), io::Error> = Err(io::Error::other("no tty"));
         assert_eq!(normalize_size(err), (24, 80));
     }
 }

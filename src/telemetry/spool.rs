@@ -315,6 +315,10 @@ pub(crate) async fn flush(config: &Config, api_url: &str) -> Delivery {
 
 #[cfg(test)]
 mod tests {
+    // These async tests hold `ENV_MUTEX` (a std Mutex) across `.await` points on
+    // purpose: it is an env-serialization latch held across await points by design,
+    // serializing tests that mutate process-global env vars so they never race.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
     use crate::api::types::{PlanGovernanceEventName, PlanGovernanceEventProperties};
     use crate::config::types::{Config, TelemetryConfig};
@@ -877,6 +881,10 @@ mod tests {
         }
         let live: Vec<String> = (0..40).map(|i| format!("live-{i}")).collect();
 
+        // Each spawned thread needs its own owned id (`thread::spawn` is `'static`),
+        // and `live` is reused in the assertion below, so the clone is required —
+        // clippy's redundant_iter_cloned suggestion would not compile here.
+        #[allow(clippy::redundant_iter_cloned)]
         let handles: Vec<_> = live
             .iter()
             .cloned()

@@ -627,10 +627,12 @@ mod tests {
 
     #[test]
     fn test_get_telemetry_enabled() {
-        let mut config = Config::default();
-        config.telemetry = Some(TelemetryConfig {
-            enabled: Some(true),
-        });
+        let config = Config {
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
         assert_eq!(get(&config, "telemetry.enabled").unwrap(), "true");
     }
 
@@ -660,18 +662,22 @@ mod tests {
 
     #[test]
     fn test_set_telemetry_enabled_updates_existing() {
-        let mut config = Config::default();
-        config.telemetry = Some(TelemetryConfig {
-            enabled: Some(true),
-        });
+        let mut config = Config {
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
         set(&mut config, "telemetry.enabled", "false").unwrap();
         assert_eq!(config.telemetry.unwrap().enabled, Some(false));
     }
 
     #[test]
     fn test_get_max_budget_usd() {
-        let mut config = Config::default();
-        config.max_budget_usd = Some(1.25);
+        let config = Config {
+            max_budget_usd: Some(1.25),
+            ..Default::default()
+        };
         assert_eq!(get(&config, "max_budget_usd").unwrap(), "1.25");
     }
 
@@ -701,8 +707,10 @@ mod tests {
 
     #[test]
     fn test_get_telemetry_enabled_none_in_struct() {
-        let mut config = Config::default();
-        config.telemetry = Some(TelemetryConfig { enabled: None });
+        let config = Config {
+            telemetry: Some(TelemetryConfig { enabled: None }),
+            ..Default::default()
+        };
         let err = get(&config, "telemetry.enabled").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");

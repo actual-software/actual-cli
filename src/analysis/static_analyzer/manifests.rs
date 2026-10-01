@@ -2648,7 +2648,7 @@ require github.com/another/indirect v4.0.0 // indirect
         let dir = tempdir().unwrap();
         let path = dir.path().join("invalid_utf8.txt");
         // 0xFF 0xFE is not valid UTF-8
-        fs::write(&path, &[0xFF, 0xFE, 0x00, 0x01]).unwrap();
+        fs::write(&path, [0xFF, 0xFE, 0x00, 0x01]).unwrap();
 
         let result = super::read_manifest_file(&path);
         assert!(result.is_none());

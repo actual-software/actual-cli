@@ -16,7 +16,7 @@ mod tests {
     #[test]
     fn confirm_action_clone() {
         let action = ConfirmAction::Accept;
-        let cloned = action.clone();
+        let cloned = action;
         assert_eq!(action, cloned);
     }
 
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn confirm_action_change_clone() {
         let action = ConfirmAction::Change;
-        let cloned = action.clone();
+        let cloned = action;
         assert_eq!(action, cloned);
     }
 

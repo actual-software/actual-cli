@@ -354,7 +354,7 @@ mod tests {
     fn test_runtime_build_error_helper() {
         // Exercises runtime_build_error(), the only reachable path to the
         // tokio-runtime-build error conversion without OS-level trickery.
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic error");
+        let io_err = std::io::Error::other("synthetic error");
         let err = runtime_build_error(io_err);
         assert!(matches!(
             err,

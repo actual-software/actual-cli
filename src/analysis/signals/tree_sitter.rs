@@ -718,7 +718,7 @@ mod tests {
         assert!(!matches.is_empty());
         assert!(matches
             .iter()
-            .any(|m| m.value.as_str().map_or(false, |s| s.contains("serve"))));
+            .any(|m| m.value.as_str().is_some_and(|s| s.contains("serve"))));
     }
 
     #[test]

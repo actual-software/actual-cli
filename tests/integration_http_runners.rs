@@ -129,7 +129,7 @@ mod tests {
         /// - Clears `CLAUDE_BINARY` so the binary is not found (we must not
         ///   fall back to the ClaudeCli runner accidentally).
         fn cmd_anthropic(&self) -> assert_cmd::Command {
-            let mut cmd = assert_cmd::Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"));
+            let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("actual");
             cmd.env("ANTHROPIC_API_KEY", "test-key");
             cmd.env("ANTHROPIC_API_BASE_URL", &self.anthropic_url);
             cmd.env("ACTUAL_CONFIG", self.config_path.to_str().unwrap());
@@ -141,7 +141,7 @@ mod tests {
 
         /// Build a command that invokes the binary with the OpenAI API runner.
         fn cmd_openai(&self) -> assert_cmd::Command {
-            let mut cmd = assert_cmd::Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"));
+            let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("actual");
             cmd.env("OPENAI_API_KEY", "test-key");
             cmd.env("OPENAI_API_BASE_URL", &self.openai_url);
             cmd.env("ACTUAL_CONFIG", self.config_path.to_str().unwrap());
@@ -341,7 +341,7 @@ mod tests {
             .create();
 
         let env = TestEnvHttp::new(&adr_server, &llm_server);
-        let mut cmd = assert_cmd::Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"));
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("actual");
         cmd.env("ACTUAL_CONFIG", env.config_path.to_str().unwrap());
         cmd.env("CLAUDE_BINARY", "/nonexistent/claude");
         // Explicitly remove ANTHROPIC_API_KEY so the runner fails to find a key.
@@ -603,7 +603,7 @@ mod tests {
             .create();
 
         let env = TestEnvHttp::new(&adr_server, &llm_server);
-        let mut cmd = assert_cmd::Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"));
+        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("actual");
         cmd.env("ACTUAL_CONFIG", env.config_path.to_str().unwrap());
         cmd.env("CLAUDE_BINARY", "/nonexistent/claude");
         // Explicitly remove OPENAI_API_KEY so the runner fails to find a key.

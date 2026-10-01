@@ -863,7 +863,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    static TEST_KEYRING: Mutex<Option<HashMap<(String, String), Vec<u8>>>> = Mutex::new(None);
+    type TestKeyringMap = HashMap<(String, String), Vec<u8>>;
+    static TEST_KEYRING: Mutex<Option<TestKeyringMap>> = Mutex::new(None);
     static TEST_KEYRING_FAIL: Mutex<bool> = Mutex::new(false);
     static TEST_KEYRING_FAIL_BUILD: Mutex<bool> = Mutex::new(false);
 
