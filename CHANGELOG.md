@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-09-29
+## [0.6.0] - 2026-10-01
 
 ### Added
 - Plan-governance and scope telemetry now carry a hashed identity + timestamp envelope so metrics can be sliced by user, org and repo without any raw identifier ever leaving the machine: `user_id_hash`/`org_id_hash`/`repo_id_hash` (unsalted, domain-separated SHA-256 of the logged-in ids), a synthetic repo-slug-derived `org_id` on anonymous runs, and `datetime_utc`. Ids are read locally (stored credentials + a config sticky-scope pin) with no network call on the hook path; the backend applies a secret pepper before anything reaches PostHog
