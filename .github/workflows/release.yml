@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
 
+# One run per tag — a single tag push must not spawn duplicate releases.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
