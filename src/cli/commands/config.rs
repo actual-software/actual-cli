@@ -52,6 +52,24 @@ fn has_any_api_key(cfg: &config::Config) -> bool {
     cfg.anthropic_api_key.is_some() || cfg.openai_api_key.is_some() || cfg.cursor_api_key.is_some()
 }
 
+/// `config set --repo`: pin a value for the repository at the current
+/// directory. Only `rules_min_score` is repo-scoped.
+fn set_for_repo(cfg: &mut config::Config, key: &str, value: &str) -> Result<(), ActualError> {
+    if key != "rules_min_score" {
+        return Err(ActualError::ConfigError(format!(
+            "--repo is only supported for rules_min_score, not {key}"
+        )));
+    }
+    let floor = value.parse::<f64>().map_err(|_| {
+        ActualError::ConfigError(format!(
+            "invalid value for {key}: expected f64, got \"{value}\""
+        ))
+    })?;
+    let root = crate::cli::commands::sync::resolve_cwd();
+    let repo_key = crate::cli::commands::sync::compute_repo_key(&root);
+    config::rules_floor::set_floor(cfg, &repo_key, floor)
+}
+
 fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
     match &args.action {
         ConfigAction::Path => {
@@ -74,7 +92,12 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
         }
         ConfigAction::Set(args) => {
             let mut cfg = config::paths::load_from(path)?;
-            let warning = config::dotpath::set(&mut cfg, &args.key, &args.value)?;
+            let warning = if args.repo {
+                set_for_repo(&mut cfg, &args.key, &args.value)?;
+                None
+            } else {
+                config::dotpath::set(&mut cfg, &args.key, &args.value)?
+            };
             config::paths::save_to(&cfg, path)?;
             if let Some(msg) = warning {
                 eprintln!("{msg}");
@@ -140,10 +163,48 @@ mod tests {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: "batch_size".to_string(),
                     value: "25".to_string(),
+                    repo: false,
                 }),
             };
             assert_eq!(handle_result(exec(&args)), 0);
         });
+    }
+
+    #[test]
+    fn test_set_rules_min_score_for_repo_persists_per_repo_only() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        let args = ConfigArgs {
+            action: ConfigAction::Set(ConfigSetArgs {
+                key: "rules_min_score".to_string(),
+                value: "2.0".to_string(),
+                repo: true,
+            }),
+        };
+
+        run_with_path(&args, &config_file).unwrap();
+
+        let config = config::paths::load_from(&config_file).unwrap();
+        assert_eq!(config.rules_min_score, None);
+        let floors = config.rules_min_score_by_repo.unwrap();
+        assert_eq!(floors.len(), 1);
+        assert_eq!(floors.values().next(), Some(&2.0));
+    }
+
+    #[test]
+    fn test_set_repo_rejects_other_keys_and_invalid_values() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        for (key, value) in [("batch_size", "25"), ("rules_min_score", "-1")] {
+            let args = ConfigArgs {
+                action: ConfigAction::Set(ConfigSetArgs {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    repo: true,
+                }),
+            };
+            assert!(run_with_path(&args, &config_file).is_err(), "{key}={value}");
+        }
     }
 
     #[test]
@@ -154,6 +215,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "rules_min_score".to_string(),
                 value: "1.5".to_string(),
+                repo: false,
             }),
         };
 
@@ -181,6 +243,7 @@ mod tests {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: "batch_size".to_string(),
                     value: "10".to_string(),
+                    repo: false,
                 }),
             };
             let code = handle_result(exec(&args));
@@ -195,6 +258,7 @@ mod tests {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: "nonexistent_key".to_string(),
                     value: "value".to_string(),
+                    repo: false,
                 }),
             };
             assert_ne!(handle_result(exec(&args)), 0);
@@ -228,6 +292,7 @@ mod tests {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: "model".to_string(),
                     value: "opus".to_string(),
+                    repo: false,
                 }),
             };
             assert!(run(&args).is_ok());
@@ -245,6 +310,7 @@ mod tests {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: "batch_size".to_string(),
                     value: "not_a_number".to_string(),
+                    repo: false,
                 }),
             };
             assert!(run(&args).is_err());
@@ -268,6 +334,7 @@ mod tests {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: "batch_size".to_string(),
                     value: "10".to_string(),
+                    repo: false,
                 }),
             };
             assert!(run(&args).is_err());
@@ -430,6 +497,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "anthropic_api_key".to_string(),
                 value: "sk-test-should-not-appear".to_string(),
+                repo: false,
             }),
         };
         let result = run_with_path(&args, &config_file);
@@ -444,6 +512,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "cursor_api_key".to_string(),
                 value: "cursor-test-should-not-appear".to_string(),
+                repo: false,
             }),
         };
         let result = run_with_path(&args, &config_file);
@@ -460,6 +529,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "model".to_string(),
                 value: "totally-bogus-model-name".to_string(),
+                repo: false,
             }),
         };
         let result = run_with_path(&args, &config_file);
@@ -477,6 +547,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "batch_size".to_string(),
                 value: "42".to_string(),
+                repo: false,
             }),
         };
         let result = run_with_path(&args, &config_file);
@@ -536,6 +607,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "batch_size".to_string(),
                 value: "10".to_string(),
+                repo: false,
             }),
         };
         let result = run_with_path(&args, Path::new("/dev/null/impossible.yaml"));
@@ -575,6 +647,7 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "batch_size".to_string(),
                 value: "10".to_string(),
+                repo: false,
             }),
         };
         let result = run_with_path(&args, &config_file);

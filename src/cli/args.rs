@@ -734,6 +734,11 @@ pub struct ConfigSetArgs {
     pub key: String,
     /// Configuration value
     pub value: String,
+    /// Apply the value to the repository at the current directory only
+    /// (supported for `rules_min_score`, whose useful value depends on the
+    /// rule set)
+    #[arg(long)]
+    pub repo: bool,
 }
 
 /// Arguments for the `cache` command
@@ -848,7 +853,8 @@ pub struct RulesSelectArgs {
     ///
     /// Selection otherwise returns its cap whenever anything scored above
     /// zero, so a file no rule governs still gets the least bad few. Defaults
-    /// to the `rules_min_score` config key, or to no floor.
+    /// to the repository's floor from `config set --repo rules_min_score`, then the
+    /// user-wide `rules_min_score` config key, or to no floor.
     #[arg(
         long,
         value_name = "SCORE",
