@@ -149,6 +149,11 @@ fn render_index_json(resolved: &ResolvedIndex) -> String {
 // ── rules select ─────────────────────────────────────────────────────────
 
 pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
+    if args.files.is_empty() && args.plan.iter().all(|p| p.trim().is_empty()) {
+        return Err(ActualError::ConfigError(
+            "rules select needs a PLAN or at least one --file".to_string(),
+        ));
+    }
     let root = repo_root(args.repo.as_ref());
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" ")).with_paths(args.files.clone());
@@ -2494,6 +2499,33 @@ mod tests {
             };
             assert!(exec_select(&args).is_ok());
         }
+    }
+
+    #[test]
+    fn test_exec_select_refuses_a_blank_plan_without_a_file() {
+        let root = sample();
+        for plan in [vec![String::new()], vec!["  ".to_string()]] {
+            let args = RulesSelectArgs {
+                plan,
+                ..select_args(root.path(), 5)
+            };
+            assert!(exec_select(&args).is_err());
+        }
+    }
+
+    #[test]
+    fn test_exec_select_accepts_a_blank_plan_beside_a_file() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let args = RulesSelectArgs {
+            plan: vec![String::new()],
+            files: vec!["services/auth/oauth/token.ts".to_string()],
+            ..select_args(root.path(), 5)
+        };
+        assert!(exec_select(&args).is_ok());
     }
 
     /// `--by-adr` takes its own path out of `exec_select`, in both renderings.
