@@ -915,6 +915,15 @@ mod tests {
     }
 
     #[test]
+    fn test_set_rules_min_score_rejects_unparseable_value() {
+        let mut config = Config::default();
+        let error = set(&mut config, "rules_min_score", "abc")
+            .expect_err("non-numeric score floor must be rejected");
+        assert!(error.to_string().contains("expected f64"), "{error}");
+        assert_eq!(config.rules_min_score, None);
+    }
+
+    #[test]
     fn test_set_rules_min_score_accepts_zero() {
         let mut config = Config::default();
         set(&mut config, "rules_min_score", "0").unwrap();
