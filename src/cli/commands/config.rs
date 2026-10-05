@@ -195,7 +195,11 @@ mod tests {
     fn test_set_repo_rejects_other_keys_and_invalid_values() {
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
-        for (key, value) in [("batch_size", "25"), ("rules_min_score", "-1")] {
+        for (key, value) in [
+            ("batch_size", "25"),
+            ("rules_min_score", "-1"),
+            ("rules_min_score", "abc"),
+        ] {
             let args = ConfigArgs {
                 action: ConfigAction::Set(ConfigSetArgs {
                     key: key.to_string(),
