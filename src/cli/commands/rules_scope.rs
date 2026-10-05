@@ -408,7 +408,13 @@ fn render_adr_panel(
 /// floor that was read successfully must still be valid: `NaN` would silently
 /// reject every document because every comparison against it is false.
 fn min_score(args: &RulesSelectArgs, root: &Path) -> Result<f64, ActualError> {
-    let score = match args.min_score {
+    effective_min_score(args.min_score, root)
+}
+
+/// [`min_score`] over a bare flag value, shared with `rules brief` so the hook
+/// and the command cannot disagree about which floor is in force.
+pub(crate) fn effective_min_score(flag: Option<f64>, root: &Path) -> Result<f64, ActualError> {
+    let score = match flag {
         Some(score) => score,
         None => {
             let cfg = crate::config::paths::load().ok();

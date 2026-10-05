@@ -230,7 +230,7 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
 
     let query = Query::new("")
         .with_paths([relative])
-        .with_min_score(min_score(args));
+        .with_min_score(min_score(args, root));
     let decisions = resolved.index.search_adrs(&query, args.limit);
     if decisions.is_empty() {
         return None;
@@ -271,17 +271,14 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
     render_brief(&briefed, args.rules_per_decision)
 }
 
-/// The score floor for this invocation: the flag, else the config key, else
-/// none. An unreadable config degrades to no floor, the same way
-/// `rules select` treats it. A manually edited config can bypass the validated
-/// `config set` path, so validate again at consumption; an invalid value also
-/// degrades to no floor rather than silently rejecting every document.
-fn min_score(args: &RulesBriefArgs) -> f64 {
-    let score = args
-        .min_score
-        .or_else(|| crate::config::paths::load().ok()?.rules_min_score)
-        .unwrap_or(0.0);
-    crate::config::types::validate_rules_min_score(score).unwrap_or(0.0)
+/// The score floor for this invocation, resolved exactly as `rules select`
+/// resolves it: the flag, else this repository's floor, else the user-wide
+/// config key, else none. An unreadable config degrades to no floor. A
+/// manually edited config can bypass the validated `config set` path, so an
+/// invalid value also degrades to no floor here — the hook fails open rather
+/// than silently rejecting every document.
+fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
+    super::rules_scope::effective_min_score(args.min_score, root).unwrap_or(0.0)
 }
 
 /// The path as the rule set names it: relative to the repository root, with
@@ -592,15 +589,39 @@ mod tests {
 
         let mut a = args(root.path());
         a.min_score = None;
-        assert_eq!(min_score(&a), 0.0);
+        assert_eq!(min_score(&a, root.path()), 0.0);
 
         let mut cfg = crate::config::paths::load().unwrap_or_default();
         cfg.rules_min_score = Some(1.5);
         crate::config::paths::save(&cfg).unwrap();
-        assert_eq!(min_score(&a), 1.5);
+        assert_eq!(min_score(&a, root.path()), 1.5);
 
         a.min_score = Some(2.25);
-        assert_eq!(min_score(&a), 2.25);
+        assert_eq!(min_score(&a, root.path()), 2.25);
+    }
+
+    /// The repository's own floor beats the user-wide one in the hook too, so
+    /// a floor fitted to this rule set is the one the hook applies.
+    #[test]
+    fn test_min_score_prefers_the_repo_floor_over_the_user_wide_one() {
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _dir =
+            crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _file = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
+        let root = repo();
+        let other = repo();
+        let mut a = args(root.path());
+        a.min_score = None;
+
+        let mut cfg = crate::config::paths::load().unwrap_or_default();
+        cfg.rules_min_score = Some(1.5);
+        let key = crate::cli::commands::sync::compute_repo_key(root.path());
+        crate::config::rules_floor::set_floor(&mut cfg, &key, 0.5).unwrap();
+        crate::config::paths::save(&cfg).unwrap();
+
+        assert_eq!(min_score(&a, root.path()), 0.5);
+        assert_eq!(min_score(&a, other.path()), 1.5);
     }
 
     /// A manually edited config can bypass `config set` validation. The hook
@@ -620,7 +641,7 @@ mod tests {
         cfg.rules_min_score = Some(f64::NAN);
         crate::config::paths::save(&cfg).unwrap();
 
-        assert_eq!(min_score(&a), 0.0);
+        assert_eq!(min_score(&a, root.path()), 0.0);
     }
 
     /// A floor above everything silences the hook, which is how a file that

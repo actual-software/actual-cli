@@ -819,7 +819,8 @@ pub struct RulesBriefArgs {
     pub rules_per_decision: usize,
 
     /// Score a document must reach to be briefed at all. Defaults to the
-    /// `rules_min_score` config key, or to no floor.
+    /// repository's floor from `config set --repo rules_min_score`, then the
+    /// user-wide `rules_min_score` config key, or to no floor.
     #[arg(
         long,
         value_name = "SCORE",
