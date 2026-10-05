@@ -33,7 +33,7 @@
 //! here yet, so a repeated read of one file briefs it again.
 
 use std::io::{IsTerminal, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -220,7 +220,15 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
 /// The brief for one file, or `None` when nothing governs it — or when
 /// anything at all goes wrong.
 fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
-    let relative = relative_to_root(root, file)?;
+    let Some(relative) = relative_to_root(root, file) else {
+        // Still empty stdout and exit 0, but a path that cannot be placed
+        // under the root must not look the same as a file nothing governs.
+        eprintln!(
+            "actual rules brief: {file} is not under {}; no brief",
+            root.display()
+        );
+        return None;
+    };
 
     let rules_dir = args
         .rules_dir
@@ -285,25 +293,55 @@ fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
 /// forward slashes.
 ///
 /// A hook envelope carries absolute paths, while verify-block globs are
-/// repository-relative, so an unconverted path matches nothing. A path
-/// outside the repository yields `None` rather than a guess — briefing a file
-/// in another checkout against these rules would be wrong, not merely
-/// unhelpful.
+/// repository-relative, so an unconverted path matches nothing. Both sides go
+/// through [`resolve`] first, so a symlinked checkout or a `/tmp` versus
+/// `/private/tmp` spelling difference does not read as "outside the
+/// repository". A path that really is outside yields `None` rather than a
+/// guess — briefing a file in another checkout against these rules would be
+/// wrong, not merely unhelpful.
 fn relative_to_root(root: &Path, file: &str) -> Option<String> {
     let path = Path::new(file);
-    let relative = if path.is_absolute() {
-        // `canonicalize` is deliberately not used: it touches the filesystem,
-        // and under `PreToolUse` on `Write` the file does not exist yet.
-        path.strip_prefix(root).ok()?
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        path
+        root.join(path)
     };
+    let relative = resolve(&joined)
+        .strip_prefix(resolve(root))
+        .ok()?
+        .to_path_buf();
     let text = relative
         .components()
         .map(|c| c.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/");
     (!text.is_empty()).then_some(text)
+}
+
+/// `path` with symlinks, `.` and `..` resolved, whether or not it exists.
+///
+/// `canonicalize` alone fails on a file `Write` is about to create. So the
+/// deepest ancestor that exists is canonicalized, and the rest is appended
+/// with `.`/`..` collapsed lexically — which is exact there, since a path
+/// that does not exist cannot contain a symlink.
+fn resolve(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        let Ok(mut resolved) = ancestor.canonicalize() else {
+            continue;
+        };
+        let rest = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+        for component in rest.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    resolved.pop();
+                }
+                other => resolved.push(other),
+            }
+        }
+        return resolved;
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -549,6 +587,69 @@ mod tests {
         );
         assert_eq!(relative_to_root(root, "/elsewhere/token.ts"), None);
         assert_eq!(relative_to_root(root, ""), None);
+    }
+
+    #[test]
+    fn test_relative_to_root_collapses_dot_segments() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            relative_to_root(root, "/repo/a/../services/./token.ts").as_deref(),
+            Some("services/token.ts")
+        );
+        assert_eq!(
+            relative_to_root(root, "a/../services/token.ts").as_deref(),
+            Some("services/token.ts")
+        );
+        // Escapes the root, absolute or relative.
+        assert_eq!(relative_to_root(root, "/repo/../elsewhere/x.ts"), None);
+        assert_eq!(relative_to_root(root, "../elsewhere/x.ts"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_relative_to_root_sees_through_a_symlinked_root() {
+        let real = tempdir().unwrap();
+        std::fs::create_dir_all(real.path().join("services/auth")).unwrap();
+        std::fs::write(real.path().join("services/auth/token.ts"), "").unwrap();
+        let aliases = tempdir().unwrap();
+        let alias = aliases.path().join("checkout");
+        std::os::unix::fs::symlink(real.path(), &alias).unwrap();
+
+        // Root spelled one way, file the other, in both directions.
+        for (root, file) in [
+            (real.path(), alias.join("services/auth/token.ts")),
+            (alias.as_path(), real.path().join("services/auth/token.ts")),
+        ] {
+            assert_eq!(
+                relative_to_root(root, file.to_str().unwrap()).as_deref(),
+                Some("services/auth/token.ts")
+            );
+        }
+        // A `Write` of a file that does not exist yet, under a new directory.
+        let new_file = alias.join("services/new/dir/token.ts");
+        assert_eq!(
+            relative_to_root(real.path(), new_file.to_str().unwrap()).as_deref(),
+            Some("services/new/dir/token.ts")
+        );
+        // `..` through the symlink still lands outside.
+        let escape = alias.join("../elsewhere.ts");
+        assert_eq!(
+            relative_to_root(real.path(), escape.to_str().unwrap()),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_hook_briefs_through_a_symlinked_root() {
+        let root = repo();
+        let aliases = tempdir().unwrap();
+        let alias = aliases.path().join("checkout");
+        std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+        let a = args(root.path());
+        let raw = envelope(&alias, "PostToolUse", "Read", &governed(&alias));
+
+        assert!(hook_reply(&raw, &a).is_some());
     }
 
     // ── direct mode ──────────────────────────────────────────────────────
