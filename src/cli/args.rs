@@ -316,10 +316,9 @@ fn parse_rule_key(s: &str) -> Result<String, String> {
     }
 }
 
-/// A plan or path that only occupies an argv slot still names no selection
-/// subject. Keep the original text for matching, but reject values whose
-/// trimmed form is empty so `rules select ""` cannot bypass its plan-or-file
-/// requirement.
+/// A path that only occupies an argv slot still names no selection subject.
+/// Keep the original text for matching, but reject values whose trimmed form
+/// is empty.
 fn parse_non_empty_selection_value(s: &str) -> Result<String, String> {
     if s.trim().is_empty() {
         Err("value must not be empty or whitespace".to_string())
@@ -806,11 +805,11 @@ pub struct RulesSelectArgs {
     /// file an agent is about to touch has a path and no plan, and passing
     /// `""` to satisfy a required argument is not an interface. One of the two
     /// is still required, because a query with neither names nothing to match.
-    #[arg(
-        value_name = "PLAN",
-        required_unless_present = "files",
-        value_parser = parse_non_empty_selection_value
-    )]
+    ///
+    /// A blank plan beside a `--file` is accepted, as it was when the plan was
+    /// required and `""` was the only path-only form. A blank plan with no
+    /// `--file` is refused by `rules select` itself.
+    #[arg(value_name = "PLAN", required_unless_present = "files")]
     pub plan: Vec<String>,
 
     /// Repository root to scan. Defaults to the current directory.
@@ -2449,13 +2448,11 @@ mod parse_tests {
         assert!(error.to_string().contains("PLAN"), "{error}");
     }
 
-    /// An argv value that is empty after trimming does not name a plan or a
-    /// path, so it cannot satisfy the command's subject requirement.
+    /// An argv `--file` value that is empty after trimming does not name a
+    /// path. A blank plan is checked in `exec_select`, where `--file` is known.
     #[test]
-    fn test_rules_select_rejects_empty_plan_and_file_values() {
+    fn test_rules_select_rejects_empty_file_values() {
         for argv in [
-            vec!["actual", "rules", "select", ""],
-            vec!["actual", "rules", "select", "   "],
             vec!["actual", "rules", "select", "--file", ""],
             vec!["actual", "rules", "select", "--file", " \t "],
         ] {
@@ -2468,6 +2465,15 @@ mod parse_tests {
                 "{error}"
             );
         }
+    }
+
+    /// A script written when the plan was required passes `""` beside a path.
+    #[test]
+    fn test_rules_select_accepts_a_blank_plan_beside_a_file() {
+        let args = rules_select_args_from(&["actual", "rules", "select", "", "--file", "a.rs"])
+            .expect("blank plan with a file parses");
+        assert_eq!(args.plan, vec![String::new()]);
+        assert_eq!(args.files, vec!["a.rs".to_string()]);
     }
 
     /// `--help` is the interface a hook author reads. The path-only case has
