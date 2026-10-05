@@ -176,9 +176,19 @@ pub struct Config {
     /// floor is what lets a selection answer "nothing". It is corpus-dependent
     /// — scores are sums of weighted 0..1 coverages, so a rule set with deeper
     /// verify paths scores higher throughout — hence configurable rather than
-    /// a constant. `--min-score` overrides it.
+    /// a constant. This is the user-wide default; a repository's own floor
+    /// (`rules_min_score_by_repo`) takes precedence, and `--min-score`
+    /// overrides both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_min_score: Option<f64>,
+
+    /// Per-repository `rules select` score floors (keyed by SHA-256 of origin
+    /// URL, the same key `rejected_adrs` and `sticky_repo_scope` use). A floor
+    /// fitted to one rule set does not transfer to another, so this takes
+    /// precedence over the user-wide [`Config::rules_min_score`]. See
+    /// [`crate::config::rules_floor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_min_score_by_repo: Option<HashMap<String, f64>>,
 }
 
 /// Validate the score floor shared by CLI flags, config mutation and config
@@ -222,6 +232,7 @@ impl Default for Config {
             max_turns: None,
             max_tokens: None,
             rules_min_score: None,
+            rules_min_score_by_repo: None,
         }
     }
 }
@@ -393,6 +404,7 @@ mod tests {
             max_turns: Some(10),
             max_tokens: Some(32768),
             rules_min_score: Some(1.5),
+            rules_min_score_by_repo: Some(HashMap::from([("repo-key".to_string(), 2.0)])),
         };
 
         let yaml = serde_yml::to_string(&config).expect("serialize to YAML");

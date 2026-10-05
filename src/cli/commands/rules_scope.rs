@@ -155,7 +155,7 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
         ));
     }
     let root = repo_root(args.repo.as_ref());
-    let min_score = min_score(args)?;
+    let min_score = min_score(args, &root)?;
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" "))
         .with_paths(args.files.clone())
@@ -394,19 +394,34 @@ fn render_adr_panel(
         .render(width)
 }
 
-/// The score floor for this invocation: the flag, else the config key, else
-/// none.
+/// The score floor for this invocation: the flag, else this repository's
+/// floor, else the user-wide config key, else none.
+///
+/// A floor fitted to one rule set does not transfer to another, so the
+/// per-repository value (keyed like `rejected_adrs` and `sticky_repo_scope`)
+/// wins over the user-wide one. The repo key shells out to git, so it is only
+/// computed when a per-repository floor exists.
 ///
 /// An unreadable config is not a reason to refuse a selection — the same
 /// reasoning `run_selection` applies to stage 2 — so it degrades to no floor,
 /// which returns more rather than silently returning nothing. A configured
 /// floor that was read successfully must still be valid: `NaN` would silently
 /// reject every document because every comparison against it is false.
-fn min_score(args: &RulesSelectArgs) -> Result<f64, ActualError> {
-    let score = args
-        .min_score
-        .or_else(|| crate::config::paths::load().ok()?.rules_min_score)
-        .unwrap_or(0.0);
+fn min_score(args: &RulesSelectArgs, root: &Path) -> Result<f64, ActualError> {
+    let score = match args.min_score {
+        Some(score) => score,
+        None => {
+            let cfg = crate::config::paths::load().ok();
+            cfg.as_ref()
+                .filter(|cfg| cfg.rules_min_score_by_repo.is_some())
+                .and_then(|cfg| {
+                    let key = crate::cli::commands::sync::compute_repo_key(root);
+                    crate::config::rules_floor::get_floor(cfg, &key)
+                })
+                .or_else(|| cfg.and_then(|cfg| cfg.rules_min_score))
+                .unwrap_or(0.0)
+        }
+    };
     crate::config::types::validate_rules_min_score(score).map_err(ActualError::ConfigError)
 }
 
@@ -2596,20 +2611,55 @@ mod tests {
         let _guards = isolated_config(&home);
         let root = sample();
 
-        assert_eq!(min_score(&select_args(root.path(), 5)).unwrap(), 0.0);
+        assert_eq!(
+            min_score(&select_args(root.path(), 5), root.path()).unwrap(),
+            0.0
+        );
 
         let mut cfg = crate::config::paths::load().unwrap_or_default();
         cfg.rules_min_score = Some(1.5);
         crate::config::paths::save(&cfg).unwrap();
 
-        assert_eq!(min_score(&select_args(root.path(), 5)).unwrap(), 1.5);
         assert_eq!(
-            min_score(&RulesSelectArgs {
-                min_score: Some(2.25),
-                ..select_args(root.path(), 5)
-            })
+            min_score(&select_args(root.path(), 5), root.path()).unwrap(),
+            1.5
+        );
+        assert_eq!(
+            min_score(
+                &RulesSelectArgs {
+                    min_score: Some(2.25),
+                    ..select_args(root.path(), 5)
+                },
+                root.path()
+            )
             .unwrap(),
             2.25
+        );
+    }
+
+    /// The repository's own floor beats the user-wide one, and another
+    /// repository's floor does not leak across.
+    #[test]
+    fn test_min_score_prefers_the_repo_floor_over_the_user_wide_one() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+        let other = sample();
+
+        let mut cfg = crate::config::paths::load().unwrap_or_default();
+        cfg.rules_min_score = Some(1.5);
+        let key = crate::cli::commands::sync::compute_repo_key(root.path());
+        crate::config::rules_floor::set_floor(&mut cfg, &key, 0.5).unwrap();
+        crate::config::paths::save(&cfg).unwrap();
+
+        assert_eq!(
+            min_score(&select_args(root.path(), 5), root.path()).unwrap(),
+            0.5
+        );
+        assert_eq!(
+            min_score(&select_args(other.path(), 5), other.path()).unwrap(),
+            1.5
         );
     }
 
@@ -2627,7 +2677,7 @@ mod tests {
         cfg.rules_min_score = Some(f64::NAN);
         crate::config::paths::save(&cfg).unwrap();
 
-        let error = min_score(&select_args(root.path(), 5)).unwrap_err();
+        let error = min_score(&select_args(root.path(), 5), root.path()).unwrap_err();
         assert!(error.to_string().contains("non-negative finite"), "{error}");
     }
 

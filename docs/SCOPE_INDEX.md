@@ -178,11 +178,21 @@ like an index that found nothing. JSON selections always include the effective
 `min_score`, including `0.0` when no floor is active, and evaluation output
 records the same value so its metrics are reproducible.
 
-Persist a corpus-specific floor with the validated config interface:
+Persist a floor with the validated config interface. `rules_min_score` is
+user-wide, so it is only a default: a floor fitted to one rule set does not
+transfer to another (a path-only score is capped by the depth of a rule's
+verify globs, so a rule scoped to `src/**` tops out well below one scoped four
+segments deep). Pin the corpus-specific value per repository with `--repo`,
+which keys it by the origin URL the same way remembered scopes and rejected
+ADRs are keyed:
 
 ```bash
-actual config set rules_min_score 1.5
+actual config set --repo rules_min_score 1.5   # this repository only
+actual config set rules_min_score 1.0          # user-wide default
 ```
+
+Precedence is `--min-score`, then the repository's floor, then the user-wide
+`rules_min_score`, then no floor.
 
 Scores are sums of weighted 0..1 coverages, so a useful floor is
 corpus-dependent and belongs in config rather than in a constant. Measured on
