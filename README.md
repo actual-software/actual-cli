@@ -17,7 +17,7 @@
   <a href="https://github.com/actual-software/actual-cli/issues"><img src="https://img.shields.io/github/issues/actual-software/actual-cli" alt="Issues"></a>
 </p>
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Quickstart
 
@@ -105,7 +105,7 @@ cargo install --git https://github.com/actual-software/actual-cli.git
 
 </details>
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Use Actual.ai Skill + CLI
 
@@ -135,25 +135,25 @@ actual whoami                 # show the signed-in account and organization
 
 </details>
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## What are the Actual.ai Skill and CLI?
 
 The Actual.ai CLI is the engine behind the [Actual.ai Skill](https://github.com/actual-software/actual-skill). Together they give your AI coding agents guardrails for AI-powered software development. The skill is how you and your agent use Actual: you ask in plain language, and the skill manages the CLI for you. The CLI connects your agent to the Advisor, which answers org-scoped architecture questions from your team's Architectural Decision Records (ADRs), and every answer cites the decisions it drew on.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Why do I need the Actual.ai Skill and CLI?
 
 Coding agents don't know the architecture decisions your team has already made, so they write code that ignores them. The skill gives your agent that context and checks its plans and changes against your rules, running the CLI underneath, so its code follows your architecture from the start. You don't have to remember a command to get there.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Who are the Actual.ai Skill and CLI for?
 
 AI-native software teams: developers who build with coding agents and want answers, plans, and code grounded in the architecture decisions their team has already made. Most teams install the skill and let it manage the CLI. Teams wiring Actual into scripts or CI can also call the CLI directly.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Where do the Actual.ai Skill and CLI work?
 
@@ -168,13 +168,13 @@ The skill works inside the coding agent your team already uses: Claude Code, Cod
 
 Windows is not currently supported.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## When do the Actual.ai Skill and CLI run?
 
 Whenever an architecture question comes up. The skill manages the CLI and decides when each command runs. Before your agent writes code, the skill asks the Advisor how your team builds things. When your agent's context needs refreshing, the skill runs `actual adr-bot`. In Claude Code, the skill also runs `actual plan-check` before implementation starts and `actual impl-check` at the end of every turn.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## How do the Actual.ai Skill and CLI work?
 
@@ -301,13 +301,13 @@ See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill
 - For the Advisor: an Actual AI account (sign up at [actual.ai/cli](https://actual.ai/cli), or ask your agent to sign you in) and your repository onboarded at [app.actual.ai](https://app.actual.ai).
 - For ADR-backed context and governance: a configured runner. Claude Code CLI is the default; `actual runners` lists the rest. ADR-backed context needs no account or API key.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Privacy & Telemetry
 
 The CLI collects minimal telemetry to improve the product, whether the skill manages it for you or you run it directly. Raw ids, source code, and file paths are never sent. Events sent while you're signed in carry identity-linked one-way hashes; signed-out events are pseudonymous, not anonymous. Turn telemetry off with `ACTUAL_NO_TELEMETRY=1`, the config file, or a compile-time feature flag. See [PRIVACY.md](PRIVACY.md) for who can attribute the data and how long it's kept.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## Contributing
 
@@ -315,7 +315,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for build inst
 
 To report a vulnerability, **do not open a public issue**. See [SECURITY.md](SECURITY.md) for responsible disclosure.
 
-<img src="assets/divider.svg" width="100%" height="4" alt="">
+<hr>
 
 ## License
 
