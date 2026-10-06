@@ -42,13 +42,26 @@ use crate::error::ActualError;
 use crate::rules::brief::{render_brief, BriefDecision};
 use crate::rules::scope::{self, index::Query};
 
-/// Hook events this command answers. Anything else gets silence: a brief
-/// belongs to a file the agent is reading or editing, and no other event
-/// carries one.
-const ANSWERED_EVENTS: &[&str] = &["PostToolUse", "PreToolUse"];
+/// The event and tool pairs this command answers, and nothing else: a read is
+/// briefed after it ran, an edit or write before it does. A brief after a
+/// write arrives once the file is already changed, and a brief before a read
+/// is one the read would have delivered anyway, so neither is answered even
+/// if a hook matcher routes it here.
+///
+/// Only tools whose input carries an absolute `file_path` belong here. A tool
+/// that names its file under another key (`NotebookEdit` uses
+/// `notebook_path`) would always be silence, so listing it would overstate
+/// what the hook can see.
+const ANSWERED: &[(&str, &[&str])] = &[
+    ("PostToolUse", &["Read"]),
+    ("PreToolUse", &["Edit", "Write"]),
+];
 
-/// Tools whose envelopes name a file worth briefing.
-const ANSWERED_TOOLS: &[&str] = &["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"];
+fn is_answered(event: &str, tool: &str) -> bool {
+    ANSWERED
+        .iter()
+        .any(|(answered, tools)| *answered == event && tools.contains(&tool))
+}
 
 /// The fields this command reads from a hook envelope.
 ///
@@ -189,14 +202,12 @@ fn stdin_is_char_device() -> bool {
 fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     let envelope: HookEnvelope = serde_json::from_str(raw).ok()?;
 
+    // A `PostToolUse` on some other tool, a `PreToolUse` on a shell command,
+    // or an event and tool that are not a documented pair name no file to
+    // brief.
     let event = envelope.hook_event_name?;
-    if !ANSWERED_EVENTS.contains(&event.as_str()) {
-        return None;
-    }
-    // A `PostToolUse` on some other tool, or a `PreToolUse` on a shell
-    // command, names no file to brief.
     let tool = envelope.tool_name?;
-    if !ANSWERED_TOOLS.contains(&tool.as_str()) {
+    if !is_answered(&event, &tool) {
         return None;
     }
 
@@ -448,7 +459,6 @@ mod tests {
             ("PostToolUse", "Read"),
             ("PreToolUse", "Edit"),
             ("PreToolUse", "Write"),
-            ("PreToolUse", "MultiEdit"),
         ] {
             let raw = envelope(root.path(), event, tool, &governed(root.path()));
             let out = hook_reply(&raw, &args(root.path())).expect("a brief");
@@ -510,6 +520,30 @@ mod tests {
             ),
         ] {
             assert_eq!(hook_reply(&raw, &a), None, "{name}");
+        }
+    }
+
+    /// Event and tool are answered as pairs. A write is briefed before it
+    /// runs, a read after; the other combinations are silence even though each
+    /// half is answered on its own.
+    #[test]
+    fn test_only_documented_event_and_tool_pairs_are_answered() {
+        let root = repo();
+        let a = args(root.path());
+        let file = governed(root.path());
+        for (event, tool, answered) in [
+            ("PostToolUse", "Read", true),
+            ("PreToolUse", "Edit", true),
+            ("PreToolUse", "Write", true),
+            ("PostToolUse", "Write", false),
+            ("PostToolUse", "Edit", false),
+            ("PreToolUse", "Read", false),
+            // Tools that do not carry an absolute `file_path`.
+            ("PreToolUse", "MultiEdit", false),
+            ("PreToolUse", "NotebookEdit", false),
+        ] {
+            let raw = envelope(root.path(), event, tool, &file);
+            assert_eq!(hook_reply(&raw, &a).is_some(), answered, "{event}/{tool}");
         }
     }
 
