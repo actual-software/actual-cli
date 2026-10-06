@@ -379,9 +379,10 @@ fn brief_for(
     let (brief, shown) =
         render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)?;
 
-    // Only what the brief carried in full is remembered: a decision the cap
-    // left out, or truncated to fewer rules, has not been shown and must stay
-    // eligible.
+    // Only decisions that contributed everything they could are remembered:
+    // shown in full, or trimmed to `--rules-per-decision`, which is a ceiling
+    // no later read can lift. A decision `--max-chars` left out or trimmed
+    // stays eligible, because a read with less competition can fit it whole.
     if let Some((dir, key, mut state)) = memory {
         for position in shown {
             state.record(&decisions[position].key);
@@ -747,6 +748,31 @@ mod tests {
 
             let other = session_envelope(root.path(), "s2", None, &file);
             assert!(hook_reply(&other, &a).is_some());
+        });
+    }
+
+    /// A decision with more MUST rules than `--rules-per-decision` is briefed
+    /// once too. The cap is everything it can ever contribute, so a second
+    /// read would repeat the identical truncated block without adding a rule.
+    #[test]
+    fn test_a_decision_over_the_per_decision_cap_is_briefed_once() {
+        with_scratch_config(|| {
+            let root = repo();
+            std::fs::write(
+                crate::rules::rules_dir(root.path()).join("cross-cutting-token-signing-e410.md"),
+                OAUTH.replace(
+                    "- **R-A-002** SHOULD: rotate keys quarterly.",
+                    "- **R-A-002** MUST NOT: sign with HS256.",
+                ),
+            )
+            .unwrap();
+            let mut a = args(root.path());
+            a.rules_per_decision = 1;
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+
+            let first = hook_reply(&read, &a).expect("a brief");
+            assert!(first.contains("(1 of 2 rules shown)"), "{first}");
+            assert_eq!(hook_reply(&read, &a), None);
         });
     }
 
