@@ -460,6 +460,37 @@ mod tests {
         assert!(brief.contains("(1 more decision not shown)"), "{brief}");
     }
 
+    /// More than one decision left out is disclosed in the plural.
+    #[test]
+    fn test_several_decisions_beyond_the_cap_are_disclosed_in_the_plural() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.",
+        );
+        let b = doc(
+            "cross-cutting-pinning-c3d4",
+            "Pin Providers: Terraform",
+            "- **R-B-001** MUST: pin every provider to an exact version in the lockfile.",
+        );
+        let c = doc(
+            "cross-cutting-logging-f5a6",
+            "Structured Logging: Services",
+            "- **R-C-001** MUST: emit structured JSON logs with a correlation id attached.",
+        );
+        let decisions = [
+            decision("Adopt RS256", vec![&a]),
+            decision("Pin Providers", vec![&b]),
+            decision("Structured Logging", vec![&c]),
+        ];
+        let first_only = render_brief(FILE, &decisions[..1], 8, 10_000).unwrap();
+        let cap = first_only.chars().count() + OMISSION_NOTE_RESERVE;
+        let brief = render_brief(FILE, &decisions, 8, cap).unwrap();
+
+        assert!(brief.contains("## Adopt RS256"), "{brief}");
+        assert!(brief.contains("(2 more decisions not shown)"), "{brief}");
+    }
+
     /// A cap too small for any rule is silence, like a cap of zero rules.
     #[test]
     fn test_a_cap_too_small_for_any_rule_says_nothing() {
