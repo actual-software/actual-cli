@@ -818,6 +818,11 @@ pub struct RulesBriefArgs {
     #[arg(long, default_value_t = 8)]
     pub rules_per_decision: usize,
 
+    /// Maximum size of the whole brief, in characters. Rules are dropped
+    /// whole, lowest-ranked first, and the brief says what it left out.
+    #[arg(long, default_value_t = crate::rules::brief::DEFAULT_MAX_CHARS)]
+    pub max_chars: usize,
+
     /// Score a document must reach to be briefed at all. Defaults to the
     /// repository's floor from `config set --repo rules_min_score`, then the
     /// user-wide `rules_min_score` config key, or to no floor.

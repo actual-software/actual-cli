@@ -154,8 +154,8 @@ this one.
 actual rules index [PATH] [--rebuild] [--clear] [--json]
 actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--min-score S] [--by-adr] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--ablate SIGNAL]... [--rebuild] [--json]
-actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--min-score S]
-actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--min-score S]
+actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
+actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 ```
 
 `rules brief` is the hook's form of a selection: given the file an agent is

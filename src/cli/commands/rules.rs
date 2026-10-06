@@ -496,6 +496,7 @@ mod tests {
                     rules_dir: None,
                     limit: 2,
                     rules_per_decision: 8,
+                    max_chars: crate::rules::brief::DEFAULT_MAX_CHARS,
                     min_score: Some(0.0),
                 }),
             };

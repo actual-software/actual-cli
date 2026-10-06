@@ -23,8 +23,7 @@
 //! rules says so, because an agent told nothing about the remainder would
 //! reasonably read the four as the whole obligation.
 //!
-//! This is the minimal renderer the hook needs; the caps and wording are
-//! AK-790's subject.
+//! The brief is bounded twice: rules per decision, and total characters.
 
 use crate::rules::types::{RuleDocument, RuleLevel};
 
@@ -35,8 +34,22 @@ pub struct BriefDecision<'a> {
     pub documents: Vec<&'a RuleDocument>,
 }
 
+/// Default ceiling on a brief's size, in characters. The reference corpus
+/// tokenizes at 2.62 characters per token, so this is about 1.5k tokens: above
+/// the median top-5 brief (~1.0k) and the p90 (~1.4k) of the AK-769 set, and
+/// well under the ~2.6k that two uncapped decisions cost.
+pub const DEFAULT_MAX_CHARS: usize = 4000;
+
+/// Room kept free for the note that names decisions left out entirely.
+const OMISSION_NOTE_RESERVE: usize = 64;
+
 /// Render decisions as a brief, or `None` when there is nothing to say: no
-/// decisions, or none of them stating an obligation.
+/// decisions, none of them stating an obligation, or a cap too small for any
+/// rule to fit.
+///
+/// `rules_per_decision` caps each decision; `max_chars` caps the whole brief.
+/// Rules are kept or dropped whole, in rank order, never cut mid-line, and
+/// everything left out is disclosed.
 ///
 /// The brief opens with a sentence saying what it is and which file it is
 /// about. Hook context is meant to be project information, and a bare run of
@@ -46,18 +59,59 @@ pub fn render_brief(
     file: &str,
     decisions: &[BriefDecision<'_>],
     rules_per_decision: usize,
+    max_chars: usize,
 ) -> Option<String> {
-    let blocks: Vec<String> = decisions
+    let candidates: Vec<(&str, Vec<String>)> = decisions
         .iter()
-        .filter_map(|decision| render_decision(decision, rules_per_decision))
+        .filter_map(|decision| {
+            let lines = decision_lines(decision);
+            (!lines.is_empty()).then_some((decision.heading, lines))
+        })
         .collect();
 
-    (!blocks.is_empty()).then(|| {
-        format!(
-            "This repository's own rules that apply to `{file}`:\n\n{}",
-            blocks.join("\n\n")
-        )
-    })
+    let frame = format!("This repository's own rules that apply to `{file}`:");
+    let mut used = frame.chars().count();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut omitted = 0usize;
+
+    for (at, (heading, lines)) in candidates.iter().enumerate() {
+        let later = candidates.len() - at - 1;
+        let reserve = if later > 0 { OMISSION_NOTE_RESERVE } else { 0 };
+        let total = lines.len();
+        let fit = (1..=total.min(rules_per_decision)).rev().find_map(|shown| {
+            let block = decision_block(heading, &lines[..shown], total);
+            // +2 for the blank line that joins blocks.
+            (used + 2 + block.chars().count() + reserve <= max_chars).then_some(block)
+        });
+        match fit {
+            Some(block) => {
+                used += 2 + block.chars().count();
+                blocks.push(block);
+            }
+            None => omitted += 1,
+        }
+    }
+
+    if blocks.is_empty() {
+        return None;
+    }
+    if omitted > 0 {
+        let noun = if omitted == 1 {
+            "decision"
+        } else {
+            "decisions"
+        };
+        blocks.push(format!("({omitted} more {noun} not shown)"));
+    }
+    Some(format!("{frame}\n\n{}", blocks.join("\n\n")))
+}
+
+fn decision_block(heading: &str, shown: &[String], total: usize) -> String {
+    let mut block = format!("## {heading}\n{}", shown.join("\n"));
+    if total > shown.len() {
+        block.push_str(&format!("\n- ({} of {total} rules shown)", shown.len()));
+    }
+    block
 }
 
 /// `RuleLevel::as_str` is the serialized form (`MUST_NOT`); a brief is prose
@@ -69,10 +123,11 @@ fn level_word(level: RuleLevel) -> &'static str {
     }
 }
 
-fn render_decision(decision: &BriefDecision<'_>, rules_per_decision: usize) -> Option<String> {
+/// Every obligation of a decision as a line, identical statements merged
+/// under the first document that stated them.
+fn decision_lines(decision: &BriefDecision<'_>) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
-    let mut available = 0usize;
 
     for document in &decision.documents {
         let slug = document.slug().unwrap_or("<unnamed>");
@@ -84,26 +139,15 @@ fn render_decision(decision: &BriefDecision<'_>, rules_per_decision: usize) -> O
                 continue;
             }
             seen.push(&rule.statement);
-            available += 1;
-            if lines.len() < rules_per_decision {
-                lines.push(format!(
-                    "- [{slug}/{}] {} {}",
-                    rule.id,
-                    level_word(rule.level),
-                    rule.statement
-                ));
-            }
+            lines.push(format!(
+                "- [{slug}/{}] {} {}",
+                rule.id,
+                level_word(rule.level),
+                rule.statement
+            ));
         }
     }
-
-    if lines.is_empty() {
-        return None;
-    }
-    let mut block = format!("## {}\n{}", decision.heading, lines.join("\n"));
-    if available > lines.len() {
-        block.push_str(&format!("\n- ({} of {available} rules shown)", lines.len()));
-    }
-    Some(block)
+    lines
 }
 
 #[cfg(test)]
@@ -138,7 +182,13 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: sign with HS256.",
         );
-        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert!(brief.contains("\n\n## Adopt RS256\n"), "{brief}");
         assert!(brief.contains("- [cross-cutting-signing-e410/R-A-001] MUST sign with RS256."));
@@ -153,7 +203,13 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** SHOULD: rotate quarterly.\n- **R-A-003** MAY: cache the key.",
         );
-        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert!(brief.contains("R-A-001"));
         assert!(!brief.contains("R-A-002"), "{brief}");
@@ -174,8 +230,13 @@ mod tests {
             "Adopt RS256: Token Verification",
             "- **R-B-001** MUST: sign with RS256.\n- **R-B-002** MUST: check revocation.",
         );
-        let brief =
-            render_brief(FILE, &[decision("Adopt RS256", vec![&a, &b])], 8).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a, &b])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert_eq!(brief.matches("sign with RS256.").count(), 1, "{brief}");
         assert!(
@@ -202,8 +263,13 @@ mod tests {
             "Adopt RS256: Key Caching",
             "- **R-A-001** MUST: cache public keys for an hour.",
         );
-        let brief =
-            render_brief(FILE, &[decision("Adopt RS256", vec![&a, &b])], 8).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a, &b])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert!(
             brief.contains("[cross-cutting-signing-e410/R-A-001]"),
@@ -223,7 +289,13 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: one.\n- **R-A-002** MUST: two.\n- **R-A-003** MUST: three.",
         );
-        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 2).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a])],
+            2,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert!(brief.contains("R-A-001"));
         assert!(brief.contains("R-A-002"));
@@ -239,7 +311,13 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: one.",
         );
-        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert!(!brief.contains("rules shown"), "{brief}");
     }
@@ -264,6 +342,7 @@ mod tests {
                 decision("Pin Providers", vec![&b]),
             ],
             8,
+            DEFAULT_MAX_CHARS,
         )
         .expect("a brief");
 
@@ -275,7 +354,7 @@ mod tests {
     /// into silence.
     #[test]
     fn test_nothing_to_say_is_none() {
-        assert_eq!(render_brief(FILE, &[], 8), None);
+        assert_eq!(render_brief(FILE, &[], 8, DEFAULT_MAX_CHARS), None);
 
         let advice_only = doc(
             "cross-cutting-signing-e410",
@@ -283,7 +362,12 @@ mod tests {
             "- **R-A-001** SHOULD: rotate quarterly.",
         );
         assert_eq!(
-            render_brief(FILE, &[decision("Adopt RS256", vec![&advice_only])], 8),
+            render_brief(
+                FILE,
+                &[decision("Adopt RS256", vec![&advice_only])],
+                8,
+                DEFAULT_MAX_CHARS
+            ),
             None
         );
     }
@@ -298,7 +382,12 @@ mod tests {
             "- **R-A-001** MUST: sign with RS256.",
         );
         assert_eq!(
-            render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 0),
+            render_brief(
+                FILE,
+                &[decision("Adopt RS256", vec![&a])],
+                0,
+                DEFAULT_MAX_CHARS
+            ),
             None
         );
     }
@@ -312,13 +401,76 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: sign with RS256.",
         );
-        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(
+            FILE,
+            &[decision("Adopt RS256", vec![&a])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .expect("a brief");
 
         assert!(
             brief.starts_with(
                 "This repository's own rules that apply to `services/auth/token.ts`:\n\n"
             ),
             "{brief}"
+        );
+    }
+
+    /// The total cap drops whole rules, never half a line, and says so.
+    #[test]
+    fn test_total_cap_drops_whole_rules_and_discloses() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: one.\n- **R-A-002** MUST: two.\n- **R-A-003** MUST: three.",
+        );
+        let full = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8, 10_000).unwrap();
+        let cap = full.chars().count() - 5;
+        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8, cap).unwrap();
+
+        assert!(brief.chars().count() <= cap, "{brief}");
+        assert!(brief.contains("R-A-001"), "{brief}");
+        assert!(!brief.contains("R-A-003"), "{brief}");
+        assert!(brief.contains("rules shown)"), "{brief}");
+    }
+
+    /// A decision that does not fit is named as left out, not dropped quietly.
+    #[test]
+    fn test_decisions_beyond_the_cap_are_disclosed() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.",
+        );
+        let b = doc(
+            "cross-cutting-pinning-c3d4",
+            "Pin Providers: Terraform",
+            "- **R-B-001** MUST: pin providers.",
+        );
+        let decisions = [
+            decision("Adopt RS256", vec![&a]),
+            decision("Pin Providers", vec![&b]),
+        ];
+        let both = render_brief(FILE, &decisions, 8, 10_000).unwrap();
+        let brief = render_brief(FILE, &decisions, 8, both.chars().count() - 1).unwrap();
+
+        assert!(brief.contains("## Adopt RS256"), "{brief}");
+        assert!(!brief.contains("## Pin Providers"), "{brief}");
+        assert!(brief.contains("(1 more decision not shown)"), "{brief}");
+    }
+
+    /// A cap too small for any rule is silence, like a cap of zero rules.
+    #[test]
+    fn test_a_cap_too_small_for_any_rule_says_nothing() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.",
+        );
+        assert_eq!(
+            render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8, 10),
+            None
         );
     }
 }
