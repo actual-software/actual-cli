@@ -62,11 +62,24 @@ pub fn render_brief(
     rules_per_decision: usize,
     max_chars: usize,
 ) -> Option<String> {
-    let candidates: Vec<(&str, Vec<String>)> = decisions
+    render_brief_shown(file, decisions, rules_per_decision, max_chars).map(|(brief, _)| brief)
+}
+
+/// [`render_brief`], also naming which of `decisions` it showed, by position.
+/// A caller that remembers what an agent has been told needs to record only
+/// those: a decision the cap left out has not been briefed.
+pub fn render_brief_shown(
+    file: &str,
+    decisions: &[BriefDecision<'_>],
+    rules_per_decision: usize,
+    max_chars: usize,
+) -> Option<(String, Vec<usize>)> {
+    let candidates: Vec<(usize, &str, Vec<String>)> = decisions
         .iter()
-        .filter_map(|decision| {
+        .enumerate()
+        .filter_map(|(position, decision)| {
             let lines = decision_lines(decision);
-            (!lines.is_empty()).then_some((decision.heading, lines))
+            (!lines.is_empty()).then_some((position, decision.heading, lines))
         })
         .collect();
 
@@ -82,16 +95,17 @@ pub fn render_brief(
 /// still fits, so the cap holds either way.
 fn pack(
     frame: &str,
-    candidates: &[(&str, Vec<String>)],
+    candidates: &[(usize, &str, Vec<String>)],
     rules_per_decision: usize,
     max_chars: usize,
     reserve_note: bool,
-) -> Option<String> {
+) -> Option<(String, Vec<usize>)> {
     let mut used = frame.chars().count();
     let mut blocks: Vec<String> = Vec::new();
+    let mut shown: Vec<usize> = Vec::new();
     let mut omitted = 0usize;
 
-    for (at, (heading, lines)) in candidates.iter().enumerate() {
+    for (at, (position, heading, lines)) in candidates.iter().enumerate() {
         let later = candidates.len() - at - 1;
         // The note is owed if this is not the last decision.
         let reserve = if reserve_note && later > 0 {
@@ -109,6 +123,7 @@ fn pack(
             Some(block) => {
                 used += 2 + block.chars().count();
                 blocks.push(block);
+                shown.push(*position);
             }
             None => {
                 omitted = candidates.len() - at;
@@ -131,7 +146,7 @@ fn pack(
             blocks.push(note);
         }
     }
-    Some(format!("{frame}\n\n{}", blocks.join("\n\n")))
+    Some((format!("{frame}\n\n{}", blocks.join("\n\n")), shown))
 }
 
 fn decision_block(heading: &str, shown: &[String], total: usize) -> String {

@@ -491,6 +491,7 @@ mod tests {
             let args = RulesArgs {
                 action: RulesAction::Brief(RulesBriefArgs {
                     claude_hook: false,
+                    claude_session_start: false,
                     file: Some("src/main.rs".to_string()),
                     repo: Some(root.path().to_path_buf()),
                     rules_dir: None,

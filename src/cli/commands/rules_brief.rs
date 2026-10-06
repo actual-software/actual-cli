@@ -29,8 +29,13 @@
 //! stdout and exit 0. A governance aid that breaks an agent's edit loop when
 //! it malfunctions is worse than one that says nothing.
 //!
-//! Session dedupe (a decision briefed once per session) is AK-791 and is not
-//! here yet, so a repeated read of one file briefs it again.
+//! **Once per session.** A decision already briefed in this context is not
+//! briefed again, and when every decision is already known the reply is
+//! silence. The memory is [`super::brief_session`]. Context compaction
+//! empties the context the brief lived in, so `--claude-session-start` is the
+//! entry point for a `SessionStart` hook: on `compact` (and `clear`) it
+//! forgets what was briefed. Direct mode and an envelope without a
+//! `session_id` have no session and brief every time.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Component, Path, PathBuf};
@@ -38,8 +43,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::args::RulesBriefArgs;
+use crate::cli::commands::brief_session::{self, SessionKey};
 use crate::error::ActualError;
-use crate::rules::brief::{render_brief, BriefDecision};
+use crate::rules::brief::{render_brief_shown, BriefDecision};
 use crate::rules::scope::{self, index::Query};
 
 /// The event and tool pairs this command answers, and nothing else: a read is
@@ -74,6 +80,10 @@ pub struct HookEnvelope {
     pub hook_event_name: Option<String>,
     pub tool_name: Option<String>,
     pub session_id: Option<String>,
+    /// Set when the hook fires inside a subagent.
+    pub agent_id: Option<String>,
+    /// On `SessionStart`: `startup`, `resume`, `clear` or `compact`.
+    pub source: Option<String>,
     pub cwd: Option<String>,
     pub tool_input: Option<ToolInput>,
 }
@@ -102,12 +112,43 @@ struct ContextOutput {
 }
 
 pub fn exec(args: &RulesBriefArgs) -> Result<(), ActualError> {
+    if args.claude_session_start {
+        session_start(&read_stdin(), args);
+        return Ok(());
+    }
     if args.claude_hook {
         emit(hook_reply(&read_stdin(), args));
         // Always `Ok`: see the fail-open note in the module docs.
         return Ok(());
     }
     exec_direct(args)
+}
+
+/// Answer a `SessionStart` envelope. Only a source that emptied the context
+/// forgets anything: `startup` has no state yet, and `resume` restores the
+/// transcript, brief included. Silent whatever happens.
+fn session_start(raw: &str, args: &RulesBriefArgs) {
+    let Ok(envelope) = serde_json::from_str::<HookEnvelope>(raw) else {
+        return;
+    };
+    if !matches!(envelope.source.as_deref(), Some("compact" | "clear")) {
+        return;
+    }
+    let Some(session_id) = envelope.session_id.filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let root = args
+        .repo
+        .clone()
+        .or_else(|| envelope.cwd.map(PathBuf::from))
+        .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    if let Some(dir) = brief_session::sessions_dir() {
+        brief_session::reset(&dir, &session_id, &rules_dir);
+    }
 }
 
 /// Print a reply, or nothing. Split out so the decision to stay silent is
@@ -131,7 +172,7 @@ fn exec_direct(args: &RulesBriefArgs) -> Result<(), ActualError> {
         .repo
         .clone()
         .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
-    match brief_for(&root, &file, args) {
+    match brief_for(&root, &file, args, None) {
         Some(brief) => println!("{brief}"),
         None => println!("No rule document governs {file}."),
     }
@@ -224,7 +265,12 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
         .or_else(|| envelope.cwd.map(PathBuf::from))
         .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
 
-    let brief = brief_for(&root, &file, args)?;
+    let session_id = envelope.session_id.filter(|id| !id.is_empty());
+    let session = session_id.as_deref().map(|session_id| SessionIdentity {
+        session_id,
+        agent_id: envelope.agent_id.as_deref().filter(|id| !id.is_empty()),
+    });
+    let brief = brief_for(&root, &file, args, session)?;
     serde_json::to_string(&ContextOutput {
         hook_specific_output: HookSpecificContext {
             hook_event_name: event,
@@ -234,9 +280,21 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     .ok()
 }
 
-/// The brief for one file, or `None` when nothing governs it — or when
-/// anything at all goes wrong.
-fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
+/// Who is being briefed, for the once-per-session memory.
+#[derive(Clone, Copy)]
+struct SessionIdentity<'a> {
+    session_id: &'a str,
+    agent_id: Option<&'a str>,
+}
+
+/// The brief for one file, or `None` when nothing governs it, nothing in it
+/// is new to this session, or anything at all goes wrong.
+fn brief_for(
+    root: &Path,
+    file: &str,
+    args: &RulesBriefArgs,
+    session: Option<SessionIdentity<'_>>,
+) -> Option<String> {
     let Some(relative) = relative_to_root(root, file) else {
         // Still empty stdout and exit 0, but a path that cannot be placed
         // under the root must not look the same as a file nothing governs.
@@ -256,7 +314,25 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
     let query = Query::new("")
         .with_paths([relative.clone()])
         .with_min_score(min_score(args, root));
-    let decisions = resolved.index.search_adrs(&query, args.limit);
+    let mut decisions = resolved.index.search_adrs(&query, args.limit);
+
+    // Decisions this context was already briefed on are dropped after the
+    // search, so `--limit` still means "the top N for this file" rather than
+    // "N more than last time": the third-best decision does not surface just
+    // because the first two were stated earlier.
+    let memory = session.and_then(|who| {
+        let dir = brief_session::sessions_dir()?;
+        let key = SessionKey {
+            session_id: who.session_id,
+            agent_id: who.agent_id,
+            rules_dir: &rules_dir,
+        };
+        let state = brief_session::load(&dir, &key);
+        Some((dir, key, state))
+    });
+    if let Some((_, _, state)) = &memory {
+        decisions.retain(|decision| !state.has_briefed(&decision.key));
+    }
     if decisions.is_empty() {
         return None;
     }
@@ -293,7 +369,18 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
         })
         .collect();
 
-    render_brief(&relative, &briefed, args.rules_per_decision, args.max_chars)
+    let (brief, shown) =
+        render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)?;
+
+    // Only what the brief actually carried is remembered: a decision the cap
+    // left out has not been shown, and must stay eligible.
+    if let Some((dir, key, mut state)) = memory {
+        for position in shown {
+            state.record(&decisions[position].key);
+        }
+        brief_session::store(&dir, &key, &state);
+    }
+    Some(brief)
 }
 
 /// The score floor for this invocation, resolved exactly as `rules select`
@@ -380,6 +467,7 @@ mod tests {
     fn args(root: &Path) -> RulesBriefArgs {
         RulesBriefArgs {
             claude_hook: true,
+            claude_session_start: false,
             file: None,
             repo: Some(root.to_path_buf()),
             rules_dir: None,
@@ -393,7 +481,6 @@ mod tests {
 
     fn envelope(root: &Path, event: &str, tool: &str, file: &str) -> String {
         serde_json::json!({
-            "session_id": "s1",
             "cwd": root.to_string_lossy(),
             "hook_event_name": event,
             "tool_name": tool,
@@ -598,6 +685,164 @@ mod tests {
         .to_string();
 
         assert!(hook_reply(&raw, &args(root.path())).is_some());
+    }
+
+    // ── once per session ─────────────────────────────────────────────────
+
+    /// A hook envelope that belongs to a session.
+    fn session_envelope(root: &Path, session: &str, agent: Option<&str>, file: &str) -> String {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&envelope(root, "PostToolUse", "Read", file)).unwrap();
+        value["session_id"] = session.into();
+        if let Some(agent) = agent {
+            value["agent_id"] = agent.into();
+        }
+        value.to_string()
+    }
+
+    fn session_start_envelope(root: &Path, session: &str, source: &str) -> String {
+        serde_json::json!({
+            "session_id": session,
+            "cwd": root.to_string_lossy(),
+            "hook_event_name": "SessionStart",
+            "source": source,
+        })
+        .to_string()
+    }
+
+    /// Run `body` with the config directory pointed at a scratch one, so no
+    /// test writes to the machine's real session state.
+    fn with_scratch_config(body: impl FnOnce()) {
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _dir =
+            crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _file = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
+        body();
+    }
+
+    /// The decision is stated once; asking again in the same session is
+    /// silence, and a different session is briefed afresh.
+    #[test]
+    fn test_a_decision_is_briefed_once_per_session() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let file = governed(root.path());
+
+            let first = session_envelope(root.path(), "s1", None, &file);
+            assert!(hook_reply(&first, &a).is_some());
+            assert_eq!(hook_reply(&first, &a), None);
+
+            let other = session_envelope(root.path(), "s2", None, &file);
+            assert!(hook_reply(&other, &a).is_some());
+        });
+    }
+
+    /// A second file governed by the same decision adds nothing new.
+    #[test]
+    fn test_another_file_of_the_same_decision_is_silent() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let one = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            let two = session_envelope(
+                root.path(),
+                "s1",
+                None,
+                &root
+                    .path()
+                    .join("services/auth/oauth/other.ts")
+                    .to_string_lossy(),
+            );
+
+            assert!(hook_reply(&one, &a).is_some());
+            assert_eq!(hook_reply(&two, &a), None);
+        });
+    }
+
+    /// After compaction the brief is gone from context, so the session-start
+    /// reset makes the decision eligible again.
+    #[test]
+    fn test_reset_on_compact_briefs_again() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            assert!(hook_reply(&read, &a).is_some());
+            assert_eq!(hook_reply(&read, &a), None);
+
+            session_start(&session_start_envelope(root.path(), "s1", "compact"), &a);
+
+            assert!(hook_reply(&read, &a).is_some());
+        });
+    }
+
+    /// `startup` and `resume` keep the context the brief lives in, so they
+    /// must not forget it.
+    #[test]
+    fn test_reset_ignores_sources_that_keep_the_context() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            assert!(hook_reply(&read, &a).is_some());
+
+            for source in ["startup", "resume"] {
+                session_start(&session_start_envelope(root.path(), "s1", source), &a);
+            }
+            session_start("not json", &a);
+
+            assert_eq!(hook_reply(&read, &a), None);
+        });
+    }
+
+    /// A subagent's context never saw the parent's brief, so it is briefed
+    /// even where the envelope hands it the parent's `session_id`.
+    #[test]
+    fn test_a_subagent_is_briefed_independently_of_its_parent() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let file = governed(root.path());
+
+            let parent = session_envelope(root.path(), "s1", None, &file);
+            let child = session_envelope(root.path(), "s1", Some("agent-7"), &file);
+            assert!(hook_reply(&parent, &a).is_some());
+            assert!(hook_reply(&child, &a).is_some());
+            assert_eq!(hook_reply(&child, &a), None);
+        });
+    }
+
+    /// Fail open: damaged state means briefing again, never a hook error.
+    #[test]
+    fn test_a_corrupt_state_file_briefs_again() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            assert!(hook_reply(&read, &a).is_some());
+
+            let dir = brief_session::sessions_dir().unwrap();
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                std::fs::write(entry.path(), "{ not json").unwrap();
+            }
+
+            assert!(hook_reply(&read, &a).is_some());
+        });
+    }
+
+    /// Without a session there is nothing to remember, so every read briefs.
+    #[test]
+    fn test_an_envelope_without_a_session_briefs_every_time() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let raw = envelope(root.path(), "PostToolUse", "Read", &governed(root.path()));
+
+            assert!(hook_reply(&raw, &a).is_some());
+            assert!(hook_reply(&raw, &a).is_some());
+        });
     }
 
     // ── path resolution ──────────────────────────────────────────────────
