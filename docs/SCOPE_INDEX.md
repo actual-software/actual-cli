@@ -183,7 +183,10 @@ Under `--claude-hook` a decision is briefed **once per session**: state keyed
 by `session_id`, the subagent's `agent_id` when the envelope has one, and the
 rules directory lives in `brief-sessions/` under the user config directory
 (never in the repository), and a read whose decisions were all briefed already
-is silence. Files untouched for a week are pruned. A context compaction
+is silence. `--limit` is applied first and the already-briefed are dropped
+after, so a fully briefed read is silent even when a lower-ranked decision
+exists: the brief never promotes the runner-up, and a fresh session gets the
+same top N. Files untouched for a week are pruned. A context compaction
 empties the context the brief lived in, so a `SessionStart` hook should run
 `actual rules brief --claude-session-start`: on source `compact` or `clear` it
 forgets what was briefed, and for `startup` and `resume` it does nothing.

@@ -762,6 +762,49 @@ mod tests {
         });
     }
 
+    /// `--limit` is the top N for the file, applied before the already-briefed
+    /// are dropped: once those N are stated, the read is silent even though a
+    /// lower-ranked decision exists, and that one does not surface in its
+    /// place. A fresh session gets the same top N, so silence never hides what
+    /// a stateless brief would have said.
+    #[test]
+    fn test_limit_applies_before_briefed_decisions_are_dropped() {
+        with_scratch_config(|| {
+            let root = repo();
+            let other = OAUTH
+                .replace(
+                    "Sign With Asymmetric Keys: Token Signing",
+                    "Rotate Keys: Rotation",
+                )
+                .replace("R-A-", "R-B-");
+            std::fs::write(
+                crate::rules::rules_dir(root.path()).join("cross-cutting-rotation-b7f2.md"),
+                other,
+            )
+            .unwrap();
+            let mut a = args(root.path());
+            a.limit = 1;
+            let file = governed(root.path());
+
+            let first = hook_reply(&session_envelope(root.path(), "s1", None, &file), &a)
+                .expect("the top decision is briefed");
+            assert_eq!(
+                first.matches("## ").count(),
+                1,
+                "limit 1 briefs one decision: {first}"
+            );
+
+            assert_eq!(
+                hook_reply(&session_envelope(root.path(), "s1", None, &file), &a),
+                None,
+                "the runner-up must not be promoted once the top decision is stated"
+            );
+
+            let fresh = hook_reply(&session_envelope(root.path(), "s2", None, &file), &a);
+            assert_eq!(fresh, Some(first));
+        });
+    }
+
     /// After compaction the brief is gone from context, so the session-start
     /// reset makes the decision eligible again.
     #[test]
