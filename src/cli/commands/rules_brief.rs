@@ -146,10 +146,16 @@ fn exec_direct(args: &RulesBriefArgs) -> Result<(), ActualError> {
 /// direct-mode tests blocked on the test harness's own stdin. Anything that
 /// is not a pipe or a redirected file reads as empty, which is silence.
 fn read_stdin() -> String {
-    if !stdin_is_piped() {
+    read_envelope_if(stdin_is_piped(), std::io::stdin())
+}
+
+/// [`read_stdin`] over any source, so both sides of the guard are testable
+/// whatever the test harness happens to attach to the real stdin.
+fn read_envelope_if(piped: bool, source: impl Read) -> String {
+    if !piped {
         return String::new();
     }
-    read_envelope(std::io::stdin())
+    read_envelope(source)
 }
 
 /// The reading half, over any source, so the "an unreadable source is
@@ -341,13 +347,13 @@ fn resolve(path: &Path) -> PathBuf {
             continue;
         };
         let rest = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+        // `components` already drops an interior `.`, so only `..` needs
+        // handling here.
         for component in rest.components() {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    resolved.pop();
-                }
-                other => resolved.push(other),
+            if component == Component::ParentDir {
+                resolved.pop();
+            } else {
+                resolved.push(component);
             }
         }
         return resolved;
@@ -639,6 +645,18 @@ mod tests {
         assert_eq!(relative_to_root(root, "../elsewhere/x.ts"), None);
     }
 
+    /// A relative root that does not exist has no ancestor to canonicalize, so
+    /// it is compared as written rather than failing.
+    #[test]
+    fn test_resolve_leaves_a_path_with_no_existing_ancestor_as_written() {
+        let path = Path::new("no-such-dir-for-brief-test/a/../b.ts");
+        assert_eq!(resolve(path), path);
+        assert_eq!(
+            relative_to_root(Path::new("no-such-dir-for-brief-test"), "a/b.ts").as_deref(),
+            Some("a/b.ts")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_relative_to_root_sees_through_a_symlinked_root() {
@@ -798,6 +816,16 @@ mod tests {
     fn test_hook_mode_without_a_pipe_exits_zero() {
         let root = repo();
         assert!(exec(&args(root.path())).is_ok());
+    }
+
+    #[test]
+    fn test_read_envelope_if_reads_only_a_piped_source() {
+        let envelope = b"{\"a\":1}";
+        assert_eq!(
+            read_envelope_if(true, std::io::Cursor::new(envelope)),
+            "{\"a\":1}"
+        );
+        assert_eq!(read_envelope_if(false, std::io::Cursor::new(envelope)), "");
     }
 
     #[test]
