@@ -31,7 +31,7 @@
 //!
 //! **Once per session.** A decision already briefed in this context is not
 //! briefed again, and when every decision is already known the reply is
-//! silence. The memory is [`super::brief_session`]. Context compaction
+//! silence. The memory is [`super::brief_memory`]. Context compaction
 //! empties the context the brief lived in, so `--claude-session-start` is the
 //! entry point for a `SessionStart` hook: on `compact` (and `clear`) it
 //! forgets what was briefed. Direct mode and an envelope without a
@@ -43,7 +43,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::args::RulesBriefArgs;
-use crate::cli::commands::brief_session::{self, SessionKey};
+use crate::cli::commands::brief_memory::{self, SessionKey};
 use crate::error::ActualError;
 use crate::rules::brief::{render_brief_shown, BriefDecision};
 use crate::rules::scope::{self, index::Query};
@@ -148,9 +148,9 @@ fn session_start(raw: &str, args: &RulesBriefArgs) {
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
-    if let Some(dir) = brief_session::sessions_dir() {
+    if let Some(dir) = brief_memory::sessions_dir() {
         let agent_id = envelope.agent_id.as_deref().filter(|id| !id.is_empty());
-        brief_session::reset(&dir, &session_id, agent_id, &resolve(&rules_dir));
+        brief_memory::reset(&dir, &session_id, agent_id, &resolve(&rules_dir));
     }
 }
 
@@ -328,13 +328,13 @@ fn brief_for(
     // and a reset that misses the file leaves a compacted agent unbriefed.
     let key_dir = resolve(&rules_dir);
     let memory = session.and_then(|who| {
-        let dir = brief_session::sessions_dir()?;
+        let dir = brief_memory::sessions_dir()?;
         let key = SessionKey {
             session_id: who.session_id,
             agent_id: who.agent_id,
             rules_dir: &key_dir,
         };
-        let state = brief_session::load(&dir, &key);
+        let state = brief_memory::load(&dir, &key);
         Some((dir, key, state))
     });
     if let Some((_, _, state)) = &memory {
@@ -387,7 +387,7 @@ fn brief_for(
         for position in shown {
             state.record(&decisions[position].key);
         }
-        brief_session::store(&dir, &key, &state);
+        brief_memory::store(&dir, &key, &state);
     }
     Some(brief)
 }
@@ -1008,7 +1008,7 @@ mod tests {
             let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
             assert!(hook_reply(&read, &a).is_some());
 
-            let dir = brief_session::sessions_dir().unwrap();
+            let dir = brief_memory::sessions_dir().unwrap();
             for entry in std::fs::read_dir(&dir).unwrap().flatten() {
                 std::fs::write(entry.path(), "{ not json").unwrap();
             }
