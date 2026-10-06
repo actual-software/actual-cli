@@ -48,8 +48,9 @@ const OMISSION_NOTE_RESERVE: usize = 64;
 /// rule to fit.
 ///
 /// `rules_per_decision` caps each decision; `max_chars` caps the whole brief.
-/// Rules are kept or dropped whole, in rank order, never cut mid-line, and
-/// everything left out is disclosed.
+/// Rules are kept or dropped whole, in rank order, never cut mid-line. The
+/// first decision that cannot place a rule ends the brief, so what is left out
+/// is always the lowest-ranked tail, and a note says how many decisions it was.
 ///
 /// The brief opens with a sentence saying what it is and which file it is
 /// about. Hook context is meant to be project information, and a bare run of
@@ -92,8 +93,8 @@ fn pack(
 
     for (at, (heading, lines)) in candidates.iter().enumerate() {
         let later = candidates.len() - at - 1;
-        // The note is owed once anything was skipped, or may yet be.
-        let reserve = if reserve_note && (later > 0 || omitted > 0) {
+        // The note is owed if this is not the last decision.
+        let reserve = if reserve_note && later > 0 {
             OMISSION_NOTE_RESERVE
         } else {
             0
@@ -109,7 +110,10 @@ fn pack(
                 used += 2 + block.chars().count();
                 blocks.push(block);
             }
-            None => omitted += 1,
+            None => {
+                omitted = candidates.len() - at;
+                break;
+            }
         }
     }
 
@@ -515,10 +519,10 @@ mod tests {
         assert!(brief.contains("(2 more decisions not shown)"), "{brief}");
     }
 
-    /// A short decision kept after a long one was skipped must not spend the
-    /// characters the omission note needs.
+    /// A smaller decision never fills a gap left by a higher-ranked one that
+    /// did not fit: what is left out is the tail, so the note's count is true.
     #[test]
-    fn test_the_cap_holds_when_a_later_decision_is_kept_after_a_skip() {
+    fn test_a_lower_decision_is_not_shown_past_a_higher_one_that_did_not_fit() {
         let long = doc(
             "cross-cutting-pinning-c3d4",
             "Pin Providers: Terraform",
@@ -535,9 +539,8 @@ mod tests {
         ];
         let short_only = render_brief(FILE, &decisions[1..], 8, 10_000).unwrap();
         let cap = short_only.chars().count();
-        let brief = render_brief(FILE, &decisions, 8, cap).unwrap_or_default();
 
-        assert!(brief.chars().count() <= cap, "{brief}");
+        assert_eq!(render_brief(FILE, &decisions, 8, cap), None);
     }
 
     /// A decision that fits the cap alone is shown even when a lower one
