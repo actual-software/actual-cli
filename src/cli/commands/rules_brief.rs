@@ -372,8 +372,9 @@ fn brief_for(
     let (brief, shown) =
         render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)?;
 
-    // Only what the brief actually carried is remembered: a decision the cap
-    // left out has not been shown, and must stay eligible.
+    // Only what the brief carried in full is remembered: a decision the cap
+    // left out, or truncated to fewer rules, has not been shown and must stay
+    // eligible.
     if let Some((dir, key, mut state)) = memory {
         for position in shown {
             state.record(&decisions[position].key);
