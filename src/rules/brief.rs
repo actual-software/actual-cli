@@ -37,13 +37,27 @@ pub struct BriefDecision<'a> {
 
 /// Render decisions as a brief, or `None` when there is nothing to say: no
 /// decisions, or none of them stating an obligation.
-pub fn render_brief(decisions: &[BriefDecision<'_>], rules_per_decision: usize) -> Option<String> {
+///
+/// The brief opens with a sentence saying what it is and which file it is
+/// about. Hook context is meant to be project information, and a bare run of
+/// `MUST` lines reads like a command arriving from nowhere — which is what an
+/// injection looks like. The rule lines themselves keep the rules' own words.
+pub fn render_brief(
+    file: &str,
+    decisions: &[BriefDecision<'_>],
+    rules_per_decision: usize,
+) -> Option<String> {
     let blocks: Vec<String> = decisions
         .iter()
         .filter_map(|decision| render_decision(decision, rules_per_decision))
         .collect();
 
-    (!blocks.is_empty()).then(|| blocks.join("\n\n"))
+    (!blocks.is_empty()).then(|| {
+        format!(
+            "This repository's own rules that apply to `{file}`:\n\n{}",
+            blocks.join("\n\n")
+        )
+    })
 }
 
 /// `RuleLevel::as_str` is the serialized form (`MUST_NOT`); a brief is prose
@@ -100,6 +114,8 @@ mod tests {
 
     use crate::rules::parse_rule_document;
 
+    const FILE: &str = "services/auth/token.ts";
+
     fn doc(slug: &str, title: &str, rules: &str) -> RuleDocument {
         let text = format!(
             "# {title}\n\nThese rules are ALWAYS ACTIVE everywhere.\n\n### Rules\n\n{rules}\n"
@@ -122,9 +138,9 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: sign with HS256.",
         );
-        let brief = render_brief(&[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
 
-        assert!(brief.starts_with("## Adopt RS256\n"), "{brief}");
+        assert!(brief.contains("\n\n## Adopt RS256\n"), "{brief}");
         assert!(brief.contains("- [cross-cutting-signing-e410/R-A-001] MUST sign with RS256."));
         assert!(brief.contains("[cross-cutting-signing-e410/R-A-002] MUST NOT sign with HS256."));
     }
@@ -137,7 +153,7 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** SHOULD: rotate quarterly.\n- **R-A-003** MAY: cache the key.",
         );
-        let brief = render_brief(&[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
 
         assert!(brief.contains("R-A-001"));
         assert!(!brief.contains("R-A-002"), "{brief}");
@@ -158,7 +174,8 @@ mod tests {
             "Adopt RS256: Token Verification",
             "- **R-B-001** MUST: sign with RS256.\n- **R-B-002** MUST: check revocation.",
         );
-        let brief = render_brief(&[decision("Adopt RS256", vec![&a, &b])], 8).expect("a brief");
+        let brief =
+            render_brief(FILE, &[decision("Adopt RS256", vec![&a, &b])], 8).expect("a brief");
 
         assert_eq!(brief.matches("sign with RS256.").count(), 1, "{brief}");
         assert!(
@@ -185,7 +202,8 @@ mod tests {
             "Adopt RS256: Key Caching",
             "- **R-A-001** MUST: cache public keys for an hour.",
         );
-        let brief = render_brief(&[decision("Adopt RS256", vec![&a, &b])], 8).expect("a brief");
+        let brief =
+            render_brief(FILE, &[decision("Adopt RS256", vec![&a, &b])], 8).expect("a brief");
 
         assert!(
             brief.contains("[cross-cutting-signing-e410/R-A-001]"),
@@ -205,7 +223,7 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: one.\n- **R-A-002** MUST: two.\n- **R-A-003** MUST: three.",
         );
-        let brief = render_brief(&[decision("Adopt RS256", vec![&a])], 2).expect("a brief");
+        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 2).expect("a brief");
 
         assert!(brief.contains("R-A-001"));
         assert!(brief.contains("R-A-002"));
@@ -221,7 +239,7 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: one.",
         );
-        let brief = render_brief(&[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
 
         assert!(!brief.contains("rules shown"), "{brief}");
     }
@@ -240,6 +258,7 @@ mod tests {
             "- **R-B-001** MUST: pin providers.",
         );
         let brief = render_brief(
+            FILE,
             &[
                 decision("Adopt RS256", vec![&a]),
                 decision("Pin Providers", vec![&b]),
@@ -256,7 +275,7 @@ mod tests {
     /// into silence.
     #[test]
     fn test_nothing_to_say_is_none() {
-        assert_eq!(render_brief(&[], 8), None);
+        assert_eq!(render_brief(FILE, &[], 8), None);
 
         let advice_only = doc(
             "cross-cutting-signing-e410",
@@ -264,7 +283,7 @@ mod tests {
             "- **R-A-001** SHOULD: rotate quarterly.",
         );
         assert_eq!(
-            render_brief(&[decision("Adopt RS256", vec![&advice_only])], 8),
+            render_brief(FILE, &[decision("Adopt RS256", vec![&advice_only])], 8),
             None
         );
     }
@@ -278,6 +297,28 @@ mod tests {
             "Adopt RS256: Token Signing",
             "- **R-A-001** MUST: sign with RS256.",
         );
-        assert_eq!(render_brief(&[decision("Adopt RS256", vec![&a])], 0), None);
+        assert_eq!(
+            render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 0),
+            None
+        );
+    }
+
+    /// The brief says what it is and which file it is about before any rule,
+    /// so it reads as project information rather than a bare command.
+    #[test]
+    fn test_brief_opens_with_a_factual_frame() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.",
+        );
+        let brief = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8).expect("a brief");
+
+        assert!(
+            brief.starts_with(
+                "This repository's own rules that apply to `services/auth/token.ts`:\n\n"
+            ),
+            "{brief}"
+        );
     }
 }
