@@ -293,7 +293,8 @@ including who can attribute the data and its retention.
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for build
-instructions, coding standards, and PR guidelines.
+instructions, coding standards, and PR guidelines, and
+[ARCHITECTURE.md](ARCHITECTURE.md) for a module-level reference to the codebase.
 
 ## Security
 
