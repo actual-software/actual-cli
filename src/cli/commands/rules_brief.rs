@@ -237,7 +237,7 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
     let resolved = scope::resolve_in(&rules_dir, root, false).ok()?;
 
     let query = Query::new("")
-        .with_paths([relative])
+        .with_paths([relative.clone()])
         .with_min_score(min_score(args, root));
     let decisions = resolved.index.search_adrs(&query, args.limit);
     if decisions.is_empty() {
@@ -276,7 +276,7 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
         })
         .collect();
 
-    render_brief(&briefed, args.rules_per_decision)
+    render_brief(&relative, &briefed, args.rules_per_decision)
 }
 
 /// The score floor for this invocation, resolved exactly as `rules select`
