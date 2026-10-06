@@ -76,7 +76,12 @@ pub fn render_brief(
 
     for (at, (heading, lines)) in candidates.iter().enumerate() {
         let later = candidates.len() - at - 1;
-        let reserve = if later > 0 { OMISSION_NOTE_RESERVE } else { 0 };
+        // The note is owed once anything was skipped, or may yet be.
+        let reserve = if later > 0 || omitted > 0 {
+            OMISSION_NOTE_RESERVE
+        } else {
+            0
+        };
         let total = lines.len();
         let fit = (1..=total.min(rules_per_decision)).rev().find_map(|shown| {
             let block = decision_block(heading, &lines[..shown], total);
@@ -489,6 +494,31 @@ mod tests {
 
         assert!(brief.contains("## Adopt RS256"), "{brief}");
         assert!(brief.contains("(2 more decisions not shown)"), "{brief}");
+    }
+
+    /// A short decision kept after a long one was skipped must not spend the
+    /// characters the omission note needs.
+    #[test]
+    fn test_the_cap_holds_when_a_later_decision_is_kept_after_a_skip() {
+        let long = doc(
+            "cross-cutting-pinning-c3d4",
+            "Pin Providers: Terraform",
+            "- **R-B-001** MUST: pin every provider to an exact version in the lockfile and never use a floating range.",
+        );
+        let short = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign.",
+        );
+        let decisions = [
+            decision("Pin Providers", vec![&long]),
+            decision("Adopt RS256", vec![&short]),
+        ];
+        let short_only = render_brief(FILE, &decisions[1..], 8, 10_000).unwrap();
+        let cap = short_only.chars().count();
+        let brief = render_brief(FILE, &decisions, 8, cap).unwrap_or_default();
+
+        assert!(brief.chars().count() <= cap, "{brief}");
     }
 
     /// A cap too small for any rule is silence, like a cap of zero rules.
