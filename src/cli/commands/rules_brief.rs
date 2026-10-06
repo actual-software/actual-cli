@@ -126,7 +126,9 @@ pub fn exec(args: &RulesBriefArgs) -> Result<(), ActualError> {
 
 /// Answer a `SessionStart` envelope. Only a source that emptied the context
 /// forgets anything: `startup` has no state yet, and `resume` restores the
-/// transcript, brief included. Silent whatever happens.
+/// transcript, brief included. The reset is for the agent whose context
+/// emptied: a subagent's `agent_id` clears its memory, never the parent's.
+/// Silent whatever happens.
 fn session_start(raw: &str, args: &RulesBriefArgs) {
     let Ok(envelope) = serde_json::from_str::<HookEnvelope>(raw) else {
         return;
@@ -147,7 +149,8 @@ fn session_start(raw: &str, args: &RulesBriefArgs) {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     if let Some(dir) = brief_session::sessions_dir() {
-        brief_session::reset(&dir, &session_id, &rules_dir);
+        let agent_id = envelope.agent_id.as_deref().filter(|id| !id.is_empty());
+        brief_session::reset(&dir, &session_id, agent_id, &rules_dir);
     }
 }
 
@@ -819,6 +822,36 @@ mod tests {
             session_start(&session_start_envelope(root.path(), "s1", "compact"), &a);
 
             assert!(hook_reply(&read, &a).is_some());
+        });
+    }
+
+    /// A subagent's context is its own: its compaction makes its decisions
+    /// eligible again without touching the parent's, and the parent's
+    /// compaction leaves the subagent's alone.
+    #[test]
+    fn test_reset_targets_only_the_agent_whose_context_emptied() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let file = governed(root.path());
+            let parent = session_envelope(root.path(), "s1", None, &file);
+            let child = session_envelope(root.path(), "s1", Some("sub1"), &file);
+            assert!(hook_reply(&parent, &a).is_some());
+            assert!(hook_reply(&child, &a).is_some());
+
+            let mut start: serde_json::Value =
+                serde_json::from_str(&session_start_envelope(root.path(), "s1", "compact"))
+                    .unwrap();
+            start["agent_id"] = "sub1".into();
+            session_start(&start.to_string(), &a);
+
+            assert!(hook_reply(&child, &a).is_some(), "subagent forgot");
+            assert_eq!(hook_reply(&parent, &a), None, "parent was cleared");
+
+            session_start(&session_start_envelope(root.path(), "s1", "compact"), &a);
+
+            assert!(hook_reply(&parent, &a).is_some(), "parent forgot");
+            assert_eq!(hook_reply(&child, &a), None, "subagent was cleared");
         });
     }
 

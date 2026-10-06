@@ -123,12 +123,13 @@ pub fn store(dir: &Path, key: &SessionKey<'_>, session: &BriefSession) {
     prune_stale(dir);
 }
 
-/// Forget what the main agent of `session_id` was briefed on, because that
-/// context is gone. Subagent contexts are separate and untouched.
-pub fn reset(dir: &Path, session_id: &str, rules_dir: &Path) {
+/// Forget what one agent of `session_id` was briefed on, because that
+/// context is gone: the main agent when `agent_id` is `None`, else that
+/// subagent. Every other context is separate and untouched.
+pub fn reset(dir: &Path, session_id: &str, agent_id: Option<&str>, rules_dir: &Path) {
     let key = SessionKey {
         session_id,
-        agent_id: None,
+        agent_id,
         rules_dir,
     };
     let _ = std::fs::remove_file(session_path(dir, &key));
@@ -213,7 +214,7 @@ mod tests {
         store(dir.path(), &key("s1", None, rules), &session);
         store(dir.path(), &key("s1", Some("sub-1"), rules), &session);
 
-        reset(dir.path(), "s1", rules);
+        reset(dir.path(), "s1", None, rules);
 
         assert!(!load(dir.path(), &key("s1", None, rules)).has_briefed("Adopt RS256"));
         assert!(load(dir.path(), &key("s1", Some("sub-1"), rules)).has_briefed("Adopt RS256"));
@@ -223,7 +224,12 @@ mod tests {
     #[test]
     fn test_reset_of_an_unknown_session_is_harmless() {
         let dir = tempdir().unwrap();
-        reset(dir.path(), "never-seen", Path::new("/repo/.actual/rules"));
+        reset(
+            dir.path(),
+            "never-seen",
+            None,
+            Path::new("/repo/.actual/rules"),
+        );
     }
 
     /// Fail open: a damaged file is an empty session, so the agent is briefed
