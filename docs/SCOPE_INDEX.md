@@ -171,6 +171,13 @@ outside the repository, a missing rule set) is empty stdout and exit 0, so a
 broken brief never breaks an agent's edit loop. `--file` runs the same
 selection at a terminal and prints the brief as text.
 
+The brief is held to three budgets: `--limit` counts decisions,
+`--rules-per-decision` caps what each contributes, and `--max-chars` (4000 by
+default) caps the whole text. Under the character cap rules are dropped whole,
+lowest-ranked first: a decision that cannot place a rule ends the brief, so what
+is left out is always the tail, and a closing line says how many decisions that
+was. A cap too small for even one rule yields no brief.
+
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;
 stage 2 is skipped then because it ranks against plan prose. `--explain`

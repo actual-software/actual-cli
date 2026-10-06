@@ -782,8 +782,8 @@ pub enum RulesAction {
 /// Arguments for `rules brief`
 ///
 /// The hook this serves runs on every file an agent reads, so every default
-/// here is a budget: `--limit` counts decisions, and `--rules-per-decision`
-/// caps what each one contributes.
+/// here is a budget: `--limit` counts decisions, `--rules-per-decision` caps
+/// what each one contributes, and `--max-chars` caps the whole brief.
 #[derive(Parser, Debug)]
 pub struct RulesBriefArgs {
     /// Read a Claude Code hook envelope from stdin and emit the hook's JSON
