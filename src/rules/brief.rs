@@ -70,6 +70,22 @@ pub fn render_brief(
         .collect();
 
     let frame = format!("This repository's own rules that apply to `{file}`:");
+    // Keeping room for the omission note can cost a decision that would fit
+    // alone, so a brief that comes out empty is packed again without it.
+    pack(&frame, &candidates, rules_per_decision, max_chars, true)
+        .or_else(|| pack(&frame, &candidates, rules_per_decision, max_chars, false))
+}
+
+/// One packing pass. With `reserve_note`, room is kept for the omission note
+/// whenever it is or may yet be owed; without, the note is added only if it
+/// still fits, so the cap holds either way.
+fn pack(
+    frame: &str,
+    candidates: &[(&str, Vec<String>)],
+    rules_per_decision: usize,
+    max_chars: usize,
+    reserve_note: bool,
+) -> Option<String> {
     let mut used = frame.chars().count();
     let mut blocks: Vec<String> = Vec::new();
     let mut omitted = 0usize;
@@ -77,7 +93,7 @@ pub fn render_brief(
     for (at, (heading, lines)) in candidates.iter().enumerate() {
         let later = candidates.len() - at - 1;
         // The note is owed once anything was skipped, or may yet be.
-        let reserve = if later > 0 || omitted > 0 {
+        let reserve = if reserve_note && (later > 0 || omitted > 0) {
             OMISSION_NOTE_RESERVE
         } else {
             0
@@ -106,7 +122,10 @@ pub fn render_brief(
         } else {
             "decisions"
         };
-        blocks.push(format!("({omitted} more {noun} not shown)"));
+        let note = format!("({omitted} more {noun} not shown)");
+        if used + 2 + note.chars().count() <= max_chars {
+            blocks.push(note);
+        }
     }
     Some(format!("{frame}\n\n{}", blocks.join("\n\n")))
 }
@@ -518,6 +537,32 @@ mod tests {
         let cap = short_only.chars().count();
         let brief = render_brief(FILE, &decisions, 8, cap).unwrap_or_default();
 
+        assert!(brief.chars().count() <= cap, "{brief}");
+    }
+
+    /// A decision that fits the cap alone is shown even when a lower one
+    /// does not fit, and the cap holds.
+    #[test]
+    fn test_a_fitting_decision_survives_a_lower_one_that_does_not_fit() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.",
+        );
+        let b = doc(
+            "cross-cutting-pinning-c3d4",
+            "Pin Providers: Terraform",
+            "- **R-B-001** MUST: pin every provider to an exact version in the lockfile.",
+        );
+        let top_only = render_brief(FILE, &[decision("Adopt RS256", vec![&a])], 8, 10_000).unwrap();
+        let cap = top_only.chars().count();
+        let decisions = [
+            decision("Adopt RS256", vec![&a]),
+            decision("Pin Providers", vec![&b]),
+        ];
+        let brief = render_brief(FILE, &decisions, 8, cap).expect("the top decision fits");
+
+        assert!(brief.contains("## Adopt RS256"), "{brief}");
         assert!(brief.chars().count() <= cap, "{brief}");
     }
 
