@@ -189,7 +189,9 @@ exists: the brief never promotes the runner-up, and a fresh session gets the
 same top N. Files untouched for a week are pruned. A context compaction
 empties the context the brief lived in, so a `SessionStart` hook should run
 `actual rules brief --claude-session-start`: on source `compact` or `clear` it
-forgets what was briefed, and for `startup` and `resume` it does nothing.
+forgets what was briefed to the agent that envelope names (a subagent's
+`agent_id` clears that subagent, never the parent), and for `startup` and
+`resume` it does nothing.
 Damaged state reads as nothing briefed, so the failure mode is a repeated brief,
 never a missing one.
 
