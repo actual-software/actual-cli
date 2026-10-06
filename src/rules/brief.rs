@@ -65,9 +65,10 @@ pub fn render_brief(
     render_brief_shown(file, decisions, rules_per_decision, max_chars).map(|(brief, _)| brief)
 }
 
-/// [`render_brief`], also naming which of `decisions` it showed, by position.
-/// A caller that remembers what an agent has been told needs to record only
-/// those: a decision the cap left out has not been briefed.
+/// [`render_brief`], also naming which of `decisions` it showed in full, by
+/// position. A caller that remembers what an agent has been told needs to
+/// record only those: a decision the cap left out, or cut to fewer rules, has
+/// not been briefed.
 pub fn render_brief_shown(
     file: &str,
     decisions: &[BriefDecision<'_>],
@@ -117,13 +118,17 @@ fn pack(
         let fit = (1..=total.min(rules_per_decision)).rev().find_map(|shown| {
             let block = decision_block(heading, &lines[..shown], total);
             // +2 for the blank line that joins blocks.
-            (used + 2 + block.chars().count() + reserve <= max_chars).then_some(block)
+            (used + 2 + block.chars().count() + reserve <= max_chars).then_some((block, shown))
         });
         match fit {
-            Some(block) => {
+            Some((block, placed)) => {
                 used += 2 + block.chars().count();
                 blocks.push(block);
-                shown.push(*position);
+                // A decision with rules left out has not been briefed: the
+                // "(n of m rules shown)" line and this record must agree.
+                if placed == total {
+                    shown.push(*position);
+                }
             }
             None => {
                 omitted = candidates.len() - at;
@@ -556,6 +561,52 @@ mod tests {
         let cap = short_only.chars().count();
 
         assert_eq!(render_brief(FILE, &decisions, 8, cap), None);
+    }
+
+    /// A decision cut to fewer rules has not been briefed: only a decision
+    /// shown in full is reported, so the caller leaves the rest eligible.
+    #[test]
+    fn test_a_decision_cut_by_rules_per_decision_is_not_reported_shown() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: sign with HS256.",
+        );
+        let b = doc(
+            "cross-cutting-pinning-c3d4",
+            "Pin Providers: Terraform",
+            "- **R-B-001** MUST: pin every provider.",
+        );
+        let decisions = [
+            decision("Adopt RS256", vec![&a]),
+            decision("Pin Providers", vec![&b]),
+        ];
+        let (brief, shown) =
+            render_brief_shown(FILE, &decisions, 1, DEFAULT_MAX_CHARS).expect("a brief");
+
+        assert!(brief.contains("(1 of 2 rules shown)"), "{brief}");
+        assert_eq!(shown, vec![1]);
+    }
+
+    /// The same holds when the character cap, not the per-decision cap, is
+    /// what trimmed the decision.
+    #[test]
+    fn test_a_decision_cut_by_the_character_cap_is_not_reported_shown() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: sign with HS256 or any shared secret algorithm at all.",
+        );
+        let decisions = [decision("Adopt RS256", vec![&a])];
+        let full = render_brief_shown(FILE, &decisions, 8, DEFAULT_MAX_CHARS).unwrap();
+        assert_eq!(full.1, vec![0]);
+
+        let one_rule = render_brief(FILE, &decisions, 1, DEFAULT_MAX_CHARS).unwrap();
+        let (brief, shown) =
+            render_brief_shown(FILE, &decisions, 8, one_rule.chars().count()).expect("a brief");
+
+        assert!(brief.contains("(1 of 2 rules shown)"), "{brief}");
+        assert!(shown.is_empty(), "{shown:?}");
     }
 
     /// The invariant: whatever the cap, a brief never exceeds it.
