@@ -543,6 +543,36 @@ mod tests {
         assert_eq!(render_brief(FILE, &decisions, 8, cap), None);
     }
 
+    /// The invariant: whatever the cap, a brief never exceeds it.
+    #[test]
+    fn test_a_brief_never_exceeds_its_cap() {
+        let a = doc(
+            "cross-cutting-signing-e410",
+            "Adopt RS256: Token Signing",
+            "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: sign with HS256.",
+        );
+        let b = doc(
+            "cross-cutting-pinning-c3d4",
+            "Pin Providers: Terraform",
+            "- **R-B-001** MUST: pin every provider to an exact version in the lockfile and never use a floating range.",
+        );
+        let c = doc(
+            "cross-cutting-logging-f5a6",
+            "Structured Logging: Services",
+            "- **R-C-001** MUST: log.",
+        );
+        let decisions = [
+            decision("Adopt RS256", vec![&a]),
+            decision("Pin Providers", vec![&b]),
+            decision("Structured Logging", vec![&c]),
+        ];
+        for cap in 0..=600 {
+            if let Some(brief) = render_brief(FILE, &decisions, 8, cap) {
+                assert!(brief.chars().count() <= cap, "cap {cap}: {brief}");
+            }
+        }
+    }
+
     /// A decision that fits the cap alone is shown even when a lower one
     /// does not fit, and the cap holds.
     #[test]
