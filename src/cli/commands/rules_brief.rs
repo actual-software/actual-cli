@@ -293,7 +293,7 @@ fn brief_for(root: &Path, file: &str, args: &RulesBriefArgs) -> Option<String> {
         })
         .collect();
 
-    render_brief(&relative, &briefed, args.rules_per_decision)
+    render_brief(&relative, &briefed, args.rules_per_decision, args.max_chars)
 }
 
 /// The score floor for this invocation, resolved exactly as `rules select`
@@ -385,6 +385,7 @@ mod tests {
             rules_dir: None,
             limit: 2,
             rules_per_decision: 8,
+            max_chars: crate::rules::brief::DEFAULT_MAX_CHARS,
             // Explicit, so these tests never read the machine's own config.
             min_score: Some(0.0),
         }
