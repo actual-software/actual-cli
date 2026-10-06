@@ -672,23 +672,26 @@ mod tests {
     }
 
     /// Unmodelled fields must not break deserialization: a newer envelope
-    /// still briefs.
+    /// still briefs. It names a session, so it runs against scratch state
+    /// rather than leaving a file in the real config directory.
     #[test]
     fn test_envelope_tolerates_unknown_fields() {
-        let root = repo();
-        let raw = serde_json::json!({
-            "session_id": "s1",
-            "cwd": root.path().to_string_lossy(),
-            "hook_event_name": "PostToolUse",
-            "tool_name": "Read",
-            "tool_use_id": "t1",
-            "permission_mode": "acceptEdits",
-            "something_new": {"nested": true},
-            "tool_input": {"file_path": governed(root.path()), "offset": 1},
-        })
-        .to_string();
+        with_scratch_config(|| {
+            let root = repo();
+            let raw = serde_json::json!({
+                "session_id": "s1",
+                "cwd": root.path().to_string_lossy(),
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Read",
+                "tool_use_id": "t1",
+                "permission_mode": "acceptEdits",
+                "something_new": {"nested": true},
+                "tool_input": {"file_path": governed(root.path()), "offset": 1},
+            })
+            .to_string();
 
-        assert!(hook_reply(&raw, &args(root.path())).is_some());
+            assert!(hook_reply(&raw, &args(root.path())).is_some());
+        });
     }
 
     // ── once per session ─────────────────────────────────────────────────
