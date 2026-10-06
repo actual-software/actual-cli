@@ -113,13 +113,14 @@ pub fn load(dir: &Path, key: &SessionKey<'_>) -> BriefSession {
 pub fn store(dir: &Path, key: &SessionKey<'_>, session: &BriefSession) {
     let mut to_write = session.clone();
     to_write.format_version = FORMAT_VERSION;
-    let Ok(json) = serde_json::to_string(&to_write) else {
-        return;
-    };
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let _ = crate::config::paths::write_secure(&session_path(dir, key), json.as_bytes());
+    // Serializing a version and a set of strings cannot fail, so there is no
+    // error path to take here; writing nothing is still the right fallback.
+    if let Ok(json) = serde_json::to_string(&to_write) {
+        let _ = crate::config::paths::write_secure(&session_path(dir, key), json.as_bytes());
+    }
     prune_stale(dir);
 }
 
@@ -145,10 +146,16 @@ fn prune_stale(dir: &Path) {
         if path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
-        let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
-            continue;
-        };
-        if now.duration_since(modified).unwrap_or_default() > SESSION_MAX_AGE {
+        // A file whose age cannot be read is kept: pruning is a convenience,
+        // and deleting state on a failed stat would silently over-brief.
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|modified| {
+                now.duration_since(modified).unwrap_or_default() > SESSION_MAX_AGE
+            });
+        if stale {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -269,6 +276,37 @@ mod tests {
             &key("s1", None, rules),
             &BriefSession::default(),
         );
+    }
+
+    /// Pruning a directory that cannot be read is not an error: there is
+    /// nothing to clean up, and the caller's own write has already happened.
+    #[test]
+    fn test_pruning_an_unreadable_directory_is_harmless() {
+        let dir = tempdir().unwrap();
+        prune_stale(&dir.path().join("never-created"));
+    }
+
+    /// Only this store's own files are candidates. Anything else in the
+    /// directory is left alone, however old it is.
+    #[test]
+    fn test_pruning_leaves_files_it_does_not_own() {
+        let dir = tempdir().unwrap();
+        let rules = Path::new("/repo/.actual/rules");
+        let foreign = dir.path().join("notes.txt");
+        std::fs::write(&foreign, "not ours").unwrap();
+        let eight_days = std::time::Duration::from_secs(8 * 24 * 60 * 60);
+        let file = std::fs::File::options().write(true).open(&foreign).unwrap();
+        file.set_modified(std::time::SystemTime::now() - eight_days)
+            .unwrap();
+        drop(file);
+
+        store(
+            dir.path(),
+            &key("s1", None, rules),
+            &BriefSession::default(),
+        );
+
+        assert!(foreign.exists(), "a foreign file was pruned");
     }
 
     #[test]
