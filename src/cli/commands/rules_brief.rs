@@ -888,6 +888,55 @@ mod tests {
         });
     }
 
+    /// `exec` routes `--claude-session-start` to the reset, reading the
+    /// envelope from stdin, which is empty under a test harness: nothing to
+    /// forget, exit 0.
+    #[test]
+    fn test_exec_session_start_mode_exits_zero() {
+        let root = repo();
+        let mut a = args(root.path());
+        a.claude_hook = false;
+        a.claude_session_start = true;
+        assert!(exec(&a).is_ok());
+    }
+
+    /// A reset envelope with no session cannot say whose memory to clear, so
+    /// it clears none.
+    #[test]
+    fn test_reset_without_a_session_id_forgets_nothing() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            assert!(hook_reply(&read, &a).is_some());
+
+            for start in [
+                serde_json::json!({"cwd": root.path().to_string_lossy(), "source": "compact"}),
+                serde_json::json!({"session_id": "", "source": "clear"}),
+            ] {
+                session_start(&start.to_string(), &a);
+            }
+
+            assert_eq!(hook_reply(&read, &a), None);
+        });
+    }
+
+    /// Without a usable config directory there is nowhere to keep state: the
+    /// reset does nothing and every read is briefed, never silenced.
+    #[test]
+    fn test_an_unusable_config_dir_means_no_memory() {
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _dir = crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", "not/absolute");
+        let _file = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
+        let root = repo();
+        let a = args(root.path());
+        let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+
+        assert!(hook_reply(&read, &a).is_some());
+        assert!(hook_reply(&read, &a).is_some());
+        session_start(&session_start_envelope(root.path(), "s1", "compact"), &a);
+    }
+
     /// `startup` and `resume` keep the context the brief lives in, so they
     /// must not forget it.
     #[test]
