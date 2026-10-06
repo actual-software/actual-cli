@@ -193,7 +193,11 @@ forgets what was briefed to the agent that envelope names (a subagent's
 `agent_id` clears that subagent, never the parent), and for `startup` and
 `resume` it does nothing.
 Damaged state reads as nothing briefed, so the failure mode is a repeated brief,
-never a missing one.
+never a missing one. Concurrent hook runs are last-write-wins: a lost update only
+drops a record, so a decision is briefed again. The reset depends on the
+`SessionStart` hook being installed — this repository ships the command, and
+the plugin must register `actual rules brief --claude-session-start`; until it
+does, a compacted context is not briefed again on what it already saw.
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;

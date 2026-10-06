@@ -150,7 +150,7 @@ fn session_start(raw: &str, args: &RulesBriefArgs) {
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     if let Some(dir) = brief_session::sessions_dir() {
         let agent_id = envelope.agent_id.as_deref().filter(|id| !id.is_empty());
-        brief_session::reset(&dir, &session_id, agent_id, &rules_dir);
+        brief_session::reset(&dir, &session_id, agent_id, &resolve(&rules_dir));
     }
 }
 
@@ -323,12 +323,16 @@ fn brief_for(
     // search, so `--limit` still means "the top N for this file" rather than
     // "N more than last time": the third-best decision does not surface just
     // because the first two were stated earlier.
+    // The key is the resolved path: the read hook and the SessionStart hook
+    // may be handed the same directory spelled differently (a symlink, a `..`),
+    // and a reset that misses the file leaves a compacted agent unbriefed.
+    let key_dir = resolve(&rules_dir);
     let memory = session.and_then(|who| {
         let dir = brief_session::sessions_dir()?;
         let key = SessionKey {
             session_id: who.session_id,
             agent_id: who.agent_id,
-            rules_dir: &rules_dir,
+            rules_dir: &key_dir,
         };
         let state = brief_session::load(&dir, &key);
         Some((dir, key, state))
@@ -855,6 +859,32 @@ mod tests {
 
             assert!(hook_reply(&parent, &a).is_some(), "parent forgot");
             assert_eq!(hook_reply(&child, &a), None, "subagent was cleared");
+        });
+    }
+
+    /// The read hook and the SessionStart hook can name the same rules
+    /// directory differently; the reset must still find the file the read wrote.
+    #[test]
+    fn test_reset_finds_state_under_a_differently_spelled_rules_dir() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            assert!(hook_reply(&read, &a).is_some());
+            assert_eq!(hook_reply(&read, &a), None);
+
+            let mut spelled = args(root.path());
+            spelled.rules_dir = Some(
+                crate::rules::rules_dir(root.path())
+                    .join("..")
+                    .join(crate::rules::rules_dir(root.path()).file_name().unwrap()),
+            );
+            session_start(
+                &session_start_envelope(root.path(), "s1", "compact"),
+                &spelled,
+            );
+
+            assert!(hook_reply(&read, &a).is_some(), "reset missed the file");
         });
     }
 
