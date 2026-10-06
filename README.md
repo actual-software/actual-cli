@@ -19,7 +19,7 @@
 
 ## Quickstart
 
-### 1. Install Actual.ai Skill — Claude Code CLI
+### Install Actual.ai Skill — Claude Code CLI
 
 Start with the [Actual.ai Skill](https://github.com/actual-software/actual-skill). The skill wraps the Actual.ai CLI so your coding agent can use it, and installs the CLI for you on first run. Run each step as its own copy/paste.
 
@@ -41,9 +41,28 @@ Step 3 — reload plugins so Claude Code CLI loads the newly installed plugin:
 /reload-plugins
 ```
 
-### 2. Install Actual.ai CLI — npm / npx
+Step 4 — run the skill in your coding agent:
 
-The skill installs the CLI on its own, so you only need this step for scripts and CI or to run the CLI outside an agent.
+```
+/actual
+```
+
+The first time you run it, the skill asks for your permission to install the Actual.ai CLI for you. For example:
+
+```
+/actual
+
+The `actual` CLI is not installed. Should I install it with:
+
+    npm install -g @actualai/actual
+
+Then I'll verify it with `actual --version`.
+```
+
+<details>
+<summary><strong>Manual install Actual.ai CLI — npm / npx</strong></summary>
+
+The skill installs the CLI for you, so you only need a manual install for scripts and CI or to run the CLI outside an agent.
 
 Step 1 — install the CLI globally:
 
@@ -64,6 +83,8 @@ Step 3 — ask your first architecture question:
 ```
 actual advisor "Should new services talk over gRPC or REST?"
 ```
+
+</details>
 
 <details>
 <summary><strong>Install Actual.ai CLI — Homebrew</strong></summary>
