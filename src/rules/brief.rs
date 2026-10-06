@@ -65,10 +65,13 @@ pub fn render_brief(
     render_brief_shown(file, decisions, rules_per_decision, max_chars).map(|(brief, _)| brief)
 }
 
-/// [`render_brief`], also naming which of `decisions` it showed in full, by
-/// position. A caller that remembers what an agent has been told needs to
-/// record only those: a decision the cap left out, or cut to fewer rules, has
-/// not been briefed.
+/// [`render_brief`], also naming which of `decisions` it contributed
+/// everything it could, by position. A caller that remembers what an agent
+/// has been told records only those. That means a decision shown in full, and
+/// one trimmed only to `rules_per_decision` — the cap is a ceiling on what the
+/// decision can ever contribute, so a later read cannot show more. A decision
+/// `max_chars` left out or trimmed is not named: a read with less competition
+/// can still fit it whole.
 pub fn render_brief_shown(
     file: &str,
     decisions: &[BriefDecision<'_>],
@@ -124,9 +127,14 @@ fn pack(
             Some((block, placed)) => {
                 used += 2 + block.chars().count();
                 blocks.push(block);
-                // A decision with rules left out has not been briefed: the
-                // "(n of m rules shown)" line and this record must agree.
-                if placed == total {
+                // Briefed means "everything this decision could contribute
+                // was shown". `rules_per_decision` is a ceiling on that: a
+                // decision cut only by the per-decision cap can never show
+                // more on a later read, so repeating it adds no rule and the
+                // once-per-session promise would never be kept. A cut by
+                // `max_chars` is different — a read with less competition can
+                // fit the decision whole — so that one stays eligible.
+                if placed == total.min(rules_per_decision) {
                     shown.push(*position);
                 }
             }
@@ -563,10 +571,12 @@ mod tests {
         assert_eq!(render_brief(FILE, &decisions, 8, cap), None);
     }
 
-    /// A decision cut to fewer rules has not been briefed: only a decision
-    /// shown in full is reported, so the caller leaves the rest eligible.
+    /// The per-decision cap is a ceiling on what a decision can contribute,
+    /// so a decision trimmed only by that cap is reported shown: a later read
+    /// could not add a rule, and leaving it eligible would repeat the same
+    /// block for the whole session.
     #[test]
-    fn test_a_decision_cut_by_rules_per_decision_is_not_reported_shown() {
+    fn test_a_decision_cut_only_by_rules_per_decision_is_reported_shown() {
         let a = doc(
             "cross-cutting-signing-e410",
             "Adopt RS256: Token Signing",
@@ -585,7 +595,8 @@ mod tests {
             render_brief_shown(FILE, &decisions, 1, DEFAULT_MAX_CHARS).expect("a brief");
 
         assert!(brief.contains("(1 of 2 rules shown)"), "{brief}");
-        assert_eq!(shown, vec![1]);
+        // Both: the first trimmed to the cap, the second whole.
+        assert_eq!(shown, vec![0, 1]);
     }
 
     /// The same holds when the character cap, not the per-decision cap, is

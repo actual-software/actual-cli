@@ -186,7 +186,11 @@ rules directory lives in `brief-sessions/` under the user config directory
 is silence. `--limit` is applied first and the already-briefed are dropped
 after, so a fully briefed read is silent even when a lower-ranked decision
 exists: the brief never promotes the runner-up, and a fresh session gets the
-same top N. Files untouched for a week are pruned. A context compaction
+same top N. A decision counts as briefed once it has contributed everything
+it can: shown in full, or trimmed only by `--rules-per-decision`, which caps
+what it could ever state. A decision `--max-chars` left out or trimmed stays
+eligible, because a read with less competing for the budget can still fit it
+whole. Files untouched for a week are pruned. A context compaction
 empties the context the brief lived in, so a `SessionStart` hook should run
 `actual rules brief --claude-session-start`: on source `compact` or `clear` it
 forgets what was briefed to the agent that envelope names (a subagent's
