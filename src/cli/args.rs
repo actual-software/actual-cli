@@ -819,7 +819,7 @@ pub struct RulesBriefArgs {
     pub rules_per_decision: usize,
 
     /// Maximum size of the whole brief, in characters. Rules are dropped
-    /// whole, lowest-ranked first, and the brief says what it left out.
+    /// whole, lowest-ranked first, and the brief says how many decisions it left out.
     #[arg(long, default_value_t = crate::rules::brief::DEFAULT_MAX_CHARS)]
     pub max_chars: usize,
 
