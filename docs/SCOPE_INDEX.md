@@ -155,6 +155,7 @@ actual rules index [PATH] [--rebuild] [--clear] [--json]
 actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--min-score S] [--by-adr] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--ablate SIGNAL]... [--rebuild] [--json]
 actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
+actual rules brief --claude-session-start [--repo PATH] [--rules-dir PATH]
 actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 ```
 
@@ -177,6 +178,17 @@ default) caps the whole text. Under the character cap rules are dropped whole,
 lowest-ranked first: a decision that cannot place a rule ends the brief, so what
 is left out is always the tail, and a closing line says how many decisions that
 was. A cap too small for even one rule yields no brief.
+
+Under `--claude-hook` a decision is briefed **once per session**: state keyed
+by `session_id`, the subagent's `agent_id` when the envelope has one, and the
+rules directory lives in `brief-sessions/` under the user config directory
+(never in the repository), and a read whose decisions were all briefed already
+is silence. Files untouched for a week are pruned. A context compaction
+empties the context the brief lived in, so a `SessionStart` hook should run
+`actual rules brief --claude-session-start`: on source `compact` or `clear` it
+forgets what was briefed, and for `startup` and `resume` it does nothing.
+Damaged state reads as nothing briefed, so the failure mode is a repeated brief,
+never a missing one.
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;

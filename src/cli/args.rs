@@ -796,6 +796,13 @@ pub struct RulesBriefArgs {
     #[arg(long)]
     pub claude_hook: bool,
 
+    /// Answer a Claude Code `SessionStart` envelope on stdin: when the
+    /// session's context was emptied (`compact` or `clear`), forget which
+    /// decisions were briefed so they are briefed again. Prints nothing and
+    /// always exits 0.
+    #[arg(long, conflicts_with_all = ["claude_hook", "file"])]
+    pub claude_session_start: bool,
+
     /// The file to brief, in direct mode. Ignored under `--claude-hook`,
     /// which takes the path from the envelope.
     #[arg(long, value_name = "PATH")]
