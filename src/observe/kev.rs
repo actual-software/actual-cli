@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 
-const DEFAULT_KEV_URL: &str = "http://localhost:8787";
-const TIMEOUT_SECS: u64 = 2;
+const DEFAULT_KEV_URL: &str = "http://localhost:8009";
+const DEFAULT_TIMEOUT_MS: u64 = 2000;
 
 #[derive(Debug)]
 pub enum KevError {
@@ -64,6 +64,25 @@ pub fn kev_url() -> String {
     env::var("KEV_URL").unwrap_or_else(|_| DEFAULT_KEV_URL.to_string())
 }
 
+/// Per-request timeout, from `KEV_TIMEOUT_MS` (default 2000). The model's first call after
+/// idling can take several seconds; a demo or a cold host can raise this instead of falling back.
+pub fn kev_timeout() -> Duration {
+    env::var("KEV_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(DEFAULT_TIMEOUT_MS))
+}
+
+/// `KEV_URL=off` (or disabled/0/false) turns kev off; hooks then use the deterministic rules only.
+fn kev_disabled(url: &str) -> bool {
+    matches!(
+        url.trim().to_ascii_lowercase().as_str(),
+        "off" | "disabled" | "0" | "false" | ""
+    )
+}
+
 pub struct KevClient {
     client: Client,
     base_url: String,
@@ -71,21 +90,32 @@ pub struct KevClient {
 
 impl KevClient {
     pub fn new() -> Option<Self> {
+        Self::with_base_url(&kev_url(), kev_timeout())
+    }
+
+    /// The hook path's constructor: `None` when `KEV_URL` turns kev off.
+    pub fn from_env() -> Option<Self> {
+        let url = kev_url();
+        if kev_disabled(&url) {
+            return None;
+        }
+        Self::with_base_url(&url, kev_timeout())
+    }
+
+    pub fn with_base_url(base_url: &str, timeout: Duration) -> Option<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .timeout(timeout)
+            // A dead or unrouted host must not stall a hook for the whole timeout.
+            .connect_timeout(timeout.min(Duration::from_millis(500)))
             .build()
             .ok()?;
         Some(Self {
             client,
-            base_url: kev_url(),
+            base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
 
-    pub async fn noul(
-        &self,
-        state: &str,
-        instructions: &str,
-    ) -> Result<NoulResponse, KevError> {
+    pub async fn noul(&self, state: &str, instructions: &str) -> Result<NoulResponse, KevError> {
         let mut questions = HashMap::new();
         questions.insert(
             "q".to_string(),
@@ -228,14 +258,18 @@ mod tests {
 
     #[test]
     fn test_kev_url_default() {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = crate::testutil::EnvGuard::remove("KEV_URL");
-        assert_eq!(kev_url(), "http://localhost:8787");
+        assert_eq!(kev_url(), "http://localhost:8009");
     }
 
     #[test]
     fn test_kev_url_from_env() {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = crate::testutil::EnvGuard::set("KEV_URL", "http://kev.internal:9000");
         assert_eq!(kev_url(), "http://kev.internal:9000");
     }
@@ -280,5 +314,97 @@ mod tests {
         let answer = resp.answers.get("q").unwrap();
         assert_eq!(answer.choice, "mutating");
         assert!((answer.confidence - 0.92).abs() < 1e-6);
+    }
+
+    // ── Live: real kev server at KEV_URL (default :8009). Run with
+    //    `cargo test --lib observe::kev::tests::live -- --ignored --test-threads=1` ──
+
+    #[tokio::test]
+    #[ignore = "needs a running kev server (KEV_URL, default http://localhost:8009)"]
+    async fn live_noul_returns_a_probability() {
+        let kev = KevClient::new().expect("client");
+        let resp = kev
+            .noul(
+                "Refactor the payment module to use ts-rest contracts",
+                "Is this a substantive coding instruction that requires architectural review?",
+            )
+            .await
+            .unwrap_or_else(|KevError::Unavailable(e)| {
+                panic!("kev unavailable at {}: {e}", kev_url())
+            });
+        assert!(
+            (0.0..=1.0).contains(&resp.probability),
+            "probability {}",
+            resp.probability
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a running kev server (KEV_URL, default http://localhost:8009)"]
+    async fn live_choice_classifies_a_mutating_command() {
+        let kev = KevClient::new().expect("client");
+        let resp = kev
+            .choice(
+                "git add -A && git commit -m wip | tee /tmp/log; rm -rf dist",
+                "Classify this bash command's filesystem/repository impact",
+                &[
+                    (
+                        "read_only",
+                        "Only reads data, lists files, or queries state",
+                    ),
+                    (
+                        "mutating",
+                        "Modifies files, repository, packages, or infrastructure",
+                    ),
+                    ("ambiguous", "Could be either depending on flags or context"),
+                ],
+            )
+            .await
+            .unwrap_or_else(|KevError::Unavailable(e)| {
+                panic!("kev unavailable at {}: {e}", kev_url())
+            });
+        assert_eq!(resp.selected, "mutating");
+        let total: f64 = resp.distribution.values().sum();
+        assert!((total - 1.0).abs() < 0.01, "distribution sums to {total}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a running kev server (KEV_URL, default http://localhost:8009)"]
+    async fn live_boundary_v2_uses_kev_for_complex_commands() {
+        let kev = KevClient::new().expect("client");
+        // Complex (pipe) and missed by the deterministic check, so the decision comes from kev.
+        let payload = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "cat package.json | jq '.version = \"2.0.0\"' | sponge package.json"}});
+        assert!(super::super::boundary::is_mutating_bash_v2(&payload, Some(&kev)).await);
+        let read_only = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git log --oneline | head -20 | grep fix"}});
+        assert!(!super::super::boundary::is_mutating_bash_v2(&read_only, Some(&kev)).await);
+    }
+
+    // ── Hook-path construction from env ──
+
+    #[test]
+    fn from_env_is_disabled_by_kev_url_off() {
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for off in ["off", "OFF", "disabled", "0", "false"] {
+            let _guard = crate::testutil::EnvGuard::set("KEV_URL", off);
+            assert!(
+                KevClient::from_env().is_none(),
+                "KEV_URL={off} should disable kev"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_reads_kev_timeout_ms() {
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _unset = crate::testutil::EnvGuard::remove("KEV_TIMEOUT_MS");
+        assert_eq!(kev_timeout(), Duration::from_millis(2000));
+        let _set = crate::testutil::EnvGuard::set("KEV_TIMEOUT_MS", "6000");
+        assert_eq!(kev_timeout(), Duration::from_millis(6000));
+        let _bad = crate::testutil::EnvGuard::set("KEV_TIMEOUT_MS", "nope");
+        assert_eq!(kev_timeout(), Duration::from_millis(2000));
     }
 }

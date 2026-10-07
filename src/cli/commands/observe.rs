@@ -11,7 +11,10 @@ use crate::auth::store::StoredCredentials;
 use crate::cli::args::{ObserveArgs, ObserveCommand};
 use crate::config::{paths as config_paths, sticky};
 use crate::error::ActualError;
-use crate::observe::boundary::{is_evaluation_boundary, classify_tool_action, ToolAction};
+use crate::observe::boundary::{
+    classify_tool_action, classify_tool_action_v2, is_evaluation_boundary, is_evaluation_boundary_v2, ToolAction,
+};
+use crate::observe::kev::KevClient;
 use crate::observe::canonicalize;
 use crate::observe::hook_output::build_block_output;
 use crate::observe::journal::SessionJournal;
@@ -174,9 +177,20 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
     let journal = SessionJournal::new()?;
     journal.append(session_id, &raw_payload, &aewo_code)?;
 
+    // kev (System One classifier) refines the deterministic boundary rules where they are
+    // unsure. Off with KEV_URL=off; unreachable kev falls back to the deterministic rules.
+    let kev = KevClient::from_env();
+    let kev_rt = kev.as_ref().and_then(|_| {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().ok()
+    });
+
     if hook_type == HookType::PreToolUse {
         journal.clear_stop_acknowledged(session_id);
-        let action = classify_tool_action(tool_name, &raw_payload);
+        let action = match &kev_rt {
+            Some(rt) => rt.block_on(classify_tool_action_v2(tool_name, &raw_payload, kev.as_ref())),
+            None => classify_tool_action(tool_name, &raw_payload),
+        };
+        tracing::info!(target: "actual::observe", hook = hook_type.as_str(), tool = tool_name.unwrap_or("-"), action = ?action, kev = kev.is_some(), "boundary decision");
         match action {
             ToolAction::Free => {
                 println!("{{}}");
@@ -217,7 +231,14 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from);
         emit_stop_output(session_id, &journal, cwd.as_deref(), msg_hash);
-    } else if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
+    } else if {
+        let boundary = match &kev_rt {
+            Some(rt) => rt.block_on(is_evaluation_boundary_v2(hook_type, tool_name, &raw_payload, kev.as_ref())),
+            None => is_evaluation_boundary(hook_type, tool_name, &raw_payload),
+        };
+        tracing::info!(target: "actual::observe", hook = hook_type.as_str(), boundary, kev = kev.is_some(), "boundary decision");
+        boundary
+    } {
         journal.clear_stop_acknowledged(session_id);
         emit_boundary_output(session_id, &journal, hook_type);
     } else {

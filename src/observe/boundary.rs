@@ -52,31 +52,86 @@ pub fn is_evaluation_boundary(
     }
 }
 
+/// Hook-path classifier. Same decisions as [`classify_tool_action`], except a complex Bash
+/// command the deterministic patterns call Free is put to kev. Falls back to v1 when kev is
+/// absent or unreachable.
+pub async fn classify_tool_action_v2(
+    tool_name: Option<&str>,
+    payload: &serde_json::Value,
+    kev: Option<&super::kev::KevClient>,
+) -> ToolAction {
+    match (tool_name, classify_tool_action(tool_name, payload)) {
+        (Some("Bash"), ToolAction::Free) if is_mutating_bash_v2(payload, kev).await => {
+            ToolAction::AdvisorGated
+        }
+        (_, action) => action,
+    }
+}
+
+/// Hook-path boundary check. Same as [`is_evaluation_boundary`], except ambiguous-length
+/// prompts and complex Bash commands are put to kev. Falls back to v1 without kev.
+pub async fn is_evaluation_boundary_v2(
+    hook_type: HookType,
+    tool_name: Option<&str>,
+    payload: &serde_json::Value,
+    kev: Option<&super::kev::KevClient>,
+) -> bool {
+    match (hook_type, tool_name) {
+        (HookType::UserPromptSubmit, _) => is_substantial_prompt_v2(payload, kev).await,
+        (HookType::PreToolUse, Some("Bash")) => is_mutating_bash_v2(payload, kev).await,
+        _ => is_evaluation_boundary(hook_type, tool_name, payload),
+    }
+}
+
 fn is_substantial_prompt(payload: &serde_json::Value) -> bool {
-    let prompt = payload
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     prompt.len() >= MIN_PROMPT_LENGTH
 }
 
 const MUTATING_BASH_PATTERNS: &[&str] = &[
-    "rm ", "rm\t", "rmdir",
-    "mv ", "mv\t",
-    "cp ", "cp\t",
-    "chmod", "chown",
-    "git commit", "git push", "git reset", "git checkout", "git merge", "git rebase",
-    "git stash", "git cherry-pick", "git revert",
-    "npm install", "npm uninstall", "npm ci",
-    "pnpm install", "pnpm add", "pnpm remove",
-    "yarn add", "yarn remove",
-    "pip install", "pip uninstall",
-    "uv add", "uv remove", "uv sync",
-    "cargo add", "cargo install",
-    "docker build", "docker push", "docker run",
-    "kubectl apply", "kubectl delete",
+    "rm ",
+    "rm\t",
+    "rmdir",
+    "mv ",
+    "mv\t",
+    "cp ",
+    "cp\t",
+    "chmod",
+    "chown",
+    "git commit",
+    "git push",
+    "git reset",
+    "git checkout",
+    "git merge",
+    "git rebase",
+    "git stash",
+    "git cherry-pick",
+    "git revert",
+    "npm install",
+    "npm uninstall",
+    "npm ci",
+    "pnpm install",
+    "pnpm add",
+    "pnpm remove",
+    "yarn add",
+    "yarn remove",
+    "pip install",
+    "pip uninstall",
+    "uv add",
+    "uv remove",
+    "uv sync",
+    "cargo add",
+    "cargo install",
+    "docker build",
+    "docker push",
+    "docker run",
+    "kubectl apply",
+    "kubectl delete",
     "make ",
-    "curl -x post", "curl -x put", "curl -x delete", "curl -x patch",
+    "curl -x post",
+    "curl -x put",
+    "curl -x delete",
+    "curl -x patch",
 ];
 
 fn is_mutating_bash(payload: &serde_json::Value) -> bool {
@@ -150,10 +205,7 @@ pub async fn is_substantial_prompt_v2(
     payload: &serde_json::Value,
     kev: Option<&super::kev::KevClient>,
 ) -> bool {
-    let prompt = payload
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
     let len = prompt.len();
 
     if len < PROMPT_AMBIGUOUS_LOW {
@@ -172,8 +224,13 @@ pub async fn is_substantial_prompt_v2(
             )
             .await
         {
-            Ok(resp) => return resp.probability >= 0.5,
-            Err(_) => {} // fall through to deterministic
+            Ok(resp) => {
+                tracing::info!(target: "kev", decision = "prompt", probability = resp.probability, "kev decided an ambiguous prompt");
+                return resp.probability >= 0.5;
+            }
+            Err(super::kev::KevError::Unavailable(e)) => {
+                tracing::info!(target: "kev", error = %e, "kev unavailable; deterministic prompt rule used");
+            }
         }
     }
 
@@ -205,9 +262,8 @@ pub async fn is_mutating_bash_v2(
     }
 
     // Only consult kev for complex commands the deterministic check may miss
-    let is_complex = command.len() > BASH_COMPLEXITY_THRESHOLD
-        || command.contains('|')
-        || command.contains(';');
+    let is_complex =
+        command.len() > BASH_COMPLEXITY_THRESHOLD || command.contains('|') || command.contains(';');
 
     if !is_complex {
         return false;
@@ -219,15 +275,27 @@ pub async fn is_mutating_bash_v2(
                 command,
                 "Classify this bash command's filesystem/repository impact",
                 &[
-                    ("read_only", "Only reads data, lists files, or queries state"),
-                    ("mutating", "Modifies files, repository, packages, or infrastructure"),
+                    (
+                        "read_only",
+                        "Only reads data, lists files, or queries state",
+                    ),
+                    (
+                        "mutating",
+                        "Modifies files, repository, packages, or infrastructure",
+                    ),
                     ("ambiguous", "Could be either depending on flags or context"),
                 ],
             )
             .await
         {
-            Ok(resp) => return resp.selected == "mutating" && resp.confidence >= 0.5,
-            Err(_) => {} // fall through to false (deterministic already said Free)
+            Ok(resp) => {
+                tracing::info!(target: "kev", decision = "bash", selected = %resp.selected, confidence = resp.confidence, "kev classified a complex bash command");
+                return resp.selected == "mutating" && resp.confidence >= 0.5;
+            }
+            Err(super::kev::KevError::Unavailable(e)) => {
+                // Deterministic check already said Free.
+                tracing::info!(target: "kev", error = %e, "kev unavailable; deterministic bash rule used");
+            }
         }
     }
 
@@ -560,7 +628,10 @@ mod tests {
         assert!(is_evaluation_boundary(
             HookType::PreToolUse,
             Some("Agent"),
-            &agent_pre_tool("Explore calculator structure", "Find all calculator modules"),
+            &agent_pre_tool(
+                "Explore calculator structure",
+                "Find all calculator modules"
+            ),
         ));
     }
 
@@ -598,7 +669,10 @@ mod tests {
         assert!(is_evaluation_boundary(
             HookType::PostToolUse,
             Some("Agent"),
-            &agent_post_tool("Explore calculator structure", "Found 3 calculator modules..."),
+            &agent_post_tool(
+                "Explore calculator structure",
+                "Found 3 calculator modules..."
+            ),
         ));
     }
 
@@ -703,5 +777,142 @@ mod tests {
     #[tokio::test]
     async fn test_v2_mutating_bash_empty() {
         assert!(!is_mutating_bash_v2(&empty(), None).await);
+    }
+
+    // ── Hook-path wiring: v2 classifiers consult kev only where v1 is unsure ──
+
+    async fn kev_mock(
+        answer: serde_json::Value,
+    ) -> (mockito::ServerGuard, super::super::kev::KevClient) {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({"model": "kev-latest", "answers": {"q": answer}}).to_string(),
+            )
+            .create_async()
+            .await;
+        let kev = super::super::kev::KevClient::with_base_url(
+            &server.url(),
+            std::time::Duration::from_secs(2),
+        )
+        .expect("client");
+        (server, kev)
+    }
+
+    fn bash(command: &str) -> serde_json::Value {
+        json!({"tool_name": "Bash", "tool_input": {"command": command}})
+    }
+
+    // A pipeline the deterministic patterns miss (no rm/mv/git commit/...).
+    const SNEAKY_MUTATION: &str =
+        "cat package.json | jq '.version = \"2.0.0\"' | sponge package.json";
+
+    #[tokio::test]
+    async fn classify_v2_without_kev_matches_v1() {
+        for (tool, payload) in [
+            (Some("Bash"), bash("ls -la")),
+            (Some("Bash"), bash("rm -rf dist")),
+            (Some("Bash"), bash(SNEAKY_MUTATION)),
+            (Some("Edit"), json!({})),
+            (Some("Read"), json!({})),
+            (Some("AskUserQuestion"), json!({})),
+        ] {
+            assert_eq!(
+                classify_tool_action_v2(tool, &payload, None).await,
+                classify_tool_action(tool, &payload)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_v2_gates_a_mutation_only_kev_catches() {
+        let (_srv, kev) = kev_mock(
+            json!({"type": "choice", "choice": "mutating", "confidence": 0.9,
+            "probabilities": {"mutating": 0.93, "read_only": 0.05, "ambiguous": 0.02}}),
+        )
+        .await;
+        assert_eq!(
+            classify_tool_action(Some("Bash"), &bash(SNEAKY_MUTATION)),
+            ToolAction::Free
+        );
+        assert_eq!(
+            classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await,
+            ToolAction::AdvisorGated
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_v2_leaves_read_only_pipelines_free() {
+        let (_srv, kev) = kev_mock(
+            json!({"type": "choice", "choice": "read_only", "confidence": 0.9,
+            "probabilities": {"mutating": 0.04, "read_only": 0.94, "ambiguous": 0.02}}),
+        )
+        .await;
+        let payload = bash("git log --oneline | head -20 | grep fix");
+        assert_eq!(
+            classify_tool_action_v2(Some("Bash"), &payload, Some(&kev)).await,
+            ToolAction::Free
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_v2_lets_kev_decide_ambiguous_prompts() {
+        let ambiguous = prompt_payload("fix the login bug please"); // 10..=50 chars
+        let (_yes, kev_yes) = kev_mock(json!({"type": "noul", "noul": 0.91})).await;
+        assert!(
+            is_evaluation_boundary_v2(HookType::UserPromptSubmit, None, &ambiguous, Some(&kev_yes))
+                .await
+        );
+        let (_no, kev_no) = kev_mock(json!({"type": "noul", "noul": 0.08})).await;
+        assert!(
+            !is_evaluation_boundary_v2(HookType::UserPromptSubmit, None, &ambiguous, Some(&kev_no))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_v2_without_kev_matches_v1() {
+        for (hook, tool, payload) in [
+            (HookType::UserPromptSubmit, None, prompt_payload("hi")),
+            (
+                HookType::UserPromptSubmit,
+                None,
+                prompt_payload("fix the login bug please"),
+            ),
+            (HookType::PreToolUse, Some("Bash"), bash("rm -rf dist")),
+            (HookType::PostToolUse, Some("Agent"), json!({})),
+            (HookType::Stop, None, json!({})),
+        ] {
+            assert_eq!(
+                is_evaluation_boundary_v2(hook, tool, &payload, None).await,
+                is_evaluation_boundary(hook, tool, &payload)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn kev_down_falls_back_to_deterministic() {
+        // Nothing listens on port 9; the client must fail fast and v1 must decide.
+        let kev = super::super::kev::KevClient::with_base_url(
+            "http://127.0.0.1:9",
+            std::time::Duration::from_millis(500),
+        )
+        .unwrap();
+        assert_eq!(
+            classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await,
+            ToolAction::Free
+        );
+        assert!(
+            is_evaluation_boundary_v2(
+                HookType::UserPromptSubmit,
+                None,
+                &prompt_payload("fix the login bug please"),
+                Some(&kev)
+            )
+            .await
+        );
     }
 }
