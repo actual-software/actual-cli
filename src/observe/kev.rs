@@ -93,6 +93,11 @@ pub struct KevClient {
     last_call_id: Mutex<Option<String>>,
     /// Where `call`/`decision` records go; resolved once at construction.
     log_path: Option<PathBuf>,
+    /// Model, latency and answer of the most recent call, for the decision signal.
+    last_call: Mutex<Option<serde_json::Value>>,
+    /// The most recent decision this client drove (or fell back on). The hook attaches it to
+    /// the event so the Advisor request (step 2) carries why step 1 gated the action.
+    last_signal: Mutex<Option<serde_json::Value>>,
 }
 
 /// Audit log for kev: `~/.actual/logs/kev.jsonl` (override `KEV_LOG_PATH`, disable `KEV_LOG=off`).
@@ -165,6 +170,8 @@ impl KevClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             last_call_id: Mutex::new(None),
+            last_call: Mutex::new(None),
+            last_signal: Mutex::new(None),
             // Unit tests never write to the real ~/.actual/logs; they opt in with with_log_path.
             log_path: if cfg!(test) { None } else { kev_log_path() },
         })
@@ -226,6 +233,14 @@ impl KevClient {
                 Err(KevError::Unavailable(e))
             }
         };
+        if let Ok(mut last) = self.last_call.lock() {
+            *last = Some(serde_json::json!({
+                "call_id": call_id,
+                "model": record.get("response").and_then(|r| r.get("model")).cloned(),
+                "latency_ms": latency_ms,
+                "answer": record.get("response").and_then(|r| r.pointer("/answers/q")).cloned(),
+            }));
+        }
         tracing::debug!(target: "kev", %call_id, latency_ms, request = %record["request"], response = %record.get("response").unwrap_or(&serde_json::Value::Null), "kev call");
         append_log(self.log_path.as_ref(), record);
         result
@@ -244,14 +259,29 @@ impl KevClient {
         error: Option<&str>,
     ) {
         let call_id = self.last_call_id.lock().ok().and_then(|g| g.clone());
-        append_log(
-            self.log_path.as_ref(),
-            serde_json::json!({
-                "record": "decision", "call_id": call_id, "check": check,
-                "score_name": score_name, "score": score, "threshold": threshold,
-                "verdict": verdict, "source": source, "error": error,
-            }),
-        );
+        let decision = serde_json::json!({
+            "call_id": call_id, "check": check,
+            "score_name": score_name, "score": score, "threshold": threshold,
+            "verdict": verdict, "source": source, "error": error,
+        });
+        let mut signal = decision.clone();
+        if let Some(call) = self.last_call.lock().ok().and_then(|g| g.clone()) {
+            for key in ["model", "latency_ms", "answer"] {
+                signal[key] = call.get(key).cloned().unwrap_or(serde_json::Value::Null);
+            }
+        }
+        if let Ok(mut last) = self.last_signal.lock() {
+            *last = Some(signal);
+        }
+        let mut record = decision;
+        record["record"] = serde_json::json!("decision");
+        append_log(self.log_path.as_ref(), record);
+    }
+
+    /// The decision kev drove for this hook, if it was consulted: check, score, threshold,
+    /// verdict, source (`kev` or `fallback_rules`), model, latency and kev's raw answer.
+    pub fn last_signal(&self) -> Option<serde_json::Value> {
+        self.last_signal.lock().ok().and_then(|g| g.clone())
     }
 
     pub async fn noul(&self, state: &str, instructions: &str) -> Result<NoulResponse, KevError> {

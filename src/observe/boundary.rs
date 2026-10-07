@@ -1101,4 +1101,50 @@ mod tests {
             .unwrap()
             .ends_with(".actual/logs/kev.jsonl"));
     }
+
+    // ── Step 1 -> step 2: the kev verdict travels with the event to the Advisor ──
+
+    #[tokio::test]
+    async fn kev_signal_carries_the_verdict_for_the_advisor_request() {
+        let (_srv, kev) = kev_mock(
+            json!({"type": "choice", "choice": "mutating", "confidence": 0.2663,
+            "probabilities": {"read_only": 0.234, "mutating": 0.511, "ambiguous": 0.256}}),
+        )
+        .await;
+        classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await;
+
+        let signal = kev
+            .last_signal()
+            .expect("signal after a kev-backed decision");
+        assert_eq!(signal["check"], "is_mutating_bash");
+        assert_eq!(signal["source"], "kev");
+        assert_eq!(signal["verdict"], true);
+        assert_eq!(signal["score_name"], "p_mutating");
+        assert_eq!(signal["score"], 0.511);
+        assert_eq!(signal["threshold"], 0.5);
+        assert_eq!(signal["answer"]["probabilities"]["mutating"], 0.511);
+        assert!(signal["call_id"].is_string());
+        assert!(signal["latency_ms"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn kev_signal_is_absent_when_kev_was_not_consulted() {
+        let (_srv, kev) = kev_mock(json!({"type": "noul", "noul": 0.9})).await;
+        // `rm -rf` is gated by the deterministic rules; kev is never asked.
+        classify_tool_action_v2(Some("Bash"), &bash("rm -rf dist"), Some(&kev)).await;
+        assert!(kev.last_signal().is_none());
+    }
+
+    #[tokio::test]
+    async fn kev_signal_records_a_fallback() {
+        let kev = super::super::kev::KevClient::with_base_url(
+            "http://127.0.0.1:9",
+            std::time::Duration::from_millis(500),
+        )
+        .unwrap();
+        classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await;
+        let signal = kev.last_signal().expect("fallback is recorded too");
+        assert_eq!(signal["source"], "fallback_rules");
+        assert!(signal["error"].is_string());
+    }
 }
