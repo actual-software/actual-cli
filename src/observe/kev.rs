@@ -2,7 +2,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::time::Duration;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const DEFAULT_KEV_URL: &str = "http://localhost:8009";
 const DEFAULT_TIMEOUT_MS: u64 = 2000;
@@ -86,6 +89,55 @@ fn kev_disabled(url: &str) -> bool {
 pub struct KevClient {
     client: Client,
     base_url: String,
+    /// `call_id` of the most recent request, so the boundary's decision record can point at it.
+    last_call_id: Mutex<Option<String>>,
+    /// Where `call`/`decision` records go; resolved once at construction.
+    log_path: Option<PathBuf>,
+}
+
+/// Audit log for kev: `~/.actual/logs/kev.jsonl` (override `KEV_LOG_PATH`, disable `KEV_LOG=off`).
+/// One `call` record per request (exact input, raw output, latency) and one `decision` record
+/// per boundary check that used it.
+pub fn kev_log_path() -> Option<PathBuf> {
+    if env::var("KEV_LOG")
+        .map(|v| kev_disabled(&v))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if let Ok(p) = env::var("KEV_LOG_PATH") {
+        if !p.trim().is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    Some(
+        dirs::home_dir()?
+            .join(".actual")
+            .join("logs")
+            .join("kev.jsonl"),
+    )
+}
+
+fn append_log(path: Option<&PathBuf>, mut record: serde_json::Value) {
+    let Some(path) = path else { return };
+    if let Some(obj) = record.as_object_mut() {
+        obj.insert(
+            "ts".into(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Best effort: an unwritable log must never break a hook. One write per line so
+    // concurrent hook processes cannot interleave records.
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(format!("{record}\n").as_bytes());
+    }
 }
 
 impl KevClient {
@@ -112,7 +164,94 @@ impl KevClient {
         Some(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            last_call_id: Mutex::new(None),
+            // Unit tests never write to the real ~/.actual/logs; they opt in with with_log_path.
+            log_path: if cfg!(test) { None } else { kev_log_path() },
         })
+    }
+
+    /// Send this client's audit records to `path` (`None` disables them).
+    pub fn with_log_path(mut self, path: Option<PathBuf>) -> Self {
+        self.log_path = path;
+        self
+    }
+
+    /// One request to `/v1/systemone`, logged as a `call` record: exact input, HTTP status,
+    /// raw response (or error), latency.
+    async fn post<Q: Serialize>(
+        &self,
+        kind: &str,
+        req: &SystemOneRequest<Q>,
+    ) -> Result<serde_json::Value, KevError> {
+        let call_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(mut last) = self.last_call_id.lock() {
+            *last = Some(call_id.clone());
+        }
+        let url = format!("{}/v1/systemone", self.base_url);
+        let started = Instant::now();
+        let outcome: Result<(u16, serde_json::Value), String> = async {
+            let resp = self
+                .client
+                .post(&url)
+                .json(req)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+            Ok((status, body))
+        }
+        .await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let request = serde_json::to_value(req).unwrap_or(serde_json::Value::Null);
+        let mut record = serde_json::json!({
+            "record": "call", "call_id": call_id, "kind": kind, "url": url,
+            "latency_ms": latency_ms, "request": request,
+        });
+        let result = match outcome {
+            Ok((status, body)) => {
+                record["http_status"] = serde_json::json!(status);
+                record["response"] = body.clone();
+                if (200..300).contains(&status) {
+                    Ok(body)
+                } else {
+                    let e = format!("kev returned HTTP {status}");
+                    record["error"] = serde_json::json!(e);
+                    Err(KevError::Unavailable(e))
+                }
+            }
+            Err(e) => {
+                record["error"] = serde_json::json!(e);
+                Err(KevError::Unavailable(e))
+            }
+        };
+        tracing::debug!(target: "kev", %call_id, latency_ms, request = %record["request"], response = %record.get("response").unwrap_or(&serde_json::Value::Null), "kev call");
+        append_log(self.log_path.as_ref(), record);
+        result
+    }
+
+    /// Records what a boundary check decided with (or without) kev, linked to the last call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_decision(
+        &self,
+        check: &str,
+        score_name: &str,
+        score: Option<f64>,
+        threshold: f64,
+        verdict: bool,
+        source: &str,
+        error: Option<&str>,
+    ) {
+        let call_id = self.last_call_id.lock().ok().and_then(|g| g.clone());
+        append_log(
+            self.log_path.as_ref(),
+            serde_json::json!({
+                "record": "decision", "call_id": call_id, "check": check,
+                "score_name": score_name, "score": score, "threshold": threshold,
+                "verdict": verdict, "source": source, "error": error,
+            }),
+        );
     }
 
     pub async fn noul(&self, state: &str, instructions: &str) -> Result<NoulResponse, KevError> {
@@ -128,18 +267,9 @@ impl KevClient {
             state: state.to_string(),
             questions,
         };
-        let resp = self
-            .client
-            .post(format!("{}/v1/systemone", self.base_url))
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| KevError::Unavailable(e.to_string()))?;
-
-        let body: SystemOneResponse<NoulAnswer> = resp
-            .json()
-            .await
-            .map_err(|e| KevError::Unavailable(e.to_string()))?;
+        let raw = self.post("noul", &req).await?;
+        let body: SystemOneResponse<NoulAnswer> = serde_json::from_value(raw)
+            .map_err(|e| KevError::Unavailable(format!("bad kev response: {e}")))?;
 
         let answer = body
             .answers
@@ -174,18 +304,9 @@ impl KevClient {
             state: state.to_string(),
             questions,
         };
-        let resp = self
-            .client
-            .post(format!("{}/v1/systemone", self.base_url))
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| KevError::Unavailable(e.to_string()))?;
-
-        let body: SystemOneResponse<ChoiceAnswer> = resp
-            .json()
-            .await
-            .map_err(|e| KevError::Unavailable(e.to_string()))?;
+        let raw = self.post("choice", &req).await?;
+        let body: SystemOneResponse<ChoiceAnswer> = serde_json::from_value(raw)
+            .map_err(|e| KevError::Unavailable(format!("bad kev response: {e}")))?;
 
         let answer = body
             .answers

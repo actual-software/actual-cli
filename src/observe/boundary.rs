@@ -196,6 +196,10 @@ fn is_agent_launch(payload: &serde_json::Value) -> bool {
 const PROMPT_AMBIGUOUS_LOW: usize = 10;
 const PROMPT_AMBIGUOUS_HIGH: usize = 50;
 const BASH_COMPLEXITY_THRESHOLD: usize = 80;
+/// Gate a complex Bash command when kev's P(mutating) reaches this.
+const BASH_KEV_THRESHOLD: f64 = 0.5;
+/// Treat an ambiguous-length prompt as substantial when kev's yes-probability reaches this.
+const PROMPT_KEV_THRESHOLD: f64 = 0.5;
 
 /// Kev-augmented substantial prompt check.
 ///
@@ -225,11 +229,31 @@ pub async fn is_substantial_prompt_v2(
             .await
         {
             Ok(resp) => {
-                tracing::info!(target: "kev", decision = "prompt", probability = resp.probability, "kev decided an ambiguous prompt");
-                return resp.probability >= 0.5;
+                let verdict = resp.probability >= PROMPT_KEV_THRESHOLD;
+                tracing::info!(target: "kev", check = "is_substantial_prompt", input = %prompt, probability = resp.probability, threshold = PROMPT_KEV_THRESHOLD, verdict, "kev decided an ambiguous prompt");
+                kev.log_decision(
+                    "is_substantial_prompt",
+                    "p_substantial",
+                    Some(resp.probability),
+                    PROMPT_KEV_THRESHOLD,
+                    verdict,
+                    "kev",
+                    None,
+                );
+                return verdict;
             }
             Err(super::kev::KevError::Unavailable(e)) => {
-                tracing::info!(target: "kev", error = %e, "kev unavailable; deterministic prompt rule used");
+                let verdict = prompt.len() >= MIN_PROMPT_LENGTH;
+                tracing::info!(target: "kev", check = "is_substantial_prompt", input = %prompt, error = %e, verdict, "kev unavailable; deterministic prompt rule used");
+                kev.log_decision(
+                    "is_substantial_prompt",
+                    "p_substantial",
+                    None,
+                    PROMPT_KEV_THRESHOLD,
+                    verdict,
+                    "fallback_rules",
+                    Some(&e),
+                );
             }
         }
     }
@@ -289,15 +313,34 @@ pub async fn is_mutating_bash_v2(
             .await
         {
             Ok(resp) => {
-                tracing::info!(target: "kev", decision = "bash", selected = %resp.selected, p_mutating = resp.distribution.get("mutating").copied().unwrap_or(0.0), margin = resp.confidence, "kev classified a complex bash command");
                 // `confidence` is kev's top-two margin, not P(choice): a 51% "mutating"
                 // answer has confidence ~0.27. Gate on the probability itself.
                 let p_mutating = resp.distribution.get("mutating").copied().unwrap_or(0.0);
-                return p_mutating >= 0.5;
+                let verdict = p_mutating >= BASH_KEV_THRESHOLD;
+                tracing::info!(target: "kev", check = "is_mutating_bash", input = %command, selected = %resp.selected, p_mutating, margin = resp.confidence, threshold = BASH_KEV_THRESHOLD, verdict, "kev classified a complex bash command");
+                kev.log_decision(
+                    "is_mutating_bash",
+                    "p_mutating",
+                    Some(p_mutating),
+                    BASH_KEV_THRESHOLD,
+                    verdict,
+                    "kev",
+                    None,
+                );
+                return verdict;
             }
             Err(super::kev::KevError::Unavailable(e)) => {
                 // Deterministic check already said Free.
-                tracing::info!(target: "kev", error = %e, "kev unavailable; deterministic bash rule used");
+                tracing::info!(target: "kev", check = "is_mutating_bash", input = %command, error = %e, verdict = false, "kev unavailable; deterministic bash rule used");
+                kev.log_decision(
+                    "is_mutating_bash",
+                    "p_mutating",
+                    None,
+                    BASH_KEV_THRESHOLD,
+                    false,
+                    "fallback_rules",
+                    Some(&e),
+                );
             }
         }
     }
@@ -851,16 +894,28 @@ mod tests {
     async fn classify_v2_gates_on_mutating_probability_not_the_margin() {
         // Real kev answer for the jq|sponge rewrite: `confidence` is the top-two margin
         // (0.27), while P(mutating) is 0.51. Gating on the margin let it through.
-        let (_srv, kev) = kev_mock(json!({"type": "choice", "choice": "mutating", "confidence": 0.2663,
-            "probabilities": {"read_only": 0.234, "mutating": 0.511, "ambiguous": 0.256}})).await;
-        assert_eq!(classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await, ToolAction::AdvisorGated);
+        let (_srv, kev) = kev_mock(
+            json!({"type": "choice", "choice": "mutating", "confidence": 0.2663,
+            "probabilities": {"read_only": 0.234, "mutating": 0.511, "ambiguous": 0.256}}),
+        )
+        .await;
+        assert_eq!(
+            classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await,
+            ToolAction::AdvisorGated
+        );
     }
 
     #[tokio::test]
     async fn classify_v2_does_not_gate_when_mutating_is_unlikely() {
-        let (_srv, kev) = kev_mock(json!({"type": "choice", "choice": "ambiguous", "confidence": 0.1,
-            "probabilities": {"read_only": 0.35, "mutating": 0.2, "ambiguous": 0.45}})).await;
-        assert_eq!(classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await, ToolAction::Free);
+        let (_srv, kev) = kev_mock(
+            json!({"type": "choice", "choice": "ambiguous", "confidence": 0.1,
+            "probabilities": {"read_only": 0.35, "mutating": 0.2, "ambiguous": 0.45}}),
+        )
+        .await;
+        assert_eq!(
+            classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await,
+            ToolAction::Free
+        );
     }
 
     #[tokio::test]
@@ -933,5 +988,117 @@ mod tests {
             )
             .await
         );
+    }
+
+    // ── Audit log: every kev call and the decision it drove land in kev.jsonl ──
+
+    fn read_log(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line is JSON"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn kev_log_records_input_raw_output_and_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("kev.jsonl");
+
+        let (_srv, kev) = kev_mock(
+            json!({"type": "choice", "choice": "mutating", "confidence": 0.2663,
+            "probabilities": {"read_only": 0.234, "mutating": 0.511, "ambiguous": 0.256}}),
+        )
+        .await;
+        let kev = kev.with_log_path(Some(log.clone()));
+        let action =
+            classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await;
+        assert_eq!(action, ToolAction::AdvisorGated);
+
+        let rows = read_log(&log);
+        let call = rows
+            .iter()
+            .find(|r| r["record"] == "call")
+            .expect("call record");
+        let decision = rows
+            .iter()
+            .find(|r| r["record"] == "decision")
+            .expect("decision record");
+
+        // Input: exactly what was sent to kev.
+        assert_eq!(call["kind"], "choice");
+        assert_eq!(call["request"]["state"], SNEAKY_MUTATION);
+        assert_eq!(call["request"]["questions"]["q"]["type"], "choice");
+        assert!(call["request"]["questions"]["q"]["criteria"]["mutating"].is_string());
+        // Raw output: kev's response body, untouched.
+        assert_eq!(
+            call["response"]["answers"]["q"]["probabilities"]["mutating"],
+            0.511
+        );
+        assert_eq!(call["http_status"], 200);
+        assert!(call["latency_ms"].as_u64().is_some());
+        // Decision: which rule, what threshold, what kev said, what it decided.
+        assert_eq!(decision["call_id"], call["call_id"]);
+        assert_eq!(decision["check"], "is_mutating_bash");
+        assert_eq!(decision["score_name"], "p_mutating");
+        assert_eq!(decision["score"], 0.511);
+        assert_eq!(decision["threshold"], 0.5);
+        assert_eq!(decision["verdict"], true);
+        assert_eq!(decision["source"], "kev");
+    }
+
+    #[tokio::test]
+    async fn kev_log_records_fallback_when_kev_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("kev.jsonl");
+
+        let kev = super::super::kev::KevClient::with_base_url(
+            "http://127.0.0.1:9",
+            std::time::Duration::from_millis(500),
+        )
+        .unwrap()
+        .with_log_path(Some(log.clone()));
+        let boundary = is_evaluation_boundary_v2(
+            HookType::UserPromptSubmit,
+            None,
+            &prompt_payload("fix the login bug please"),
+            Some(&kev),
+        )
+        .await;
+        assert!(boundary);
+
+        let rows = read_log(&log);
+        let call = rows
+            .iter()
+            .find(|r| r["record"] == "call")
+            .expect("call record");
+        assert_eq!(call["request"]["state"], "fix the login bug please");
+        assert!(call["error"].is_string());
+        let decision = rows
+            .iter()
+            .find(|r| r["record"] == "decision")
+            .expect("decision record");
+        assert_eq!(decision["check"], "is_substantial_prompt");
+        assert_eq!(decision["source"], "fallback_rules");
+        assert_eq!(decision["verdict"], true);
+    }
+
+    #[test]
+    fn kev_log_path_honours_off_and_override() {
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _off = crate::testutil::EnvGuard::set("KEV_LOG", "off");
+        assert!(super::super::kev::kev_log_path().is_none());
+        let _on = crate::testutil::EnvGuard::remove("KEV_LOG");
+        let _p = crate::testutil::EnvGuard::set("KEV_LOG_PATH", "/tmp/custom-kev.jsonl");
+        assert_eq!(
+            super::super::kev::kev_log_path().unwrap(),
+            std::path::PathBuf::from("/tmp/custom-kev.jsonl")
+        );
+        let _d = crate::testutil::EnvGuard::remove("KEV_LOG_PATH");
+        assert!(super::super::kev::kev_log_path()
+            .unwrap()
+            .ends_with(".actual/logs/kev.jsonl"));
     }
 }
