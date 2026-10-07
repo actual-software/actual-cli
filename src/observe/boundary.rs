@@ -289,8 +289,11 @@ pub async fn is_mutating_bash_v2(
             .await
         {
             Ok(resp) => {
-                tracing::info!(target: "kev", decision = "bash", selected = %resp.selected, confidence = resp.confidence, "kev classified a complex bash command");
-                return resp.selected == "mutating" && resp.confidence >= 0.5;
+                tracing::info!(target: "kev", decision = "bash", selected = %resp.selected, p_mutating = resp.distribution.get("mutating").copied().unwrap_or(0.0), margin = resp.confidence, "kev classified a complex bash command");
+                // `confidence` is kev's top-two margin, not P(choice): a 51% "mutating"
+                // answer has confidence ~0.27. Gate on the probability itself.
+                let p_mutating = resp.distribution.get("mutating").copied().unwrap_or(0.0);
+                return p_mutating >= 0.5;
             }
             Err(super::kev::KevError::Unavailable(e)) => {
                 // Deterministic check already said Free.
@@ -842,6 +845,22 @@ mod tests {
             classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await,
             ToolAction::AdvisorGated
         );
+    }
+
+    #[tokio::test]
+    async fn classify_v2_gates_on_mutating_probability_not_the_margin() {
+        // Real kev answer for the jq|sponge rewrite: `confidence` is the top-two margin
+        // (0.27), while P(mutating) is 0.51. Gating on the margin let it through.
+        let (_srv, kev) = kev_mock(json!({"type": "choice", "choice": "mutating", "confidence": 0.2663,
+            "probabilities": {"read_only": 0.234, "mutating": 0.511, "ambiguous": 0.256}})).await;
+        assert_eq!(classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await, ToolAction::AdvisorGated);
+    }
+
+    #[tokio::test]
+    async fn classify_v2_does_not_gate_when_mutating_is_unlikely() {
+        let (_srv, kev) = kev_mock(json!({"type": "choice", "choice": "ambiguous", "confidence": 0.1,
+            "probabilities": {"read_only": 0.35, "mutating": 0.2, "ambiguous": 0.45}})).await;
+        assert_eq!(classify_tool_action_v2(Some("Bash"), &bash(SNEAKY_MUTATION), Some(&kev)).await, ToolAction::Free);
     }
 
     #[tokio::test]
