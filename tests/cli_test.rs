@@ -1398,3 +1398,191 @@ fn test_rules_select_retains_spool_on_failed_delivery() {
     }
     assert!(retained, "a failed delivery must keep the event queued");
 }
+
+// ── session summary ──────────────────────────────────────────────────────
+
+/// A repository whose rule set holds one decision that can be added to
+/// context.
+fn governed_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let rules = repo.path().join(".actual").join("rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(
+        rules.join("cross-cutting-signing-a1b2.md"),
+        "# Adopt RS256: Token Signing\n\nThese rules are ALWAYS ACTIVE for token signing in \
+         `services/auth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n\n\
+         ### Verify\n\n```bash\ngrep -r \"jwt.sign\" services/auth/ --include=\"*.ts\"\n```\n",
+    )
+    .unwrap();
+    repo
+}
+
+/// `actual <args>` run from `dir`, the way `impl-gate.sh` runs it after its
+/// `cd`, with `config_dir` holding the session records.
+fn actual_in(dir: &std::path::Path, config_dir: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = cmd();
+    command
+        .args(args)
+        .current_dir(dir)
+        .env("ACTUAL_CONFIG_DIR", config_dir)
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_NO_TELEMETRY", "1");
+    command
+}
+
+/// What the read hook does in session `s1` when the agent reads a governed
+/// file of `repo`: the decision is briefed and recorded.
+fn brief_a_read(repo: &std::path::Path, config_dir: &std::path::Path) {
+    let read = serde_json::json!({
+        "session_id": "s1",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": repo.join("services/auth/token.ts")},
+    })
+    .to_string();
+    actual_in(
+        repo,
+        config_dir,
+        &[
+            "rules",
+            "brief",
+            "--claude-hook",
+            "--repo",
+            repo.to_str().unwrap(),
+        ],
+    )
+    .write_stdin(read)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("R-A-001"));
+}
+
+/// The summary hook's stdout for `envelope`, run from `dir` with `flags`,
+/// after asserting it exited 0.
+fn summary_hook(
+    dir: &std::path::Path,
+    config_dir: &std::path::Path,
+    flags: &[&str],
+    envelope: &str,
+) -> String {
+    let args = [&["session", "summary", "--claude-hook"], flags].concat();
+    let output = actual_in(dir, config_dir, &args)
+        .write_stdin(envelope.to_string())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(output).unwrap()
+}
+
+fn stop_envelope(cwd: &std::path::Path) -> String {
+    serde_json::json!({
+        "session_id": "s1",
+        "cwd": cwd,
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+    })
+    .to_string()
+}
+
+/// The path the two hooks drive together, with the `--rules-dir` that
+/// `impl-gate.sh` passes: a read of a governed file is briefed and recorded,
+/// the end of that response shows the count, and the next response, with
+/// nothing new, is silent.
+#[test]
+fn test_session_summary_hook_reports_a_briefed_decision_once() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    let rules_dir = repo.path().join(".actual").join("rules");
+    let flags = ["--rules-dir", rules_dir.to_str().unwrap()];
+    brief_a_read(repo.path(), config_dir.path());
+
+    let stop = stop_envelope(repo.path());
+    assert_eq!(
+        summary_hook(repo.path(), config_dir.path(), &flags, &stop),
+        "Actual AI: added 1 of 1 ADR to context this session.\n"
+    );
+    assert_eq!(
+        summary_hook(repo.path(), config_dir.path(), &flags, &stop),
+        ""
+    );
+}
+
+/// The envelope's `cwd` follows the agent's `cd`, so the summary keys on the
+/// directory it runs in. Run from a repository with nothing briefed, it is
+/// silent even though the envelope names another repository whose record
+/// would print; run from that repository, the same envelope prints.
+#[test]
+fn test_session_summary_hook_keys_on_its_own_directory_not_the_envelopes_cwd() {
+    let briefed = governed_repo();
+    let other = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    brief_a_read(briefed.path(), config_dir.path());
+    let stop = stop_envelope(briefed.path());
+
+    assert_eq!(
+        summary_hook(other.path(), config_dir.path(), &[], &stop),
+        ""
+    );
+    assert_eq!(
+        summary_hook(briefed.path(), config_dir.path(), &[], &stop),
+        "Actual AI: added 1 of 1 ADR to context this session.\n"
+    );
+}
+
+/// Nothing to say is empty stdout and exit 0: a session that briefed
+/// nothing, an envelope that is not JSON, and a repository with no rules.
+#[test]
+fn test_session_summary_hook_is_silent_with_nothing_to_say() {
+    let repo = governed_repo();
+    let bare = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+
+    let stop = stop_envelope(repo.path());
+    assert_eq!(summary_hook(repo.path(), config_dir.path(), &[], &stop), "");
+    assert_eq!(
+        summary_hook(repo.path(), config_dir.path(), &[], "{ not json"),
+        ""
+    );
+    brief_a_read(repo.path(), config_dir.path());
+    assert_eq!(summary_hook(bare.path(), config_dir.path(), &[], &stop), "");
+}
+
+/// Direct mode always prints the current counts, here with nothing added
+/// yet, and `--json` carries the same numbers.
+#[test]
+fn test_session_summary_direct_mode_prints_the_current_counts() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["session", "summary", "--session", "s1"],
+    )
+    .assert()
+    .success()
+    .stdout("Actual AI: added 0 of 1 ADR to context this session.\n");
+
+    let output = actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["session", "summary", "--session", "s1", "--json"],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value, serde_json::json!({"x": 0, "y": 1, "decisions": []}));
+}
+
+#[test]
+fn test_session_summary_needs_a_session_or_the_hook() {
+    cmd()
+        .args(["session", "summary"])
+        .assert()
+        .failure()
+        .code(2);
+}

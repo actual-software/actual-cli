@@ -45,11 +45,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::rules::scope::signals::{self, DocumentSignals, PathGlob};
-use crate::rules::{RuleDocument, RuleSetLoadReport};
+use crate::rules::{RuleDocument, RuleLevel, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 5;
+pub const INDEX_FORMAT_VERSION: u32 = 6;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -152,6 +152,10 @@ pub struct IndexedDocument {
     /// published files carry, so it is the key here, derived at build time so
     /// the parse happens once rather than per query.
     pub adr: Option<String>,
+    /// How many MUST and MUST NOT rules the document states. A brief carries
+    /// nothing else (see [`crate::rules::brief`]), so a decision none of whose
+    /// documents states one can never be added to context.
+    pub obligations: usize,
     pub scope: Option<String>,
     pub globs: Vec<String>,
     /// Terms per field with how often each occurs in that field.
@@ -546,6 +550,22 @@ impl ScopeIndex {
         group_matches(matches, limit)
     }
 
+    /// The decisions a brief can add to context: those with at least one MUST
+    /// or MUST NOT rule, keyed the way [`Self::search_adrs`] groups them.
+    pub fn decision_keys(&self) -> BTreeSet<String> {
+        self.documents
+            .iter()
+            .filter(|doc| doc.obligations > 0)
+            .map(|doc| decision_key(doc.adr.as_deref(), &doc.slug))
+            .collect()
+    }
+
+    /// How many decisions [`Self::decision_keys`] holds: the Y of "added X of
+    /// Y ADRs to context".
+    pub fn decision_count(&self) -> usize {
+        self.decision_keys().len()
+    }
+
     fn score_document(
         &self,
         doc: &IndexedDocument,
@@ -615,10 +635,7 @@ impl ScopeIndex {
 fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
     let mut groups: Vec<AdrGroup> = Vec::new();
     for hit in matches {
-        // A document whose title names no decision is its own group, keyed by
-        // slug: pooling every such document under one heading would present
-        // unrelated rules as one subject.
-        let key = hit.adr.clone().unwrap_or_else(|| hit.slug.clone());
+        let key = decision_key(hit.adr.as_deref(), &hit.slug);
         match groups.iter_mut().find(|group| group.key == key) {
             Some(group) => group.documents.push(hit),
             None => groups.push(AdrGroup {
@@ -633,6 +650,15 @@ fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
     }
     groups.truncate(limit);
     groups
+}
+
+/// What a document is grouped under: the decision its title names, or its own
+/// slug when it names none, since pooling every unnamed document under one
+/// heading would present unrelated rules as one subject. Grouping and
+/// [`ScopeIndex::decision_keys`] both key on this, so the decisions briefed
+/// and the decisions counted cannot drift apart.
+fn decision_key(adr: Option<&str>, slug: &str) -> String {
+    adr.unwrap_or(slug).to_string()
 }
 
 /// First tie-break: how many documents declare the rarest glob that reached
@@ -819,6 +845,11 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
             .to_string(),
         title: doc.title.clone(),
         adr: adr_key(doc.title.as_deref()),
+        obligations: doc
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.level, RuleLevel::Must | RuleLevel::MustNot))
+            .count(),
         scope: doc.scope.clone(),
         globs: extracted.globs.into_iter().map(|g| g.pattern).collect(),
         field_terms,
@@ -1550,6 +1581,114 @@ mod tests {
         assert_eq!(groups, group_matches(matches, 5));
     }
 
+    /// Helper: a document stating `rules`, one bullet per line, with no
+    /// verify block.
+    fn ruled(slug: &str, title: &str, rules: &str) -> RuleDocument {
+        parse_rule_document(
+            &PathBuf::from(format!("/repo/.actual/rules/{slug}.md")),
+            &format!(
+                "# {title}\n\nThese rules are ALWAYS ACTIVE everywhere.\n\n### Rules\n\n{rules}\n"
+            ),
+        )
+        .expect("fixture parses")
+    }
+
+    /// Only MUST and MUST NOT rules are obligations; advice is not.
+    #[test]
+    fn test_build_counts_each_documents_obligations() {
+        let index = index_of(vec![ruled(
+            "mixed",
+            "Mixed",
+            "- **R-1** MUST: a.\n- **R-2** MUST NOT: b.\n- **R-3** SHOULD: c.\n- **R-4** MAY: d.",
+        )]);
+        assert_eq!(index.documents[0].obligations, 2);
+    }
+
+    /// Siblings of one decision count once, and a document whose title names
+    /// no decision counts on its own.
+    #[test]
+    fn test_decision_count_groups_siblings_and_counts_an_unnamed_document_alone() {
+        let index = sample_index();
+        assert_eq!(index.decision_count(), 2);
+        assert_eq!(
+            index.decision_keys().into_iter().collect::<Vec<_>>(),
+            vec!["Adopt RS256", "cross-cutting-provider-pinning-c3d4"]
+        );
+    }
+
+    /// A decision counts once any of its documents states an obligation, in
+    /// either polarity, and a decision stating only advice never counts,
+    /// because a brief would have nothing to say about it.
+    #[test]
+    fn test_decision_count_leaves_out_decisions_that_state_only_advice() {
+        let advice = ruled(
+            "caching-reads",
+            "Advise Caching: Reads",
+            "- **R-1** SHOULD: cache reads.\n- **R-2** MAY: warm the cache.",
+        );
+        let index = index_of(vec![
+            advice.clone(),
+            ruled(
+                "signing-rotation",
+                "Adopt RS256: Rotation",
+                "- **R-1** SHOULD: rotate quarterly.",
+            ),
+            ruled(
+                "signing-algorithm",
+                "Adopt RS256: Algorithm",
+                "- **R-1** MUST: sign with RS256.",
+            ),
+            ruled(
+                "provider-pinning",
+                "Pin Providers",
+                "- **R-1** MUST NOT: float a provider version.",
+            ),
+        ]);
+
+        assert_eq!(
+            index.decision_keys().into_iter().collect::<Vec<_>>(),
+            vec!["Adopt RS256", "provider-pinning"]
+        );
+        assert_eq!(index.decision_count(), 2);
+        // The same line a brief draws: it has nothing to say about advice.
+        let briefed = crate::rules::brief::BriefDecision {
+            heading: "Advise Caching",
+            documents: vec![&advice],
+        };
+        assert_eq!(
+            crate::rules::brief::render_brief(
+                "src/cache.rs",
+                &[briefed],
+                8,
+                crate::rules::brief::DEFAULT_MAX_CHARS
+            ),
+            None
+        );
+    }
+
+    /// Every decision a search can return is one the count holds, under the
+    /// same key: the X a brief records is always part of the Y.
+    #[test]
+    fn test_every_searched_decision_is_a_counted_decision() {
+        let index = sample_index();
+        let everything = Query::new("").with_paths([
+            "services/auth/oauth/token.ts".to_string(),
+            "infra/terraform/main.tf".to_string(),
+        ]);
+        let searched: BTreeSet<String> = index
+            .search_adrs(&everything, 10)
+            .into_iter()
+            .map(|group| group.key)
+            .collect();
+
+        assert_eq!(searched, index.decision_keys());
+    }
+
+    #[test]
+    fn test_an_empty_index_counts_no_decisions() {
+        assert_eq!(index_of(Vec::new()).decision_count(), 0);
+    }
+
     /// Nothing matching means no groups, not an empty group.
     #[test]
     fn test_search_adrs_returns_nothing_when_no_document_matches() {
@@ -1569,6 +1708,7 @@ mod tests {
             relative_path: format!(".actual/rules/{slug}.md"),
             title: None,
             adr: None,
+            obligations: 1,
             scope: None,
             globs: globs.iter().map(|g| g.to_string()).collect(),
             field_terms: BTreeMap::new(),

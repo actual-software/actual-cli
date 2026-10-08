@@ -47,6 +47,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::PlanCheck(args) => cli::commands::plan_check::exec(args),
         Command::PlanCheckOverride(args) => cli::commands::check_engine::exec_override(args),
         Command::ImplCheck(args) => cli::commands::impl_check::exec(args),
+        Command::Session(args) => cli::commands::session_summary::exec(args),
         Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
     }
 }
@@ -85,6 +86,30 @@ mod tests {
             "--repo",
             repo.path().to_str().unwrap(),
             "a plan",
+        ]);
+        assert!(run(cli).is_ok());
+    }
+
+    #[test]
+    fn test_run_session_summary_dispatch_returns_ok() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        // Direct mode over a repository with no rules: no record and no rule
+        // set, so nothing beyond the scratch config directory is touched.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+        let repo = tempdir().unwrap();
+        let cli = Cli::parse_from([
+            "actual",
+            "session",
+            "summary",
+            "--session",
+            "s1",
+            "--repo",
+            repo.path().to_str().unwrap(),
         ]);
         assert!(run(cli).is_ok());
     }
