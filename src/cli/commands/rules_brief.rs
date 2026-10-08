@@ -1077,17 +1077,17 @@ mod tests {
             )
             .unwrap();
             let a = args(root.path());
-            let oauth = governed(root.path());
+            let signing = governed(root.path());
             let terraform = root
                 .path()
                 .join("infra/terraform/main.tf")
                 .to_string_lossy()
                 .to_string();
 
-            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &oauth), &a).is_some());
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &signing), &a).is_some());
             assert_eq!(ledger(root.path(), "s1"), ["Sign With Asymmetric Keys"]);
 
-            for file in [&terraform, &oauth] {
+            for file in [&terraform, &signing] {
                 let read = session_envelope(root.path(), "s1", Some("sub-1"), file);
                 assert!(hook_reply(&read, &a).is_some(), "{file}");
             }
