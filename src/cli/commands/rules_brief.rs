@@ -190,7 +190,7 @@ fn exec_direct(args: &RulesBriefArgs) -> Result<(), ActualError> {
 /// a reader can wait on — `impl_check` learned this the same way, when its
 /// direct-mode tests blocked on the test harness's own stdin. Anything that
 /// is not a pipe or a redirected file reads as empty, which is silence.
-fn read_stdin() -> String {
+pub(crate) fn read_stdin() -> String {
     read_envelope_if(stdin_is_piped(), std::io::stdin())
 }
 
@@ -452,7 +452,7 @@ fn relative_to_root(root: &Path, file: &str) -> Option<String> {
 /// deepest ancestor that exists is canonicalized, and the rest is appended
 /// with `.`/`..` collapsed lexically — which is exact there, since a path
 /// that does not exist cannot contain a symlink.
-fn resolve(path: &Path) -> PathBuf {
+pub(crate) fn resolve(path: &Path) -> PathBuf {
     for ancestor in path.ancestors() {
         let Ok(mut resolved) = ancestor.canonicalize() else {
             continue;

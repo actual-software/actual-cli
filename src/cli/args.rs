@@ -434,6 +434,9 @@ pub enum Command {
     #[command(name = "check-override", visible_alias = "plan-check-override")]
     PlanCheckOverride(PlanCheckOverrideArgs),
 
+    /// Report what Actual AI did in a coding session
+    Session(SessionArgs),
+
     /// Internal: drain the scope-telemetry spool once, then exit.
     ///
     /// Spawned as a detached child process by `rules select` so telemetry
@@ -840,6 +843,52 @@ pub struct RulesBriefArgs {
         allow_hyphen_values = true
     )]
     pub min_score: Option<f64>,
+}
+
+/// Arguments for the `session` command
+#[derive(Parser, Debug)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub action: SessionAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SessionAction {
+    /// One sentence on how many ADRs a session added to the agent's context
+    Summary(SessionSummaryArgs),
+}
+
+/// Arguments for `session summary`
+#[derive(Parser, Debug)]
+pub struct SessionSummaryArgs {
+    /// Read a Claude Code `Stop` envelope from stdin and print the sentence
+    /// when the count changed since it was last shown, recording it as shown.
+    /// Prints nothing otherwise, and always exits 0.
+    #[arg(long)]
+    pub claude_hook: bool,
+
+    /// The session to summarize, in direct mode, which always prints the
+    /// current sentence and never records it as shown.
+    #[arg(
+        long,
+        value_name = "ID",
+        required_unless_present = "claude_hook",
+        conflicts_with = "claude_hook"
+    )]
+    pub session: Option<String>,
+
+    /// Repository root. Defaults to the current directory, under
+    /// `--claude-hook` too: the envelope's `cwd` is never read.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Rule directory, when it is not `<repo>/.actual/rules`.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: Option<std::path::PathBuf>,
+
+    /// Print the counts and the decisions added as JSON, in direct mode.
+    #[arg(long, conflicts_with = "claude_hook")]
+    pub json: bool,
 }
 
 /// Arguments for `rules ls`
@@ -2844,5 +2893,84 @@ mod parse_tests {
             help.contains("Exit codes"),
             "impl-check --help does not document exit codes: {help}"
         );
+    }
+
+    // ---- SessionSummaryArgs / `session summary` parsing tests ----
+
+    /// Extract `session summary` arguments, or `None` when the command line
+    /// does not parse to one.
+    fn session_summary_args_from(argv: &[&str]) -> Option<SessionSummaryArgs> {
+        match Cli::try_parse_from(argv).ok()?.command {
+            Command::Session(args) => match args.action {
+                SessionAction::Summary(summary) => Some(summary),
+            },
+            _ => None,
+        }
+    }
+
+    /// The hook form: what `impl-gate.sh` will run, with the rules directory
+    /// it already resolved.
+    #[test]
+    fn test_session_summary_hook_form_parses() {
+        let args = session_summary_args_from(&[
+            "actual",
+            "session",
+            "summary",
+            "--claude-hook",
+            "--rules-dir",
+            "/repo/.actual/rules",
+        ])
+        .expect("expected a session summary command");
+        assert!(args.claude_hook);
+        assert_eq!(
+            args.rules_dir.as_deref(),
+            Some(std::path::Path::new("/repo/.actual/rules"))
+        );
+        assert_eq!(args.session, None);
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn test_session_summary_direct_form_parses() {
+        let args = session_summary_args_from(&[
+            "actual",
+            "session",
+            "summary",
+            "--session",
+            "s1",
+            "--repo",
+            "/repo",
+            "--json",
+        ])
+        .expect("expected a session summary command");
+        assert!(!args.claude_hook);
+        assert_eq!(args.session.as_deref(), Some("s1"));
+        assert_eq!(args.repo.as_deref(), Some(std::path::Path::new("/repo")));
+        assert!(args.json);
+    }
+
+    /// One of the two modes is required, and the direct-mode flags cannot
+    /// ride along on the hook, which never reads them.
+    #[test]
+    fn test_session_summary_rejects_no_mode_and_mixed_modes() {
+        for argv in [
+            &["actual", "session", "summary"][..],
+            &[
+                "actual",
+                "session",
+                "summary",
+                "--claude-hook",
+                "--session",
+                "s1",
+            ],
+            &["actual", "session", "summary", "--claude-hook", "--json"],
+        ] {
+            assert!(session_summary_args_from(argv).is_none(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn test_session_summary_args_from_another_command_is_none() {
+        assert!(session_summary_args_from(&["actual", "status"]).is_none());
     }
 }

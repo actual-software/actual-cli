@@ -157,6 +157,8 @@ actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--abl
 actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 actual rules brief --claude-session-start [--repo PATH] [--rules-dir PATH]
 actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
+actual session summary --claude-hook [--repo PATH] [--rules-dir PATH]
+actual session summary --session ID [--repo PATH] [--rules-dir PATH] [--json]
 ```
 
 `rules brief` is the hook's form of a selection: given the file an agent is
@@ -215,6 +217,25 @@ lose neither the file nor each other's decisions, and a run that cannot take
 the lock within a short wait skips its write. Damaged or older-format state
 reads as an empty session, which can only lower the count. Files untouched for
 a week are pruned, and nothing in the record leaves the machine.
+
+`session summary` turns that record into one line for the end of a response:
+"Actual AI: added X of Y ADRs to context this session." Y is the number of
+decisions the rule set can add to context at all, meaning those with at least
+one MUST or MUST NOT rule. They are keyed the way the brief groups them, so the
+documents of one decision count once and a document whose title names no
+decision counts on its own. X is the recorded decisions still among them, so a
+rule set edited mid-session can lower X but never lift it past Y. "ADRs" is
+singular when Y is 1. Under `--claude-hook` the command reads the `session_id`
+of a `Stop` envelope and nothing else. The rules directory is `--rules-dir`,
+else `<repo>/.actual/rules` with `--repo` or the working directory, the same
+resolution `impl-check` uses; the envelope's `cwd` is never read, because it
+follows the agent's `cd`. The line is printed only when X is above 0 and the
+counts differ from the last ones shown, which are recorded under the record's
+lock before printing. Everything else, every failure included, is empty stdout
+and exit 0. A cold index is built on the spot, and there is no network, runner
+or model call. `--session ID` prints the current line even at 0 and never
+records it as shown; `--json` prints `{x, y, decisions}` instead, where
+`decisions` names the decisions X counted.
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;
