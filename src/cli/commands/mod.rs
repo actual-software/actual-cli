@@ -9,6 +9,7 @@ use crate::generation::OutputFormat;
 
 pub mod advisor;
 pub mod auth;
+pub(crate) mod brief_ledger;
 pub(crate) mod brief_memory;
 pub mod cache;
 pub(crate) mod check_engine;

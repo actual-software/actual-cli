@@ -43,6 +43,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::args::RulesBriefArgs;
+use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::brief_memory::{self, SessionKey};
 use crate::error::ActualError;
 use crate::rules::brief::{render_brief_shown, BriefDecision};
@@ -378,6 +379,20 @@ fn brief_for(
 
     let (brief, shown) =
         render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)?;
+
+    // The session-wide record counts what the memory below remembers, by the
+    // same rule, but keys on the session alone: subagents add to one count,
+    // and compaction never resets it.
+    if let (Some(who), Some(dir)) = (session, brief_ledger::ledger_dir()) {
+        let key = LedgerKey {
+            session_id: who.session_id,
+            rules_dir: &key_dir,
+        };
+        let added = shown
+            .iter()
+            .map(|&position| decisions[position].key.as_str());
+        brief_ledger::record(&dir, &key, added);
+    }
 
     // Only decisions that contributed everything they could are remembered:
     // shown in full, or trimmed to `--rules-per-decision`, which is a ceiling
@@ -1027,6 +1042,112 @@ mod tests {
 
             assert!(hook_reply(&raw, &a).is_some());
             assert!(hook_reply(&raw, &a).is_some());
+        });
+    }
+
+    // ── the session-wide record ──────────────────────────────────────────
+
+    /// A second decision, governing files [`OAUTH`] does not.
+    const TERRAFORM: &str = "# Pin Providers: Provider Versions\n\nThese rules are ALWAYS ACTIVE for Terraform in `infra/terraform/`.\n\n### Rules\n\n- **R-P-001** MUST: pin every provider to an exact version.\n\n### Verify\n\n```bash\ngrep -r \"version\" infra/terraform/ --include=\"*.tf\"\n```\n";
+
+    /// The decisions in `session`'s record for the rules under `root`.
+    fn ledger(root: &Path, session: &str) -> Vec<String> {
+        let rules_dir = resolve(&crate::rules::rules_dir(root));
+        let key = LedgerKey {
+            session_id: session,
+            rules_dir: &rules_dir,
+        };
+        brief_ledger::load(&brief_ledger::ledger_dir().unwrap(), &key)
+            .briefed
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// The main agent and its subagents add to one record, and a decision
+    /// briefed to both counts once.
+    #[test]
+    fn test_the_session_record_adds_up_the_main_agent_and_subagents() {
+        with_scratch_config(|| {
+            let root = repo();
+            std::fs::write(
+                crate::rules::rules_dir(root.path())
+                    .join("cross-cutting-provider-versions-c3d1.md"),
+                TERRAFORM,
+            )
+            .unwrap();
+            let a = args(root.path());
+            let oauth = governed(root.path());
+            let terraform = root
+                .path()
+                .join("infra/terraform/main.tf")
+                .to_string_lossy()
+                .to_string();
+
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &oauth), &a).is_some());
+            assert_eq!(ledger(root.path(), "s1"), ["Sign With Asymmetric Keys"]);
+
+            for file in [&terraform, &oauth] {
+                let read = session_envelope(root.path(), "s1", Some("sub-1"), file);
+                assert!(hook_reply(&read, &a).is_some(), "{file}");
+            }
+
+            assert_eq!(
+                ledger(root.path(), "s1"),
+                ["Pin Providers", "Sign With Asymmetric Keys"]
+            );
+            assert!(ledger(root.path(), "s2").is_empty());
+        });
+    }
+
+    /// The compaction reset wipes the memory, so the decision is briefed
+    /// again, and leaves the session record alone, so it still counts once.
+    #[test]
+    fn test_a_compaction_reset_leaves_the_session_record_alone() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            assert!(hook_reply(&read, &a).is_some());
+
+            session_start(&session_start_envelope(root.path(), "s1", "compact"), &a);
+            assert_eq!(ledger(root.path(), "s1"), ["Sign With Asymmetric Keys"]);
+
+            assert!(hook_reply(&read, &a).is_some(), "the memory was not reset");
+            assert_eq!(ledger(root.path(), "s1"), ["Sign With Asymmetric Keys"]);
+        });
+    }
+
+    /// The record counts by the memory's rule. A decision `--max-chars` cut
+    /// short is not counted, because a later read can still show it whole;
+    /// one trimmed to `--rules-per-decision` is, because that is all it can
+    /// ever show.
+    #[test]
+    fn test_the_session_record_counts_by_the_memorys_rule() {
+        with_scratch_config(|| {
+            let root = repo();
+            std::fs::write(
+                crate::rules::rules_dir(root.path()).join("cross-cutting-token-signing-e410.md"),
+                OAUTH.replace(
+                    "- **R-A-002** SHOULD: rotate keys quarterly.",
+                    "- **R-A-002** MUST NOT: sign with HS256.",
+                ),
+            )
+            .unwrap();
+            let file = governed(root.path());
+            let read = session_envelope(root.path(), "s1", None, &file);
+            let whole = brief_for(root.path(), &file, &args(root.path()), None).unwrap();
+
+            let mut cut = args(root.path());
+            cut.max_chars = whole.chars().count() - 1;
+            let brief = hook_reply(&read, &cut).expect("a shortened brief");
+            assert!(brief.contains("(1 of 2 rules shown)"), "{brief}");
+            assert!(ledger(root.path(), "s1").is_empty());
+
+            let mut capped = args(root.path());
+            capped.rules_per_decision = 1;
+            assert!(hook_reply(&read, &capped).is_some());
+            assert_eq!(ledger(root.path(), "s1"), ["Sign With Asymmetric Keys"]);
         });
     }
 

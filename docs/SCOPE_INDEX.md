@@ -203,6 +203,19 @@ drops a record, so a decision is briefed again. The reset depends on the
 the plugin must register `actual rules brief --claude-session-start`; until it
 does, a compacted context is not briefed again on what it already saw.
 
+Beside that memory, `--claude-hook` keeps a session-wide record of every
+decision it has briefed, so a summary can say how many decisions a whole
+session was given: one file per `session_id` and rules directory in
+`brief-ledger/` under the user config directory, with no `agent_id`, so the main
+agent and its subagents add to one record. A decision enters it by the
+memory's rule, and nothing resets it: `--claude-session-start` clears only the
+memory, and a decision briefed again after a compaction is already counted.
+Every write holds a lock from its read to its rename, so concurrent hook runs
+lose neither the file nor each other's decisions, and a run that cannot take
+the lock within a short wait skips its write. Damaged or older-format state
+reads as an empty session, which can only lower the count. Files untouched for
+a week are pruned, and nothing in the record leaves the machine.
+
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;
 stage 2 is skipped then because it ranks against plan prose. `--explain`
