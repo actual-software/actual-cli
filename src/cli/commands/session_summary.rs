@@ -95,7 +95,10 @@ fn emit(line: Option<String>) {
 /// failure is `None`, so nothing here can become a non-zero exit.
 fn hook_line(raw: &str, args: &SessionSummaryArgs) -> Option<String> {
     let envelope: StopEnvelope = serde_json::from_str(raw).ok()?;
-    let session_id = envelope.session_id.filter(|id| !id.is_empty())?;
+    let Some(session_id) = envelope.session_id.filter(|id| !id.is_empty()) else {
+        // Not `?`: CodeQL reads that early return as the session id reaching `emit`.
+        return None;
+    };
     let (root, rules_dir) = locate(args);
     let dir = brief_ledger::ledger_dir()?;
     let key_dir = rules_brief::resolve(&rules_dir);
