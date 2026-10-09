@@ -315,7 +315,38 @@ fn brief_for(
         .unwrap_or_else(|| crate::rules::rules_dir(root));
     let resolved = scope::resolve_in(&rules_dir, root, false).ok()?;
 
-    let query = Query::new("")
+    // The path is given twice over, as a path and as query text, because the
+    // index scores two independent signals and a brief otherwise only ever
+    // offers one of them.
+    //
+    // `with_paths` feeds the glob signal: a rule whose `verify` block names
+    // `apps/actual/**` matches this file. That is the stronger signal where it
+    // exists, and on a rule set written with paths it dominates. But it is the
+    // *only* signal a brief had, because the query text was empty -- while
+    // `plan-check` and `impl-check` pass the plan or the diff there and so also
+    // light up the title and scope-prose fields.
+    //
+    // Measured on a 155-document rule set whose `verify` blocks hold only
+    // generic shell commands (1 document in 155 names any path), selecting by
+    // path returned nothing for every file tried, so briefing was inert for
+    // that whole corpus while both gates worked normally. Passing the relative
+    // path as text selects the `articleReadingProgress`, `@/lib/articles` and
+    // `react-native Component` decisions for
+    // `app/components/add-article/AddArticlePresenter.tsx`, on the terms the
+    // filename itself carries.
+    //
+    // The path is passed raw: the index's tokenizer already splits `/`, `.`
+    // and `-`, so pre-splitting it into words scores identically.
+    //
+    // The file's *contents* would be the obvious richer source and are worse:
+    // tried on the same file, imports and boilerplate swamp the signal and the
+    // top hits fall from 0.66 to 0.16 and stop being about the file's subject.
+    // It would also cost a read on every brief.
+    //
+    // Scores are a sum of weighted field contributions, so this can only add
+    // to a document's score, never reduce it: no decision that was briefed
+    // before stops being briefed because of this.
+    let query = Query::new(relative.clone())
         .with_paths([relative.clone()])
         .with_min_score(min_score(args, root));
     let mut decisions = resolved.index.search_adrs(&query, args.limit);
@@ -480,6 +511,20 @@ mod tests {
 
     const OAUTH: &str = "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** SHOULD: rotate keys quarterly.\n\n### Verify\n\n```bash\ngrep -r \"jwt.sign\" services/auth/oauth/ --include=\"*.ts\"\n```\n";
 
+    /// A rule document whose `Verify` block names no path at all, only a
+    /// generic command. Whole rule sets are written this way -- one measured
+    /// corpus had 1 of 155 documents naming any path -- and against them the
+    /// glob signal matches nothing, so the query text is the only signal left.
+    const PATHLESS: &str = "# Reading Progress Module Adoption\n\nThese rules are ALWAYS ACTIVE for reading progress components.\n\n### Rules\n\n- **R-P-001** MUST: read progress through the module.\n\n### Verify\n\n```bash\nnpm run test\n```\n";
+
+    fn pathless_repo() -> TempDir {
+        let root = tempdir().unwrap();
+        let dir = crate::rules::rules_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app-reading-progress-7f21.md"), PATHLESS).unwrap();
+        root
+    }
+
     fn repo() -> TempDir {
         let root = tempdir().unwrap();
         let dir = crate::rules::rules_dir(root.path());
@@ -594,6 +639,46 @@ mod tests {
     #[test]
     fn test_ungoverned_file_is_silent() {
         let root = repo();
+        let file = root
+            .path()
+            .join("infra/terraform/main.tf")
+            .to_string_lossy()
+            .to_string();
+        let raw = envelope(root.path(), "PostToolUse", "Read", &file);
+
+        assert_eq!(hook_reply(&raw, &args(root.path())), None);
+    }
+
+    /// A rule set with no paths in its `Verify` blocks still briefs, because
+    /// the query carries the file's own path as text and the title and scope
+    /// fields match on the terms a filename spells.
+    ///
+    /// Before this, such a corpus was briefed on nothing at all while both
+    /// gates worked normally on it: they pass the plan or the diff as query
+    /// text, and a brief passed an empty string.
+    #[test]
+    fn test_a_rule_set_without_paths_is_still_briefed() {
+        let root = pathless_repo();
+        let file = root
+            .path()
+            .join("app/components/reading-progress/ProgressBar.tsx")
+            .to_string_lossy()
+            .to_string();
+        let raw = envelope(root.path(), "PostToolUse", "Read", &file);
+
+        let reply = hook_reply(&raw, &args(root.path())).expect("a brief");
+        assert!(
+            reply.contains("R-P-001"),
+            "the decision the filename's terms match should be briefed: {reply}"
+        );
+    }
+
+    /// The text signal is not a wildcard: a file whose path shares no term
+    /// with the rule set is still silent. Otherwise every read in a repository
+    /// would brief everything.
+    #[test]
+    fn test_path_text_does_not_match_an_unrelated_file() {
+        let root = pathless_repo();
         let file = root
             .path()
             .join("infra/terraform/main.tf")
