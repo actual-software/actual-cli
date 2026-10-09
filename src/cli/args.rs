@@ -884,10 +884,12 @@ pub struct RulesIndexArgs {
 pub struct RulesSelectArgs {
     /// The plan to match against the rule set.
     ///
-    /// Optional when at least one `--file` is given: a hook selecting for the
-    /// file an agent is about to touch has a path and no plan, and passing
-    /// `""` to satisfy a required argument is not an interface. One of the two
-    /// is still required, because a query with neither names nothing to match.
+    /// Optional when at least one `--file` is given, because passing `""` to
+    /// satisfy a required argument is not an interface. One of the two is
+    /// still required, because a query with neither names nothing to match.
+    ///
+    /// Omitting it narrows the query to the path signal alone, which is rarely
+    /// what you want from this command — see `--file`.
     ///
     /// A blank plan beside a `--file` is accepted, as it was when the plan was
     /// required and `""` was the only path-only form. A blank plan with no
@@ -901,9 +903,17 @@ pub struct RulesSelectArgs {
 
     /// A file or directory to match against the rule set. Repeatable.
     ///
-    /// With a plan, these are the paths the plan touches. Without a plan they
-    /// are the query itself: a hook selecting for the file an agent is about
-    /// to touch has a path and no plan.
+    /// Adds the path signal: a document scores here when a glob in its
+    /// `verify` block covers one of these paths. With a plan, these are the
+    /// paths the plan touches, and both signals score.
+    ///
+    /// `--file` is not a stand-in for a plan. Scoring sums weighted field
+    /// contributions, and with no plan text only the path field can
+    /// contribute, so a rule set whose `verify` blocks name no paths returns
+    /// nothing for every file — which says nothing about whether those rules
+    /// govern it. To see what briefing would say for a file, run
+    /// `rules brief --file <path>`: it builds its own query and gives the
+    /// path to both signals.
     #[arg(
         long = "file",
         value_name = "PATH",
@@ -2649,8 +2659,12 @@ mod parse_tests {
         assert_eq!(args.files, vec!["a.rs".to_string()]);
     }
 
-    /// `--help` is the interface a hook author reads. The path-only case has
-    /// to be on the PLAN and `--file` help, not only in a parse test.
+    /// `--help` is the interface a reader reaches for when briefing seems not
+    /// to fire, so it has to say what `--file` alone does and does not answer.
+    /// A path-only query scores on the path field only, and a rule set whose
+    /// `verify` blocks name no paths returns nothing for every file -- which
+    /// is not the same as those rules not governing it. Pinned here because
+    /// the wrong conclusion was drawn from exactly this command.
     #[test]
     fn test_rules_select_help_documents_a_file_without_a_plan() {
         use clap::CommandFactory;
@@ -2667,8 +2681,12 @@ mod parse_tests {
             "PLAN help does not document the path-only case: {help}"
         );
         assert!(
-            help.contains("Without a plan they"),
-            "--file help does not document standing alone: {help}"
+            help.contains("not a stand-in for a plan"),
+            "--file help does not warn that it is not a plan: {help}"
+        );
+        assert!(
+            help.contains("rules brief --file"),
+            "--file help does not point at the command that answers for a file: {help}"
         );
     }
 
