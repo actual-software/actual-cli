@@ -961,8 +961,8 @@ pub struct RulesSelectArgs {
     /// contribute, so a rule set whose `verify` blocks name no paths returns
     /// nothing for every file — which says nothing about whether those rules
     /// govern it. To see what briefing would say for a file, run
-    /// `rules brief --file <path>`: it builds its own query and gives the
-    /// path to both signals.
+    /// `rules brief --file <path>`: it builds its own query, and when no glob
+    /// covers the file it retries with the path's words as query text.
     #[arg(
         long = "file",
         value_name = "PATH",
