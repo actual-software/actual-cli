@@ -326,8 +326,11 @@ fn brief_for(
     // displace a glob match under `--limit`. The retry also needs more than
     // one shared word; see [`MIN_RETRY_TERMS`].
     //
-    // The path is passed raw: the index's tokenizer already splits `/`, `.`
-    // and `-`. The file's contents are not used: imports and boilerplate
+    // The text is the path with `/` turned into spaces. The tokenizer splits
+    // on both, so the terms are the same, but text with no slash names no
+    // path: the query also reads paths out of its text, splitting on
+    // whitespace, and `docs/My Notes/a.md` would add `Notes/a.md` as a second,
+    // wrong path. The file's contents are not used: imports and boilerplate
     // swamp the terms that say what the file is about, and it would cost a
     // read on every brief.
     let floor = min_score(args, root);
@@ -336,7 +339,7 @@ fn brief_for(
         .with_min_score(floor);
     let mut decisions = resolved.index.search_adrs(&by_path, args.limit);
     if decisions.is_empty() {
-        let by_text = Query::new(relative.clone())
+        let by_text = Query::new(relative.replace('/', " "))
             .with_paths([relative.clone()])
             .with_min_score(floor);
         decisions = retry_by_text(&resolved.index, &by_text, args.limit);
@@ -569,6 +572,9 @@ mod tests {
     /// Shares only `app` with `app/components/reading-progress/ProgressBar.tsx`.
     const LOGGING: &str = "# Request Logging\n\nThese rules are ALWAYS ACTIVE for logging in app services.\n\n### Rules\n\n- **R-L-001** MUST: log every request with its trace id.\n\n### Verify\n\n```bash\nnpm run lint\n```\n";
 
+    /// Governs `Notes/**` at the repository root.
+    const RELEASE_NOTES: &str = "# Release Checklist\n\nThese rules are ALWAYS ACTIVE for release checklists.\n\n### Rules\n\n- **R-N-001** MUST: list every migration.\n\n### Verify\n\n```bash\ngrep -r \"Migration\" Notes/ --include=\"*.md\"\n```\n";
+
     /// Several pathless documents, so terms are weighted by inverse document
     /// frequency. A one-document rule set takes the `term_weight` fallback
     /// instead, where every known word counts in full and nothing is ranked.
@@ -764,6 +770,25 @@ mod tests {
         let file = root
             .path()
             .join("lib/progress.ts")
+            .to_string_lossy()
+            .to_string();
+        let raw = envelope(root.path(), "PostToolUse", "Read", &file);
+
+        assert_eq!(hook_reply(&raw, &args(root.path())), None);
+    }
+
+    /// A path containing a space is one path. Read as prose, `docs/My
+    /// Notes/a.md` would also name `Notes/a.md`, which a rule globbing
+    /// `Notes/**` covers, though the file is not under `Notes/`.
+    #[test]
+    fn test_a_path_with_a_space_is_not_split_into_another_path() {
+        let root = tempdir().unwrap();
+        let dir = crate::rules::rules_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("release-checklist-5d2a.md"), RELEASE_NOTES).unwrap();
+        let file = root
+            .path()
+            .join("docs/My Notes/a.md")
             .to_string_lossy()
             .to_string();
         let raw = envelope(root.path(), "PostToolUse", "Read", &file);
