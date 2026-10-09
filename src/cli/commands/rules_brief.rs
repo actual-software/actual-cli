@@ -561,11 +561,24 @@ mod tests {
     /// Names no path.
     const TOKEN_WORDS: &str = "# Token Expiry Policy\n\nThese rules are ALWAYS ACTIVE for OAuth token expiry in auth services.\n\n### Rules\n\n- **R-T-001** MUST: expire tokens within an hour.\n\n### Verify\n\n```bash\nnpm run test\n```\n";
 
+    /// Shares `bar` and `component` with `reading-progress/ProgressBar.tsx`:
+    /// enough words to clear the retry minimum, fewer and commoner than the
+    /// reading-progress rule's.
+    const CHARTS: &str = "# Bar Chart Rendering\n\nThese rules are ALWAYS ACTIVE for bar chart components.\n\n### Rules\n\n- **R-C-001** MUST: render charts with the shared axis.\n\n### Verify\n\n```bash\nnpm run lint\n```\n";
+
+    /// Shares only `app` with `app/components/reading-progress/ProgressBar.tsx`.
+    const LOGGING: &str = "# Request Logging\n\nThese rules are ALWAYS ACTIVE for logging in app services.\n\n### Rules\n\n- **R-L-001** MUST: log every request with its trace id.\n\n### Verify\n\n```bash\nnpm run lint\n```\n";
+
+    /// Several pathless documents, so terms are weighted by inverse document
+    /// frequency. A one-document rule set takes the `term_weight` fallback
+    /// instead, where every known word counts in full and nothing is ranked.
     fn pathless_repo() -> TempDir {
         let root = tempdir().unwrap();
         let dir = crate::rules::rules_dir(root.path());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("app-reading-progress-7f21.md"), PATHLESS).unwrap();
+        std::fs::write(dir.join("bar-chart-rendering-3c4d.md"), CHARTS).unwrap();
+        std::fs::write(dir.join("request-logging-9e1b.md"), LOGGING).unwrap();
         root
     }
 
@@ -705,11 +718,25 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let raw = envelope(root.path(), "PostToolUse", "Read", &file);
+        let args = RulesBriefArgs {
+            limit: 3,
+            ..args(root.path())
+        };
 
-        let reply = hook_reply(&raw, &args(root.path())).expect("a brief");
+        let reply = hook_reply(&raw, &args).expect("a brief");
+        let progress = reply
+            .find("R-P-001")
+            .unwrap_or_else(|| panic!("the reading-progress rule should be briefed: {reply}"));
+        let charts = reply
+            .find("R-C-001")
+            .unwrap_or_else(|| panic!("a two-word match should be briefed: {reply}"));
         assert!(
-            reply.contains("R-P-001"),
-            "the decision the filename's terms match should be briefed: {reply}"
+            progress < charts,
+            "the rule sharing more and rarer words should rank first: {reply}"
+        );
+        assert!(
+            !reply.contains("R-L-001"),
+            "a one-word match should not be briefed, even with room under --limit: {reply}"
         );
     }
 
