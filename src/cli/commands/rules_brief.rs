@@ -49,7 +49,7 @@ use crate::error::ActualError;
 use crate::rules::brief::{render_brief_shown, BriefDecision};
 use crate::rules::scope::{
     self,
-    index::{AdrGroup, Field, Match, Query, ScopeIndex},
+    index::{AdrGroup, Match, Query, ScopeIndex},
 };
 
 /// The event and tool pairs this command answers, and nothing else: a read is
@@ -438,13 +438,21 @@ fn brief_for(
 /// manually edited config can bypass the validated `config set` path, so an
 /// invalid value also degrades to no floor here — the hook fails open rather
 /// than silently rejecting every document.
+fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
+    super::rules_scope::effective_min_score(args.min_score, root).unwrap_or(0.0)
+}
+
 /// Distinct words a document must share with the path before the text retry
 /// briefs it on words alone. One shared word is too often a folder name every
 /// codebase has — `test`, `config`, `utils` — to say a rule governs the file.
 const MIN_RETRY_TERMS: usize = 2;
 
-/// The text retry's decisions, keeping only documents with glob evidence or
-/// at least [`MIN_RETRY_TERMS`] matched words.
+/// The text retry's decisions, keeping only documents with at least
+/// [`MIN_RETRY_TERMS`] matched words.
+///
+/// A glob match is no exemption. The retry only runs when the path search
+/// found nothing at the floor, so a glob-matched document reaching it scored
+/// below that floor; one shared word must not lift it back over.
 ///
 /// The filter runs before the cap, so a decision dropped here makes room for
 /// the next one that qualifies rather than leaving the brief short.
@@ -471,23 +479,12 @@ fn retry_by_text(index: &ScopeIndex, query: &Query, limit: usize) -> Vec<AdrGrou
 }
 
 fn clears_retry_minimum(hit: &Match) -> bool {
-    if hit
-        .contributions
-        .iter()
-        .any(|contribution| contribution.field == Field::Path)
-    {
-        return true;
-    }
     let words: std::collections::BTreeSet<&str> = hit
         .contributions
         .iter()
         .flat_map(|contribution| contribution.matched.iter().map(String::as_str))
         .collect();
     words.len() >= MIN_RETRY_TERMS
-}
-
-fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
-    super::rules_scope::effective_min_score(args.min_score, root).unwrap_or(0.0)
 }
 
 /// The path as the rule set names it: relative to the repository root, with
@@ -1576,6 +1573,38 @@ mod tests {
         a.min_score = Some(99.0);
         let raw = envelope(root.path(), "PostToolUse", "Read", &governed(root.path()));
 
+        assert_eq!(hook_reply(&raw, &a), None);
+    }
+
+    /// A glob match the floor filtered out can come back through the text
+    /// retry when the file's path shares enough words with the rule: the floor
+    /// is judged on the retry's fuller score.
+    #[test]
+    fn test_the_retry_briefs_a_glob_match_the_floor_dropped_on_enough_words() {
+        let root = repo();
+        let mut a = args(root.path());
+        a.min_score = Some(2.5);
+        let raw = envelope(root.path(), "PostToolUse", "Read", &governed(root.path()));
+
+        let out = hook_reply(&raw, &a).expect("a brief");
+
+        assert!(out.contains("Sign With Asymmetric Keys"), "{out}");
+    }
+
+    /// The same drop is not undone by one shared word: a glob match does not
+    /// exempt a document from the retry's two-word minimum.
+    #[test]
+    fn test_the_retry_does_not_rescue_a_glob_match_on_one_word() {
+        let root = tempdir().unwrap();
+        let dir = crate::rules::rules_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("release-checklist-5d2a.md"), RELEASE_NOTES).unwrap();
+        let file = root.path().join("Notes/a.md").to_string_lossy().to_string();
+        let raw = envelope(root.path(), "PostToolUse", "Read", &file);
+        let mut a = args(root.path());
+
+        assert!(hook_reply(&raw, &a).is_some(), "briefed with no floor");
+        a.min_score = Some(1.0);
         assert_eq!(hook_reply(&raw, &a), None);
     }
 
