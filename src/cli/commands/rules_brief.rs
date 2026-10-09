@@ -47,7 +47,10 @@ use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::brief_memory::{self, SessionKey};
 use crate::error::ActualError;
 use crate::rules::brief::{render_brief_shown, BriefDecision};
-use crate::rules::scope::{self, index::Query};
+use crate::rules::scope::{
+    self,
+    index::{AdrGroup, Field, Match, Query, ScopeIndex},
+};
 
 /// The event and tool pairs this command answers, and nothing else: a read is
 /// briefed after it ran, an edit or write before it does. A brief after a
@@ -320,7 +323,8 @@ fn brief_for(
     // the path retried as query text, so the title and scope fields can match
     // the terms it spells. That keeps a rule set whose `verify` blocks name no
     // paths from being briefed on nothing, without letting a word match
-    // displace a glob match under `--limit`.
+    // displace a glob match under `--limit`. The retry also needs more than
+    // one shared word; see [`MIN_RETRY_TERMS`].
     //
     // The path is passed raw: the index's tokenizer already splits `/`, `.`
     // and `-`. The file's contents are not used: imports and boilerplate
@@ -335,7 +339,7 @@ fn brief_for(
         let by_text = Query::new(relative.clone())
             .with_paths([relative.clone()])
             .with_min_score(floor);
-        decisions = resolved.index.search_adrs(&by_text, args.limit);
+        decisions = retry_by_text(&resolved.index, &by_text, args.limit);
     }
 
     // Decisions this context was already briefed on are dropped after the
@@ -431,6 +435,54 @@ fn brief_for(
 /// manually edited config can bypass the validated `config set` path, so an
 /// invalid value also degrades to no floor here — the hook fails open rather
 /// than silently rejecting every document.
+/// Distinct words a document must share with the path before the text retry
+/// briefs it on words alone. One shared word is too often a folder name every
+/// codebase has — `test`, `config`, `utils` — to say a rule governs the file.
+const MIN_RETRY_TERMS: usize = 2;
+
+/// The text retry's decisions, keeping only documents with glob evidence or
+/// at least [`MIN_RETRY_TERMS`] matched words.
+///
+/// The filter runs before the cap, so a decision dropped here makes room for
+/// the next one that qualifies rather than leaving the brief short.
+fn retry_by_text(index: &ScopeIndex, query: &Query, limit: usize) -> Vec<AdrGroup> {
+    let mut decisions: Vec<AdrGroup> = index
+        .search_adrs(query, index.len())
+        .into_iter()
+        .filter_map(|mut decision| {
+            decision.documents.retain(clears_retry_minimum);
+            let best = decision.documents.first()?.score;
+            decision.score = best;
+            Some(decision)
+        })
+        .collect();
+    // A decision whose best document was dropped now ranks on its next one.
+    // The sort is stable, so ties keep the index's order.
+    decisions.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    decisions.truncate(limit);
+    decisions
+}
+
+fn clears_retry_minimum(hit: &Match) -> bool {
+    if hit
+        .contributions
+        .iter()
+        .any(|contribution| contribution.field == Field::Path)
+    {
+        return true;
+    }
+    let words: std::collections::BTreeSet<&str> = hit
+        .contributions
+        .iter()
+        .flat_map(|contribution| contribution.matched.iter().map(String::as_str))
+        .collect();
+    words.len() >= MIN_RETRY_TERMS
+}
+
 fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
     super::rules_scope::effective_min_score(args.min_score, root).unwrap_or(0.0)
 }
@@ -670,6 +722,21 @@ mod tests {
         let file = root
             .path()
             .join("infra/terraform/main.tf")
+            .to_string_lossy()
+            .to_string();
+        let raw = envelope(root.path(), "PostToolUse", "Read", &file);
+
+        assert_eq!(hook_reply(&raw, &args(root.path())), None);
+    }
+
+    /// One shared word is not enough for the text retry: `progress` alone in
+    /// `lib/progress.ts` does not make the reading-progress rule govern it.
+    #[test]
+    fn test_a_single_shared_word_is_not_briefed() {
+        let root = pathless_repo();
+        let file = root
+            .path()
+            .join("lib/progress.ts")
             .to_string_lossy()
             .to_string();
         let raw = envelope(root.path(), "PostToolUse", "Read", &file);
