@@ -786,11 +786,35 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
                 .zip(query_segments.iter())
                 .take_while(|(a, b)| a == b)
                 .count();
-            let contained =
-                agreeing > 0 && (agreeing == literal.len() || agreeing == query_segments.len());
             let exact = compiled
                 .as_ref()
                 .is_some_and(|pattern| pattern.matches(query_path));
+            // Partial agreement, in the two directions it can run:
+            //
+            //   query is an ancestor of the glob's literal prefix -- a plan
+            //     naming `app/lib` against a rule for `app/lib/*-screen.ts`.
+            //     Still useful: the plan may well touch that subtree.
+            //   the glob's literal prefix is an ancestor of the query -- a
+            //     rule for `app/lib/*-screen.ts` against the file
+            //     `app/lib/apiAuth.ts`.
+            //
+            // The second direction is only an inference about a path the glob
+            // could have matched and did not. When the glob compiled, it has
+            // already answered: `app/lib/*-screen.{ts,tsx}` does not match
+            // `apiAuth.ts`, and treating the shared `app/lib` prefix as
+            // agreement overrides that answer with a guess. Measured on a
+            // 187-document corpus, it made every rule whose glob began
+            // `app/lib/` govern every file under `app/lib/`, so reading an
+            // auth helper briefed three query-cache rules and three
+            // Presenter-component rules, none of which applied to it.
+            //
+            // A glob that did not compile keeps the old behaviour in both
+            // directions: with no pattern to consult there is no answer to
+            // override, and a prefix is the only signal left.
+            let descends = agreeing > 0 && agreeing == literal.len();
+            let glob_declined = compiled.is_some() && !exact;
+            let contained = agreeing > 0
+                && (agreeing == query_segments.len() || (descends && !glob_declined));
             if !contained && !exact {
                 continue;
             }
@@ -1283,6 +1307,47 @@ mod tests {
         let (shallow, shallow_globs) = path_coverage(signing, &["services/auth".to_string()]);
         assert!(!shallow_globs[0].exact);
         assert!(shallow > 0.0 && shallow < deep);
+    }
+
+    /// A glob that compiled and declined is not overruled by a shared prefix.
+    ///
+    /// `app/lib/*-screen.{ts,tsx}` does not match `app/lib/apiAuth.ts`, and the
+    /// two sharing their first two segments is not evidence that it does.
+    /// Before this, every rule whose glob began `app/lib/` governed every file
+    /// under `app/lib/` on a 187-document corpus, so reading an auth helper
+    /// briefed three query-cache rules that did not apply to it.
+    ///
+    /// The ancestor direction is untouched: a plan naming a directory above
+    /// the rule's own still agrees partially, because it may yet touch it.
+    #[test]
+    fn test_a_compiled_glob_that_declines_is_not_overruled_by_a_prefix() {
+        let index = index_of(vec![doc(
+            "app-screens-1234",
+            "Screens",
+            "These rules are ALWAYS ACTIVE for all code matching: app/lib/*-screen.{ts,tsx}",
+            "grep -rn \"useQuery\" app/lib/",
+        )]);
+        let screens = &index.documents[0];
+        assert!(
+            screens
+                .path_globs()
+                .any(|g| g.pattern == "app/lib/*-screen.{ts,tsx}"),
+            "the brace list survives prose harvesting: {:?}",
+            screens
+                .path_globs()
+                .map(|g| g.pattern.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // The file the glob names still matches outright.
+        let (named, named_globs) = path_coverage(screens, &["app/lib/stats-screen.ts".to_string()]);
+        assert!(named > 0.0);
+        assert!(named_globs.iter().any(|g| g.exact));
+
+        // An ancestor still agrees partially: a plan naming `app/lib` may
+        // touch the screen helpers below it.
+        let (ancestor, _) = path_coverage(screens, &["app/lib".to_string()]);
+        assert!(ancestor > 0.0);
     }
 
     #[test]
