@@ -220,10 +220,17 @@ fn is_path_like(token: &str) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(is_source_extension);
+    // A comma is path-legal here only because a comma between two separate
+    // paths never reaches this function: split_prose_tokens breaks on one
+    // outside braces, and the verify tokenizer treats it as a separator too.
+    // So a comma still present is inside a brace list -- `{ts,tsx}` -- and
+    // rejecting it would throw away the whole pattern, which is what happened
+    // before: the list was split first, and only the comma-free fragment
+    // `app/lib/*-screen.{ts` survived to become a glob.
     (has_slash || has_source_extension)
         && token
             .chars()
-            .all(|c| c.is_alphanumeric() || "._-/*?()[]{}~".contains(c))
+            .all(|c| c.is_alphanumeric() || "._-/*?()[]{}~,".contains(c))
 }
 
 /// Extensions worth treating as evidence that a token names a file.
@@ -542,11 +549,42 @@ pub fn globs_from_verify(body: &str) -> (Vec<PathGlob>, Vec<String>) {
     (globs, extensions)
 }
 
+/// Split prose into candidate path tokens on whitespace, backticks and commas
+/// -- but not on a comma inside a brace list, because `{ts,tsx}` is one path
+/// pattern and not two. Splitting it produced `app/lib/*-screen.{ts`, a glob
+/// that compiles to nothing and whose literal prefix is still `app/lib`, so a
+/// rule scoped to screen files was harvested as one scoped to a directory.
+/// The verify-block tokenizer already knows a comma can sit inside a path (see
+/// SHELL_ESCAPABLE_IN_PATH); this is the prose side learning the same thing.
+fn split_prose_tokens(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    for (at, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+        let is_break = c.is_whitespace() || c == '`' || (c == ',' && depth == 0);
+        if is_break {
+            if start < at {
+                out.push(&text[start..at]);
+            }
+            start = at + c.len_utf8();
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
 /// Path globs written into prose — the scope sentence often names a directory
 /// outright, in backticks or bare.
 pub fn globs_from_prose(text: &str) -> Vec<PathGlob> {
     let mut globs = Vec::new();
-    for raw in text.split(|c: char| c.is_whitespace() || c == '`' || c == ',') {
+    for raw in split_prose_tokens(text) {
         let token = raw
             .trim_end_matches(['.', ')', ':', ';'])
             .trim_start_matches('(');
@@ -1006,6 +1044,30 @@ mod tests {
     fn test_globs_from_prose_ignores_bare_words_and_filenames() {
         assert!(globs_from_prose("These rules apply to auth.ts and tokens.").is_empty());
         assert!(globs_from_prose("no paths at all here").is_empty());
+    }
+
+    /// A brace list is one pattern, not two. Splitting prose on every comma
+    /// turned `app/lib/*-screen.{ts,tsx}` into `app/lib/*-screen.{ts` plus a
+    /// stray `tsx}`: a glob that compiles to nothing, whose literal prefix is
+    /// still `app/lib`. The verify-block tokenizer already treats a comma as
+    /// escapable inside a path; this is the prose side agreeing with it.
+    #[test]
+    fn test_globs_from_prose_keeps_a_brace_list_whole() {
+        let globs = globs_from_prose("ALWAYS ACTIVE for all code matching: app/lib/*-screen.{ts,tsx}");
+        assert_eq!(
+            globs.iter().map(|g| &g.pattern).collect::<Vec<_>>(),
+            vec!["app/lib/*-screen.{ts,tsx}"]
+        );
+    }
+
+    /// Commas between separate paths still separate them.
+    #[test]
+    fn test_globs_from_prose_still_splits_a_comma_between_paths() {
+        let globs = globs_from_prose("code under `app/hooks/`, `app/lib/`, and nowhere else");
+        assert_eq!(
+            globs.iter().map(|g| &g.pattern).collect::<Vec<_>>(),
+            vec!["app/hooks/**", "app/lib/**"]
+        );
     }
 
     #[test]
