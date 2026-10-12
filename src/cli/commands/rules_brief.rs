@@ -158,6 +158,69 @@ fn session_start(raw: &str, args: &RulesBriefArgs) {
     }
 }
 
+/// Why no brief was produced.
+///
+/// Hook mode's stdout cannot say: it carries the brief the model reads, so any
+/// explanation printed there would be read as governance. The reason goes to
+/// stderr instead, which the shell hook keeps for `--debug` and a mod reads
+/// directly.
+///
+/// [`Ungoverned`](Self::Ungoverned) and [`AlreadyBriefed`](Self::AlreadyBriefed)
+/// are the pair that forced this. Both produce empty stdout, so a reader who
+/// cannot separate them cannot tell a file no rule document covers from one
+/// whose rules were stated earlier in the session. The mod reported both as a
+/// single outcome, and its line claimed `package.json, pnpm-lock.yaml governed,
+/// already briefed this session` for a lockfile that nothing governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoBrief {
+    /// The path does not sit under the repository root.
+    OutsideRoot,
+    /// No rule set to search: absent, or an index that would not build.
+    NoRules,
+    /// Searched, and no rule document claims the file.
+    Ungoverned,
+    /// Rule documents claim it, and every one was briefed earlier.
+    AlreadyBriefed,
+    /// Claimed and unbriefed, but nothing renderable fit: no rule lines, or
+    /// none that `--max-chars` left room for.
+    NothingToShow,
+}
+
+impl NoBrief {
+    /// The stable token a reader matches on. Prose above it may change.
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            Self::OutsideRoot => "outside-root",
+            Self::NoRules => "no-rules",
+            Self::Ungoverned => "ungoverned",
+            Self::AlreadyBriefed => "already-briefed",
+            Self::NothingToShow => "nothing-to-show",
+        }
+    }
+
+    /// The same fact as a sentence, for `--file` at a terminal.
+    fn sentence(self, file: &str) -> String {
+        match self {
+            Self::OutsideRoot => format!("{file} is not under the repository root."),
+            Self::NoRules => format!("No rule set to search for {file}."),
+            Self::Ungoverned => format!("No rule document governs {file}."),
+            Self::AlreadyBriefed => {
+                format!("Every rule document governing {file} was briefed earlier this session.")
+            }
+            Self::NothingToShow => format!("No rule text fits the brief budget for {file}."),
+        }
+    }
+}
+
+/// Name the reason on stderr and stay silent on stdout.
+///
+/// Hook mode only. Direct mode prints [`NoBrief::sentence`] on stdout, and
+/// printing both would report one silence twice.
+fn report(reason: NoBrief, detail: &str) -> Option<String> {
+    eprintln!("actual rules brief: no-brief={} {detail}", reason.token());
+    None
+}
+
 /// Print a reply, or nothing. Split out so the decision to stay silent is
 /// testable without a process boundary.
 fn emit(reply: Option<String>) {
@@ -180,8 +243,8 @@ fn exec_direct(args: &RulesBriefArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
     match brief_for(&root, &file, args, None) {
-        Some(brief) => println!("{brief}"),
-        None => println!("No rule document governs {file}."),
+        Ok(brief) => println!("{brief}"),
+        Err(reason) => println!("{}", reason.sentence(&file)),
     }
     Ok(())
 }
@@ -277,7 +340,10 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
         session_id,
         agent_id: envelope.agent_id.as_deref().filter(|id| !id.is_empty()),
     });
-    let brief = brief_for(&root, &file, args, session)?;
+    let brief = match brief_for(&root, &file, args, session) {
+        Ok(brief) => brief,
+        Err(reason) => return report(reason, &relative_to_root(&root, &file).unwrap_or(file)),
+    };
     serde_json::to_string(&ContextOutput {
         hook_specific_output: HookSpecificContext {
             hook_event_name: event,
@@ -301,22 +367,18 @@ fn brief_for(
     file: &str,
     args: &RulesBriefArgs,
     session: Option<SessionIdentity<'_>>,
-) -> Option<String> {
+) -> Result<String, NoBrief> {
     let Some(relative) = relative_to_root(root, file) else {
-        // Still empty stdout and exit 0, but a path that cannot be placed
-        // under the root must not look the same as a file nothing governs.
-        eprintln!(
-            "actual rules brief: {file} is not under {}; no brief",
-            root.display()
-        );
-        return None;
+        return Err(NoBrief::OutsideRoot);
     };
 
     let rules_dir = args
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(root));
-    let resolved = scope::resolve_in(&rules_dir, root, false).ok()?;
+    let Ok(resolved) = scope::resolve_in(&rules_dir, root, false) else {
+        return Err(NoBrief::NoRules);
+    };
 
     // A glob in a `verify` block is the evidence a rule governs this file, so
     // the path alone is searched first. Only when no rule claims the file is
@@ -363,11 +425,18 @@ fn brief_for(
         let state = brief_memory::load(&dir, &key);
         Some((dir, key, state))
     });
+    // Read before the filter: afterwards an empty list cannot say whether the
+    // search found nothing or the session had already stated all of it.
+    let governed = !decisions.is_empty();
     if let Some((_, _, state)) = &memory {
         decisions.retain(|decision| !state.has_briefed(&decision.key));
     }
     if decisions.is_empty() {
-        return None;
+        return Err(if governed {
+            NoBrief::AlreadyBriefed
+        } else {
+            NoBrief::Ungoverned
+        });
     }
 
     // The index stores what ranks a document, not what it says, so the rule
@@ -402,8 +471,11 @@ fn brief_for(
         })
         .collect();
 
-    let (brief, shown) =
-        render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)?;
+    let Some((brief, shown)) =
+        render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)
+    else {
+        return Err(NoBrief::NothingToShow);
+    };
 
     // The session-wide record counts what the memory below remembers, by the
     // same rule, but keys on the session alone: subagents add to one count,
@@ -429,7 +501,7 @@ fn brief_for(
         }
         brief_memory::store(&dir, &key, &state);
     }
-    Some(brief)
+    Ok(brief)
 }
 
 /// The score floor for this invocation, resolved exactly as `rules select`
@@ -1330,6 +1402,128 @@ mod tests {
 
             assert!(hook_reply(&read, &a).is_some(), "the memory was not reset");
             assert_eq!(ledger(root.path(), "s1"), ["Sign With Asymmetric Keys"]);
+        });
+    }
+
+    // ── why no brief ─────────────────────────────────────────────────────
+
+    /// The pair that forced the reason onto stderr. Both end in empty stdout,
+    /// and a reader that cannot separate them calls an ungoverned file
+    /// governed -- which a mod's own output did, for a lockfile.
+    #[test]
+    fn test_a_file_nothing_governs_and_one_already_briefed_differ() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+
+            let ungoverned = root.path().join("README.md").to_string_lossy().to_string();
+            assert_eq!(
+                brief_for(root.path(), &ungoverned, &a, None),
+                Err(NoBrief::Ungoverned)
+            );
+
+            let who = SessionIdentity { session_id: "s1", agent_id: None };
+            let file = governed(root.path());
+            assert!(brief_for(root.path(), &file, &a, Some(who)).is_ok());
+            assert_eq!(
+                brief_for(root.path(), &file, &a, Some(who)),
+                Err(NoBrief::AlreadyBriefed),
+                "a second read of the same file is suppressed, not ungoverned"
+            );
+        });
+    }
+
+    /// Without a session there is no memory, so a repeat read is answered
+    /// again and `--file` never reports `already-briefed`.
+    #[test]
+    fn test_without_a_session_a_repeat_read_is_still_governed() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let file = governed(root.path());
+            assert!(brief_for(root.path(), &file, &a, None).is_ok());
+            assert!(brief_for(root.path(), &file, &a, None).is_ok());
+        });
+    }
+
+    #[test]
+    fn test_a_path_outside_the_root_says_so() {
+        with_scratch_config(|| {
+            let root = repo();
+            assert_eq!(
+                brief_for(root.path(), "/etc/hosts", &args(root.path()), None),
+                Err(NoBrief::OutsideRoot)
+            );
+        });
+    }
+
+    /// A repository with no rule set at all is `ungoverned`, not `no-rules`:
+    /// an absent directory resolves to an empty index, which searches fine and
+    /// claims nothing. `no-rules` is for an index that would not build.
+    #[test]
+    fn test_a_repo_with_no_rule_set_governs_nothing() {
+        with_scratch_config(|| {
+            let bare = tempdir().unwrap();
+            let file = bare.path().join("src/a.ts").to_string_lossy().to_string();
+            assert_eq!(
+                brief_for(bare.path(), &file, &args(bare.path()), None),
+                Err(NoBrief::Ungoverned)
+            );
+        });
+    }
+
+    #[test]
+    fn test_a_rule_set_that_will_not_build_says_so() {
+        with_scratch_config(|| {
+            let bare = tempdir().unwrap();
+            let not_a_dir = bare.path().join("rules-file");
+            std::fs::write(&not_a_dir, "not a directory").unwrap();
+            let mut a = args(bare.path());
+            a.rules_dir = Some(not_a_dir);
+            let file = bare.path().join("src/a.ts").to_string_lossy().to_string();
+            assert_eq!(brief_for(bare.path(), &file, &a, None), Err(NoBrief::NoRules));
+        });
+    }
+
+    /// A budget too small to hold any rule is not the same as no rule.
+    #[test]
+    fn test_a_budget_that_fits_nothing_says_so() {
+        with_scratch_config(|| {
+            let root = repo();
+            let mut a = args(root.path());
+            a.max_chars = 1;
+            assert_eq!(
+                brief_for(root.path(), &governed(root.path()), &a, None),
+                Err(NoBrief::NothingToShow)
+            );
+        });
+    }
+
+    /// The tokens are what a reader matches on, so they are pinned here
+    /// rather than left to the prose above them.
+    #[test]
+    fn test_the_reason_tokens_are_stable() {
+        assert_eq!(NoBrief::OutsideRoot.token(), "outside-root");
+        assert_eq!(NoBrief::NoRules.token(), "no-rules");
+        assert_eq!(NoBrief::Ungoverned.token(), "ungoverned");
+        assert_eq!(NoBrief::AlreadyBriefed.token(), "already-briefed");
+        assert_eq!(NoBrief::NothingToShow.token(), "nothing-to-show");
+    }
+
+    /// Hook mode stays silent on stdout whatever the reason, because stdout is
+    /// what the model reads.
+    #[test]
+    fn test_every_reason_leaves_stdout_empty_in_hook_mode() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            for file in [
+                root.path().join("README.md").to_string_lossy().to_string(),
+                "/etc/hosts".to_string(),
+            ] {
+                let read = session_envelope(root.path(), "s-quiet", None, &file);
+                assert_eq!(hook_reply(&read, &a), None, "{file} answered on stdout");
+            }
         });
     }
 
