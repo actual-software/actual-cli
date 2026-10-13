@@ -262,6 +262,8 @@ git diff HEAD | actual impl-check
 
 `plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`. With `--claude-hook`, both commands speak Claude Code's hook contract, which is how the skill manages them in Claude Code. See [Rule selection](docs/RULE_SELECTION.md) and [Scope index](docs/SCOPE_INDEX.md) for details.
 
+`impl-check` hands the judge the whole diff in one prompt when it fits. A diff too big for that is cut between files, every part is judged against the same rules at the same time, and a conflict found in any part counts for the whole diff.
+
 </details>
 
 ### Troubleshooting
