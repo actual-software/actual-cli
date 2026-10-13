@@ -412,6 +412,8 @@ fn git_ok(root: &Path, index: Option<&Path>, args: &[&str], what: &str) -> Resul
 fn exec_hook(args: &ImplCheckArgs) {
     let raw = match capped_read(std::io::stdin(), "the hook payload") {
         Ok(text) => text,
+        // `--turn-start` prints nothing on any path; see `record_turn_start`.
+        Err(_) if args.turn_start => return,
         Err(_) => {
             emit(plan_check_hook::render_notice(
                 "impl-check could not read the hook payload on stdin",

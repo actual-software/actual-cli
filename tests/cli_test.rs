@@ -1125,6 +1125,23 @@ fn test_impl_check_claude_hook_fails_open_on_non_utf8_stdin() {
         .stdout(predicate::str::contains("could not read the hook payload"));
 }
 
+/// The same unreadable payload under `--turn-start` prints nothing. Its
+/// `UserPromptSubmit` envelope carries the prompt, so a large paste reaches
+/// this branch.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_claude_hook_turn_start_is_silent_on_unreadable_stdin() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+
+    fixture
+        .cmd()
+        .args(["--claude-hook", "--turn-start"])
+        .write_stdin(vec![0xffu8, 0xfe, 0x00, 0x41])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
 /// An oversized envelope is refused rather than buffered in full, same as
 /// `plan-check --claude-hook`.
 #[cfg(unix)]
