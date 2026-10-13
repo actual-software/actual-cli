@@ -1053,7 +1053,8 @@ mod tests {
     /// escapable inside a path; this is the prose side agreeing with it.
     #[test]
     fn test_globs_from_prose_keeps_a_brace_list_whole() {
-        let globs = globs_from_prose("ALWAYS ACTIVE for all code matching: app/lib/*-screen.{ts,tsx}");
+        let globs =
+            globs_from_prose("ALWAYS ACTIVE for all code matching: app/lib/*-screen.{ts,tsx}");
         assert_eq!(
             globs.iter().map(|g| &g.pattern).collect::<Vec<_>>(),
             vec!["app/lib/*-screen.{ts,tsx}"]

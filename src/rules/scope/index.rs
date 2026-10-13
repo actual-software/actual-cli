@@ -813,8 +813,8 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
             // override, and a prefix is the only signal left.
             let descends = agreeing > 0 && agreeing == literal.len();
             let glob_declined = compiled.is_some() && !exact;
-            let contained = agreeing > 0
-                && (agreeing == query_segments.len() || (descends && !glob_declined));
+            let contained =
+                agreeing > 0 && (agreeing == query_segments.len() || (descends && !glob_declined));
             if !contained && !exact {
                 continue;
             }
