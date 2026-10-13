@@ -174,6 +174,15 @@ outside the repository, a missing rule set) is empty stdout and exit 0, so a
 broken brief never breaks an agent's edit loop. `--file` runs the same
 selection at a terminal and prints the brief as text.
 
+Hook-mode stdout stays empty whenever there is no brief, so the model never
+reads the explanation as governance. The reason is one stderr line,
+`actual rules brief: no-brief=<token> <path>`, which the shell hook keeps
+for `--debug` and a reader can match on. The tokens are `ungoverned` (searched,
+and no rule document claims the file — including a repository with no rule
+set), `already-briefed`, `outside-root`, `no-rules` (an index that will not
+build, not an absent directory), and `nothing-to-show`. `--file` prints the
+matching sentence on stdout and does not also write that line.
+
 The brief is held to three budgets: `--limit` counts decisions,
 `--rules-per-decision` caps what each contributes, and `--max-chars` (4000 by
 default) caps the whole text. Under the character cap rules are dropped whole,
