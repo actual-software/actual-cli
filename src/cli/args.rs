@@ -811,7 +811,8 @@ pub struct RulesBriefArgs {
     #[arg(long, value_name = "PATH")]
     pub file: Option<String>,
 
-    /// Repository root. Defaults to the envelope's `cwd` under
+    /// Repository root. Defaults to `<root>` when `--rules-dir` is
+    /// `<root>/.actual/rules`, then to the envelope's `cwd` under
     /// `--claude-hook`, else the current directory.
     #[arg(long, value_name = "PATH")]
     pub repo: Option<std::path::PathBuf>,

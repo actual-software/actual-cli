@@ -670,6 +670,46 @@ mod tests {
         });
     }
 
+    /// Folders in the record change nothing the summary prints, and the
+    /// hook's write of what it showed keeps them.
+    #[test]
+    fn test_recorded_folders_leave_the_summary_as_it_was() {
+        with_scratch_config(|| {
+            let root = repo();
+            brief(root.path(), &["Adopt RS256"]);
+            let rules_dir = key_dir(root.path());
+            let key = LedgerKey {
+                session_id: "s1",
+                rules_dir: &rules_dir,
+            };
+            let dir = brief_ledger::ledger_dir().unwrap();
+            brief_ledger::record_folder(&dir, &key, "services/auth", true);
+            brief_ledger::record_folder(&dir, &key, "infra", false);
+            let line = Some("Actual AI: added 1 of 2 ADRs to context this session.");
+            let mut json = direct_args(root.path());
+            json.json = true;
+
+            assert_eq!(
+                direct_output("s1", &direct_args(root.path()))
+                    .unwrap()
+                    .as_deref(),
+                line
+            );
+            let text = direct_output("s1", &json).unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                serde_json::json!({"x": 1, "y": 2, "decisions": ["Adopt RS256"]})
+            );
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                line
+            );
+            let after = recorded(root.path());
+            assert!(after.last_reported.is_some());
+            assert!(after.uncovered_folders.contains("infra"));
+        });
+    }
+
     /// Outside the hook a rule set that cannot be read is an error, so a
     /// person debugging sees why there is no count.
     #[test]

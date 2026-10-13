@@ -143,11 +143,7 @@ fn session_start(raw: &str, args: &RulesBriefArgs) {
     let Some(session_id) = envelope.session_id.filter(|id| !id.is_empty()) else {
         return;
     };
-    let root = args
-        .repo
-        .clone()
-        .or_else(|| envelope.cwd.map(PathBuf::from))
-        .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
+    let root = repo_root(args, || envelope_root(envelope.cwd));
     let rules_dir = args
         .rules_dir
         .clone()
@@ -246,10 +242,7 @@ fn exec_direct(args: &RulesBriefArgs) -> Result<(), ActualError> {
             "rules brief needs --file, or --claude-hook with an envelope on stdin".to_string(),
         ));
     };
-    let root = args
-        .repo
-        .clone()
-        .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
+    let root = repo_root(args, crate::cli::commands::sync::resolve_cwd);
     match brief_for(&root, &file, args, None) {
         Ok(brief) => println!("{brief}"),
         Err(reason) => println!("{}", reason.sentence(&file)),
@@ -337,11 +330,7 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     }
 
     let file = envelope.tool_input?.file_path?;
-    let root = args
-        .repo
-        .clone()
-        .or_else(|| envelope.cwd.map(PathBuf::from))
-        .unwrap_or_else(crate::cli::commands::sync::resolve_cwd);
+    let root = repo_root(args, || envelope_root(envelope.cwd));
 
     let session_id = envelope.session_id.filter(|id| !id.is_empty());
     let session = session_id.as_deref().map(|session_id| SessionIdentity {
@@ -435,6 +424,9 @@ fn brief_for(
     // Read before the filter: afterwards an empty list cannot say whether the
     // search found nothing or the session had already stated all of it.
     let governed = !decisions.is_empty();
+    if let Some(who) = session {
+        record_folder(&resolved.index, who, &key_dir, &relative, governed);
+    }
     if let Some((_, _, state)) = &memory {
         decisions.retain(|decision| !state.has_briefed(&decision.key));
     }
@@ -511,6 +503,32 @@ fn brief_for(
     Ok(brief)
 }
 
+/// Note the folder `relative` sits in, in the session's record: covered when
+/// the search found a decision, uncovered when it found none. A rule set with
+/// no documents notes nothing, since every folder would read as uncovered.
+fn record_folder(
+    index: &ScopeIndex,
+    who: SessionIdentity<'_>,
+    rules_dir: &Path,
+    relative: &str,
+    governed: bool,
+) {
+    if index.is_empty() {
+        return;
+    }
+    let (Some(folder), Some(dir)) = (
+        brief_ledger::folder_of(relative),
+        brief_ledger::ledger_dir(),
+    ) else {
+        return;
+    };
+    let key = LedgerKey {
+        session_id: who.session_id,
+        rules_dir,
+    };
+    brief_ledger::record_folder(&dir, &key, &folder, governed);
+}
+
 /// The score floor for this invocation, resolved exactly as `rules select`
 /// resolves it: the flag, else this repository's floor, else the user-wide
 /// config key, else none. An unreadable config degrades to no floor. A
@@ -564,6 +582,33 @@ fn clears_retry_minimum(hit: &Match) -> bool {
         .flat_map(|contribution| contribution.matched.iter().map(String::as_str))
         .collect();
     words.len() >= MIN_RETRY_TERMS
+}
+
+/// The repository root: `--repo`, else `<root>` when `--rules-dir` is
+/// `<root>/.actual/rules`, else `fallback`.
+///
+/// A hook envelope's `cwd` follows the agent's `cd`. Taken as the root, it
+/// places every path against whatever directory the shell last moved to, so a
+/// conventional rules directory, which never moves, is preferred to it.
+fn repo_root(args: &RulesBriefArgs, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    args.repo
+        .clone()
+        .or_else(|| args.rules_dir.as_deref().and_then(root_of_rules_dir))
+        .unwrap_or_else(fallback)
+}
+
+fn root_of_rules_dir(rules_dir: &Path) -> Option<PathBuf> {
+    if !rules_dir.ends_with(crate::rules::RULES_DIR_NAME) {
+        return None;
+    }
+    let root = rules_dir.parent()?.parent()?;
+    (!root.as_os_str().is_empty()).then(|| root.to_path_buf())
+}
+
+/// The envelope's `cwd`, else the process's own.
+fn envelope_root(cwd: Option<String>) -> PathBuf {
+    cwd.map(PathBuf::from)
+        .unwrap_or_else(crate::cli::commands::sync::resolve_cwd)
 }
 
 /// The path as the rule set names it: relative to the repository root, with
@@ -1412,6 +1457,134 @@ mod tests {
         });
     }
 
+    // ── the session's folders ────────────────────────────────────────────
+
+    /// Names one file of `billing/` in its `Verify` block and shares only
+    /// `billing` with the folder's other files, so they are governed by none.
+    const INVOICES: &str = "# Invoice Totals\n\nThese rules are ALWAYS ACTIVE for invoice totals.\n\n### Rules\n\n- **R-I-001** MUST: round totals once.\n\n### Verify\n\n```bash\ngrep -n \"round(\" billing/invoice.rs\n```\n";
+
+    /// The covered folders and the gaps in `session`'s record for the rules
+    /// under `root`.
+    fn folders(root: &Path, session: &str) -> (Vec<String>, Vec<String>) {
+        let rules_dir = resolve(&crate::rules::rules_dir(root));
+        let key = LedgerKey {
+            session_id: session,
+            rules_dir: &rules_dir,
+        };
+        let record = brief_ledger::load(&brief_ledger::ledger_dir().unwrap(), &key);
+        let gaps = record
+            .uncovered_folders
+            .difference(&record.covered_folders)
+            .cloned()
+            .collect();
+        (record.covered_folders.into_iter().collect(), gaps)
+    }
+
+    fn read_in(root: &Path, session: &str, file: &str) -> String {
+        session_envelope(root, session, None, &root.join(file).to_string_lossy())
+    }
+
+    /// A governed file covers its folder and an ungoverned one leaves its
+    /// folder a gap, both named from the repository root. A folder whose
+    /// decision was briefed earlier in the session is covered all the same.
+    #[test]
+    fn test_a_read_notes_its_folder_as_covered_or_a_gap() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let reply = |file: &str| hook_reply(&read_in(root.path(), "s1", file), &a);
+
+            assert!(reply("services/auth/oauth/token.ts").is_some());
+            assert_eq!(reply("services/auth/oauth/keys/rotate.ts"), None);
+            assert_eq!(reply("infra/terraform/main.tf"), None);
+
+            assert_eq!(
+                folders(root.path(), "s1"),
+                (
+                    vec![
+                        "services/auth/oauth".to_string(),
+                        "services/auth/oauth/keys".to_string()
+                    ],
+                    vec!["infra/terraform".to_string()]
+                )
+            );
+        });
+    }
+
+    /// A folder holding one governed file and one ungoverned file is covered,
+    /// whichever of the two is read first.
+    #[test]
+    fn test_a_mixed_folder_is_covered_in_either_order() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("invoice-totals-4b1e.md"), INVOICES).unwrap();
+            let a = args(root.path());
+            let (invoice, ledger) = ("billing/invoice.rs", "billing/ledger.py");
+            let path = |file: &str| root.path().join(file).to_string_lossy().to_string();
+            assert!(brief_for(root.path(), &path(invoice), &a, None).is_ok());
+            assert_eq!(
+                brief_for(root.path(), &path(ledger), &a, None),
+                Err(NoBrief::Ungoverned)
+            );
+
+            for (session, order) in [("s1", [invoice, ledger]), ("s2", [ledger, invoice])] {
+                for file in order {
+                    hook_reply(&read_in(root.path(), session, file), &a);
+                }
+                assert_eq!(
+                    folders(root.path(), session),
+                    (vec!["billing".to_string()], vec![]),
+                    "{session}"
+                );
+            }
+        });
+    }
+
+    /// Docs, config, lockfiles and generated output note no folder, even
+    /// where a decision governs them and the brief answers.
+    #[test]
+    fn test_files_that_never_count_note_no_folder() {
+        with_scratch_config(|| {
+            let root = repo();
+            let a = args(root.path());
+            let governed_config = read_in(root.path(), "s1", "services/auth/oauth/keys.json");
+            assert!(hook_reply(&governed_config, &a).is_some());
+            for file in [
+                "infra/terraform/README.md",
+                "Cargo.lock",
+                "dist/oauth/token.js",
+            ] {
+                hook_reply(&read_in(root.path(), "s1", file), &a);
+            }
+
+            assert_eq!(folders(root.path(), "s1"), (vec![], vec![]));
+        });
+    }
+
+    /// With no rule documents to apply, or a rule set that will not build,
+    /// every folder would read as a gap, so none is noted.
+    #[test]
+    fn test_no_folder_is_noted_without_a_rule_set_to_apply() {
+        with_scratch_config(|| {
+            let bare = tempdir().unwrap();
+            let read = read_in(bare.path(), "s1", "src/a.ts");
+            assert_eq!(hook_reply(&read, &args(bare.path())), None);
+
+            let not_a_dir = bare.path().join("rules-file");
+            std::fs::write(&not_a_dir, "not a directory").unwrap();
+            let mut unbuildable = args(bare.path());
+            unbuildable.rules_dir = Some(not_a_dir);
+            assert_eq!(hook_reply(&read, &unbuildable), None);
+
+            let records = std::fs::read_dir(brief_ledger::ledger_dir().unwrap())
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+            assert_eq!(records, 0);
+        });
+    }
+
     // ── why no brief ─────────────────────────────────────────────────────
 
     /// The pair that forced the reason onto stderr. Both end in empty stdout,
@@ -1641,8 +1814,8 @@ mod tests {
 
     // ── path resolution ──────────────────────────────────────────────────
 
-    /// The envelope's `cwd` stands in for the repository root when no
-    /// `--repo` is given, which is how the skill will invoke this.
+    /// The envelope's `cwd` stands in for the repository root when neither
+    /// `--repo` nor a conventional `--rules-dir` names it.
     #[test]
     fn test_cwd_from_the_envelope_is_the_repository_root() {
         let root = repo();
@@ -1651,6 +1824,66 @@ mod tests {
         let raw = envelope(root.path(), "PostToolUse", "Read", &governed(root.path()));
 
         assert!(hook_reply(&raw, &a).is_some());
+    }
+
+    /// `--repo` wins; without it a rules directory in the conventional place
+    /// names the root; anything else falls back.
+    #[test]
+    fn test_the_root_is_the_repo_then_the_rules_dirs_root_then_the_fallback() {
+        let with = |repo: Option<&str>, rules_dir: Option<&str>| RulesBriefArgs {
+            repo: repo.map(PathBuf::from),
+            rules_dir: rules_dir.map(PathBuf::from),
+            ..args(Path::new("/unused"))
+        };
+        for (repo, rules_dir, expected) in [
+            (Some("/repo"), Some("/other/.actual/rules"), "/repo"),
+            (None, Some("/repo/.actual/rules"), "/repo"),
+            (
+                None,
+                Some("/repo/apps/web/.actual/rules/"),
+                "/repo/apps/web",
+            ),
+            (None, Some("/repo/custom-rules"), "/fallback"),
+            (None, Some(".actual/rules"), "/fallback"),
+            (None, None, "/fallback"),
+        ] {
+            assert_eq!(
+                repo_root(&with(repo, rules_dir), || PathBuf::from("/fallback")),
+                Path::new(expected),
+                "{repo:?} {rules_dir:?}"
+            );
+        }
+    }
+
+    /// After the agent `cd`s into a subfolder, a hook given `--rules-dir` and
+    /// no `--repo` still places, briefs and records files from the repository
+    /// root rather than from the envelope's `cwd`.
+    #[test]
+    fn test_a_subfolder_cwd_still_places_files_from_the_repository_root() {
+        with_scratch_config(|| {
+            let root = repo();
+            let mut a = args(root.path());
+            a.repo = None;
+            a.rules_dir = Some(crate::rules::rules_dir(root.path()));
+            let read = |file: &str| {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&read_in(root.path(), "s1", file)).unwrap();
+                value["cwd"] = root.path().join("services").to_string_lossy().into();
+                value.to_string()
+            };
+
+            let brief = hook_reply(&read("services/auth/oauth/token.ts"), &a).expect("a brief");
+            assert!(brief.contains("`services/auth/oauth/token.ts`"), "{brief}");
+            assert_eq!(hook_reply(&read("infra/terraform/main.tf"), &a), None);
+
+            assert_eq!(
+                folders(root.path(), "s1"),
+                (
+                    vec!["services/auth/oauth".to_string()],
+                    vec!["infra/terraform".to_string()]
+                )
+            );
+        });
     }
 
     #[test]

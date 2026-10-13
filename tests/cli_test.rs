@@ -1586,3 +1586,47 @@ fn test_session_summary_needs_a_session_or_the_hook() {
         .failure()
         .code(2);
 }
+
+/// Run from a subfolder the agent changed into, a hook given the conventional
+/// `--rules-dir` and no `--repo` still places files from the repository root:
+/// a governed file is briefed under its root-relative path, and a file outside
+/// the subfolder is `ungoverned` rather than `outside-root`.
+#[test]
+fn test_rules_brief_takes_the_root_from_a_conventional_rules_dir() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    let rules_dir = repo.path().join(".actual").join("rules");
+    let subfolder = repo.path().join("services");
+    std::fs::create_dir_all(&subfolder).unwrap();
+    let brief = |file: &str| {
+        let read = serde_json::json!({
+            "session_id": "s1",
+            "cwd": subfolder,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": repo.path().join(file)},
+        })
+        .to_string();
+        actual_in(
+            &subfolder,
+            config_dir.path(),
+            &[
+                "rules",
+                "brief",
+                "--claude-hook",
+                "--rules-dir",
+                rules_dir.to_str().unwrap(),
+            ],
+        )
+        .write_stdin(read)
+        .assert()
+        .success()
+    };
+
+    brief("services/auth/token.ts").stdout(predicate::str::contains("`services/auth/token.ts`"));
+    brief("infra/main.tf")
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "no-brief=ungoverned infra/main.tf",
+        ));
+}
