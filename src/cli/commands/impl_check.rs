@@ -27,6 +27,15 @@
 //! *pipe* is still "nothing to check," same as an empty `--diff-file` — see
 //! [`resolve_direct_diff`].
 //!
+//! **A turn's commits are part of the hook's diff.** Against `HEAD`, work the
+//! agent committed during the turn is already in `HEAD`, so a turn that
+//! commits (or commits and pushes) everything it wrote ends with an empty
+//! diff and is never checked. `--turn-start`, run from a `UserPromptSubmit`
+//! hook, records `HEAD` in the session at the start of each turn, and the
+//! check that ends the turn diffs against that commit instead, as long as it
+//! is still an ancestor of `HEAD` — see [`turn_base`] for what falls back to
+//! `HEAD` and why.
+//!
 //! **Untracked files are part of the default diff.** Plain `git diff HEAD`
 //! only shows tracked-file changes, so an agent that only creates files
 //! would produce an empty diff and skip the gate. [`working_tree_diff`]
@@ -67,7 +76,7 @@ use crate::cli::commands::check_engine::{
     self, capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline,
     HookRun, Outcome,
 };
-use crate::cli::commands::governance_session::{self, GovernanceSession};
+use crate::cli::commands::governance_session::{self, GovernanceSession, TurnStart};
 use crate::cli::commands::impl_check_hook::HookEnvelope;
 use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
@@ -314,6 +323,13 @@ fn non_empty(text: String) -> Option<String> {
 /// operation with no network involved, unlike this repo's async git-remote
 /// calls in `advisor.rs` / `sync/cache.rs`.
 fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
+    working_tree_diff_from(root, "HEAD")
+}
+
+/// [`working_tree_diff`] against `base` instead of `HEAD`. The throwaway
+/// index still starts from `HEAD`, so a file committed since `base` is
+/// tracked there and shows up as added, and one deleted since as deleted.
+fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError> {
     let tmp = tempfile::tempdir().map_err(ActualError::IoError)?;
     let index = tmp.path().join("index");
     for (args, what) in [
@@ -327,7 +343,7 @@ fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
     }
 
     let mut child = git_command(root, Some(&index))
-        .args(["diff", "--no-ext-diff", "HEAD"])
+        .args(["diff", "--no-ext-diff", base, "--"])
         .spawn()
         .map_err(ActualError::IoError)?;
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -418,6 +434,10 @@ fn exec_hook(args: &ImplCheckArgs) {
 /// real violation, a deny) rather than propagating an error, so this
 /// function never reaches an ordinary nonzero exit on its own.
 fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
+    if args.turn_start {
+        record_turn_start(args, raw);
+        return;
+    }
     let envelope: HookEnvelope = match serde_json::from_str(raw) {
         Ok(envelope) => envelope,
         Err(_) => {
@@ -434,9 +454,21 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
+    // The revision loop keys on `(session_id, rules_dir)` for the file, then
+    // on `ArtifactKind::Diff` for deny counts / rounds / clearances — a
+    // session no prior `impl-check` call has ever touched starts this loop
+    // fresh, even if `plan-check` already wrote overrides into the same file.
+    // See the module doc.
+    let session_id = envelope.session_id.as_deref();
+    let mut session = session_id
+        .map(|id| governance_session::load(id, &rules_dir))
+        .unwrap_or_default();
+
     // Unlike plan text, the diff is never carried on the envelope -- always
-    // the working-tree diff in the resolved repo. See the module doc.
-    let diff_text = match working_tree_diff(&root) {
+    // the working-tree diff in the resolved repo, against the commit this
+    // turn started from when the session recorded one. See the module doc.
+    let base = turn_base(&session, &root);
+    let diff_text = match working_tree_diff_from(&root, base.as_deref().unwrap_or("HEAD")) {
         Ok(text) => text,
         Err(e) => {
             emit(plan_check_hook::render_notice(&format!(
@@ -447,21 +479,13 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         }
     };
     if diff_text.trim().is_empty() {
-        emit(plan_check_hook::render_notice(
-            "impl-check found no diff to check (working tree matches HEAD and there are no untracked files).",
-        ));
+        emit(plan_check_hook::render_notice(if base.is_some() {
+            "impl-check found no diff to check (nothing has changed since this turn started and there are no untracked files)."
+        } else {
+            "impl-check found no diff to check (working tree matches HEAD and there are no untracked files)."
+        }));
         return;
     }
-
-    // The revision loop keys on `(session_id, rules_dir)` for the file, then
-    // on `ArtifactKind::Diff` for deny counts / rounds / clearances — a
-    // session no prior `impl-check` call has ever touched starts this loop
-    // fresh, even if `plan-check` already wrote overrides into the same file.
-    // See the module doc.
-    let session_id = envelope.session_id.as_deref();
-    let mut session = session_id
-        .map(|id| governance_session::load(id, &rules_dir))
-        .unwrap_or_default();
     let diff_digest = governance_session::content_digest(&diff_text);
 
     #[cfg(feature = "telemetry")]
@@ -506,6 +530,69 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     );
 }
 
+/// `--turn-start`: record `HEAD` as the commit this turn starts from. Emits
+/// nothing on any path, because a `UserPromptSubmit` hook's stdout is added
+/// to the prompt. When no commit can be named (an unborn branch, or not a
+/// repository), the record is cleared and the next check diffs against
+/// `HEAD`. A payload it cannot parse leaves the previous turn's record in
+/// place, so the next check re-reads that turn's commits too rather than
+/// skipping this one's.
+fn record_turn_start(args: &ImplCheckArgs, raw: &str) {
+    let Ok(HookEnvelope {
+        session_id: Some(session_id),
+    }) = serde_json::from_str(raw)
+    else {
+        return;
+    };
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    let mut session = governance_session::load(&session_id, &rules_dir);
+    let turn_start = head_commit(&root).map(|head| TurnStart { root, head });
+    if session.turn_start != turn_start {
+        session.turn_start = turn_start;
+        governance_session::store(&session_id, &rules_dir, &session);
+    }
+}
+
+/// The commit this turn started from, when the session recorded one in this
+/// repository and it is still an ancestor of `HEAD`. Otherwise `None`, and
+/// the check diffs against `HEAD` as it did before turns were recorded. That
+/// covers an amend, a rebase or a branch switch across the turn: the recorded
+/// commit is no longer behind `HEAD`, and diffing from it would hand the
+/// judge commits this turn may not have written, such as everything a
+/// `git pull --rebase` brought in.
+fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
+    let start = session.turn_start.as_ref()?;
+    let usable = start.root == root
+        && is_object_id(&start.head)
+        && git_command(root, None)
+            .args(["merge-base", "--is-ancestor", &start.head, "HEAD"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+    usable.then(|| start.head.clone())
+}
+
+/// `HEAD`'s full commit id in `root`, or `None` on an unborn branch or
+/// outside a repository.
+fn head_commit(root: &Path) -> Option<String> {
+    let output = git_command(root, None)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+        .output()
+        .ok()?;
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && is_object_id(&head)).then_some(head)
+}
+
+/// A full SHA-1 or SHA-256 object id. The recorded commit is read back from
+/// a file and handed to git as an argument, so nothing else gets through: a
+/// value starting with `-` would be read as an option.
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +624,7 @@ mod tests {
             repo: None,
             rules_dir: None,
             claude_hook: false,
+            turn_start: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -1482,5 +1570,300 @@ mod tests {
             "an overridden rule must not be denied: {:?}",
             session.diff.deny_counts
         );
+    }
+
+    // ── --turn-start and the turn's diff base ───────────────────────────
+
+    fn head_of(repo: &StdPath) -> String {
+        git_stdout(repo, &["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    fn turn_start_args(repo: &StdPath) -> ImplCheckArgs {
+        let mut args = base_args();
+        args.claude_hook = true;
+        args.turn_start = true;
+        args.repo = Some(repo.to_path_buf());
+        args
+    }
+
+    /// Work committed after `base` is in the diff from `base` and missing
+    /// from the diff against `HEAD`, which is the gap a turn base closes.
+    #[test]
+    fn test_working_tree_diff_from_a_base_includes_commits_made_since() {
+        let repo = git_repo_with_baseline();
+        let base = head_of(repo.path());
+        std::fs::write(
+            repo.path().join("service.rs"),
+            "fn handler() { committed() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("added.rs"),
+            "fn added_and_committed() {}\n",
+        )
+        .unwrap();
+        run_git(repo.path(), &["add", "."]);
+        run_git(
+            repo.path(),
+            &["commit", "-q", "-m", "work done in the turn"],
+        );
+        run_git(repo.path(), &["rm", "-q", "oauth.rs"]);
+        run_git(
+            repo.path(),
+            &["commit", "-q", "-m", "a deletion in the turn"],
+        );
+        std::fs::write(repo.path().join("untracked.rs"), "fn not_yet_added() {}\n").unwrap();
+
+        let diff = working_tree_diff_from(repo.path(), &base).unwrap();
+        assert!(diff.contains("committed()"), "{diff}");
+        assert!(diff.contains("added_and_committed"), "{diff}");
+        assert!(diff.contains("deleted file mode"), "{diff}");
+        assert!(diff.contains("not_yet_added"), "{diff}");
+
+        let against_head = working_tree_diff(repo.path()).unwrap();
+        assert!(!against_head.contains("committed()"), "{against_head}");
+        assert!(against_head.contains("not_yet_added"), "{against_head}");
+    }
+
+    /// A file named `HEAD` must not turn the revision into a path.
+    #[test]
+    fn test_working_tree_diff_is_not_confused_by_a_file_named_head() {
+        let repo = git_repo_with_baseline();
+        std::fs::write(repo.path().join("HEAD"), "not a revision\n").unwrap();
+        let diff = working_tree_diff(repo.path()).unwrap();
+        assert!(diff.contains("not a revision"), "{diff}");
+    }
+
+    /// The marker stores `HEAD` against the session, keeps it while a later
+    /// turn starts from the same commit, and follows `HEAD` once it moves.
+    #[test]
+    fn test_record_turn_start_stores_head_for_the_session() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = crate::rules::rules_dir(repo.path());
+        let raw = serde_json::json!({
+            "session_id": "sess-turn-1",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "do the thing",
+        })
+        .to_string();
+        let recorded = |head: String| {
+            Some(TurnStart {
+                root: repo.path().to_path_buf(),
+                head,
+            })
+        };
+
+        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        let first = head_of(repo.path());
+        assert_eq!(
+            governance_session::load("sess-turn-1", &rules).turn_start,
+            recorded(first.clone())
+        );
+
+        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        assert_eq!(
+            governance_session::load("sess-turn-1", &rules).turn_start,
+            recorded(first.clone())
+        );
+
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 7 }\n").unwrap();
+        run_git(
+            repo.path(),
+            &["commit", "-q", "-am", "the previous turn's work"],
+        );
+        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        let second = head_of(repo.path());
+        assert_ne!(first, second);
+        assert_eq!(
+            governance_session::load("sess-turn-1", &rules).turn_start,
+            recorded(second)
+        );
+    }
+
+    /// With no commit to name, the last turn's record is cleared rather than
+    /// left behind as a base for this one.
+    #[test]
+    fn test_record_turn_start_clears_the_record_on_an_unborn_branch() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let unborn = tempdir().unwrap();
+        run_git(unborn.path(), &["init", "-q"]);
+        let rules = crate::rules::rules_dir(unborn.path());
+        let mut stale = GovernanceSession::default();
+        stale.turn_start = Some(TurnStart {
+            root: unborn.path().to_path_buf(),
+            head: "a".repeat(40),
+        });
+        governance_session::store("sess-turn-unborn", &rules, &stale);
+
+        let raw = serde_json::json!({"session_id": "sess-turn-unborn"}).to_string();
+        exec_hook_with(&turn_start_args(unborn.path()), &raw);
+
+        assert_eq!(
+            governance_session::load("sess-turn-unborn", &rules).turn_start,
+            None
+        );
+    }
+
+    /// No session id means nothing to key a record on, and a payload that is
+    /// not JSON names none either: both are ignored, and nothing is written.
+    #[test]
+    fn test_record_turn_start_ignores_a_payload_without_a_session_id() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+
+        exec_hook_with(&turn_start_args(repo.path()), "{}");
+        exec_hook_with(&turn_start_args(repo.path()), "not json");
+
+        assert!(!home.path().join("plan-check-sessions").exists());
+    }
+
+    #[test]
+    fn test_turn_base_uses_the_recorded_commit_only_while_it_is_behind_head() {
+        let repo = git_repo_with_baseline();
+        let root = repo.path().to_path_buf();
+        let start = head_of(repo.path());
+        let mut session = GovernanceSession::default();
+        assert_eq!(turn_base(&session, &root), None, "nothing recorded");
+
+        session.turn_start = Some(TurnStart {
+            root: root.clone(),
+            head: start.clone(),
+        });
+        assert_eq!(
+            turn_base(&session, &root),
+            Some(start.clone()),
+            "HEAD itself"
+        );
+
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 8 }\n").unwrap();
+        run_git(
+            repo.path(),
+            &["commit", "-q", "-am", "a commit in the turn"],
+        );
+        assert_eq!(
+            turn_base(&session, &root),
+            Some(start.clone()),
+            "a commit behind HEAD"
+        );
+
+        let elsewhere = tempdir().unwrap();
+        assert_eq!(
+            turn_base(&session, elsewhere.path()),
+            None,
+            "recorded in another checkout"
+        );
+
+        session.turn_start = Some(TurnStart {
+            root: root.clone(),
+            head: head_of(repo.path()),
+        });
+        run_git(repo.path(), &["commit", "-q", "--amend", "-m", "rewritten"]);
+        assert_eq!(
+            turn_base(&session, &root),
+            None,
+            "history rewritten across the turn"
+        );
+
+        session.turn_start = Some(TurnStart {
+            root,
+            head: "--output=/tmp/injected".to_string(),
+        });
+        assert_eq!(turn_base(&session, repo.path()), None, "not an object id");
+    }
+
+    /// The reported gap: everything the turn wrote is committed, so the tree
+    /// matches `HEAD`. With the turn's start recorded the check still judges
+    /// that work; without a record, the same tree reads as nothing to check.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_judges_work_committed_since_the_turn_started() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-q", "-m", "rules"]);
+
+        let marked = serde_json::json!({"session_id": "sess-turn-committed"}).to_string();
+        let unmarked = serde_json::json!({"session_id": "sess-turn-unmarked"}).to_string();
+        exec_hook_with(&turn_start_args(repo.path()), &marked);
+
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); }\n",
+        )
+        .unwrap();
+        run_git(repo.path(), &["commit", "-q", "-am", "the turn's work"]);
+
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        exec_hook_with(&args, &marked);
+        exec_hook_with(&args, &unmarked);
+
+        assert_eq!(
+            governance_session::load("sess-turn-committed", &rules)
+                .diff
+                .rounds,
+            1,
+            "work committed during the turn must be judged"
+        );
+        assert_eq!(
+            governance_session::load("sess-turn-unmarked", &rules)
+                .diff
+                .rounds,
+            0,
+            "against HEAD, the committed work is invisible"
+        );
+    }
+
+    /// A turn that changed nothing since its recorded start is nothing to
+    /// check, the same as a clean tree against `HEAD`.
+    #[test]
+    fn test_exec_hook_with_nothing_changed_since_the_turn_started() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = crate::rules::rules_dir(repo.path());
+        let raw = serde_json::json!({"session_id": "sess-turn-clean"}).to_string();
+        exec_hook_with(&turn_start_args(repo.path()), &raw);
+
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        exec_hook_with(&args, &raw);
+
+        let session = governance_session::load("sess-turn-clean", &rules);
+        assert!(session.turn_start.is_some());
+        assert_eq!(session.diff.rounds, 0);
+    }
+
+    #[test]
+    fn test_is_object_id_accepts_only_full_hex_ids() {
+        assert!(is_object_id(&"0123456789abcdef".repeat(4)[..40]));
+        assert!(is_object_id(&"f".repeat(64)));
+        assert!(!is_object_id(&"f".repeat(39)));
+        assert!(!is_object_id(&"g".repeat(40)));
+        assert!(!is_object_id("HEAD"));
     }
 }

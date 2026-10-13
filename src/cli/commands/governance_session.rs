@@ -174,6 +174,23 @@ pub struct GovernanceSession {
     pub plan: LoopState,
     /// `impl-check --claude-hook`'s deny counts, rounds, and clearances.
     pub diff: LoopState,
+    /// The commit the current turn started from, which `impl-check
+    /// --claude-hook --turn-start` overwrites at the start of every turn.
+    /// Optional so a file written before turns were recorded still loads at
+    /// this format version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_start: Option<TurnStart>,
+}
+
+/// Where and from which commit a Claude Code turn started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnStart {
+    /// The repository root `head` was read in. A turn recorded in one
+    /// checkout never sets the diff base for another that shares this
+    /// session's rules directory.
+    pub root: PathBuf,
+    /// `HEAD`'s full commit id when the turn started.
+    pub head: String,
 }
 
 /// One explicit override: a human, outside the agent's control, telling this
@@ -351,6 +368,7 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             deny_counts: v2.deny_counts,
         },
         diff: LoopState::default(),
+        turn_start: None,
     }
 }
 
@@ -1062,5 +1080,33 @@ mod tests {
         assert_eq!(raw["diff"]["deny_counts"]["doc::R-A"], 1);
         assert!(raw.get("rounds").is_none());
         assert!(raw.get("deny_counts").is_none());
+    }
+
+    /// A recorded turn start survives a round trip. A session that never
+    /// recorded one writes no `turn_start` key, so its file reads exactly
+    /// like one written before turns were recorded.
+    #[test]
+    fn test_turn_start_roundtrips_and_is_omitted_when_unset() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+
+        store("session-no-turn", &rd(), &GovernanceSession::default());
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(session_path("session-no-turn", &rd()).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(raw.get("turn_start").is_none());
+        assert_eq!(load("session-no-turn", &rd()).turn_start, None);
+
+        let turn = TurnStart {
+            root: PathBuf::from("/repo"),
+            head: "a".repeat(40),
+        };
+        let session = GovernanceSession {
+            turn_start: Some(turn.clone()),
+            ..Default::default()
+        };
+        store("session-turn", &rd(), &session);
+        assert_eq!(load("session-turn", &rd()).turn_start, Some(turn));
     }
 }

@@ -1048,6 +1048,67 @@ fn test_impl_check_claude_hook_reads_a_valid_envelope_from_stdin() {
         .success();
 }
 
+/// The turn marker end to end, through the binary: `--turn-start` prints
+/// nothing (a `UserPromptSubmit` hook's stdout lands in the prompt), and the
+/// check that ends the turn still finds the work after it is all committed.
+/// A session that never recorded a turn start sees the same clean tree as
+/// nothing to check.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_claude_hook_turn_start_lets_the_stop_check_see_committed_work() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    let marked = r#"{"session_id":"sess-impl-cli-turn-1","hook_event_name":"UserPromptSubmit","prompt":"sign the tokens"}"#;
+    let unmarked = r#"{"session_id":"sess-impl-cli-turn-2"}"#;
+
+    fixture
+        .cmd()
+        .args(["--claude-hook", "--turn-start"])
+        .write_stdin(marked)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    run_git(fixture.repo.path(), &["add", "."]);
+    run_git(
+        fixture.repo.path(),
+        &["commit", "-q", "-m", "the turn's work"],
+    );
+
+    fixture
+        .cmd()
+        .arg("--claude-hook")
+        .write_stdin(marked)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no diff to check").not());
+    fixture
+        .cmd()
+        .arg("--claude-hook")
+        .write_stdin(unmarked)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "working tree matches HEAD and there are no untracked files",
+        ));
+
+    fixture
+        .cmd()
+        .args(["--claude-hook", "--turn-start"])
+        .write_stdin(marked)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    fixture
+        .cmd()
+        .arg("--claude-hook")
+        .write_stdin(marked)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "nothing has changed since this turn started",
+        ));
+}
+
 /// `exec_hook`'s own stdin-read-failure branch, `impl-check`'s side: invalid
 /// UTF-8 must fail open with a notice, never block or error the hook.
 #[cfg(unix)]
