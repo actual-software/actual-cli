@@ -775,7 +775,6 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
     let mut matches: Vec<GlobMatch> = Vec::new();
     for glob in doc.path_globs() {
         let literal: Vec<&str> = glob.literal_segments();
-        let compiled = glob::Pattern::new(&glob.pattern).ok();
         for query_path in query_paths {
             let query_segments: Vec<&str> = query_path
                 .split('/')
@@ -786,9 +785,12 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
                 .zip(query_segments.iter())
                 .take_while(|(a, b)| a == b)
                 .count();
-            let exact = compiled
-                .as_ref()
-                .is_some_and(|pattern| pattern.matches(query_path));
+            // Brace lists are expanded before compiling: `glob::Pattern` does
+            // not understand `{ts,tsx}`, and compiling the braces as literals
+            // would decline every real file, then `glob_declined` would
+            // suppress the prefix that was the only remaining match.
+            let answer = glob.matches_path(query_path);
+            let exact = answer == Some(true);
             // Partial agreement, in the two directions it can run:
             //
             //   query is an ancestor of the glob's literal prefix -- a plan
@@ -799,8 +801,8 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
             //     `app/lib/apiAuth.ts`.
             //
             // The second direction is only an inference about a path the glob
-            // could have matched and did not. When the glob compiled, it has
-            // already answered: `app/lib/*-screen.{ts,tsx}` does not match
+            // could have matched and did not. When the glob answered, it has
+            // already decided: `app/lib/*-screen.{ts,tsx}` does not match
             // `apiAuth.ts`, and treating the shared `app/lib` prefix as
             // agreement overrides that answer with a guess. Measured on a
             // 187-document corpus, it made every rule whose glob began
@@ -812,7 +814,7 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
             // directions: with no pattern to consult there is no answer to
             // override, and a prefix is the only signal left.
             let descends = agreeing > 0 && agreeing == literal.len();
-            let glob_declined = compiled.is_some() && !exact;
+            let glob_declined = answer == Some(false);
             let contained =
                 agreeing > 0 && (agreeing == query_segments.len() || (descends && !glob_declined));
             if !contained && !exact {
@@ -1309,13 +1311,12 @@ mod tests {
         assert!(shallow > 0.0 && shallow < deep);
     }
 
-    /// A glob that compiled and declined is not overruled by a shared prefix.
+    /// A glob that answered no is not overruled by a shared prefix.
     ///
     /// `app/lib/*-screen.{ts,tsx}` does not match `app/lib/apiAuth.ts`, and the
     /// two sharing their first two segments is not evidence that it does.
-    /// Before this, every rule whose glob began `app/lib/` governed every file
-    /// under `app/lib/` on a 187-document corpus, so reading an auth helper
-    /// briefed three query-cache rules that did not apply to it.
+    /// The verify body names no path: `grep … app/lib/` would harvest
+    /// `app/lib/**` and mask both the exact match and the decline.
     ///
     /// The ancestor direction is untouched: a plan naming a directory above
     /// the rule's own still agrees partially, because it may yet touch it.
@@ -1325,24 +1326,33 @@ mod tests {
             "app-screens-1234",
             "Screens",
             "These rules are ALWAYS ACTIVE for all code matching: app/lib/*-screen.{ts,tsx}",
-            "grep -rn \"useQuery\" app/lib/",
+            "",
         )]);
         let screens = &index.documents[0];
-        assert!(
-            screens
-                .path_globs()
-                .any(|g| g.pattern == "app/lib/*-screen.{ts,tsx}"),
-            "the brace list survives prose harvesting: {:?}",
+        assert_eq!(
             screens
                 .path_globs()
                 .map(|g| g.pattern.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            vec!["app/lib/*-screen.{ts,tsx}"],
+            "the brace list is the only glob, so coverage cannot hide behind app/lib/**"
         );
 
-        // The file the glob names still matches outright.
         let (named, named_globs) = path_coverage(screens, &["app/lib/stats-screen.ts".to_string()]);
         assert!(named > 0.0);
-        assert!(named_globs.iter().any(|g| g.exact));
+        assert!(named_globs
+            .iter()
+            .any(|g| g.exact && g.glob == "app/lib/*-screen.{ts,tsx}"));
+
+        let (tsx, tsx_globs) = path_coverage(screens, &["app/lib/stats-screen.tsx".to_string()]);
+        assert!(tsx > 0.0);
+        assert!(tsx_globs.iter().any(|g| g.exact));
+
+        assert_eq!(
+            path_coverage(screens, &["app/lib/apiAuth.ts".to_string()]).0,
+            0.0,
+            "a sibling the brace list declined is not pulled back by the shared prefix"
+        );
 
         // An ancestor still agrees partially: a plan naming `app/lib` may
         // touch the screen helpers below it.
