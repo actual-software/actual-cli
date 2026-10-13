@@ -607,13 +607,11 @@ pub async fn check<R: StructuredRunner>(
 /// asks what it omits, so a fragment would read as a plan missing everything
 /// in the other fragments.
 fn judge_parts(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) -> Vec<String> {
-    if kind == ArtifactKind::Plan {
+    if kind == ArtifactKind::Plan || build_prompt(kind, text, rules).len() <= MAX_JUDGE_PROMPT_BYTES
+    {
         return vec![text.to_string()];
     }
     let overhead = build_part_prompt(kind, "", rules, Some((usize::MAX, usize::MAX))).len();
-    if overhead + text.len() <= MAX_JUDGE_PROMPT_BYTES {
-        return vec![text.to_string()];
-    }
     split_diff(
         text,
         MAX_JUDGE_PROMPT_BYTES
@@ -1306,6 +1304,26 @@ mod tests {
     fn test_judge_parts_keeps_a_diff_that_fits_whole() {
         let diff = big_diff(2, 4 * 1024, MARKER);
         assert_eq!(judge_parts(ArtifactKind::Diff, &diff, &rules()), vec![diff]);
+    }
+
+    /// A diff whose one prompt fills the budget exactly stays whole, though
+    /// the part note would not fit beside it, and one byte more is cut.
+    #[test]
+    fn test_judge_parts_cuts_only_a_diff_whose_one_prompt_would_not_fit() {
+        let mut diff = big_diff(2, 50 * 1024, MARKER);
+        let room = MAX_JUDGE_PROMPT_BYTES - build_prompt(ArtifactKind::Diff, &diff, &rules()).len();
+        diff.push_str(&format!("+{}\n", "x".repeat(room - 2)));
+        assert_eq!(
+            build_prompt(ArtifactKind::Diff, &diff, &rules()).len(),
+            MAX_JUDGE_PROMPT_BYTES
+        );
+
+        assert_eq!(
+            judge_parts(ArtifactKind::Diff, &diff, &rules()),
+            vec![diff.clone()]
+        );
+        diff.push('x');
+        assert!(judge_parts(ArtifactKind::Diff, &diff, &rules()).len() > 1);
     }
 
     /// Every part's prompt, part note included, fits the budget, and the
