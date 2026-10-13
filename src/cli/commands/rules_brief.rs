@@ -1530,6 +1530,30 @@ mod tests {
         }
     }
 
+    /// Direct mode prints the sentence on stdout, so each reason's wording is
+    /// pinned the way the stderr line is.
+    #[test]
+    fn test_the_no_brief_sentence_names_the_reason() {
+        for (reason, expected) in [
+            (
+                NoBrief::OutsideRoot,
+                "src/a.ts is not under the repository root.",
+            ),
+            (NoBrief::NoRules, "No rule set to search for src/a.ts."),
+            (NoBrief::Ungoverned, "No rule document governs src/a.ts."),
+            (
+                NoBrief::AlreadyBriefed,
+                "Every rule document governing src/a.ts was briefed earlier this session.",
+            ),
+            (
+                NoBrief::NothingToShow,
+                "No rule text fits the brief budget for src/a.ts.",
+            ),
+        ] {
+            assert_eq!(reason.sentence("src/a.ts"), expected);
+        }
+    }
+
     /// Hook mode stays silent on stdout for every reason, because stdout is
     /// what the model reads.
     #[test]

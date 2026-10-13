@@ -652,6 +652,10 @@ fn split_prose_tokens(text: &str) -> Vec<&str> {
         match c {
             '{' => depth += 1,
             '}' => depth = (depth - 1).max(0),
+            // A brace list never spans whitespace or a backtick, so an
+            // unclosed `{` (inline Rust such as `match self {`) must not
+            // outlive its token.
+            w if w.is_whitespace() || w == '`' => depth = 0,
             _ => {}
         }
         let is_break = c.is_whitespace() || c == '`' || (c == ',' && depth == 0);
@@ -1194,6 +1198,16 @@ mod tests {
         assert_eq!(
             globs.iter().map(|g| &g.pattern).collect::<Vec<_>>(),
             vec!["app/lib/*-screen.{ts,tsx}"]
+        );
+    }
+
+    /// An unclosed brace earlier in the prose must not glue later commas on.
+    #[test]
+    fn test_globs_from_prose_ignores_an_unclosed_brace_before_paths() {
+        let globs = globs_from_prose("add an arm to match self { in src/a/b.rs, src/c/d.rs");
+        assert_eq!(
+            globs.iter().map(|g| &g.pattern).collect::<Vec<_>>(),
+            vec!["src/a/b.rs", "src/c/d.rs"]
         );
     }
 
