@@ -814,7 +814,12 @@ fn path_coverage(doc: &IndexedDocument, query_paths: &[String]) -> (f64, Vec<Glo
             // directions: with no pattern to consult there is no answer to
             // override, and a prefix is the only signal left.
             let descends = agreeing > 0 && agreeing == literal.len();
-            let glob_declined = answer == Some(false);
+            // Only a file query is decided by the glob's answer. For a
+            // directory the answer is about the directory itself:
+            // `app/**/*.tsx` says no to `app/components`, yet a plan naming it
+            // may well touch the files below.
+            let names_a_file = std::path::Path::new(query_path).extension().is_some();
+            let glob_declined = answer == Some(false) && names_a_file;
             let contained =
                 agreeing > 0 && (agreeing == query_segments.len() || (descends && !glob_declined));
             if !contained && !exact {
@@ -1358,6 +1363,29 @@ mod tests {
         // touch the screen helpers below it.
         let (ancestor, _) = path_coverage(screens, &["app/lib".to_string()]);
         assert!(ancestor > 0.0);
+    }
+
+    /// A directory query below a filename-tailed glob keeps its prefix credit:
+    /// the glob's "no" is about the directory path, not the files beneath it.
+    #[test]
+    fn test_a_directory_query_below_a_filename_tailed_glob_keeps_prefix_credit() {
+        let index = index_of(vec![doc(
+            "app-tsx-1234",
+            "Tsx",
+            "These rules are ALWAYS ACTIVE for all code matching: app/**/*.tsx",
+            "",
+        )]);
+        let tsx = &index.documents[0];
+        let (dir, _) = path_coverage(tsx, &["app/components".to_string()]);
+        assert!(
+            dir > 0.0,
+            "a plan naming app/components may touch .tsx files"
+        );
+        assert_eq!(
+            path_coverage(tsx, &["app/components/util.ts".to_string()]).0,
+            0.0,
+            "a file the glob declined is still declined"
+        );
     }
 
     #[test]
