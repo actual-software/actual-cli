@@ -3,10 +3,12 @@
 //!
 //! Unlike `plan-check`'s hook envelope (`plan_check_hook::HookEnvelope`),
 //! there is no `tool_input.plan`-equivalent field carrying the material to
-//! judge: the diff is always resolved via `working_tree_diff` (working tree
-//! vs `HEAD`, including untracked non-ignored files; see
-//! `impl_check::working_tree_diff`), never from the envelope itself, so this
-//! envelope only needs to carry enough to key the revision-loop session.
+//! judge: the diff is always resolved from the working tree (including
+//! untracked non-ignored files, against the commit the turn started from or
+//! `HEAD`; see `impl_check::working_tree_diff_from`), never from the envelope
+//! itself, so this envelope only needs to carry enough to key the
+//! revision-loop session. `--turn-start` reads a `UserPromptSubmit` envelope
+//! through the same struct, for the same one field.
 //! Deliberately its own, smaller struct rather than reusing
 //! `plan_check_hook::HookEnvelope`, which is coupled to `ToolInput` and other
 //! plan-specific fields this command has no use for.
