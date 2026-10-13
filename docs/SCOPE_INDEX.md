@@ -244,8 +244,9 @@ and any path with a part that starts with a dot), lockfiles (`*.lock`,
 `go.sum`, `bun.lockb`) and generated output (anything under `node_modules/`,
 `dist/`, `build/`, `target/`, `vendor/`, `__pycache__/` or `.next/`, plus
 `*.min.*` and `*.generated.*`) never count, matched on the path alone. A rule
-set that will not build, or holds no documents, notes no folders. A read whose
-folder is already covered, or already noted as uncovered, writes nothing.
+set that will not build, or holds no documents, notes no folders. A read writes
+nothing when its folder is already covered, or when no decision governs its
+file and the folder is already noted as uncovered.
 
 `session summary` turns that record into one line for the end of a response:
 "Actual AI: added X of Y ADRs to context this session." Y is the number of

@@ -259,7 +259,7 @@ fn update_within(
         return;
     }
     ledger.format_version = FORMAT_VERSION;
-    // Serializing a version, a set of strings and two counts cannot fail, so
+    // Serializing a version, sets of strings and two counts cannot fail, so
     // there is no error path to take here; writing nothing is still the right
     // fallback.
     if let Ok(json) = serde_json::to_string(&ledger) {
