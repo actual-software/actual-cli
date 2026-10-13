@@ -175,7 +175,9 @@ fn session_start(raw: &str, args: &RulesBriefArgs) {
 pub(crate) enum NoBrief {
     /// The path does not sit under the repository root.
     OutsideRoot,
-    /// No rule set to search: absent, or an index that would not build.
+    /// `resolve_in` failed: a rules path that is a file, or one that cannot
+    /// be read. An absent directory is [`Ungoverned`](Self::Ungoverned) — it
+    /// resolves to an empty index that searches and claims nothing.
     NoRules,
     /// Searched, and no rule document claims the file.
     Ungoverned,
@@ -212,12 +214,18 @@ impl NoBrief {
     }
 }
 
+/// The stderr line a reader matches on. Prose around it may change; this
+/// shape must not.
+fn report_line(reason: NoBrief, detail: &str) -> String {
+    format!("actual rules brief: no-brief={} {detail}", reason.token())
+}
+
 /// Name the reason on stderr and stay silent on stdout.
 ///
 /// Hook mode only. Direct mode prints [`NoBrief::sentence`] on stdout, and
 /// printing both would report one silence twice.
 fn report(reason: NoBrief, detail: &str) -> Option<String> {
-    eprintln!("actual rules brief: no-brief={} {detail}", reason.token());
+    eprintln!("{}", report_line(reason, detail));
     None
 }
 
@@ -360,8 +368,7 @@ struct SessionIdentity<'a> {
     agent_id: Option<&'a str>,
 }
 
-/// The brief for one file, or `None` when nothing governs it, nothing in it
-/// is new to this session, or anything at all goes wrong.
+/// The brief for one file, or the reason none was produced.
 fn brief_for(
     root: &Path,
     file: &str,
@@ -1505,31 +1512,73 @@ mod tests {
         });
     }
 
-    /// The tokens are what a reader matches on, so they are pinned here
-    /// rather than left to the prose above them.
+    /// The line a reader matches on. The tokens only matter as they appear
+    /// here; prose around them may change.
     #[test]
-    fn test_the_reason_tokens_are_stable() {
-        assert_eq!(NoBrief::OutsideRoot.token(), "outside-root");
-        assert_eq!(NoBrief::NoRules.token(), "no-rules");
-        assert_eq!(NoBrief::Ungoverned.token(), "ungoverned");
-        assert_eq!(NoBrief::AlreadyBriefed.token(), "already-briefed");
-        assert_eq!(NoBrief::NothingToShow.token(), "nothing-to-show");
+    fn test_the_no_brief_line_names_the_reason() {
+        for (reason, token) in [
+            (NoBrief::OutsideRoot, "outside-root"),
+            (NoBrief::NoRules, "no-rules"),
+            (NoBrief::Ungoverned, "ungoverned"),
+            (NoBrief::AlreadyBriefed, "already-briefed"),
+            (NoBrief::NothingToShow, "nothing-to-show"),
+        ] {
+            assert_eq!(
+                report_line(reason, "src/a.ts"),
+                format!("actual rules brief: no-brief={token} src/a.ts")
+            );
+        }
     }
 
-    /// Hook mode stays silent on stdout whatever the reason, because stdout is
+    /// Hook mode stays silent on stdout for every reason, because stdout is
     /// what the model reads.
     #[test]
     fn test_every_reason_leaves_stdout_empty_in_hook_mode() {
         with_scratch_config(|| {
             let root = repo();
             let a = args(root.path());
-            for file in [
-                root.path().join("README.md").to_string_lossy().to_string(),
-                "/etc/hosts".to_string(),
-            ] {
-                let read = session_envelope(root.path(), "s-quiet", None, &file);
-                assert_eq!(hook_reply(&read, &a), None, "{file} answered on stdout");
-            }
+
+            let ungoverned = root.path().join("README.md").to_string_lossy().to_string();
+            let read = session_envelope(root.path(), "s-quiet", None, &ungoverned);
+            assert_eq!(hook_reply(&read, &a), None, "ungoverned answered on stdout");
+
+            let read = session_envelope(root.path(), "s-quiet", None, "/etc/hosts");
+            assert_eq!(
+                hook_reply(&read, &a),
+                None,
+                "outside-root answered on stdout"
+            );
+
+            let file = governed(root.path());
+            let read = session_envelope(root.path(), "s-quiet", None, &file);
+            assert!(hook_reply(&read, &a).is_some(), "first read must brief");
+            assert_eq!(
+                hook_reply(&read, &a),
+                None,
+                "already-briefed answered on stdout"
+            );
+
+            let bare = tempdir().unwrap();
+            let not_a_dir = bare.path().join("rules-file");
+            std::fs::write(&not_a_dir, "not a directory").unwrap();
+            let mut no_rules = args(bare.path());
+            no_rules.rules_dir = Some(not_a_dir);
+            let other = bare.path().join("src/a.ts").to_string_lossy().to_string();
+            let read = session_envelope(bare.path(), "s-quiet", None, &other);
+            assert_eq!(
+                hook_reply(&read, &no_rules),
+                None,
+                "no-rules answered on stdout"
+            );
+
+            let mut tiny = args(root.path());
+            tiny.max_chars = 1;
+            let read = session_envelope(root.path(), "s-tiny", None, &file);
+            assert_eq!(
+                hook_reply(&read, &tiny),
+                None,
+                "nothing-to-show answered on stdout"
+            );
         });
     }
 
