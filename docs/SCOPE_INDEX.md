@@ -174,6 +174,13 @@ outside the repository, a missing rule set) is empty stdout and exit 0, so a
 broken brief never breaks an agent's edit loop. `--file` runs the same
 selection at a terminal and prints the brief as text.
 
+Every path is placed from the repository root: `--repo`, else `<root>` when
+`--rules-dir` is `<root>/.actual/rules`, else the envelope's `cwd` under
+`--claude-hook` or the working directory under `--file`. The envelope's `cwd`
+follows the agent's `cd`, so a hook that passes the conventional `--rules-dir`
+and no `--repo` still places files from the root after the agent changes
+directory.
+
 Hook-mode stdout stays empty whenever there is no brief, so the model never
 reads the explanation as governance. The reason is one stderr line,
 `actual rules brief: no-brief=<token> <path>`, which the shell hook keeps
@@ -226,6 +233,19 @@ lose neither the file nor each other's decisions, and a run that cannot take
 the lock within a short wait skips its write. Damaged or older-format state
 reads as an empty session, which can only lower the count. Files untouched for
 a week are pruned, and nothing in the record leaves the machine.
+
+The record also notes the folders the session worked in. A folder is the
+directory a file sits in, named from the repository root, with `.` for the root
+itself. Each file the hook is asked about counts toward its folder: the folder
+is covered once a decision governs any of those files, and a gap while none
+does, whatever order the reads arrive in. Docs (`*.md`, `*.mdx`, `*.rst`,
+`*.txt`), config (`*.json`, `*.yaml`, `*.yml`, `*.toml`, `*.ini`, `*.config.*`,
+and any path with a part that starts with a dot), lockfiles (`*.lock`,
+`go.sum`, `bun.lockb`) and generated output (anything under `node_modules/`,
+`dist/`, `build/`, `target/`, `vendor/`, `__pycache__/` or `.next/`, plus
+`*.min.*` and `*.generated.*`) never count, matched on the path alone. A rule
+set that will not build, or holds no documents, notes no folders. A read whose
+folder is already covered, or already noted as uncovered, writes nothing.
 
 `session summary` turns that record into one line for the end of a response:
 "Actual AI: added X of Y ADRs to context this session." Y is the number of

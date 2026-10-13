@@ -15,6 +15,14 @@
 //! of them counts once. `rules_dir` is keyed for the reason the memory gives:
 //! one conversation can govern several rule sets.
 //!
+//! **Folders, beside decisions.** A folder is the directory a file sits in,
+//! named from the repository root. It is covered once a decision governs any
+//! file the agents worked on in it, and a gap while every such file was
+//! governed by none, whatever order the reads arrive in. Docs, config,
+//! lockfiles and generated output never count toward one; [`folder_of`] holds
+//! that list. Every read notes a folder, so [`record_folder`] checks the
+//! record without the lock and takes it only when a folder's state changes.
+//!
 //! **Writes take a lock.** [`crate::config::paths::write_secure`] stages
 //! every write at one fixed `.tmp` path, so two hook runs writing at once can
 //! leave a damaged file, and a damaged file reads as an empty session. Every
@@ -67,8 +75,8 @@ pub struct LedgerKey<'a> {
     pub rules_dir: &'a Path,
 }
 
-/// The decisions briefed to a session's agents, and the counts last shown to
-/// the user.
+/// The decisions briefed to a session's agents, the counts last shown to the
+/// user, and the folders the agents worked in.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BriefLedger {
@@ -77,6 +85,32 @@ pub struct BriefLedger {
     pub briefed: BTreeSet<String>,
     /// Absent until the summary has been shown.
     pub last_reported: Option<Reported>,
+    /// Folders holding a file a decision governs.
+    pub covered_folders: BTreeSet<String>,
+    /// Folders holding a file no decision governs, noted only while the
+    /// folder is not covered. A gap is a folder here and not in
+    /// `covered_folders`, whichever order the two were noted in.
+    pub uncovered_folders: BTreeSet<String>,
+}
+
+impl BriefLedger {
+    /// Whether noting `folder` changes anything. A covered folder stays
+    /// covered, and an uncovered one changes only by becoming covered.
+    fn would_change(&self, folder: &str, covered: bool) -> bool {
+        !self.covered_folders.contains(folder)
+            && (covered || !self.uncovered_folders.contains(folder))
+    }
+
+    fn note_folder(&mut self, folder: &str, covered: bool) {
+        if self.would_change(folder, covered) {
+            let folders = if covered {
+                &mut self.covered_folders
+            } else {
+                &mut self.uncovered_folders
+            };
+            folders.insert(folder.to_string());
+        }
+    }
 }
 
 /// The X and Y of "added X of Y ADRs to context", as the user last saw them.
@@ -130,6 +164,72 @@ pub fn record<'k>(
             .briefed
             .extend(decision_keys.into_iter().map(str::to_string));
     });
+}
+
+/// Note that the session worked on a file in `folder`, and whether a decision
+/// governs that file, best effort. The lock is taken only when the record's
+/// lock-free read says the folder's state would change.
+pub fn record_folder(dir: &Path, key: &LedgerKey<'_>, folder: &str, covered: bool) {
+    if load(dir, key).would_change(folder, covered) {
+        update(dir, key, |ledger| ledger.note_folder(folder, covered));
+    }
+}
+
+/// The folder a repository-relative file counts toward, `.` at the root, or
+/// `None` for a file that never counts.
+pub fn folder_of(relative: &str) -> Option<String> {
+    if NEVER_COUNTED.iter().any(|rule| rule.matches(relative)) {
+        return None;
+    }
+    let folder = relative.rsplit_once('/').map_or(".", |(folder, _)| folder);
+    Some(folder.to_string())
+}
+
+/// Docs, config, lockfiles and generated output, which never count toward a
+/// folder. Matched on the path alone: the brief never reads a file's contents.
+const NEVER_COUNTED: &[Excluded] = &[
+    // Docs.
+    Excluded::Extension(&["md", "mdx", "rst", "txt"]),
+    // Config, dotfiles included.
+    Excluded::Extension(&["json", "yaml", "yml", "toml", "ini"]),
+    Excluded::Hidden,
+    Excluded::Infix(&[".config."]),
+    // Lockfiles.
+    Excluded::Extension(&["lock"]),
+    Excluded::Name(&["go.sum", "bun.lockb"]),
+    // Generated output. `.next/` is hidden, so it needs no entry of its own.
+    Excluded::Under(super::SKIP_DIRS),
+    Excluded::Infix(&[".min.", ".generated."]),
+];
+
+/// One way a path marks a file that never counts.
+enum Excluded {
+    /// The file's extension, in any case.
+    Extension(&'static [&'static str]),
+    /// The file's whole name.
+    Name(&'static [&'static str]),
+    /// Text within the file's name.
+    Infix(&'static [&'static str]),
+    /// A directory anywhere above the file.
+    Under(&'static [&'static str]),
+    /// A file or directory whose name starts with a dot.
+    Hidden,
+}
+
+impl Excluded {
+    fn matches(&self, relative: &str) -> bool {
+        let (dirs, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+        match self {
+            Self::Extension(extensions) => Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| extensions.iter().any(|e| ext.eq_ignore_ascii_case(e))),
+            Self::Name(names) => names.contains(&name),
+            Self::Infix(infixes) => infixes.iter().any(|infix| name.contains(infix)),
+            Self::Under(names) => dirs.split('/').any(|dir| names.contains(&dir)),
+            Self::Hidden => relative.split('/').any(|part| part.starts_with('.')),
+        }
+    }
 }
 
 /// Apply `change` to the record for `key` and write the result back, best
@@ -390,6 +490,193 @@ mod tests {
         assert!(ledger_path(dir.path(), &key("fresh")).exists());
         assert!(lock_file.exists(), "the lock file was pruned");
         assert!(foreign.exists(), "a foreign file was pruned");
+    }
+
+    // ── folders ──────────────────────────────────────────────────────────
+
+    /// The covered folders and the gaps in `key`'s record.
+    fn folders(dir: &Path, key: &LedgerKey<'_>) -> (Vec<String>, Vec<String>) {
+        let ledger = load(dir, key);
+        let gaps = ledger
+            .uncovered_folders
+            .difference(&ledger.covered_folders)
+            .cloned()
+            .collect();
+        (ledger.covered_folders.into_iter().collect(), gaps)
+    }
+
+    #[test]
+    fn test_a_governed_folder_is_covered_and_an_ungoverned_one_is_a_gap() {
+        let dir = tempdir().unwrap();
+        record_folder(dir.path(), &key("s1"), "services/auth", true);
+        record_folder(dir.path(), &key("s1"), "infra/terraform", false);
+
+        let (covered, gaps) = folders(dir.path(), &key("s1"));
+        assert_eq!(covered, ["services/auth"]);
+        assert_eq!(gaps, ["infra/terraform"]);
+    }
+
+    /// One governed file covers its folder whichever order the reads arrive
+    /// in, and another session's record is untouched by either.
+    #[test]
+    fn test_a_folder_with_one_governed_file_is_covered_in_either_order() {
+        let dir = tempdir().unwrap();
+        record_folder(dir.path(), &key("s1"), "src/billing", false);
+        record_folder(dir.path(), &key("s1"), "src/billing", true);
+        record_folder(dir.path(), &key("s2"), "src/billing", true);
+        record_folder(dir.path(), &key("s2"), "src/billing", false);
+
+        for session in ["s1", "s2"] {
+            let (covered, gaps) = folders(dir.path(), &key(session));
+            assert_eq!(covered, ["src/billing"], "{session}");
+            assert!(gaps.is_empty(), "{session}: {gaps:?}");
+        }
+        assert_eq!(folders(dir.path(), &key("s3")), (vec![], vec![]));
+    }
+
+    /// Noting what the record already says needs neither the lock nor a
+    /// write, so with the lock held elsewhere it returns at once. A real
+    /// change, the control, waits out the lock and is dropped.
+    #[test]
+    fn test_a_folder_that_changes_nothing_skips_the_lock() {
+        let dir = tempdir().unwrap();
+        record_folder(dir.path(), &key("s1"), "src/billing", true);
+        record_folder(dir.path(), &key("s1"), "infra", false);
+        let path = ledger_path(dir.path(), &key("s1"));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let _held = lock(dir.path(), Duration::ZERO).expect("the lock");
+
+        let started = Instant::now();
+        for (folder, covered) in [
+            ("src/billing", true),
+            ("src/billing", false),
+            ("infra", false),
+        ] {
+            record_folder(dir.path(), &key("s1"), folder, covered);
+        }
+        assert!(started.elapsed() < LOCK_WAIT, "a no-op waited on the lock");
+
+        record_folder(dir.path(), &key("s1"), "infra", true);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// The rule is applied again under the lock, so a folder another writer
+    /// covered after the lock-free read is not then noted as uncovered.
+    #[test]
+    fn test_under_the_lock_a_folder_covered_since_the_read_stays_as_it_is() {
+        let mut ledger = BriefLedger::default();
+        ledger.note_folder("src/billing", true);
+        let covered = ledger.clone();
+
+        ledger.note_folder("src/billing", false);
+
+        assert_eq!(ledger, covered);
+    }
+
+    /// A record in the shape the previous release writes loads with no
+    /// folders, and the first folder noted keeps its decisions and counts.
+    #[test]
+    fn test_a_record_written_before_folders_keeps_its_decisions() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            ledger_path(dir.path(), &key("s1")),
+            r#"{"format_version":1,"briefed":["Adopt RS256"],"last_reported":{"added":1,"available":12}}"#,
+        )
+        .unwrap();
+        assert_eq!(folders(dir.path(), &key("s1")), (vec![], vec![]));
+
+        record_folder(dir.path(), &key("s1"), "infra/terraform", false);
+
+        let ledger = load(dir.path(), &key("s1"));
+        assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
+        assert_eq!(
+            ledger.last_reported,
+            Some(Reported {
+                added: 1,
+                available: 12
+            })
+        );
+        assert_eq!(folders(dir.path(), &key("s1")).1, ["infra/terraform"]);
+    }
+
+    #[test]
+    fn test_a_file_counts_toward_the_folder_it_sits_in() {
+        for (path, folder) in [
+            ("src/billing/invoice.ts", "src/billing"),
+            ("services/auth/oauth/token.ts", "services/auth/oauth"),
+            ("main.rs", "."),
+            ("Makefile", "."),
+            // Near an exclusion, and not one.
+            ("src/admin.ts", "src"),
+            ("src/configure.ts", "src"),
+            ("src/build.rs", "src"),
+            ("src/markdown/parse.rs", "src/markdown"),
+            ("src/lockfile.ts", "src"),
+        ] {
+            assert_eq!(folder_of(path).as_deref(), Some(folder), "{path}");
+        }
+    }
+
+    fn assert_never_counts(paths: &[&str]) {
+        for path in paths {
+            assert_eq!(folder_of(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn test_docs_never_count() {
+        assert_never_counts(&[
+            "README.md",
+            "docs/guide.mdx",
+            "docs/index.rst",
+            "src/billing/notes.txt",
+            "src/CHANGES.MD",
+        ]);
+    }
+
+    #[test]
+    fn test_config_never_counts() {
+        assert_never_counts(&[
+            "package.json",
+            "config/app.yaml",
+            "deploy/values.yml",
+            "pyproject.toml",
+            "tox.ini",
+            ".env",
+            "src/.eslintrc",
+            "apps/web/.prettierrc.js",
+            ".github/workflows/release.sh",
+            ".husky/pre-commit",
+            "vite.config.ts",
+            "apps/web/next.config.mjs",
+        ]);
+    }
+
+    #[test]
+    fn test_lockfiles_never_count() {
+        assert_never_counts(&[
+            "Cargo.lock",
+            "web/yarn.lock",
+            "poetry.lock",
+            "go.sum",
+            "services/api/go.sum",
+            "bun.lockb",
+        ]);
+    }
+
+    #[test]
+    fn test_generated_output_never_counts() {
+        assert_never_counts(&[
+            "node_modules/react/index.js",
+            "packages/ui/dist/index.js",
+            "build/app.js",
+            "target/debug/build/out.rs",
+            "vendor/github.com/pkg/errors/errors.go",
+            "app/__pycache__/models.cpython-312.pyc",
+            ".next/server/page.js",
+            "public/jquery.min.js",
+            "src/schema.generated.ts",
+        ]);
     }
 
     // ── the lock ─────────────────────────────────────────────────────────
