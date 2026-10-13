@@ -141,6 +141,94 @@ impl PathGlob {
             .filter(|seg| !seg.is_empty() && *seg != ".")
             .collect()
     }
+
+    /// Brace-expanded alternatives this glob compiles as.
+    ///
+    /// `{ts,tsx}` is one author-facing glob and two patterns: `glob::Pattern`
+    /// does not expand a brace list, so matching has to. No `{` yields the
+    /// original. An unbalanced `{` yields nothing, the same as a pattern that
+    /// would not compile.
+    pub(crate) fn alternatives(&self) -> Vec<String> {
+        expand_braces(&self.pattern)
+    }
+
+    /// Whether this glob matches `path`, after expanding brace lists.
+    ///
+    /// `Some(true)` if any alternative matches. `Some(false)` if every
+    /// alternative compiled and none matched — the glob has answered no.
+    /// `None` if expansion failed or an alternative is not valid glob-crate
+    /// syntax, so there is no answer to stand on.
+    pub(crate) fn matches_path(&self, path: &str) -> Option<bool> {
+        let alternatives = self.alternatives();
+        if alternatives.is_empty() {
+            return None;
+        }
+        let compiled: Vec<glob::Pattern> = alternatives
+            .iter()
+            .map(|pattern| glob::Pattern::new(pattern).ok())
+            .collect::<Option<Vec<_>>>()?;
+        Some(compiled.iter().any(|pattern| pattern.matches(path)))
+    }
+}
+
+/// Expand the first balanced brace list and recurse, so
+/// `app/{lib,hooks}/*.{ts,tsx}` becomes four glob-crate patterns.
+///
+/// Unbalanced `{` returns nothing: there is no well-formed expansion, and
+/// treating the `{` as a literal would compile and then decline every real
+/// file — the same wrong answer that made prefix-matching necessary.
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    let mut depth = 0i32;
+    let mut close = None;
+    for (at, c) in pattern[open..].char_indices() {
+        let at = open + at;
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(at);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return Vec::new();
+    };
+    let prefix = &pattern[..open];
+    let inside = &pattern[open + '{'.len_utf8()..close];
+    let suffix = &pattern[close + '}'.len_utf8()..];
+    let mut out = Vec::new();
+    for choice in split_brace_choices(inside) {
+        out.extend(expand_braces(&format!("{prefix}{choice}{suffix}")));
+    }
+    out
+}
+
+/// Split a brace list's inside on commas that are not themselves inside a
+/// nested `{…}`.
+fn split_brace_choices(inside: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    for (at, c) in inside.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            ',' if depth == 0 => {
+                out.push(&inside[start..at]);
+                start = at + ','.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&inside[start..]);
+    out
 }
 
 /// Everything one document says about where it applies.
@@ -901,6 +989,54 @@ mod tests {
             pattern: "packages/*/src".to_string(),
         };
         assert_eq!(wild.literal_segments(), vec!["packages"]);
+    }
+
+    fn glob(pattern: &str) -> PathGlob {
+        PathGlob {
+            pattern: pattern.to_string(),
+        }
+    }
+
+    /// `{ts,tsx}` is two glob-crate patterns, not one that compiles as
+    /// literals and then declines every real file.
+    #[test]
+    fn test_brace_lists_expand_into_glob_crate_patterns() {
+        assert_eq!(
+            glob("app/lib/*-screen.{ts,tsx}").alternatives(),
+            vec!["app/lib/*-screen.ts", "app/lib/*-screen.tsx"]
+        );
+        assert_eq!(
+            glob("app/{lib,hooks}/*.{ts,tsx}").alternatives(),
+            vec![
+                "app/lib/*.ts",
+                "app/lib/*.tsx",
+                "app/hooks/*.ts",
+                "app/hooks/*.tsx"
+            ]
+        );
+        assert_eq!(glob("{a,{b,c}}").alternatives(), vec!["a", "b", "c"]);
+        assert_eq!(
+            glob("app/lib/*-screen.ts").alternatives(),
+            vec!["app/lib/*-screen.ts"]
+        );
+        assert!(glob("app/lib/{ts").alternatives().is_empty());
+    }
+
+    /// Matching expands first, so a brace list answers about the files the
+    /// author named, and a sibling it declined stays declined.
+    #[test]
+    fn test_matches_path_expands_a_brace_list_before_compiling() {
+        let screens = glob("app/lib/*-screen.{ts,tsx}");
+        assert_eq!(screens.matches_path("app/lib/stats-screen.ts"), Some(true));
+        assert_eq!(screens.matches_path("app/lib/stats-screen.tsx"), Some(true));
+        assert_eq!(screens.matches_path("app/lib/apiAuth.ts"), Some(false));
+        assert_eq!(
+            glob("app/lib/*-screen.ts").matches_path("app/lib/stats-screen.ts"),
+            Some(true)
+        );
+        assert_eq!(glob("app/lib/{ts").matches_path("app/lib/ts"), None);
+        // `**` must be its own path component; `glob::Pattern` rejects `**a`.
+        assert_eq!(glob("app/**a").matches_path("app/a"), None);
     }
 
     // ── shell tokenizing ─────────────────────────────────────────────────
