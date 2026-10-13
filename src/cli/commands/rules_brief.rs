@@ -1422,7 +1422,10 @@ mod tests {
                 Err(NoBrief::Ungoverned)
             );
 
-            let who = SessionIdentity { session_id: "s1", agent_id: None };
+            let who = SessionIdentity {
+                session_id: "s1",
+                agent_id: None,
+            };
             let file = governed(root.path());
             assert!(brief_for(root.path(), &file, &a, Some(who)).is_ok());
             assert_eq!(
@@ -1481,7 +1484,10 @@ mod tests {
             let mut a = args(bare.path());
             a.rules_dir = Some(not_a_dir);
             let file = bare.path().join("src/a.ts").to_string_lossy().to_string();
-            assert_eq!(brief_for(bare.path(), &file, &a, None), Err(NoBrief::NoRules));
+            assert_eq!(
+                brief_for(bare.path(), &file, &a, None),
+                Err(NoBrief::NoRules)
+            );
         });
     }
 
