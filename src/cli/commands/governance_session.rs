@@ -175,7 +175,8 @@ pub struct GovernanceSession {
     /// `impl-check --claude-hook`'s deny counts, rounds, and clearances.
     pub diff: LoopState,
     /// The commit the current turn started from, which `impl-check
-    /// --claude-hook --turn-start` overwrites at the start of every turn.
+    /// --claude-hook` overwrites on a `UserPromptSubmit` event, at the start
+    /// of every turn.
     /// Optional so a file written before turns were recorded still loads at
     /// this format version.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,7 +186,7 @@ pub struct GovernanceSession {
 /// Where and from which commit a Claude Code turn started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnStart {
-    /// The repository root `head` was read in. A turn recorded in one
+    /// The canonical top level of the checkout `head` was read in. A turn recorded in one
     /// checkout never sets the diff base for another that shares this
     /// session's rules directory.
     pub root: PathBuf,

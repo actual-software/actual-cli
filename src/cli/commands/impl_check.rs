@@ -70,7 +70,7 @@
 //! nothing here to wire up for that to work.
 
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
@@ -548,7 +548,10 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     let mut session = governance_session::load(session_id, &rules_dir);
-    let turn_start = head_commit(&root).map(|head| TurnStart { root, head });
+    let turn_start = head_commit(&root).map(|head| TurnStart {
+        root: checkout_root(&root),
+        head,
+    });
     if session.turn_start != turn_start {
         session.turn_start = turn_start;
         governance_session::store(session_id, &rules_dir, &session);
@@ -564,13 +567,30 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
 /// `git pull --rebase` brought in.
 fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
     let start = session.turn_start.as_ref()?;
-    let usable = start.root == root
+    let usable = start.root == checkout_root(root)
         && is_object_id(&start.head)
         && git_command(root, None)
             .args(["merge-base", "--is-ancestor", &start.head, "HEAD"])
             .output()
             .is_ok_and(|output| output.status.success());
     usable.then(|| start.head.clone())
+}
+
+/// The canonical top level of the checkout `root` sits in, falling back to
+/// `root` itself (canonicalized when possible) outside a repository. The hook
+/// runs from whatever directory the session is in, so the recorded turn and
+/// the check that ends it can see different paths for one checkout: a
+/// subdirectory, a symlink, a relative `--repo`. Both sides compare this.
+fn checkout_root(root: &Path) -> PathBuf {
+    git_command(root, None)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+        .and_then(|top| top.canonicalize().ok())
+        .or_else(|| root.canonicalize().ok())
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// `HEAD`'s full commit id in `root`, or `None` on an unborn branch or
@@ -1647,7 +1667,7 @@ mod tests {
         .to_string();
         let recorded = |head: String| {
             Some(TurnStart {
-                root: repo.path().to_path_buf(),
+                root: checkout_root(repo.path()),
                 head,
             })
         };
@@ -1691,7 +1711,7 @@ mod tests {
         let rules = crate::rules::rules_dir(unborn.path());
         let mut stale = GovernanceSession::default();
         stale.turn_start = Some(TurnStart {
-            root: unborn.path().to_path_buf(),
+            root: checkout_root(unborn.path()),
             head: "a".repeat(40),
         });
         governance_session::store("sess-turn-unborn", &rules, &stale);
@@ -1724,12 +1744,13 @@ mod tests {
     fn test_turn_base_uses_the_recorded_commit_only_while_it_is_behind_head() {
         let repo = git_repo_with_baseline();
         let root = repo.path().to_path_buf();
+        let canonical = checkout_root(&root);
         let start = head_of(repo.path());
         let mut session = GovernanceSession::default();
         assert_eq!(turn_base(&session, &root), None, "nothing recorded");
 
         session.turn_start = Some(TurnStart {
-            root: root.clone(),
+            root: canonical.clone(),
             head: start.clone(),
         });
         assert_eq!(
@@ -1749,6 +1770,14 @@ mod tests {
             "a commit behind HEAD"
         );
 
+        let subdir = repo.path().join("nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(
+            turn_base(&session, &subdir),
+            Some(start.clone()),
+            "the same checkout reached from a subdirectory"
+        );
+
         let elsewhere = tempdir().unwrap();
         assert_eq!(
             turn_base(&session, elsewhere.path()),
@@ -1757,7 +1786,7 @@ mod tests {
         );
 
         session.turn_start = Some(TurnStart {
-            root: root.clone(),
+            root: canonical.clone(),
             head: head_of(repo.path()),
         });
         run_git(repo.path(), &["commit", "-q", "--amend", "-m", "rewritten"]);
@@ -1768,7 +1797,7 @@ mod tests {
         );
 
         session.turn_start = Some(TurnStart {
-            root,
+            root: canonical,
             head: "--output=/tmp/injected".to_string(),
         });
         assert_eq!(turn_base(&session, repo.path()), None, "not an object id");
