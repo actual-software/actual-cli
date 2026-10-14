@@ -14,12 +14,15 @@
 //!   offline, which is the layer that replaces reading filenames by eye.
 //! * [`check`] is the conformance evaluation: it takes the rules `scope`
 //!   selected and asks whether a plan actually obeys them.
+//! * [`diff_split`] cuts a diff too big for one judge prompt into parts that
+//!   `check` judges separately and merges.
 //! * [`prompt_fence`] is a small shared helper `scope::rank` and `check` both
 //!   use to interpolate the developer's plan into a prompt without letting an
 //!   imitated section header close the block early.
 
 pub mod brief;
 pub mod check;
+mod diff_split;
 pub mod discover;
 pub mod parse;
 mod prompt_fence;

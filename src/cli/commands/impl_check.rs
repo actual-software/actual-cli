@@ -1483,4 +1483,82 @@ mod tests {
             session.diff.deny_counts
         );
     }
+
+    /// A diff too big for one prompt, through the real `claude-cli` runner:
+    /// every call's argv stays under Linux's 128 KiB single-argument limit,
+    /// and a conflict found only in the last part still fails the check.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_direct_judges_an_oversized_diff_in_parts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+
+        let marker = "MARKER_LOGS_THE_SIGNING_KEY";
+        let mut diff = String::new();
+        for f in 0..3 {
+            diff.push_str(&format!(
+                "diff --git a/services/auth/oauth/f{f}.rs b/services/auth/oauth/f{f}.rs\n@@ -0,0 +1 @@\n"
+            ));
+            for _ in 0..1_500 {
+                diff.push_str("+    let token = sign_access_token_with_rs256(claims);\n");
+            }
+        }
+        diff.push_str(&format!("+    {marker}\n"));
+        let diff_dir = tempdir().unwrap();
+        let diff_file = diff_dir.path().join("big.diff");
+        std::fs::write(&diff_file, &diff).unwrap();
+
+        let entry = |verdict: &str, span: &str| {
+            serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": false,
+                "structured_output": check_output(serde_json::json!([
+                    {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+                    {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": verdict, "span": span, "reason": "per part"},
+                ])),
+            })
+            .to_string()
+        };
+        let bin = tempdir().unwrap();
+        let log = bin.path().join("argv-bytes.log");
+        let script = bin.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nfor a in \"$@\"; do echo \"${{#a}}\" >> '{log}'; done\ncase \"$*\" in *'+    {marker}'*) printf '%s' '{conflict}' ;; *) printf '%s' '{clean}' ;; esac\n",
+                log = log.display(),
+                conflict = entry("conflicting", marker),
+                clean = entry("conforming", ""),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        let mut args = base_args();
+        args.diff_file = Some(diff_file);
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+
+        let err = exec(&args).unwrap_err();
+
+        assert!(matches!(err, ActualError::ImplNotConforming(_)), "{err:?}");
+        let sizes: Vec<usize> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let prompts: Vec<usize> = sizes.into_iter().filter(|&n| n > 10_000).collect();
+        assert!(prompts.len() >= 2, "{prompts:?}");
+        assert!(
+            prompts
+                .iter()
+                .all(|&n| n <= crate::rules::check::MAX_JUDGE_PROMPT_BYTES),
+            "{prompts:?}"
+        );
+    }
 }

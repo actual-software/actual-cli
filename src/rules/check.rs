@@ -62,6 +62,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ActualError;
+use crate::rules::diff_split::split_diff;
 use crate::rules::prompt_fence::fenced_plan_block;
 use crate::rules::types::RuleLevel;
 use crate::runner::structured::StructuredRunner;
@@ -152,6 +153,19 @@ pub const CHECK_TIMEOUT_SECS: u64 = CHECK_BUDGET.as_secs();
 /// classifying a deliberate rule deviation as `requires_decision`) in under
 /// half that time, at roughly half the cost.
 const JUDGE_EFFORT: &str = "low";
+
+/// The largest prompt [`check`] sends in one judge call, in bytes. Every CLI
+/// runner passes the prompt as one command-line argument. Linux refuses any
+/// single argument over 128 KiB (`MAX_ARG_STRLEN`), and macOS caps the whole
+/// argument list at 1 MiB, which a diff just under `impl-check`'s own read
+/// cap already reaches. Past either, the spawn fails with `E2BIG` before a
+/// model sees anything. A diff whose prompt would be bigger than this is
+/// judged in parts; see [`judge_parts`].
+pub const MAX_JUDGE_PROMPT_BYTES: usize = 120 * 1024;
+
+/// The least diff a part carries, however much of [`MAX_JUDGE_PROMPT_BYTES`]
+/// the rules take, so a long rule list cannot cut a diff into slivers.
+const MIN_DIFF_PART_BYTES: usize = 16 * 1024;
 
 /// How the judge classified a rule against the artifact (a plan or a diff).
 ///
@@ -348,6 +362,19 @@ fn verdict_criteria(kind: ArtifactKind) -> &'static str {
 /// of the verdict criteria — see [`ArtifactKind`] and [`verdict_criteria`].
 /// The schema and the span-quoting contract are identical either way.
 pub fn build_prompt(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) -> String {
+    build_part_prompt(kind, text, rules, None)
+}
+
+/// [`build_prompt`] for one part of a diff [`judge_parts`] cut up. `part` is
+/// `(n, of)`, and the task then tells the judge it sees part `n` of `of`, so
+/// that something a rule requires and another part holds is not judged
+/// missing. `None` builds exactly [`build_prompt`]'s bytes.
+fn build_part_prompt(
+    kind: ArtifactKind,
+    text: &str,
+    rules: &[RuleForJudging],
+    part: Option<(usize, usize)>,
+) -> String {
     let (subject, article, verb) = match kind {
         ArtifactKind::Plan => ("plan", "an implementation plan", "the plan"),
         ArtifactKind::Diff => (
@@ -385,12 +412,22 @@ pub fn build_prompt(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) ->
     }
 
     let criteria = verdict_criteria(kind);
+    let part_note = match part {
+        Some((n, of)) => format!(
+            "This is part {n} of {of} of one diff, too large to judge in one call. It is cut \
+             between files where it can be, and the other parts are judged separately, so do \
+             not judge `conflicting` only because something the rule requires is missing from \
+             this part: another part may hold it.\n"
+        ),
+        None => String::new(),
+    };
     out.push_str(&format!(
         "\n=== task ===\n\
          Return one verdict for every rule above, copying each doc and id exactly. Two \
          rules can share an id across different docs; treat `(doc, id)` together as the \
          rule's identity.\n\
          {criteria}\
+         {part_note}\
          For every rule you judge `conflicting` or `requires_decision`, quote the exact span \
          of {verb}, verbatim, that conflicts. Judge only the rules listed. Do not invent a \
          doc or id and do not omit one.\n\
@@ -535,6 +572,13 @@ pub fn parse_verdicts(
 /// A transport failure, an overrun budget, and an unusable answer all come
 /// back as an error the caller can catch and fail open on — a conformance
 /// check that could not run is never grounds to block a plan.
+///
+/// A diff too big for one prompt is judged in parts ([`judge_parts`]), every
+/// part against all of `rules`, in concurrent calls that each get the whole
+/// [`CHECK_BUDGET`], so the wall-clock cost stays near one call's. The
+/// verdicts are merged per rule ([`merge_part`]). If any part's call fails,
+/// the check fails, the same as a single call failing, because the rules that
+/// part would have judged have no verdict for it.
 pub async fn check<R: StructuredRunner>(
     runner: &R,
     kind: ArtifactKind,
@@ -543,7 +587,76 @@ pub async fn check<R: StructuredRunner>(
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Result<Vec<CheckedRule>, ActualError> {
-    let prompt = build_prompt(kind, text, rules);
+    let parts = judge_parts(kind, text, rules);
+    let of = parts.len();
+    let calls = parts.iter().enumerate().map(|(i, part)| {
+        let prompt = build_part_prompt(kind, part, rules, (of > 1).then_some((i + 1, of)));
+        judge(runner, prompt, rules, model_override, max_budget_usd)
+    });
+    let mut verdicts = Vec::new();
+    for part in futures::future::try_join_all(calls).await? {
+        merge_part(&mut verdicts, part);
+    }
+    Ok(verdicts)
+}
+
+/// What [`check`] judges, one call per entry: `text` whole, unless it is a
+/// diff whose prompt would pass [`MAX_JUDGE_PROMPT_BYTES`], which is cut with
+/// [`split_diff`] into parts that each fit beside the rules and the part
+/// note. A plan is never cut. The judge reads a plan as the whole change and
+/// asks what it omits, so a fragment would read as a plan missing everything
+/// in the other fragments.
+fn judge_parts(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) -> Vec<String> {
+    if kind == ArtifactKind::Plan || build_prompt(kind, text, rules).len() <= MAX_JUDGE_PROMPT_BYTES
+    {
+        return vec![text.to_string()];
+    }
+    let overhead = build_part_prompt(kind, "", rules, Some((usize::MAX, usize::MAX))).len();
+    split_diff(
+        text,
+        MAX_JUDGE_PROMPT_BYTES
+            .saturating_sub(overhead)
+            .max(MIN_DIFF_PART_BYTES),
+    )
+}
+
+/// Fold one part's verdicts into `merged`. Per rule, the most severe verdict
+/// any part returned wins, along with that part's span and reason, so a
+/// conflict found in one part stands whatever the other parts made of the
+/// rule, and `requires_decision` stands over `conforming`.
+fn merge_part(merged: &mut Vec<CheckedRule>, part: Vec<CheckedRule>) {
+    for verdict in part {
+        match merged
+            .iter_mut()
+            .find(|m| m.doc_slug == verdict.doc_slug && m.rule_id == verdict.rule_id)
+        {
+            Some(existing) => {
+                if severity(verdict.verdict) > severity(existing.verdict) {
+                    *existing = verdict;
+                }
+            }
+            None => merged.push(verdict),
+        }
+    }
+}
+
+fn severity(verdict: Verdict) -> u8 {
+    match verdict {
+        Verdict::Conforming => 0,
+        Verdict::RequiresDecision => 1,
+        Verdict::Conflicting => 2,
+    }
+}
+
+/// One judge call: `prompt` against [`CHECK_OUTPUT_SCHEMA`] inside
+/// [`CHECK_BUDGET`], with the answer validated against `rules`.
+async fn judge<R: StructuredRunner>(
+    runner: &R,
+    prompt: String,
+    rules: &[RuleForJudging],
+    model_override: Option<&str>,
+    max_budget_usd: Option<f64>,
+) -> Result<Vec<CheckedRule>, ActualError> {
     let call = runner.run_structured_json(
         &prompt,
         CHECK_OUTPUT_SCHEMA,
@@ -1080,5 +1193,287 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, ActualError::RunnerTimeout { .. }));
+    }
+
+    // ── a diff too big for one prompt ────────────────────────────────────
+
+    const MARKER: &str = "MARKER_LOGS_THE_SIGNING_KEY";
+
+    /// A unified diff of `files` files of about `bytes_each` bytes, the last
+    /// of which carries `marker` on one added line.
+    fn big_diff(files: usize, bytes_each: usize, marker: &str) -> String {
+        let mut out = String::new();
+        for f in 0..files {
+            let path = format!("f{f}.rs");
+            out.push_str(&format!(
+                "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1 @@\n"
+            ));
+            let start = out.len();
+            while out.len() - start < bytes_each {
+                out.push_str("+    let signed = sign_with_rs256(token);\n");
+            }
+            if f + 1 == files {
+                out.push_str(&format!("+    {marker}\n"));
+            }
+        }
+        out
+    }
+
+    fn conforming_verdicts() -> serde_json::Value {
+        verdicts_value(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "ok"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "ok"},
+        ]))
+    }
+
+    /// Records every prompt, and answers the one carrying [`MARKER`] with a
+    /// conflict on R-A-002, or with an unusable answer when `malformed`.
+    struct PartRunner {
+        malformed: bool,
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl StructuredRunner for PartRunner {
+        async fn run_structured_json(
+            &self,
+            prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
+        ) -> Result<serde_json::Value, ActualError> {
+            self.prompts.lock().unwrap().push(prompt.to_string());
+            if !prompt.contains(&format!("+    {MARKER}")) {
+                return Ok(conforming_verdicts());
+            }
+            if self.malformed {
+                return Ok(serde_json::json!({ "nonsense": true }));
+            }
+            Ok(verdicts_value(serde_json::json!([
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "ok"},
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": MARKER, "reason": "R-A-002: the last part logs the key"},
+            ])))
+        }
+    }
+
+    /// Counts how many judge calls are in flight at once.
+    struct ConcurrencyRunner {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StructuredRunner for ConcurrencyRunner {
+        async fn run_structured_json(
+            &self,
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
+        ) -> Result<serde_json::Value, ActualError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            self.in_flight.fetch_sub(1, SeqCst);
+            Ok(conforming_verdicts())
+        }
+    }
+
+    #[test]
+    fn test_build_part_prompt_names_the_part_and_none_is_build_prompt() {
+        let whole = build_prompt(ArtifactKind::Diff, "+x", &rules());
+        assert_eq!(
+            build_part_prompt(ArtifactKind::Diff, "+x", &rules(), None),
+            whole
+        );
+        assert!(!whole.contains("part 1 of"));
+        let part = build_part_prompt(ArtifactKind::Diff, "+x", &rules(), Some((2, 5)));
+        assert!(part.contains("This is part 2 of 5 of one diff"), "{part}");
+    }
+
+    /// A plan is one document and stays whole at any size.
+    #[test]
+    fn test_judge_parts_never_cuts_a_plan() {
+        let plan = "a long plan sentence.\n".repeat(20_000);
+        assert!(plan.len() > MAX_JUDGE_PROMPT_BYTES);
+        assert_eq!(judge_parts(ArtifactKind::Plan, &plan, &rules()), vec![plan]);
+    }
+
+    #[test]
+    fn test_judge_parts_keeps_a_diff_that_fits_whole() {
+        let diff = big_diff(2, 4 * 1024, MARKER);
+        assert_eq!(judge_parts(ArtifactKind::Diff, &diff, &rules()), vec![diff]);
+    }
+
+    /// A diff whose one prompt fills the budget exactly stays whole, though
+    /// the part note would not fit beside it, and one byte more is cut.
+    #[test]
+    fn test_judge_parts_cuts_only_a_diff_whose_one_prompt_would_not_fit() {
+        let mut diff = big_diff(2, 50 * 1024, MARKER);
+        let room = MAX_JUDGE_PROMPT_BYTES - build_prompt(ArtifactKind::Diff, &diff, &rules()).len();
+        diff.push_str(&format!("+{}\n", "x".repeat(room - 2)));
+        assert_eq!(
+            build_prompt(ArtifactKind::Diff, &diff, &rules()).len(),
+            MAX_JUDGE_PROMPT_BYTES
+        );
+
+        assert_eq!(
+            judge_parts(ArtifactKind::Diff, &diff, &rules()),
+            vec![diff.clone()]
+        );
+        diff.push('x');
+        assert!(judge_parts(ArtifactKind::Diff, &diff, &rules()).len() > 1);
+    }
+
+    /// Every part's prompt, part note included, fits the budget, and the
+    /// parts together are the diff, cut between files.
+    #[test]
+    fn test_judge_parts_cuts_a_diff_whose_prompt_would_not_fit() {
+        let diff = big_diff(4, 60 * 1024, MARKER);
+        assert!(build_prompt(ArtifactKind::Diff, &diff, &rules()).len() > MAX_JUDGE_PROMPT_BYTES);
+
+        let parts = judge_parts(ArtifactKind::Diff, &diff, &rules());
+
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts.concat(), diff);
+        for (i, part) in parts.iter().enumerate() {
+            assert!(part.starts_with(&format!("diff --git a/f{i}.rs")), "{i}");
+            let prompt = build_part_prompt(
+                ArtifactKind::Diff,
+                part,
+                &rules(),
+                Some((i + 1, parts.len())),
+            );
+            assert!(prompt.len() <= MAX_JUDGE_PROMPT_BYTES, "{}", prompt.len());
+        }
+    }
+
+    /// Rules that leave almost no room still get parts of the minimum size,
+    /// not slivers.
+    #[test]
+    fn test_judge_parts_keeps_a_minimum_part_size_beside_long_rules() {
+        let long_rules = vec![RuleForJudging::new(
+            "doc",
+            "R-1",
+            RuleLevel::Must,
+            "x".repeat(MAX_JUDGE_PROMPT_BYTES),
+        )];
+        let diff = big_diff(1, 64 * 1024, MARKER);
+
+        let parts = judge_parts(ArtifactKind::Diff, &diff, &long_rules);
+
+        assert!(parts.len() >= 4, "{}", parts.len());
+        assert!(parts.iter().all(|p| p.len() <= MIN_DIFF_PART_BYTES));
+    }
+
+    /// The end-to-end shape: one call per part, and a conflict found only in
+    /// the last part stands in the merged result with that part's span.
+    #[tokio::test]
+    async fn test_check_judges_every_part_and_keeps_a_conflict_from_one() {
+        let runner = PartRunner {
+            malformed: false,
+            prompts: std::sync::Mutex::new(Vec::new()),
+        };
+        let diff = big_diff(4, 60 * 1024, MARKER);
+
+        let verdicts = check(&runner, ArtifactKind::Diff, &diff, &rules(), None, None)
+            .await
+            .unwrap();
+
+        let prompts = runner.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 4);
+        assert!(prompts.iter().all(|p| p.len() <= MAX_JUDGE_PROMPT_BYTES));
+        assert!(prompts[3].contains("This is part 4 of 4 of one diff"));
+        assert_eq!(verdicts.len(), 2);
+        let r1 = verdicts.iter().find(|v| v.rule_id == "R-A-001").unwrap();
+        let r2 = verdicts.iter().find(|v| v.rule_id == "R-A-002").unwrap();
+        assert_eq!(r1.verdict, Verdict::Conforming);
+        assert_eq!(r2.verdict, Verdict::Conflicting);
+        assert_eq!(r2.span, MARKER);
+    }
+
+    /// One part's unusable answer fails the whole check, as one call's would.
+    #[tokio::test]
+    async fn test_check_fails_when_any_part_fails() {
+        let runner = PartRunner {
+            malformed: true,
+            prompts: std::sync::Mutex::new(Vec::new()),
+        };
+        let diff = big_diff(4, 60 * 1024, MARKER);
+
+        let err = check(&runner, ArtifactKind::Diff, &diff, &rules(), None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ActualError::RuleCheckInvalid(_)), "{err:?}");
+    }
+
+    /// The parts are judged at the same time, so a cut diff costs about one
+    /// call's wall-clock time rather than one per part.
+    #[tokio::test(start_paused = true)]
+    async fn test_check_judges_the_parts_concurrently() {
+        let runner = ConcurrencyRunner {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let diff = big_diff(3, 60 * 1024, MARKER);
+
+        check(&runner, ArtifactKind::Diff, &diff, &rules(), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(runner.peak.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_merge_part_keeps_the_most_severe_verdict_per_rule() {
+        let verdict = |rule: &str, verdict: Verdict, span: &str| CheckedRule {
+            doc_slug: "doc".to_string(),
+            rule_id: rule.to_string(),
+            level: RuleLevel::Must,
+            statement: "s".to_string(),
+            verdict,
+            span: span.to_string(),
+            reason: span.to_string(),
+        };
+        let mut merged = Vec::new();
+        merge_part(
+            &mut merged,
+            vec![
+                verdict("R-1", Verdict::Conforming, ""),
+                verdict("R-2", Verdict::RequiresDecision, "first"),
+                verdict("R-3", Verdict::Conflicting, "first"),
+            ],
+        );
+        merge_part(
+            &mut merged,
+            vec![
+                verdict("R-1", Verdict::RequiresDecision, "second"),
+                verdict("R-2", Verdict::Conflicting, "second"),
+                verdict("R-3", Verdict::Conflicting, "second"),
+            ],
+        );
+        merge_part(
+            &mut merged,
+            vec![
+                verdict("R-1", Verdict::Conforming, ""),
+                verdict("R-2", Verdict::Conforming, ""),
+                verdict("R-3", Verdict::Conforming, ""),
+            ],
+        );
+
+        let got: Vec<(&str, Verdict, &str)> = merged
+            .iter()
+            .map(|v| (v.rule_id.as_str(), v.verdict, v.span.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("R-1", Verdict::RequiresDecision, "second"),
+                ("R-2", Verdict::Conflicting, "second"),
+                ("R-3", Verdict::Conflicting, "first"),
+            ]
+        );
     }
 }
