@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
+### Added
+- `rules brief`: the hook's view of what governs a file. Decisions are briefed once per session and reset on compaction (including a compacted subagent's own memory), the brief's total size is capped with a disclosed note of anything left out, and a path search falls back to text matching (two shared words minimum) only when the path finds nothing. It prints a stderr line saying why a brief stayed quiet
+- `rules select` groups rule documents by decision and caps the selection in decisions rather than rules
+- Rules score floor: a selection can now answer nothing. Settable persistently with `config` (`rules_min_score`), per repository, with validated inputs and the effective floor reported
+- Session summary hook that reports the ADR count and keeps a session-wide record of the decisions briefed
+
+### Changed
+- `impl-check`'s Stop check now sees work committed during the turn; the turn start is recorded from the hook envelope's event and compared by checkout root rather than the working directory, and `--turn-start` stays silent when it cannot read its payload
+- Claude subprocesses spawned by the CLI are marked with `ACTUAL_CLI_SUBPROCESS=1`
+- README leads with the Actual.ai Skill
+
+### Fixed
+- `rules select` preserves colons in decision titles and accepts a blank plan alongside `--file`
+- Brief hook: resolves symlinks and dot segments in paths, keeps brace lists whole and expands them before a glob answers, no longer splits a spaced path in two, and only answers documented event and tool pairs
+
 ## [0.6.2] - 2026-10-01
 
 ### Fixed
