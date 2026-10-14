@@ -1048,22 +1048,23 @@ fn test_impl_check_claude_hook_reads_a_valid_envelope_from_stdin() {
         .success();
 }
 
-/// The turn marker end to end, through the binary: `--turn-start` prints
-/// nothing (a `UserPromptSubmit` hook's stdout lands in the prompt), and the
+/// The turn marker end to end, through the binary: a `UserPromptSubmit`
+/// envelope prints nothing (that hook's stdout lands in the prompt), and the
 /// check that ends the turn still finds the work after it is all committed.
 /// A session that never recorded a turn start sees the same clean tree as
 /// nothing to check.
 #[cfg(unix)]
 #[test]
-fn test_impl_check_claude_hook_turn_start_lets_the_stop_check_see_committed_work() {
+fn test_impl_check_claude_hook_user_prompt_submit_lets_the_stop_check_see_committed_work() {
     let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
-    let marked = r#"{"session_id":"sess-impl-cli-turn-1","hook_event_name":"UserPromptSubmit","prompt":"sign the tokens"}"#;
-    let unmarked = r#"{"session_id":"sess-impl-cli-turn-2"}"#;
+    let prompt = r#"{"session_id":"sess-impl-cli-turn-1","hook_event_name":"UserPromptSubmit","prompt":"sign the tokens"}"#;
+    let stop = r#"{"session_id":"sess-impl-cli-turn-1","hook_event_name":"Stop"}"#;
+    let unmarked = r#"{"session_id":"sess-impl-cli-turn-2","hook_event_name":"Stop"}"#;
 
     fixture
         .cmd()
-        .args(["--claude-hook", "--turn-start"])
-        .write_stdin(marked)
+        .arg("--claude-hook")
+        .write_stdin(prompt)
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
@@ -1077,7 +1078,7 @@ fn test_impl_check_claude_hook_turn_start_lets_the_stop_check_see_committed_work
     fixture
         .cmd()
         .arg("--claude-hook")
-        .write_stdin(marked)
+        .write_stdin(stop)
         .assert()
         .success()
         .stdout(predicate::str::contains("no diff to check").not());
@@ -1093,15 +1094,15 @@ fn test_impl_check_claude_hook_turn_start_lets_the_stop_check_see_committed_work
 
     fixture
         .cmd()
-        .args(["--claude-hook", "--turn-start"])
-        .write_stdin(marked)
+        .arg("--claude-hook")
+        .write_stdin(prompt)
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
     fixture
         .cmd()
         .arg("--claude-hook")
-        .write_stdin(marked)
+        .write_stdin(stop)
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -1123,23 +1124,6 @@ fn test_impl_check_claude_hook_fails_open_on_non_utf8_stdin() {
         .assert()
         .success()
         .stdout(predicate::str::contains("could not read the hook payload"));
-}
-
-/// The same unreadable payload under `--turn-start` prints nothing. Its
-/// `UserPromptSubmit` envelope carries the prompt, so a large paste reaches
-/// this branch.
-#[cfg(unix)]
-#[test]
-fn test_impl_check_claude_hook_turn_start_is_silent_on_unreadable_stdin() {
-    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
-
-    fixture
-        .cmd()
-        .args(["--claude-hook", "--turn-start"])
-        .write_stdin(vec![0xffu8, 0xfe, 0x00, 0x41])
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty());
 }
 
 /// An oversized envelope is refused rather than buffered in full, same as

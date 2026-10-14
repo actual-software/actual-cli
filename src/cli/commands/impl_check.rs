@@ -30,9 +30,10 @@
 //! **A turn's commits are part of the hook's diff.** Against `HEAD`, work the
 //! agent committed during the turn is already in `HEAD`, so a turn that
 //! commits (or commits and pushes) everything it wrote ends with an empty
-//! diff and is never checked. `--turn-start`, run from a `UserPromptSubmit`
-//! hook, records `HEAD` in the session at the start of each turn, and the
-//! check that ends the turn diffs against that commit instead, as long as it
+//! diff and is never checked. `--claude-hook` run from a `UserPromptSubmit`
+//! hook (the envelope's `hook_event_name`) checks nothing and records `HEAD`
+//! in the session at the start of each turn, and the check that ends the
+//! turn diffs against that commit instead, as long as it
 //! is still an ancestor of `HEAD` — see [`turn_base`] for what falls back to
 //! `HEAD` and why.
 //!
@@ -412,8 +413,6 @@ fn git_ok(root: &Path, index: Option<&Path>, args: &[&str], what: &str) -> Resul
 fn exec_hook(args: &ImplCheckArgs) {
     let raw = match capped_read(std::io::stdin(), "the hook payload") {
         Ok(text) => text,
-        // `--turn-start` prints nothing on any path; see `record_turn_start`.
-        Err(_) if args.turn_start => return,
         Err(_) => {
             emit(plan_check_hook::render_notice(
                 "impl-check could not read the hook payload on stdin",
@@ -436,10 +435,6 @@ fn exec_hook(args: &ImplCheckArgs) {
 /// real violation, a deny) rather than propagating an error, so this
 /// function never reaches an ordinary nonzero exit on its own.
 fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
-    if args.turn_start {
-        record_turn_start(args, raw);
-        return;
-    }
     let envelope: HookEnvelope = match serde_json::from_str(raw) {
         Ok(envelope) => envelope,
         Err(_) => {
@@ -449,6 +444,10 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
             return;
         }
     };
+    if envelope.is_turn_start() {
+        record_turn_start(args, &envelope);
+        return;
+    }
 
     let root = repo_root(args.repo.as_ref());
     let rules_dir = args
@@ -532,18 +531,15 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     );
 }
 
-/// `--turn-start`: record `HEAD` as the commit this turn starts from. Emits
-/// nothing on any path, because a `UserPromptSubmit` hook's stdout is added
-/// to the prompt. When no commit can be named (an unborn branch, or not a
-/// repository), the record is cleared and the next check diffs against
-/// `HEAD`. A payload it cannot parse leaves the previous turn's record in
-/// place, so the next check re-reads that turn's commits too rather than
-/// skipping this one's.
-fn record_turn_start(args: &ImplCheckArgs, raw: &str) {
-    let Ok(HookEnvelope {
-        session_id: Some(session_id),
-    }) = serde_json::from_str(raw)
-    else {
+/// A `UserPromptSubmit` envelope: record `HEAD` as the commit this turn
+/// starts from. Emits nothing on any path, because a `UserPromptSubmit`
+/// hook's stdout is added to the prompt. When no commit can be named (an
+/// unborn branch, or not a repository), the record is cleared and the next
+/// check diffs against `HEAD`. An envelope without a session id leaves the
+/// previous turn's record in place, so the next check re-reads that turn's
+/// commits too rather than skipping this one's.
+fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
+    let Some(session_id) = envelope.session_id.as_deref() else {
         return;
     };
     let root = repo_root(args.repo.as_ref());
@@ -551,11 +547,11 @@ fn record_turn_start(args: &ImplCheckArgs, raw: &str) {
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
-    let mut session = governance_session::load(&session_id, &rules_dir);
+    let mut session = governance_session::load(session_id, &rules_dir);
     let turn_start = head_commit(&root).map(|head| TurnStart { root, head });
     if session.turn_start != turn_start {
         session.turn_start = turn_start;
-        governance_session::store(&session_id, &rules_dir, &session);
+        governance_session::store(session_id, &rules_dir, &session);
     }
 }
 
@@ -626,7 +622,6 @@ mod tests {
             repo: None,
             rules_dir: None,
             claude_hook: false,
-            turn_start: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -1574,7 +1569,7 @@ mod tests {
         );
     }
 
-    // ── --turn-start and the turn's diff base ───────────────────────────
+    // ── The turn marker and the turn's diff base ───────────────────────────
 
     fn head_of(repo: &StdPath) -> String {
         git_stdout(repo, &["rev-parse", "HEAD"]).trim().to_string()
@@ -1583,7 +1578,6 @@ mod tests {
     fn turn_start_args(repo: &StdPath) -> ImplCheckArgs {
         let mut args = base_args();
         args.claude_hook = true;
-        args.turn_start = true;
         args.repo = Some(repo.to_path_buf());
         args
     }
@@ -1702,7 +1696,7 @@ mod tests {
         });
         governance_session::store("sess-turn-unborn", &rules, &stale);
 
-        let raw = serde_json::json!({"session_id": "sess-turn-unborn"}).to_string();
+        let raw = serde_json::json!({"session_id": "sess-turn-unborn", "hook_event_name": "UserPromptSubmit"}).to_string();
         exec_hook_with(&turn_start_args(unborn.path()), &raw);
 
         assert_eq!(
@@ -1711,8 +1705,8 @@ mod tests {
         );
     }
 
-    /// No session id means nothing to key a record on, and a payload that is
-    /// not JSON names none either: both are ignored, and nothing is written.
+    /// No session id means nothing to key a record on: it is ignored, and
+    /// nothing is written.
     #[test]
     fn test_record_turn_start_ignores_a_payload_without_a_session_id() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1720,8 +1714,8 @@ mod tests {
         let _guards = isolated_config(&home);
         let repo = git_repo_with_baseline();
 
-        exec_hook_with(&turn_start_args(repo.path()), "{}");
-        exec_hook_with(&turn_start_args(repo.path()), "not json");
+        let no_id = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        exec_hook_with(&turn_start_args(repo.path()), no_id);
 
         assert!(!home.path().join("plan-check-sessions").exists());
     }
@@ -1796,9 +1790,15 @@ mod tests {
         run_git(repo.path(), &["add", "."]);
         run_git(repo.path(), &["commit", "-q", "-m", "rules"]);
 
-        let marked = serde_json::json!({"session_id": "sess-turn-committed"}).to_string();
-        let unmarked = serde_json::json!({"session_id": "sess-turn-unmarked"}).to_string();
-        exec_hook_with(&turn_start_args(repo.path()), &marked);
+        let prompt = |id: &str| {
+            serde_json::json!({"session_id": id, "hook_event_name": "UserPromptSubmit"}).to_string()
+        };
+        let stop =
+            |id: &str| serde_json::json!({"session_id": id, "hook_event_name": "Stop"}).to_string();
+        exec_hook_with(
+            &turn_start_args(repo.path()),
+            &prompt("sess-turn-committed"),
+        );
 
         std::fs::write(
             repo.path().join("oauth.rs"),
@@ -1820,8 +1820,8 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
-        exec_hook_with(&args, &marked);
-        exec_hook_with(&args, &unmarked);
+        exec_hook_with(&args, &stop("sess-turn-committed"));
+        exec_hook_with(&args, &stop("sess-turn-unmarked"));
 
         assert_eq!(
             governance_session::load("sess-turn-committed", &rules)
@@ -1848,12 +1848,14 @@ mod tests {
         let _guards = isolated_config(&home);
         let repo = git_repo_with_baseline();
         let rules = crate::rules::rules_dir(repo.path());
-        let raw = serde_json::json!({"session_id": "sess-turn-clean"}).to_string();
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        let prompt = serde_json::json!({"session_id": "sess-turn-clean", "hook_event_name": "UserPromptSubmit"}).to_string();
+        let stop = serde_json::json!({"session_id": "sess-turn-clean", "hook_event_name": "Stop"})
+            .to_string();
+        exec_hook_with(&turn_start_args(repo.path()), &prompt);
 
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, &stop);
 
         let session = governance_session::load("sess-turn-clean", &rules);
         assert!(session.turn_start.is_some());

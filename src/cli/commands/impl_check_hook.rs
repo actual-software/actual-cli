@@ -7,8 +7,8 @@
 //! untracked non-ignored files, against the commit the turn started from or
 //! `HEAD`; see `impl_check::working_tree_diff_from`), never from the envelope
 //! itself, so this envelope only needs to carry enough to key the
-//! revision-loop session. `--turn-start` reads a `UserPromptSubmit` envelope
-//! through the same struct, for the same one field.
+//! revision-loop session. A `UserPromptSubmit` envelope is read through the
+//! same struct and, instead of a check, records the turn's starting commit.
 //! Deliberately its own, smaller struct rather than reusing
 //! `plan_check_hook::HookEnvelope`, which is coupled to `ToolInput` and other
 //! plan-specific fields this command has no use for.
@@ -29,6 +29,16 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct HookEnvelope {
     pub session_id: Option<String>,
+    /// Which hook event delivered the envelope. `UserPromptSubmit` marks the
+    /// start of a turn; anything else, or nothing, runs the check.
+    pub hook_event_name: Option<String>,
+}
+
+impl HookEnvelope {
+    /// Whether this envelope came from a `UserPromptSubmit` hook.
+    pub fn is_turn_start(&self) -> bool {
+        self.hook_event_name.as_deref() == Some("UserPromptSubmit")
+    }
 }
 
 #[cfg(test)]
@@ -39,6 +49,15 @@ mod tests {
     fn test_envelope_reads_session_id() {
         let env: HookEnvelope = serde_json::from_str(r#"{"session_id":"abc-123"}"#).unwrap();
         assert_eq!(env.session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn test_envelope_is_turn_start_only_for_user_prompt_submit() {
+        let parse = |json: &str| serde_json::from_str::<HookEnvelope>(json).unwrap();
+        assert!(parse(r#"{"hook_event_name":"UserPromptSubmit"}"#).is_turn_start());
+        assert!(!parse(r#"{"hook_event_name":"Stop"}"#).is_turn_start());
+        assert!(!parse(r#"{"hook_event_name":"PreToolUse"}"#).is_turn_start());
+        assert!(!parse("{}").is_turn_start());
     }
 
     #[test]
