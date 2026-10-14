@@ -1247,7 +1247,8 @@ pub struct ImplCheckArgs {
     /// diff. Mainly for scripting and testing. Ignored under `--claude-hook`,
     /// which always resolves the diff from the working tree (tracked changes
     /// plus untracked, non-ignored files, against the commit the turn started
-    /// from when `--turn-start` recorded one, otherwise against `HEAD`).
+    /// from when a `UserPromptSubmit` hook recorded one, otherwise against
+    /// `HEAD`).
     #[arg(long, value_name = "PATH", conflicts_with = "claude_hook")]
     pub diff_file: Option<std::path::PathBuf>,
 
@@ -1266,20 +1267,17 @@ pub struct ImplCheckArgs {
     /// Parse a Claude Code `PreToolUse` hook envelope from stdin and emit the
     /// hook's JSON contract on stdout instead of a panel. The diff is always
     /// resolved from the working tree in this mode (tracked changes plus
-    /// untracked, non-ignored files, against the commit `--turn-start`
-    /// recorded for this session when it is still an ancestor of `HEAD`,
-    /// otherwise against `HEAD`); every failure degrades to fail-open rather
-    /// than an error exit, per that contract.
+    /// untracked, non-ignored files, against the commit recorded for this
+    /// session at the start of the turn when it is still an ancestor of
+    /// `HEAD`, otherwise against `HEAD`); every failure degrades to fail-open
+    /// rather than an error exit, per that contract.
+    ///
+    /// An envelope whose `hook_event_name` is `UserPromptSubmit` checks
+    /// nothing and prints nothing: it records `HEAD` as the commit the turn
+    /// starts from, keyed on `session_id`, so the check that ends the turn
+    /// also sees work the agent committed, or committed and pushed, during it.
     #[arg(long)]
     pub claude_hook: bool,
-
-    /// Record `HEAD` as the commit this Claude Code turn starts from, keyed on
-    /// the envelope's `session_id`, and exit without checking anything. A
-    /// `UserPromptSubmit` hook runs this at the start of every turn, so the
-    /// `--claude-hook` check that ends the turn also sees work the agent
-    /// committed, or committed and pushed, during it.
-    #[arg(long, requires = "claude_hook")]
-    pub turn_start: bool,
 
     /// Maximum number of rule documents to judge the diff against.
     #[arg(long, default_value_t = 20)]
@@ -2871,24 +2869,6 @@ mod parse_tests {
             args.rules_dir.as_deref(),
             Some(std::path::Path::new("/repo/.actual/rules"))
         );
-    }
-
-    #[test]
-    fn test_impl_check_turn_start_parses_under_claude_hook() {
-        let args = impl_check_args_from(&["actual", "impl-check", "--claude-hook", "--turn-start"])
-            .expect("expected an impl-check command");
-        assert!(args.claude_hook);
-        assert!(args.turn_start);
-        let defaults = impl_check_args_from(&["actual", "impl-check", "--claude-hook"])
-            .expect("expected an impl-check command");
-        assert!(!defaults.turn_start);
-    }
-
-    /// The turn marker reads a hook envelope, so it means nothing to a
-    /// direct-mode call.
-    #[test]
-    fn test_impl_check_turn_start_requires_claude_hook() {
-        assert!(Cli::try_parse_from(["actual", "impl-check", "--turn-start"]).is_err());
     }
 
     /// `--diff-file` and `--claude-hook` name mutually exclusive diff
