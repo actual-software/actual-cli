@@ -209,6 +209,11 @@ impl IndexedDocument {
         path.iter().zip(root.iter()).all(|(a, b)| a == b)
     }
 
+    /// What this document is grouped under; see [`decision_key`].
+    pub fn decision_key(&self) -> String {
+        decision_key(self.adr_id.as_deref(), self.adr.as_deref(), &self.slug)
+    }
+
     fn root_admits_all(&self) -> bool {
         self.root.is_empty() || self.root == "."
     }
@@ -348,6 +353,10 @@ pub struct Match {
     pub title: Option<String>,
     /// The decision this document belongs to, when its title names one.
     pub adr: Option<String>,
+    /// The stable decision id from a v2 header. Absent for a v1 document, and
+    /// then omitted from the JSON form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adr_id: Option<String>,
     pub score: f64,
     pub contributions: Vec<FieldContribution>,
     /// Document globs that matched a path the query named, with the number of
@@ -358,9 +367,14 @@ pub struct Match {
 /// One decision a query matched, and the documents that carry it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdrGroup {
-    /// What documents were grouped on: the decision name, or the slug of a
-    /// document whose title names none.
+    /// What documents were grouped on: the v2 header's `adr_id` when the
+    /// documents carry one, else the decision name from the title, else the
+    /// slug of a document whose title names none.
     pub key: String,
+    /// The decision id, when `key` is one. Absent for a v1 group, and then
+    /// omitted from the JSON form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adr_id: Option<String>,
     /// The decision's name, absent for a document that stands alone.
     pub title: Option<String>,
     /// The best score among this group's documents, which is what it ranks at.
@@ -643,7 +657,17 @@ impl ScopeIndex {
         self.documents
             .iter()
             .filter(|doc| doc.obligations > 0)
-            .map(|doc| decision_key(doc.adr.as_deref(), &doc.slug))
+            .map(IndexedDocument::decision_key)
+            .collect()
+    }
+
+    /// The decision id for each briefable decision that has one: the v2
+    /// decisions among [`Self::decision_keys`], keyed the same way.
+    pub fn decision_adr_ids(&self) -> BTreeMap<String, String> {
+        self.documents
+            .iter()
+            .filter(|doc| doc.obligations > 0)
+            .filter_map(|doc| Some((doc.decision_key(), doc.adr_id.clone()?)))
             .collect()
     }
 
@@ -727,6 +751,7 @@ impl ScopeIndex {
             relative_path: doc.relative_path.clone(),
             title: doc.title.clone(),
             adr: doc.adr.clone(),
+            adr_id: doc.adr_id.clone(),
             score,
             contributions,
             matched_globs,
@@ -743,11 +768,12 @@ impl ScopeIndex {
 fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
     let mut groups: Vec<AdrGroup> = Vec::new();
     for hit in matches {
-        let key = decision_key(hit.adr.as_deref(), &hit.slug);
+        let key = decision_key(hit.adr_id.as_deref(), hit.adr.as_deref(), &hit.slug);
         match groups.iter_mut().find(|group| group.key == key) {
             Some(group) => group.documents.push(hit),
             None => groups.push(AdrGroup {
                 key,
+                adr_id: hit.adr_id.clone(),
                 // The first hit of a group is its best, because `matches` is
                 // already in rank order.
                 score: hit.score,
@@ -760,13 +786,13 @@ fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
     groups
 }
 
-/// What a document is grouped under: the decision its title names, or its own
-/// slug when it names none, since pooling every unnamed document under one
+/// What a document is grouped under: the stable `adr_id` its v2 header carries,
+/// else the decision its title names, else its own slug when it names none, since pooling every unnamed document under one
 /// heading would present unrelated rules as one subject. Grouping and
 /// [`ScopeIndex::decision_keys`] both key on this, so the decisions briefed
 /// and the decisions counted cannot drift apart.
-fn decision_key(adr: Option<&str>, slug: &str) -> String {
-    adr.unwrap_or(slug).to_string()
+fn decision_key(adr_id: Option<&str>, adr: Option<&str>, slug: &str) -> String {
+    adr_id.or(adr).unwrap_or(slug).to_string()
 }
 
 /// First tie-break: how many documents declare the rarest glob that reached
@@ -997,7 +1023,11 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
             .count(),
         scope: doc.scope.clone(),
         globs: extracted.globs.into_iter().map(|g| g.pattern).collect(),
-        adr_id: doc.meta.as_ref().and_then(|m| m.adr_id.clone()),
+        adr_id: doc
+            .meta
+            .as_ref()
+            .and_then(|m| m.adr_id.clone())
+            .filter(|id| !id.trim().is_empty()),
         // The root is the frame header paths are written against. A header
         // that declares none leaves its globs derived from Verify, which are
         // repository-relative, so enforcing the root would shut the document
@@ -1784,6 +1814,7 @@ mod tests {
             relative_path: format!(".actual/rules/{slug}.md"),
             title: Some(format!("{adr}: aspect")),
             adr: Some(adr.to_string()),
+            adr_id: None,
             score,
             contributions: Vec::new(),
             matched_globs: Vec::new(),
@@ -2158,6 +2189,7 @@ mod tests {
             relative_path: String::new(),
             title: None,
             adr: None,
+            adr_id: None,
             score: 1.0,
             contributions: Vec::new(),
             matched_globs: vec![GlobMatch {
@@ -2526,5 +2558,96 @@ mod tests {
         let index = index_of(vec![v2_doc("web-rules", "packages/web", &["src/**"])]);
         assert_eq!(slugs_for(&index, "packages"), vec!["web-rules"]);
         assert_eq!(slugs_for(&index, "packages/web"), vec!["web-rules"]);
+    }
+
+    // ── adr_id as the decision key ───────────────────────────────────────
+
+    /// Helper: a v2 document with a title, carrying `adr_id`.
+    fn id_doc(slug: &str, adr_id: &str, title: &str) -> RuleDocument {
+        let text = format!(
+            "---\nversion: 2\nname: {slug}\nmetadata:\n  actual:\n    adr_id: {adr_id}\n  scope:\n    root: .\n---\n\n# {title}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
+        );
+        parse_rule_document(
+            &PathBuf::from(format!("/repo/.actual/rules/{slug}.md")),
+            &text,
+        )
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn test_documents_sharing_an_adr_id_are_one_decision_whatever_their_titles() {
+        let index = index_of(vec![
+            id_doc("one", "adr-1", "Sign Tokens: Algorithm"),
+            id_doc("two", "adr-1", "Rotate Keys: Cadence"),
+        ]);
+        assert_eq!(index.decision_count(), 1);
+        assert_eq!(
+            index.decision_keys().into_iter().collect::<Vec<_>>(),
+            vec!["adr-1"]
+        );
+        assert_eq!(
+            index.decision_adr_ids().get("adr-1").map(String::as_str),
+            Some("adr-1")
+        );
+    }
+
+    #[test]
+    fn test_documents_sharing_a_title_prefix_but_not_an_adr_id_are_two_decisions() {
+        let index = index_of(vec![
+            id_doc("one", "adr-1", "Sign Tokens: Algorithm"),
+            id_doc("two", "adr-2", "Sign Tokens: Expiry"),
+        ]);
+        assert_eq!(index.decision_count(), 2);
+    }
+
+    #[test]
+    fn test_search_adrs_groups_on_the_adr_id_and_reports_it() {
+        let index = index_of(vec![
+            id_doc("one", "adr-1", "Sign Tokens: Algorithm"),
+            id_doc("two", "adr-1", "Sign Tokens: Expiry"),
+            // Without a document lacking the query's words they would be in
+            // every document, and so worth nothing.
+            id_doc("three", "adr-3", "Pin Providers: Versions"),
+        ]);
+        let groups = index.search_adrs(&Query::new("sign tokens"), 5);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].key, "adr-1");
+        assert_eq!(groups[0].adr_id.as_deref(), Some("adr-1"));
+        assert_eq!(groups[0].title.as_deref(), Some("Sign Tokens"));
+        assert_eq!(groups[0].documents.len(), 2);
+    }
+
+    #[test]
+    fn test_the_decision_key_survives_renaming_a_file() {
+        let before = index_of(vec![id_doc("old-name", "adr-1", "Sign Tokens: Algorithm")]);
+        let after = index_of(vec![id_doc("new-name", "adr-1", "Sign Tokens: Algorithm")]);
+        assert_eq!(before.decision_keys(), after.decision_keys());
+    }
+
+    #[test]
+    fn test_a_v1_group_has_no_adr_id_and_keeps_its_json_shape() {
+        let index = index_of(vec![doc(
+            "old",
+            "Sign Tokens: Algorithm",
+            "Scope.",
+            "grep -r x lib/",
+        )]);
+        let groups = index.search_adrs(&Query::new("sign tokens"), 5);
+        assert_eq!(groups[0].key, "Sign Tokens");
+        assert!(groups[0].adr_id.is_none());
+        let json = serde_json::to_value(&groups[0]).unwrap();
+        assert!(json.get("adr_id").is_none());
+        assert!(json["documents"][0].get("adr_id").is_none());
+        assert!(index.decision_adr_ids().is_empty());
+    }
+
+    #[test]
+    fn test_a_blank_adr_id_falls_back_to_the_title_prefix() {
+        let index = index_of(vec![id_doc("one", "\"  \"", "Sign Tokens: Algorithm")]);
+        assert!(index.documents[0].adr_id.is_none());
+        assert_eq!(
+            index.decision_keys().into_iter().collect::<Vec<_>>(),
+            vec!["Sign Tokens"]
+        );
     }
 }
