@@ -41,7 +41,7 @@ use sha2::{Digest, Sha256};
 
 /// Bumped whenever [`BriefSession`]'s on-disk shape changes incompatibly. A
 /// mismatch reads as an empty session.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Subdirectory of the config directory holding brief state.
 const SESSIONS_DIR_NAME: &str = "brief-sessions";
@@ -261,6 +261,20 @@ mod tests {
             r#"{"briefed":["Adopt RS256"]}"#,
         )
         .unwrap();
+        assert!(!load(dir.path(), &k).has_briefed("Adopt RS256"));
+    }
+
+    #[test]
+    fn test_a_version_1_state_file_reads_as_empty_after_the_key_change() {
+        let dir = tempdir().unwrap();
+        let rules = Path::new("/repo/.actual/rules");
+        let k = key("s1", None, rules);
+        std::fs::write(
+            session_path(dir.path(), &k),
+            r#"{"format_version":1,"briefed":["Adopt RS256"]}"#,
+        )
+        .unwrap();
+        assert_eq!(FORMAT_VERSION, 2);
         assert!(!load(dir.path(), &k).has_briefed("Adopt RS256"));
     }
 
