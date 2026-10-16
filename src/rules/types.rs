@@ -213,6 +213,25 @@ pub struct AdrMeta {
     pub languages: Vec<String>,
 }
 
+impl AdrMeta {
+    /// Declared `paths` that include files: everything not `!`-prefixed.
+    pub fn include_paths(&self) -> Vec<&str> {
+        self.paths
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !p.starts_with('!'))
+            .collect()
+    }
+
+    /// Declared `paths` that exclude files, with the `!` removed.
+    pub fn exclude_paths(&self) -> Vec<&str> {
+        self.paths
+            .iter()
+            .filter_map(|p| p.strip_prefix('!'))
+            .collect()
+    }
+}
+
 impl RuleDocument {
     /// An empty document attributed to `path`.
     pub fn empty(path: &Path) -> Self {
@@ -377,6 +396,16 @@ mod tests {
             });
         }
         doc
+    }
+
+    #[test]
+    fn test_adr_meta_splits_includes_from_excludes() {
+        let meta = AdrMeta {
+            paths: vec!["src/**".into(), "!src/**/*.test.ts".into(), "lib/**".into()],
+            ..AdrMeta::default()
+        };
+        assert_eq!(meta.include_paths(), vec!["src/**", "lib/**"]);
+        assert_eq!(meta.exclude_paths(), vec!["src/**/*.test.ts"]);
     }
 
     // ── RuleLevel ────────────────────────────────────────────────────────
