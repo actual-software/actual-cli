@@ -175,6 +175,29 @@ pub struct RuleDocument {
     /// Non-fatal problems: a dropped bullet, an unrecognized level keyword.
     /// The document is still usable.
     pub warnings: Vec<RuleIssue>,
+    /// Header v2 YAML frontmatter, when the file has a well-formed one. Absent
+    /// for v1 files, and omitted from the JSON form then, so v1 output is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AdrMeta>,
+}
+
+/// Header v2 frontmatter. `version`, `adr_id`, `status`, `candidate_group_id`
+/// and `evidence_source` come from `metadata.actual.*`; `root`, `paths` and
+/// `languages` from `metadata.scope.*`. `name` and `description` are top level.
+/// Every field is optional.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdrMeta {
+    pub version: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub adr_id: Option<String>,
+    pub status: Option<String>,
+    pub candidate_group_id: Option<String>,
+    pub evidence_source: Option<String>,
+    pub root: Option<String>,
+    pub paths: Vec<String>,
+    pub languages: Vec<String>,
 }
 
 impl RuleDocument {
@@ -189,6 +212,7 @@ impl RuleDocument {
             accept_when: Vec::new(),
             enforcement: None,
             warnings: Vec::new(),
+            meta: None,
         }
     }
 
@@ -218,6 +242,10 @@ pub enum RuleIssueKind {
     MalformedRule,
     EmptyStatement,
     UnterminatedEnforcement,
+    /// Frontmatter that is not valid YAML or not a mapping.
+    MalformedFrontmatter,
+    /// Frontmatter `version` this parser does not know.
+    UnknownVersion,
 }
 
 /// A structured problem, located at a line where that is meaningful.
