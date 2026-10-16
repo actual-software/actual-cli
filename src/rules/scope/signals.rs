@@ -237,6 +237,9 @@ pub struct DocumentSignals {
     /// Path globs from the `### Verify` operands, and from any path written
     /// into the prose scope sentence.
     pub globs: Vec<PathGlob>,
+    /// Globs the document declares itself as excluded (`!` paths in its v2
+    /// header, with the `!` removed). Empty for v1 documents.
+    pub excludes: Vec<PathGlob>,
     /// File-extension globs from `--include=` filters, e.g. `*.ts`.
     pub extensions: Vec<String>,
     /// Terms from the prose scope sentence.
@@ -680,6 +683,11 @@ pub fn globs_from_prose(text: &str) -> Vec<PathGlob> {
         let token = raw
             .trim_end_matches(['.', ')', ':', ';'])
             .trim_start_matches('(');
+        // A `!` token is an exclude. It is never an include, whatever else it
+        // looks like.
+        if token.starts_with('!') {
+            continue;
+        }
         // Prose paths must carry a slash: a bare `auth.ts` in a sentence is
         // usually an example, and a bare word is never a path.
         if token.contains('/') && is_path_like(token) {
@@ -716,11 +724,33 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
     let mut globs: Vec<PathGlob> = Vec::new();
     let mut extensions: Vec<String> = Vec::new();
 
+    // A v2 header's `paths` are the author's own statement of scope, so when it
+    // names includes they replace every derived glob. The body's generated
+    // `Scope:` line restates them, which is why prose is not read either once a
+    // header is present. Extensions still come from Verify: they say which
+    // language a rule polices, and the header does not.
+    let meta = doc.meta.as_ref();
+    let declared: Vec<PathGlob> = meta
+        .map(|m| m.include_paths())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(normalize_path)
+        .collect();
+    let excludes: Vec<PathGlob> = meta
+        .map(|m| m.exclude_paths())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(normalize_path)
+        .collect();
+    let has_declared = !declared.is_empty();
+
     for block in &doc.verify {
         let (block_globs, block_extensions) = globs_from_verify(&block.body);
-        for glob in block_globs {
-            if !globs.contains(&glob) {
-                globs.push(glob);
+        if !has_declared {
+            for glob in block_globs {
+                if !globs.contains(&glob) {
+                    globs.push(glob);
+                }
             }
         }
         for ext in block_extensions {
@@ -731,9 +761,17 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
     }
 
     let scope_text = doc.scope.as_deref().unwrap_or_default();
-    for glob in globs_from_prose(scope_text) {
-        if !globs.contains(&glob) {
-            globs.push(glob);
+    if has_declared {
+        for glob in declared {
+            if !globs.contains(&glob) {
+                globs.push(glob);
+            }
+        }
+    } else if meta.is_none() {
+        for glob in globs_from_prose(scope_text) {
+            if !globs.contains(&glob) {
+                globs.push(glob);
+            }
         }
     }
 
@@ -748,6 +786,7 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
 
     DocumentSignals {
         globs,
+        excludes,
         extensions,
         scope_terms: terms(scope_text),
         slug_terms: doc.slug().map(slug_terms).unwrap_or_default(),
@@ -1318,5 +1357,68 @@ grep -r "jwt.sign" services/auth/jwks/ --include="*.ts"
         assert!(signals.path_terms.is_empty());
         assert_eq!(signals.slug_terms, vec!["bare"]);
         assert_eq!(signals, signals.clone());
+    }
+
+    // ── v2 declared paths ────────────────────────────────────────────────
+
+    const V2_HEAD: &str = "---\nversion: 2\nname: fin-1234\nmetadata:\n  actual:\n    adr_id: a\n  scope:\n    root: .\n    paths:\n      - src/finance/**\n      - \"!src/finance/**/*.test.ts\"\n---\n\n";
+
+    const V2_BODY: &str = "# Finance\n\nScope: applies to `src/finance/**`; excludes `!src/finance/**/*.test.ts`. These rules govern `lib/legacy/` code.\n\n### Rules\n\n- **R-F-001** MUST: x.\n\n### Verify\n\n```bash\ngrep -r x services/other/ --include=\"*.ts\"\n```\n";
+
+    fn doc_from(text: &str) -> crate::rules::RuleDocument {
+        crate::rules::parse_rule_document(Path::new("/repo/.actual/rules/fin-1234.md"), text)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_v2_declared_paths_split_into_includes_and_excludes() {
+        let signals = extract(&doc_from(&format!("{V2_HEAD}{V2_BODY}")));
+        let globs: Vec<&str> = signals.globs.iter().map(|g| g.pattern.as_str()).collect();
+        let excludes: Vec<&str> = signals
+            .excludes
+            .iter()
+            .map(|g| g.pattern.as_str())
+            .collect();
+        assert_eq!(globs, vec!["src/finance/**"]);
+        assert_eq!(excludes, vec!["src/finance/**/*.test.ts"]);
+        assert!(globs.iter().all(|g| !g.starts_with('!')));
+    }
+
+    #[test]
+    fn test_v2_declared_paths_replace_verify_and_prose_globs() {
+        let signals = extract(&doc_from(&format!("{V2_HEAD}{V2_BODY}")));
+        let globs: Vec<&str> = signals.globs.iter().map(|g| g.pattern.as_str()).collect();
+        assert!(!globs.contains(&"services/other/**"), "{globs:?}");
+        assert!(!globs.contains(&"lib/legacy/**"), "{globs:?}");
+        // Extensions still come from Verify, and the Scope line still feeds terms.
+        assert_eq!(signals.extensions, vec!["*.ts"]);
+        assert!(signals.scope_terms.contains(&"finance".to_string()));
+    }
+
+    #[test]
+    fn test_v2_without_paths_keeps_verify_globs_and_skips_prose() {
+        let head = "---\nversion: 2\nmetadata:\n  scope:\n    root: .\n---\n\n";
+        let signals = extract(&doc_from(&format!("{head}{V2_BODY}")));
+        let globs: Vec<&str> = signals.globs.iter().map(|g| g.pattern.as_str()).collect();
+        assert_eq!(globs, vec!["services/other/**"]);
+        assert!(signals.excludes.is_empty());
+    }
+
+    #[test]
+    fn test_v1_derivation_is_unchanged_by_the_scope_line() {
+        let signals = extract(&doc_from(V2_BODY));
+        let globs: Vec<&str> = signals.globs.iter().map(|g| g.pattern.as_str()).collect();
+        assert!(globs.contains(&"services/other/**"), "{globs:?}");
+        assert!(globs.contains(&"src/finance/**"), "{globs:?}");
+        assert!(globs.contains(&"lib/legacy/**"), "{globs:?}");
+        assert!(globs.iter().all(|g| !g.starts_with('!')), "{globs:?}");
+        assert!(signals.excludes.is_empty());
+    }
+
+    #[test]
+    fn test_prose_never_yields_an_exclude_as_an_include() {
+        let found = globs_from_prose("Applies to `src/a/**` excluding `!src/a/gen/**`.");
+        let patterns: Vec<&str> = found.iter().map(|g| g.pattern.as_str()).collect();
+        assert_eq!(patterns, vec!["src/a/**"]);
     }
 }
