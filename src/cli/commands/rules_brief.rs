@@ -357,6 +357,23 @@ struct SessionIdentity<'a> {
     agent_id: Option<&'a str>,
 }
 
+/// What a decision is headed with: its title. A v2 decision keyed on an
+/// `adr_id` whose title names no decision falls back to its best document's
+/// title, since the id is not something to show an agent. A v1 decision falls
+/// back to its key, which is its slug, as it always has.
+fn brief_heading(decision: &AdrGroup) -> &str {
+    decision
+        .title
+        .as_deref()
+        .or_else(|| {
+            decision
+                .adr_id
+                .as_ref()
+                .and_then(|_| decision.documents.first()?.title.as_deref())
+        })
+        .unwrap_or(&decision.key)
+}
+
 /// The brief for one file, or the reason none was produced.
 fn brief_for(
     root: &Path,
@@ -461,7 +478,7 @@ fn brief_for(
         .iter()
         .enumerate()
         .map(|(position, decision)| BriefDecision {
-            heading: decision.title.as_deref().unwrap_or(&decision.key),
+            heading: brief_heading(decision),
             documents: parsed
                 .iter()
                 .filter(|(at, _)| *at == position)
@@ -773,6 +790,61 @@ mod tests {
             assert_eq!(
                 brief_for(root.path(), &path("packages/api/src/x.ts"), &a, None),
                 Err(NoBrief::Ungoverned)
+            );
+        });
+    }
+
+    /// A v2 decision whose title names no decision, so the heading must not be
+    /// the `adr_id` its key now is.
+    fn titled_v2(adr_id: &str) -> String {
+        format!(
+            "---\nversion: 2\nname: pinning\nmetadata:\n  actual:\n    adr_id: {adr_id}\n  scope:\n    root: .\n    paths:\n      - \"infra/**\"\n---\n\n# Pin Terraform Providers\n\n### Rules\n\n- **R-TF-001** MUST: pin every provider.\n"
+        )
+    }
+
+    #[test]
+    fn test_a_v2_brief_is_headed_by_its_title_not_its_adr_id() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("pinning-1a2b.md"), titled_v2("3f9c-uuid")).unwrap();
+            let a = args(root.path());
+            let file = root
+                .path()
+                .join("infra/main.tf")
+                .to_string_lossy()
+                .to_string();
+
+            let brief = brief_for(root.path(), &file, &a, None).unwrap();
+            assert!(brief.contains("## Pin Terraform Providers"), "{brief}");
+            assert!(!brief.contains("3f9c-uuid"), "{brief}");
+        });
+    }
+
+    #[test]
+    fn test_renaming_a_v2_file_does_not_rebrief_within_a_session() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("pinning-1a2b.md"), titled_v2("3f9c-uuid")).unwrap();
+            let a = args(root.path());
+            let file = root
+                .path()
+                .join("infra/main.tf")
+                .to_string_lossy()
+                .to_string();
+            let who = SessionIdentity {
+                session_id: "s1",
+                agent_id: None,
+            };
+            assert!(brief_for(root.path(), &file, &a, Some(who)).is_ok());
+
+            std::fs::rename(dir.join("pinning-1a2b.md"), dir.join("renamed-9z9z.md")).unwrap();
+            assert_eq!(
+                brief_for(root.path(), &file, &a, Some(who)),
+                Err(NoBrief::AlreadyBriefed)
             );
         });
     }

@@ -287,10 +287,7 @@ fn adr_filename_scan(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<
             .iter()
             .find(|doc| doc.slug == hit.slug)
             .expect("a filename-scan hit is always present in the index that produced it");
-        let key = document
-            .adr
-            .clone()
-            .unwrap_or_else(|| document.slug.clone());
+        let key = document.decision_key();
         let baseline_hit = JsonBaselineHit {
             slug: hit.slug,
             matched_terms: hit.matched_terms,

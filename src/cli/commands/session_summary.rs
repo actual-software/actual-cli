@@ -59,6 +59,16 @@ struct SummaryJson<'a> {
     x: usize,
     y: usize,
     decisions: Vec<&'a str>,
+    /// The `adr_id` of each entry in `decisions`, in the same order: the key
+    /// itself for a v2 decision, `null` for a v1 one. Additive, and left out
+    /// when no counted decision has one, so a v1 rule set's output is
+    /// unchanged.
+    #[serde(skip_serializing_if = "all_none")]
+    adr_ids: Vec<Option<String>>,
+}
+
+fn all_none(ids: &[Option<String>]) -> bool {
+    ids.iter().all(Option::is_none)
 }
 
 pub fn exec(args: &SessionArgs) -> Result<(), ActualError> {
@@ -149,10 +159,13 @@ fn direct_output(
 
     if args.json {
         let counted: Vec<&str> = added(&recorded, &decisions).map(String::as_str).collect();
+        let ids = rule_set_adr_ids(&root, &rules_dir)?;
+        let adr_ids = counted.iter().map(|key| ids.get(*key).cloned()).collect();
         let json = serde_json::to_string_pretty(&SummaryJson {
             x: counted.len(),
             y: decisions.len(),
             decisions: counted,
+            adr_ids,
         })
         .expect("session summary is serializable — this is a programmer error");
         return Ok(Some(json));
@@ -179,6 +192,16 @@ fn rule_set_decisions(root: &Path, rules_dir: &Path) -> Result<BTreeSet<String>,
     Ok(scope::resolve_in(rules_dir, root, false)?
         .index
         .decision_keys())
+}
+
+/// The `adr_id` of each decision that has one, keyed the way Y's members are.
+fn rule_set_adr_ids(
+    root: &Path,
+    rules_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, ActualError> {
+    Ok(scope::resolve_in(rules_dir, root, false)?
+        .index
+        .decision_adr_ids())
 }
 
 /// The recorded decisions the rule set still holds: X's members.
@@ -648,6 +671,35 @@ mod tests {
                     .unwrap()
                     .as_deref(),
                 Some("Actual AI: added 0 of 2 ADRs to context this session.")
+            );
+        });
+    }
+
+    const V2_A: &str = "---\nversion: 2\nname: a\nmetadata:\n  actual:\n    adr_id: adr-1\n  scope:\n    root: .\n---\n\n# Sign With RS256: Algorithm\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n";
+    const V2_B: &str = "---\nversion: 2\nname: b\nmetadata:\n  actual:\n    adr_id: adr-1\n  scope:\n    root: .\n---\n\n# Totally Different Title\n\n### Rules\n\n- **R-A-002** MUST: expire tokens.\n";
+
+    #[test]
+    fn test_two_files_with_one_adr_id_are_one_decision_and_json_names_the_id() {
+        with_scratch_config(|| {
+            let root = repo_with(&[
+                ("a.md", V2_A),
+                ("b.md", V2_B),
+                ("provider-pinning.md", PINNING),
+            ]);
+            let decisions =
+                rule_set_decisions(root.path(), &crate::rules::rules_dir(root.path())).unwrap();
+            assert_eq!(
+                decisions.iter().map(String::as_str).collect::<Vec<_>>(),
+                vec!["adr-1", "provider-pinning"]
+            );
+
+            brief(root.path(), &["adr-1"]);
+            let mut args = direct_args(root.path());
+            args.json = true;
+            let text = direct_output("s1", &args).unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                serde_json::json!({"x": 1, "y": 2, "decisions": ["adr-1"], "adr_ids": ["adr-1"]})
             );
         });
     }

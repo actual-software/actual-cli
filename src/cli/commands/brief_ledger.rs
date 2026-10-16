@@ -48,7 +48,7 @@ use sha2::{Digest, Sha256};
 
 /// Bumped whenever [`BriefLedger`]'s on-disk shape changes incompatibly. A
 /// mismatch reads as an empty session.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Subdirectory of the config directory holding the records.
 const LEDGER_DIR_NAME: &str = "brief-ledger";
@@ -442,6 +442,20 @@ mod tests {
         }
     }
 
+    /// A record written before decisions were keyed on `adr_id` carries keys the
+    /// new code would never produce; it reads as empty rather than miscounting.
+    #[test]
+    fn test_a_version_1_record_reads_as_empty_after_the_key_change() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            ledger_path(dir.path(), &key("s1")),
+            r#"{"format_version":1,"briefed":["Adopt RS256"]}"#,
+        )
+        .unwrap();
+        assert_eq!(FORMAT_VERSION, 2);
+        assert!(briefed(dir.path(), &key("s1")).is_empty());
+    }
+
     /// The next write over a damaged file starts the session again from
     /// what it adds, rather than failing.
     #[test]
@@ -580,7 +594,9 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             ledger_path(dir.path(), &key("s1")),
-            r#"{"format_version":1,"briefed":["Adopt RS256"],"last_reported":{"added":1,"available":12}}"#,
+            format!(
+                r#"{{"format_version":{FORMAT_VERSION},"briefed":["Adopt RS256"],"last_reported":{{"added":1,"available":12}}}}"#
+            ),
         )
         .unwrap();
         assert_eq!(folders(dir.path(), &key("s1")), (vec![], vec![]));

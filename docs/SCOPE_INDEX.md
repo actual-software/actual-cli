@@ -330,7 +330,16 @@ subject while the next relevant decision never appears. The decision name is
 the title prefix before the last colon, derived at index time so colons within
 the decision title remain part of its identity; a document
 whose title has no colon names no decision and forms its own group rather
-than pooling with other unnamed ones. Decisions appear where their best
+than pooling with other unnamed ones. A document whose v2 header carries an
+`adr_id` is grouped on that id instead, whatever its title or filename say, so
+several files sharing one id are one decision and renaming a file does not make
+it a new one. In `--by-adr --json` each decision's `key` is therefore the
+`adr_id` for v2 documents, and the decision then also carries an `adr_id`
+field (and each of its documents does); both are omitted for v1 documents,
+whose `key` is unchanged. The same key is what the brief's once-per-session
+state and `session summary` record, so `session summary --json` adds an
+`adr_ids` array, aligned with `decisions`, when any counted decision has one.
+The brief's heading stays the decision's title. Decisions appear where their best
 document ranked, and documents retain their relative rank within each
 decision. Making each group contiguous can change the flattened document
 order when decisions were interleaved. Grouping is stage 1 only, since what
