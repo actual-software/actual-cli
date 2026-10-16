@@ -1,5 +1,5 @@
 //! The session-wide record of the decisions `rules brief` added to context,
-//! for the session summary: "added X of Y ADRs to context this session".
+//! for the session summary: "X of Y ADRs added to context".
 //!
 //! # Design
 //!
@@ -94,6 +94,14 @@ pub struct BriefLedger {
 }
 
 impl BriefLedger {
+    /// The gaps: folders the session worked in where no decision governed any
+    /// of the files, sorted.
+    pub fn gaps(&self) -> impl Iterator<Item = &str> {
+        self.uncovered_folders
+            .difference(&self.covered_folders)
+            .map(String::as_str)
+    }
+
     /// Whether noting `folder` changes anything. A covered folder stays
     /// covered, and an uncovered one changes only by becoming covered.
     fn would_change(&self, folder: &str, covered: bool) -> bool {
@@ -113,13 +121,18 @@ impl BriefLedger {
     }
 }
 
-/// The X and Y of "added X of Y ADRs to context", as the user last saw them.
+/// The counts behind the summary line the user last saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reported {
     /// Decisions added to context this session.
     pub added: usize,
     /// Decisions the rule set can add to context.
     pub available: usize,
+    /// How many folders worked in no decision governs. Defaulted because a
+    /// record written before gaps were shown has none, and a field that failed
+    /// to load would empty the whole record.
+    #[serde(default)]
+    pub gaps: usize,
 }
 
 /// The directory the records live in, under the user's config directory.
@@ -259,7 +272,7 @@ fn update_within(
         return;
     }
     ledger.format_version = FORMAT_VERSION;
-    // Serializing a version, sets of strings and two counts cannot fail, so
+    // Serializing a version, sets of strings and three counts cannot fail, so
     // there is no error path to take here; writing nothing is still the right
     // fallback.
     if let Ok(json) = serde_json::to_string(&ledger) {
@@ -392,6 +405,7 @@ mod tests {
         let shown = Reported {
             added: 1,
             available: 12,
+            gaps: 2,
         };
         record(dir.path(), &key("s1"), ["Adopt RS256"]);
         update(dir.path(), &key("s1"), |ledger| {
@@ -497,11 +511,7 @@ mod tests {
     /// The covered folders and the gaps in `key`'s record.
     fn folders(dir: &Path, key: &LedgerKey<'_>) -> (Vec<String>, Vec<String>) {
         let ledger = load(dir, key);
-        let gaps = ledger
-            .uncovered_folders
-            .difference(&ledger.covered_folders)
-            .cloned()
-            .collect();
+        let gaps = ledger.gaps().map(str::to_string).collect();
         (ledger.covered_folders.into_iter().collect(), gaps)
     }
 
@@ -573,8 +583,9 @@ mod tests {
         assert_eq!(ledger, covered);
     }
 
-    /// A record in the shape the previous release writes loads with no
-    /// folders, and the first folder noted keeps its decisions and counts.
+    /// A record in the shape v0.7.0 writes loads with no folders, and with no
+    /// gap count in `last_reported`, which reads as none rather than emptying
+    /// the record. The first folder noted keeps its decisions and counts.
     #[test]
     fn test_a_record_written_before_folders_keeps_its_decisions() {
         let dir = tempdir().unwrap();
@@ -593,7 +604,8 @@ mod tests {
             ledger.last_reported,
             Some(Reported {
                 added: 1,
-                available: 12
+                available: 12,
+                gaps: 0
             })
         );
         assert_eq!(folders(dir.path(), &key("s1")).1, ["infra/terraform"]);

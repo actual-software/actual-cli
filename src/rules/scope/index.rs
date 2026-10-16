@@ -560,8 +560,8 @@ impl ScopeIndex {
             .collect()
     }
 
-    /// How many decisions [`Self::decision_keys`] holds: the Y of "added X of
-    /// Y ADRs to context".
+    /// How many decisions [`Self::decision_keys`] holds: the Y of "X of Y
+    /// ADRs added to context".
     pub fn decision_count(&self) -> usize {
         self.decision_keys().len()
     }

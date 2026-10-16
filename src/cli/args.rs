@@ -855,21 +855,24 @@ pub struct SessionArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SessionAction {
-    /// One sentence on how many ADRs a session added to the agent's context
+    /// One line on the ADRs a session added to the agent's context, and the
+    /// areas it worked in that no ADR covers
     Summary(SessionSummaryArgs),
 }
 
 /// Arguments for `session summary`
 #[derive(Parser, Debug)]
 pub struct SessionSummaryArgs {
-    /// Read a Claude Code `Stop` envelope from stdin and print the sentence
-    /// when the count changed since it was last shown, recording it as shown.
-    /// Prints nothing otherwise, and always exits 0.
+    /// Read a Claude Code `Stop` envelope from stdin and print the line when
+    /// an ADR was added or an area with no ADR found, and the line changed
+    /// since it was last shown, recording it as shown. Prints nothing
+    /// otherwise, and always exits 0.
     #[arg(long)]
     pub claude_hook: bool,
 
-    /// The session to summarize, in direct mode, which always prints the
-    /// current sentence and never records it as shown.
+    /// The session to summarize, in direct mode, which prints the current
+    /// line and never records it as shown. A rule set holding no decision
+    /// has no line.
     #[arg(
         long,
         value_name = "ID",
@@ -887,7 +890,8 @@ pub struct SessionSummaryArgs {
     #[arg(long, value_name = "PATH")]
     pub rules_dir: Option<std::path::PathBuf>,
 
-    /// Print the counts and the decisions added as JSON, in direct mode.
+    /// Print the counts, the decisions added, the areas with no ADR and the
+    /// line as JSON, in direct mode.
     #[arg(long, conflicts_with = "claude_hook")]
     pub json: bool,
 }

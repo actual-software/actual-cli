@@ -1,12 +1,13 @@
-//! `actual session summary`: one sentence on what Actual AI did in a coding
+//! `actual session summary`: one line on what Actual AI did in a coding
 //! session, for a Claude Code `Stop` hook.
 //!
 //! # Design
 //!
-//! **One sentence, built from clauses.** Iteration 1 has one clause, "added X
-//! of Y ADRs to context". Later clauses (gaps found, tokens and turns) join the
-//! same line, and [`sentence`] is the one place that joins them, so a new
-//! clause never changes how the others read.
+//! **One line, built from clauses.** "3 of 12 ADRs added to context" and "2
+//! areas with no ADR" are joined by " · ", and [`line`] is the one place that
+//! builds the line, for plain output, `--json` and the hook alike. A session
+//! that found gaps and added no ADR gets one clause for both, "no ADR covers
+//! the 3 areas you worked in". A rule set holding no decision has no line.
 //!
 //! **X and Y.** X is the decisions [`super::brief_ledger`] recorded as added to
 //! the context of this session's agents. Y is the decisions the rule set can
@@ -14,12 +15,17 @@
 //! `rules brief` groups by, and X counts only recorded decisions that are still
 //! in Y, so a rule set edited mid-session can lower X but never lift it past Y.
 //!
+//! **Gaps.** The folders the same record noted as worked in with no decision
+//! governing any of their files. Their names stay on the machine: `--json`
+//! lists them, and nothing sends them anywhere.
+//!
 //! **Shown when it changes.** A plugin cannot speak once at the end of a
-//! session, so the hook speaks at the end of a response, and only when X or Y
-//! moved since the user last saw them. The record's `last_reported` holds what
-//! they saw, and it is updated under the record's lock before the line is
-//! printed. A run that cannot take the lock prints nothing, so two runs at once
-//! report a change once.
+//! session, so the hook speaks at the end of a response, when a decision was
+//! added or a gap found and the line differs from the one the user last saw.
+//! The record's `last_reported` holds the counts behind that line, and it is
+//! updated under the record's lock before the line is printed. A run that
+//! cannot take the lock prints nothing, so two runs at once report a change
+//! once.
 //!
 //! **Keyed on what it is given.** The rules directory is `--rules-dir`, else
 //! `<repo>/.actual/rules` with the repository from `--repo` or the working
@@ -53,12 +59,18 @@ struct StopEnvelope {
     session_id: Option<String>,
 }
 
-/// `--json`: the counts behind the sentence, and the decisions X counted.
+/// `--json`: the counts behind the line, what they count, and the line itself.
 #[derive(Serialize)]
 struct SummaryJson<'a> {
     x: usize,
     y: usize,
+    /// The decisions X counted.
     decisions: Vec<&'a str>,
+    gaps: usize,
+    /// The folders `gaps` counted, sorted.
+    areas_without_adr: Vec<&'a str>,
+    /// What plain output prints, or `null` when it prints nothing.
+    line: Option<String>,
 }
 
 pub fn exec(args: &SessionArgs) -> Result<(), ActualError> {
@@ -110,7 +122,7 @@ fn hook_line(raw: &str, args: &SessionSummaryArgs) -> Option<String> {
     // Most responses have nothing new to say, so that is settled before the
     // rule set is read or the lock is taken.
     let recorded = brief_ledger::load(&dir, &key);
-    if recorded.briefed.is_empty() {
+    if recorded.briefed.is_empty() && recorded.gaps().next().is_none() {
         return None;
     }
     let decisions = rule_set_decisions(&root, &rules_dir).ok()?;
@@ -123,10 +135,10 @@ fn hook_line(raw: &str, args: &SessionSummaryArgs) -> Option<String> {
             ledger.last_reported = shown;
         }
     });
-    sentence(&[added_clause(shown?)])
+    line(shown?)
 }
 
-/// Direct mode: the sentence for `session_id` as it stands, or its counts as
+/// Direct mode: the line for `session_id` as it stands, or its counts as
 /// JSON. It only reads, so a debugging run never changes what the hook says
 /// next.
 fn direct_output(
@@ -146,18 +158,21 @@ fn direct_output(
             )
         })
         .unwrap_or_default();
+    let now = counts(&recorded, &decisions);
 
     if args.json {
-        let counted: Vec<&str> = added(&recorded, &decisions).map(String::as_str).collect();
         let json = serde_json::to_string_pretty(&SummaryJson {
-            x: counted.len(),
-            y: decisions.len(),
-            decisions: counted,
+            x: now.added,
+            y: now.available,
+            decisions: added(&recorded, &decisions).map(String::as_str).collect(),
+            gaps: now.gaps,
+            areas_without_adr: recorded.gaps().collect(),
+            line: line(now),
         })
         .expect("session summary is serializable — this is a programmer error");
         return Ok(Some(json));
     }
-    Ok(sentence(&[added_clause(counts(&recorded, &decisions))]))
+    Ok(line(now))
 }
 
 /// The repository root and the rules directory, resolved the way `impl-check`
@@ -189,40 +204,63 @@ fn added<'a>(
     recorded.briefed.intersection(decisions)
 }
 
-/// X and Y for one record against one rule set.
+/// X, Y and the gaps for one record against one rule set.
 fn counts(recorded: &BriefLedger, decisions: &BTreeSet<String>) -> Reported {
     Reported {
         added: added(recorded, decisions).count(),
         available: decisions.len(),
+        gaps: recorded.gaps().count(),
     }
 }
 
-/// The counts to show, when they are worth showing: something was added, and
-/// it is not what the user last saw.
+/// The counts to show, when they are worth showing: a decision was added or a
+/// gap found, and the line differs from the one built from the counts last
+/// shown.
 fn due(recorded: &BriefLedger, decisions: &BTreeSet<String>) -> Option<Reported> {
     let now = counts(recorded, decisions);
-    (now.added > 0 && recorded.last_reported != Some(now)).then_some(now)
+    if now.added == 0 && now.gaps == 0 {
+        return None;
+    }
+    let text = line(now)?;
+    (recorded.last_reported.and_then(line) != Some(text)).then_some(now)
 }
 
-/// "added 3 of 12 ADRs to context", with "ADR" singular when Y is 1.
+/// The summary line for `counts`, or `None` when the rule set holds no
+/// decision.
+fn line(counts: Reported) -> Option<String> {
+    if counts.available == 0 {
+        return None;
+    }
+    let clauses = match (counts.added, counts.gaps) {
+        (0, gaps) if gaps > 0 => vec![uncovered_clause(gaps)],
+        (_, 0) => vec![added_clause(counts)],
+        (_, gaps) => vec![added_clause(counts), gaps_clause(gaps)],
+    };
+    Some(format!("Actual AI: {}", clauses.join(" · ")))
+}
+
+/// "3 of 12 ADRs added to context", with "ADR" singular when Y is 1.
 fn added_clause(counts: Reported) -> String {
     let noun = if counts.available == 1 { "ADR" } else { "ADRs" };
     format!(
-        "added {} of {} {noun} to context",
+        "{} of {} {noun} added to context",
         counts.added, counts.available
     )
 }
 
-/// Join the clauses that have something to say into the summary sentence, or
-/// `None` when none does: one reads "A", two "A and B", more "A, B, and C".
-fn sentence(clauses: &[String]) -> Option<String> {
-    let joined = match clauses {
-        [] => return None,
-        [only] => only.clone(),
-        [first, second] => format!("{first} and {second}"),
-        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
-    };
-    Some(format!("Actual AI: {joined} this session."))
+/// "2 areas with no ADR", or "1 area with no ADR".
+fn gaps_clause(gaps: usize) -> String {
+    let noun = if gaps == 1 { "area" } else { "areas" };
+    format!("{gaps} {noun} with no ADR")
+}
+
+/// "no ADR covers the 3 areas you worked in", or "the area" for one.
+fn uncovered_clause(gaps: usize) -> String {
+    if gaps == 1 {
+        "no ADR covers the area you worked in".to_string()
+    } else {
+        format!("no ADR covers the {gaps} areas you worked in")
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +320,13 @@ mod tests {
         }
     }
 
+    fn json_args(root: &Path) -> SessionSummaryArgs {
+        SessionSummaryArgs {
+            json: true,
+            ..direct_args(root)
+        }
+    }
+
     /// A `Stop` envelope as Claude Code sends it. Its `cwd` names somewhere
     /// else on purpose: the summary must not read it.
     fn stop(session_id: &str) -> String {
@@ -311,6 +356,17 @@ mod tests {
         brief_ledger::record(&dir, &key, decisions.iter().copied());
     }
 
+    /// Note `folder` in session `s1`, covered or a gap, as `rules brief` does.
+    fn work_in(root: &Path, folder: &str, covered: bool) {
+        let dir = brief_ledger::ledger_dir().unwrap();
+        let rules_dir = key_dir(root);
+        let key = LedgerKey {
+            session_id: "s1",
+            rules_dir: &rules_dir,
+        };
+        brief_ledger::record_folder(&dir, &key, folder, covered);
+    }
+
     fn recorded(root: &Path) -> BriefLedger {
         let rules_dir = key_dir(root);
         brief_ledger::load(
@@ -320,6 +376,11 @@ mod tests {
                 rules_dir: &rules_dir,
             },
         )
+    }
+
+    fn json(root: &Path) -> serde_json::Value {
+        let text = direct_output("s1", &json_args(root)).unwrap().unwrap();
+        serde_json::from_str(&text).unwrap()
     }
 
     /// Run `body` with the config directory pointed at a scratch one, so no
@@ -332,40 +393,65 @@ mod tests {
         body();
     }
 
-    // ── the sentence ─────────────────────────────────────────────────────
+    // ── the line ─────────────────────────────────────────────────────────
+
+    fn shown(added: usize, available: usize, gaps: usize) -> Option<String> {
+        line(Reported {
+            added,
+            available,
+            gaps,
+        })
+    }
 
     #[test]
-    fn test_sentence_joins_its_clauses() {
-        let clauses = |names: &[&str]| names.iter().map(|c| c.to_string()).collect::<Vec<_>>();
-        assert_eq!(sentence(&[]), None);
-        assert_eq!(
-            sentence(&clauses(&["added 3 of 12 ADRs to context"])).as_deref(),
-            Some("Actual AI: added 3 of 12 ADRs to context this session.")
-        );
-        assert_eq!(
-            sentence(&clauses(&["added 3 of 12 ADRs to context", "found 2 gaps"])).as_deref(),
-            Some("Actual AI: added 3 of 12 ADRs to context and found 2 gaps this session.")
-        );
-        assert_eq!(
-            sentence(&clauses(&[
-                "added 3 of 12 ADRs to context",
-                "found 2 gaps",
-                "used 48k tokens over 14 turns"
-            ]))
-            .as_deref(),
-            Some(
-                "Actual AI: added 3 of 12 ADRs to context, found 2 gaps, and used 48k tokens over 14 turns this session."
-            )
-        );
+    fn test_the_line_takes_every_form() {
+        for (added, gaps, expected) in [
+            (
+                3,
+                2,
+                "Actual AI: 3 of 12 ADRs added to context · 2 areas with no ADR",
+            ),
+            (
+                3,
+                1,
+                "Actual AI: 3 of 12 ADRs added to context · 1 area with no ADR",
+            ),
+            (3, 0, "Actual AI: 3 of 12 ADRs added to context"),
+            (0, 3, "Actual AI: no ADR covers the 3 areas you worked in"),
+            (0, 1, "Actual AI: no ADR covers the area you worked in"),
+            (0, 0, "Actual AI: 0 of 12 ADRs added to context"),
+        ] {
+            assert_eq!(shown(added, 12, gaps).as_deref(), Some(expected));
+        }
     }
 
     #[test]
     fn test_adrs_is_singular_only_when_y_is_one() {
-        let clause = |added, available| added_clause(Reported { added, available });
-        assert_eq!(clause(1, 1), "added 1 of 1 ADR to context");
-        assert_eq!(clause(3, 12), "added 3 of 12 ADRs to context");
-        assert_eq!(clause(1, 2), "added 1 of 2 ADRs to context");
-        assert_eq!(clause(0, 0), "added 0 of 0 ADRs to context");
+        assert_eq!(
+            shown(1, 1, 0).as_deref(),
+            Some("Actual AI: 1 of 1 ADR added to context")
+        );
+        assert_eq!(
+            shown(0, 1, 0).as_deref(),
+            Some("Actual AI: 0 of 1 ADR added to context")
+        );
+        assert_eq!(
+            shown(1, 1, 2).as_deref(),
+            Some("Actual AI: 1 of 1 ADR added to context · 2 areas with no ADR")
+        );
+        assert_eq!(
+            shown(1, 2, 0).as_deref(),
+            Some("Actual AI: 1 of 2 ADRs added to context")
+        );
+    }
+
+    /// No rule set, or one holding no decision, has no line, whatever the
+    /// record holds.
+    #[test]
+    fn test_there_is_no_line_without_a_decision_to_add() {
+        for (added, gaps) in [(0, 0), (0, 2), (1, 0)] {
+            assert_eq!(shown(added, 0, gaps), None, "{added} added, {gaps} gaps");
+        }
     }
 
     // ── the hook ─────────────────────────────────────────────────────────
@@ -380,13 +466,14 @@ mod tests {
 
             assert_eq!(
                 hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
-                Some("Actual AI: added 1 of 2 ADRs to context this session.")
+                Some("Actual AI: 1 of 2 ADRs added to context")
             );
             assert_eq!(
                 recorded(root.path()).last_reported,
                 Some(Reported {
                     added: 1,
-                    available: 2
+                    available: 2,
+                    gaps: 0
                 })
             );
             assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
@@ -405,7 +492,7 @@ mod tests {
 
             assert_eq!(
                 hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
-                Some("Actual AI: added 2 of 2 ADRs to context this session.")
+                Some("Actual AI: 2 of 2 ADRs added to context")
             );
             assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
         });
@@ -428,12 +515,13 @@ mod tests {
 
             assert_eq!(
                 hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
-                Some("Actual AI: added 1 of 3 ADRs to context this session.")
+                Some("Actual AI: 1 of 3 ADRs added to context")
             );
         });
     }
 
-    /// No decision briefed means no line, and nothing written either.
+    /// No decision briefed and no gap means no line, and nothing written
+    /// either.
     #[test]
     fn test_the_hook_is_silent_when_nothing_was_added() {
         with_scratch_config(|| {
@@ -441,12 +529,130 @@ mod tests {
 
             assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
             assert_eq!(recorded(root.path()), BriefLedger::default());
+
+            work_in(root.path(), "services/auth", true);
+            assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
+            assert_eq!(recorded(root.path()).last_reported, None);
+        });
+    }
+
+    /// A session that added no decision and worked where none applies still
+    /// hears about it, once per change to the line.
+    #[test]
+    fn test_the_hook_speaks_for_gaps_with_no_decision_added() {
+        with_scratch_config(|| {
+            let root = repo();
+            work_in(root.path(), "infra", false);
+
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: no ADR covers the area you worked in")
+            );
+            assert_eq!(
+                recorded(root.path()).last_reported,
+                Some(Reported {
+                    added: 0,
+                    available: 2,
+                    gaps: 1
+                })
+            );
+            assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
+
+            work_in(root.path(), "scripts", false);
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: no ADR covers the 2 areas you worked in")
+            );
+        });
+    }
+
+    /// Gaps join the count, and a gap the session later covers drops out of
+    /// the line.
+    #[test]
+    fn test_the_hook_reports_gaps_beside_the_count() {
+        with_scratch_config(|| {
+            let root = repo();
+            brief(root.path(), &["Adopt RS256"]);
+            work_in(root.path(), "infra", false);
+
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: 1 of 2 ADRs added to context · 1 area with no ADR")
+            );
+
+            work_in(root.path(), "infra", true);
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: 1 of 2 ADRs added to context")
+            );
+        });
+    }
+
+    /// The hook compares lines, not counts: Y moving while the line names no
+    /// Y prints nothing new.
+    #[test]
+    fn test_the_hook_is_silent_when_only_an_unshown_count_moves() {
+        with_scratch_config(|| {
+            let root = repo();
+            work_in(root.path(), "infra", false);
+            assert!(hook_line(&stop("s1"), &hook_args(root.path())).is_some());
+
+            std::fs::write(
+                crate::rules::rules_dir(root.path()).join("caching-writes.md"),
+                ADVICE.replace("SHOULD", "MUST").replace("Reads", "Writes"),
+            )
+            .unwrap();
+
+            assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
+        });
+    }
+
+    /// A record v0.7.0 wrote, whose `last_reported` has no gap count, keeps
+    /// its decisions: the unchanged line is not shown again, and the first
+    /// gap is, with the decision still counted.
+    #[test]
+    fn test_the_hook_reads_a_last_reported_with_no_gap_count() {
+        with_scratch_config(|| {
+            let root = repo();
+            brief(root.path(), &["Adopt RS256"]);
+            let records: Vec<PathBuf> = std::fs::read_dir(brief_ledger::ledger_dir().unwrap())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .collect();
+            let [record] = records.as_slice() else {
+                panic!("one record expected: {records:?}");
+            };
+            std::fs::write(
+                record,
+                r#"{"format_version":1,"briefed":["Adopt RS256"],"last_reported":{"added":1,"available":2}}"#,
+            )
+            .unwrap();
+
+            assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
+
+            work_in(root.path(), "infra", false);
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: 1 of 2 ADRs added to context · 1 area with no ADR")
+            );
+            let after = recorded(root.path());
+            assert!(after.briefed.contains("Adopt RS256"));
+            assert_eq!(
+                after.last_reported,
+                Some(Reported {
+                    added: 1,
+                    available: 2,
+                    gaps: 1
+                })
+            );
         });
     }
 
     /// X counts only decisions the rule set still holds: one briefed and then
-    /// removed from the rules is not "added X of Y" with X past Y, and a
-    /// record of removed decisions alone is X of 0, which is silence.
+    /// removed from the rules is not "X of Y" with X past Y, and a record of
+    /// removed decisions alone counts 0, which is silence.
     #[test]
     fn test_x_counts_only_decisions_the_rule_set_still_holds() {
         with_scratch_config(|| {
@@ -457,7 +663,7 @@ mod tests {
             brief(root.path(), &["Adopt RS256"]);
             assert_eq!(
                 hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
-                Some("Actual AI: added 1 of 2 ADRs to context this session.")
+                Some("Actual AI: 1 of 2 ADRs added to context")
             );
         });
     }
@@ -468,6 +674,7 @@ mod tests {
         with_scratch_config(|| {
             let root = tempdir().unwrap();
             brief(root.path(), &["Adopt RS256"]);
+            work_in(root.path(), "infra", false);
 
             assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
         });
@@ -482,7 +689,7 @@ mod tests {
 
             assert_eq!(
                 hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
-                Some("Actual AI: added 1 of 1 ADR to context this session.")
+                Some("Actual AI: 1 of 1 ADR added to context")
             );
         });
     }
@@ -526,7 +733,7 @@ mod tests {
 
             assert_eq!(
                 hook_line(&envelope.to_string(), &hook_args(root.path())).as_deref(),
-                Some("Actual AI: added 1 of 2 ADRs to context this session.")
+                Some("Actual AI: 1 of 2 ADRs added to context")
             );
         });
     }
@@ -589,10 +796,7 @@ mod tests {
                 .filter_map(|handle| handle.join().unwrap())
                 .collect();
 
-            assert_eq!(
-                lines,
-                ["Actual AI: added 1 of 2 ADRs to context this session."]
-            );
+            assert_eq!(lines, ["Actual AI: 1 of 2 ADRs added to context"]);
         });
     }
 
@@ -609,14 +813,14 @@ mod tests {
             direct_output("s1", &direct_args(root.path()))
                 .unwrap()
                 .as_deref(),
-            Some("Actual AI: added 0 of 2 ADRs to context this session.")
+            Some("Actual AI: 0 of 2 ADRs added to context")
         );
     }
 
     // ── direct mode ──────────────────────────────────────────────────────
 
-    /// Direct mode prints the sentence as it stands and leaves the record
-    /// alone, so the hook still shows the change.
+    /// Direct mode prints the line as it stands and leaves the record alone,
+    /// so the hook still shows the change.
     #[test]
     fn test_direct_mode_prints_without_recording() {
         with_scratch_config(|| {
@@ -627,7 +831,7 @@ mod tests {
                 direct_output("s1", &direct_args(root.path()))
                     .unwrap()
                     .as_deref(),
-                Some("Actual AI: added 1 of 2 ADRs to context this session.")
+                Some("Actual AI: 1 of 2 ADRs added to context")
             );
             assert_eq!(recorded(root.path()).last_reported, None);
             assert!(hook_line(&stop("s1"), &hook_args(root.path())).is_some());
@@ -638,7 +842,8 @@ mod tests {
         });
     }
 
-    /// Direct mode is the debugging view, so it prints even when X is 0.
+    /// Direct mode is the debugging view, so it prints even when nothing was
+    /// added and no gap found.
     #[test]
     fn test_direct_mode_prints_when_nothing_was_added() {
         with_scratch_config(|| {
@@ -647,7 +852,33 @@ mod tests {
                 direct_output("s1", &direct_args(root.path()))
                     .unwrap()
                     .as_deref(),
-                Some("Actual AI: added 0 of 2 ADRs to context this session.")
+                Some("Actual AI: 0 of 2 ADRs added to context")
+            );
+        });
+    }
+
+    /// A rule set holding no decision prints nothing, and its JSON line is
+    /// `null` with the counts still beside it.
+    #[test]
+    fn test_direct_mode_prints_nothing_for_a_rule_set_holding_no_decision() {
+        with_scratch_config(|| {
+            let root = repo_with(&[("caching-reads.md", ADVICE)]);
+            work_in(root.path(), "infra", false);
+
+            assert_eq!(
+                direct_output("s1", &direct_args(root.path())).unwrap(),
+                None
+            );
+            assert_eq!(
+                json(root.path()),
+                serde_json::json!({
+                    "x": 0,
+                    "y": 0,
+                    "decisions": [],
+                    "gaps": 1,
+                    "areas_without_adr": ["infra"],
+                    "line": null
+                })
             );
         });
     }
@@ -657,56 +888,56 @@ mod tests {
         with_scratch_config(|| {
             let root = repo();
             brief(root.path(), &["Adopt RS256", "Retired Decision"]);
-            let mut args = direct_args(root.path());
-            args.json = true;
-
-            let text = direct_output("s1", &args).unwrap().unwrap();
-            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
             assert_eq!(
-                value,
-                serde_json::json!({"x": 1, "y": 2, "decisions": ["Adopt RS256"]})
+                json(root.path()),
+                serde_json::json!({
+                    "x": 1,
+                    "y": 2,
+                    "decisions": ["Adopt RS256"],
+                    "gaps": 0,
+                    "areas_without_adr": [],
+                    "line": "Actual AI: 1 of 2 ADRs added to context"
+                })
             );
         });
     }
 
-    /// Folders in the record change nothing the summary prints, and the
-    /// hook's write of what it showed keeps them.
+    /// The JSON lists the gaps sorted, leaves covered folders out, and its
+    /// line is the one plain output prints.
     #[test]
-    fn test_recorded_folders_leave_the_summary_as_it_was() {
+    fn test_direct_mode_json_lists_the_areas_with_no_adr() {
         with_scratch_config(|| {
             let root = repo();
-            brief(root.path(), &["Adopt RS256"]);
-            let rules_dir = key_dir(root.path());
-            let key = LedgerKey {
-                session_id: "s1",
-                rules_dir: &rules_dir,
-            };
-            let dir = brief_ledger::ledger_dir().unwrap();
-            brief_ledger::record_folder(&dir, &key, "services/auth", true);
-            brief_ledger::record_folder(&dir, &key, "infra", false);
-            let line = Some("Actual AI: added 1 of 2 ADRs to context this session.");
-            let mut json = direct_args(root.path());
-            json.json = true;
+            for (folder, covered) in [
+                ("web/app", false),
+                ("services/auth", true),
+                ("infra", false),
+                ("services/billing", false),
+                ("services/billing", true),
+            ] {
+                work_in(root.path(), folder, covered);
+            }
+            let line = "Actual AI: no ADR covers the 2 areas you worked in";
 
             assert_eq!(
                 direct_output("s1", &direct_args(root.path()))
                     .unwrap()
                     .as_deref(),
-                line
-            );
-            let text = direct_output("s1", &json).unwrap().unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&text).unwrap(),
-                serde_json::json!({"x": 1, "y": 2, "decisions": ["Adopt RS256"]})
+                Some(line)
             );
             assert_eq!(
-                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
-                line
+                json(root.path()),
+                serde_json::json!({
+                    "x": 0,
+                    "y": 2,
+                    "decisions": [],
+                    "gaps": 2,
+                    "areas_without_adr": ["infra", "web/app"],
+                    "line": line
+                })
             );
-            let after = recorded(root.path());
-            assert!(after.last_reported.is_some());
-            assert!(after.uncovered_folders.contains("infra"));
+            assert_eq!(recorded(root.path()).last_reported, None);
         });
     }
 
@@ -760,9 +991,7 @@ mod tests {
 
     #[test]
     fn test_emit_prints_a_line_or_nothing() {
-        emit(Some(
-            "Actual AI: added 1 of 1 ADR to context this session.".to_string(),
-        ));
+        emit(Some("Actual AI: 1 of 1 ADR added to context".to_string()));
         emit(None);
     }
 }
