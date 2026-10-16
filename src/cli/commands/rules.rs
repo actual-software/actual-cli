@@ -160,6 +160,12 @@ struct JsonDocument<'a> {
     path: String,
     slug: Option<&'a str>,
     title: Option<&'a str>,
+    /// The stable decision id from a v2 header; omitted for a v1 document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adr_id: Option<&'a str>,
+    /// The root a v2 document's paths are relative to; omitted for v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<&'a str>,
     scope: Option<&'a str>,
     rules: &'a [Rule],
     verify: &'a [VerifyBlock],
@@ -202,6 +208,8 @@ fn render_json(report: &RuleSetLoadReport, root: &Path) -> String {
                 path: relative_to(root, &doc.source_path),
                 slug: doc.slug(),
                 title: doc.title.as_deref(),
+                adr_id: doc.meta.as_ref().and_then(|m| m.adr_id.as_deref()),
+                root: doc.meta.as_ref().and_then(|m| m.root.as_deref()),
                 scope: doc.scope.as_deref(),
                 rules: &doc.rules,
                 verify: &doc.verify,
@@ -355,6 +363,25 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with(".actual/rules"));
+    }
+
+    #[test]
+    fn test_render_json_adds_adr_id_and_root_for_v2_documents_only() {
+        const V2: &str = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-1\n  scope:\n    root: packages/web\n---\n\n# Beta\n\n### Rules\n\n- **R-B-001** MUST: b\n";
+        let root = seed(&[("a.md", DOC), ("b.md", V2)]);
+        let report = load_rule_set(root.path()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&report, root.path())).unwrap();
+
+        let v1 = &value["documents"][0];
+        assert!(v1.get("adr_id").is_none() && v1.get("root").is_none());
+        let v2 = &value["documents"][1];
+        assert_eq!(v2["adr_id"], "adr-1");
+        assert_eq!(v2["root"], "packages/web");
+        // Nothing existing was renamed.
+        for key in ["path", "slug", "title", "scope", "rules", "warnings"] {
+            assert!(v2.get(key).is_some(), "{key}");
+        }
     }
 
     /// The one field that names this machine is `rules_dir`. Every per-file

@@ -266,6 +266,9 @@ pub enum RuleIssueKind {
     MalformedFrontmatter,
     /// Frontmatter `version` this parser does not know.
     UnknownVersion,
+    /// Another document in the same rule set has the same file stem. Raised by
+    /// the loader, not the parser, since it takes two documents to see.
+    DuplicateSlug,
 }
 
 /// A structured problem, located at a line where that is meaningful.

@@ -142,6 +142,12 @@ pub struct SelectedRule {
     pub slug: String,
     pub relative_path: String,
     pub title: Option<String>,
+    /// The stable decision id from a v2 header; omitted for a v1 document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adr_id: Option<String>,
+    /// The root a v2 document's paths are relative to; omitted for v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
     /// The stage-1 score. Kept even on a ranked result so the two orderings can
     /// be compared.
     pub score: f64,
@@ -199,7 +205,9 @@ pub fn prefilter(
             index
                 .documents
                 .iter()
-                .find(|doc| doc.slug == hit.slug)
+                // By path, not slug: two files can share a stem, and the first
+                // would be picked for both.
+                .find(|doc| doc.relative_path == hit.relative_path)
                 .map(|doc| (doc.globs.clone(), doc.scope.clone()))
                 .unwrap_or_default()
         })
@@ -268,6 +276,8 @@ impl Prefiltered {
                 slug: hit.slug.clone(),
                 relative_path: hit.relative_path.clone(),
                 title: hit.title.clone(),
+                adr_id: hit.adr_id.clone(),
+                root: hit.root.clone(),
                 score: hit.score,
                 stage: Stage::Prefilter,
                 verdict: None,
@@ -375,6 +385,8 @@ impl Prefiltered {
                     slug: hit.slug.clone(),
                     relative_path: hit.relative_path.clone(),
                     title: hit.title.clone(),
+                    adr_id: hit.adr_id.clone(),
+                    root: hit.root.clone(),
                     score: hit.score,
                     stage: if verdict.is_some() {
                         Stage::Ranked
@@ -948,6 +960,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            root: None,
             adr_id: None,
             relative_path: "p".to_string(),
             title: None,
@@ -987,6 +1000,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            root: None,
             adr_id: None,
             relative_path: "p".to_string(),
             title: None,
@@ -1005,6 +1019,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            root: None,
             adr_id: None,
             relative_path: "p".to_string(),
             title: None,
@@ -1025,6 +1040,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            root: None,
             adr_id: None,
             relative_path: "p".to_string(),
             title: None,
@@ -1048,6 +1064,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            root: None,
             adr_id: None,
             relative_path: "p".to_string(),
             title: None,
