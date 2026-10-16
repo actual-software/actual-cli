@@ -49,7 +49,7 @@ use crate::rules::{RuleDocument, RuleLevel, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 6;
+pub const INDEX_FORMAT_VERSION: u32 = 7;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -157,7 +157,26 @@ pub struct IndexedDocument {
     /// documents states one can never be added to context.
     pub obligations: usize,
     pub scope: Option<String>,
+    /// Every glob the document is matched on, relative to the repository root.
     pub globs: Vec<String>,
+    /// The stable decision id from a v2 header.
+    #[serde(default)]
+    pub adr_id: Option<String>,
+    /// The repository-relative root a v2 header's paths were written against,
+    /// normalized (`.` is the whole repository). Empty for a v1 document.
+    #[serde(default)]
+    pub root: String,
+    /// The subset of `globs` the v2 header declared, already rebased onto the
+    /// repository root. Empty when the globs were derived from Verify or prose.
+    #[serde(default)]
+    pub include_globs: Vec<String>,
+    /// Globs a v2 header excludes, rebased onto the repository root. A file one
+    /// of these matches is never governed by this document.
+    #[serde(default)]
+    pub exclude_globs: Vec<String>,
+    /// Languages a v2 header says the document applies to.
+    #[serde(default)]
+    pub languages: Vec<String>,
     /// Terms per field with how often each occurs in that field.
     ///
     /// Frequencies, not a plain set, because inverse document frequency alone
@@ -172,6 +191,37 @@ pub struct IndexedDocument {
 impl IndexedDocument {
     fn terms(&self, field: Field) -> Option<&BTreeMap<String, u32>> {
         self.field_terms.get(&field)
+    }
+
+    /// Whether `path` can be governed by this document given its root: inside
+    /// the root, or an ancestor of it (a plan naming `packages` may well touch
+    /// `packages/web`). Every document is in scope of a path when it has no
+    /// root, or the root is the whole repository.
+    fn root_admits(&self, path: &str) -> bool {
+        if self.root.is_empty() || self.root == "." {
+            return true;
+        }
+        let path: Vec<&str> = path
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect();
+        let root: Vec<&str> = self.root.split('/').collect();
+        path.iter().zip(root.iter()).all(|(a, b)| a == b)
+    }
+
+    fn root_admits_all(&self) -> bool {
+        self.root.is_empty() || self.root == "."
+    }
+
+    /// Whether `path` is a file one of this document's `!` excludes matches.
+    fn excludes_path(&self, path: &str) -> bool {
+        self.exclude_globs.iter().any(|pattern| {
+            PathGlob {
+                pattern: pattern.clone(),
+            }
+            .matches_path(path)
+                == Some(true)
+        })
     }
 
     /// The globs, parsed back into the type that knows how to compare them.
@@ -421,6 +471,22 @@ impl ScopeIndex {
         }
     }
 
+    /// Documents whose globs come from a v2 header's declared paths.
+    pub fn declared_path_documents(&self) -> usize {
+        self.documents
+            .iter()
+            .filter(|doc| !doc.include_globs.is_empty())
+            .count()
+    }
+
+    /// Documents whose globs were derived from Verify blocks or prose.
+    pub fn derived_path_documents(&self) -> usize {
+        self.documents
+            .iter()
+            .filter(|doc| doc.include_globs.is_empty() && !doc.globs.is_empty())
+            .count()
+    }
+
     /// Terms present in every indexed document, and therefore contributing
     /// nothing. Reported by `--explain` so a wrong selection is diagnosable.
     pub fn ubiquitous_terms(&self) -> Vec<&str> {
@@ -577,6 +643,27 @@ impl ScopeIndex {
     ) -> Option<Match> {
         let mut contributions: Vec<FieldContribution> = Vec::new();
         let mut score = 0.0;
+
+        // An exclude, or a path outside the document's root, is a hard
+        // negative, decided before any signal is scored so that no path to a
+        // score — glob, words, or the brief's text retry, which carries the
+        // same path — can bring the document back. A query naming several
+        // files keeps the document for those it can govern.
+        let kept_paths: Vec<String>;
+        let query_paths = if doc.exclude_globs.is_empty() && doc.root_admits_all() {
+            query_paths
+        } else {
+            kept_paths = query_paths
+                .iter()
+                .filter(|path| doc.root_admits(path) && !doc.excludes_path(path))
+                .cloned()
+                .collect();
+            if kept_paths.is_empty() && !query_paths.is_empty() {
+                return None;
+            }
+            &kept_paths
+        };
+
         // Computed once and reused: it is the only field whose evidence is also
         // reported on the match itself.
         let (path_coverage_value, matched_globs) = path_coverage(doc, query_paths);
@@ -883,6 +970,23 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
             .count(),
         scope: doc.scope.clone(),
         globs: extracted.globs.into_iter().map(|g| g.pattern).collect(),
+        adr_id: doc.meta.as_ref().and_then(|m| m.adr_id.clone()),
+        root: if doc.meta.is_some() {
+            extracted.root
+        } else {
+            String::new()
+        },
+        include_globs: extracted
+            .declared_globs
+            .into_iter()
+            .map(|g| g.pattern)
+            .collect(),
+        exclude_globs: extracted.excludes.into_iter().map(|g| g.pattern).collect(),
+        languages: doc
+            .meta
+            .as_ref()
+            .map(|m| m.languages.clone())
+            .unwrap_or_default(),
         field_terms,
     }
 }
@@ -1814,6 +1918,11 @@ mod tests {
             obligations: 1,
             scope: None,
             globs: globs.iter().map(|g| g.to_string()).collect(),
+            adr_id: None,
+            root: String::new(),
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            languages: Vec::new(),
             field_terms: BTreeMap::new(),
         }
     }
@@ -2144,5 +2253,178 @@ mod tests {
         assert!(value[0]["slug"].is_string());
         assert!(value[0]["score"].is_number());
         assert!(value[0]["contributions"][0]["field"].is_string());
+    }
+
+    // ── v2 root-relative scope and excludes ──────────────────────────────
+
+    /// Helper: a v2 document rooted at `root` declaring `paths`, with a title
+    /// and scope sentence that share no words with the path-only queries below.
+    fn v2_doc(slug: &str, root: &str, paths: &[&str]) -> RuleDocument {
+        let paths: String = paths.iter().map(|p| format!("      - \"{p}\"\n")).collect();
+        let text = format!(
+            "---\nversion: 2\nname: {slug}\nmetadata:\n  actual:\n    adr_id: id-{slug}\n  scope:\n    root: {root}\n    paths:\n{paths}    languages:\n      - typescript\n---\n\n# Quux\n\nScope: applies to the lot.\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
+        );
+        parse_rule_document(
+            &PathBuf::from(format!("/repo/.actual/rules/{slug}.md")),
+            &text,
+        )
+        .expect("fixture parses")
+    }
+
+    fn slugs_for(index: &ScopeIndex, path: &str) -> Vec<String> {
+        index
+            .search(&Query::new("").with_paths([path.to_string()]), 10)
+            .into_iter()
+            .map(|hit| hit.slug)
+            .collect()
+    }
+
+    #[test]
+    fn test_rooted_adr_is_selected_inside_its_root_and_not_outside() {
+        let index = index_of(vec![
+            v2_doc("web-rules", "packages/web", &["src/**"]),
+            v2_doc("api-rules", "packages/api", &["src/**"]),
+        ]);
+        assert_eq!(
+            slugs_for(&index, "packages/web/src/x.ts"),
+            vec!["web-rules"]
+        );
+        assert_eq!(
+            slugs_for(&index, "packages/api/src/x.ts"),
+            vec!["api-rules"]
+        );
+        assert!(slugs_for(&index, "packages/other/src/x.ts").is_empty());
+    }
+
+    #[test]
+    fn test_header_paths_are_rebased_and_root_is_normalized() {
+        let index = index_of(vec![v2_doc(
+            "web-rules",
+            "./packages/web/",
+            &["src/**", "/lib/*.ts"],
+        )]);
+        let doc = &index.documents[0];
+        assert_eq!(doc.root, "packages/web");
+        assert_eq!(
+            doc.include_globs,
+            vec!["packages/web/src/**", "packages/web/lib/*.ts"]
+        );
+        assert_eq!(doc.globs, doc.include_globs);
+        assert_eq!(doc.adr_id.as_deref(), Some("id-web-rules"));
+        assert_eq!(doc.languages, vec!["typescript"]);
+    }
+
+    #[test]
+    fn test_whole_repository_root_adds_no_prefix() {
+        let index = index_of(vec![v2_doc("all", ".", &["src/**"])]);
+        assert_eq!(index.documents[0].root, ".");
+        assert_eq!(index.documents[0].include_globs, vec!["src/**"]);
+        assert_eq!(slugs_for(&index, "src/x.ts"), vec!["all"]);
+    }
+
+    #[test]
+    fn test_excluded_file_never_gets_the_adr() {
+        let index = index_of(vec![v2_doc(
+            "web-rules",
+            "packages/web",
+            &["src/**", "!src/**/*.test.ts"],
+        )]);
+        assert_eq!(
+            index.documents[0].exclude_globs,
+            vec!["packages/web/src/**/*.test.ts"]
+        );
+        assert_eq!(
+            slugs_for(&index, "packages/web/src/a/x.ts"),
+            vec!["web-rules"]
+        );
+        assert!(slugs_for(&index, "packages/web/src/a/x.test.ts").is_empty());
+    }
+
+    #[test]
+    fn test_exclusion_beats_a_word_match() {
+        let index = index_of(vec![v2_doc(
+            "web-rules",
+            "packages/web",
+            &["src/**", "!src/**/*.test.ts"],
+        )]);
+        let query =
+            Query::new("quux applies lot").with_paths(["packages/web/src/x.test.ts".to_string()]);
+        assert!(index.search(&query, 10).is_empty());
+        // Without the excluded path the same words still match.
+        assert!(!index.search(&Query::new("quux applies lot"), 10).is_empty());
+    }
+
+    #[test]
+    fn test_query_naming_an_excluded_and_a_governed_file_keeps_the_adr() {
+        let index = index_of(vec![v2_doc(
+            "web-rules",
+            "packages/web",
+            &["src/**", "!src/**/*.test.ts"],
+        )]);
+        let query = Query::new("").with_paths([
+            "packages/web/src/x.test.ts".to_string(),
+            "packages/web/src/x.ts".to_string(),
+        ]);
+        let hits = index.search(&query, 10);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0]
+            .matched_globs
+            .iter()
+            .all(|m| m.query_path == "packages/web/src/x.ts"));
+    }
+
+    #[test]
+    fn test_declared_and_derived_path_documents_are_counted() {
+        let index = index_of(vec![
+            v2_doc("declared", "packages/web", &["src/**"]),
+            doc("derived", "T: A", "Scope.", "grep -r x lib/oauth/"),
+            doc("neither", "U: B", "Scope.", "echo hi"),
+        ]);
+        assert_eq!(index.declared_path_documents(), 1);
+        assert_eq!(index.derived_path_documents(), 1);
+    }
+
+    #[test]
+    fn test_a_v1_document_has_no_root_or_declared_globs() {
+        let index = index_of(vec![doc("old", "T: A", "Scope.", "grep -r x lib/oauth/")]);
+        let doc = &index.documents[0];
+        assert!(
+            doc.root.is_empty() && doc.include_globs.is_empty() && doc.exclude_globs.is_empty()
+        );
+        assert_eq!(doc.globs, vec!["lib/oauth/**"]);
+    }
+
+    #[test]
+    fn test_an_index_json_without_the_v7_fields_still_deserialises() {
+        let mut value = serde_json::to_value(sample_index()).unwrap();
+        for doc in value["documents"].as_array_mut().unwrap() {
+            let obj = doc.as_object_mut().unwrap();
+            for key in [
+                "adr_id",
+                "root",
+                "include_globs",
+                "exclude_globs",
+                "languages",
+            ] {
+                obj.remove(key);
+            }
+        }
+        let back: ScopeIndex = serde_json::from_value(value).unwrap();
+        assert!(back.documents.iter().all(|d| d.exclude_globs.is_empty()));
+    }
+
+    #[test]
+    fn test_outside_root_is_a_hard_negative_even_on_a_word_match() {
+        let index = index_of(vec![v2_doc("web-rules", "packages/web", &["src/**"])]);
+        let query =
+            Query::new("quux applies lot").with_paths(["packages/api/src/x.ts".to_string()]);
+        assert!(index.search(&query, 10).is_empty());
+    }
+
+    #[test]
+    fn test_an_ancestor_of_the_root_is_still_in_range() {
+        let index = index_of(vec![v2_doc("web-rules", "packages/web", &["src/**"])]);
+        assert_eq!(slugs_for(&index, "packages"), vec!["web-rules"]);
+        assert_eq!(slugs_for(&index, "packages/web"), vec!["web-rules"]);
     }
 }

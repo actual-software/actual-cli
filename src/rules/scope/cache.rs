@@ -280,6 +280,23 @@ mod tests {
     }
 
     #[test]
+    fn test_load_misses_on_a_v6_index_so_it_rebuilds() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let repo = seed(&[("a.md", DOC)]);
+        let dir = rules_dir(repo.path());
+        let mut index = build(repo.path());
+        index.format_version = 6;
+        store(&dir, &index);
+
+        assert_eq!(INDEX_FORMAT_VERSION, 7);
+        assert!(load(&dir, &index.content_digest).is_none());
+    }
+
+    #[test]
     fn test_load_misses_on_an_absent_or_corrupt_entry() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let home = tempdir().unwrap();
