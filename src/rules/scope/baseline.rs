@@ -27,6 +27,8 @@ pub const DEFAULT_LIMIT: usize = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineMatch {
     pub slug: String,
+    /// The document's path, which is unique where its slug may not be.
+    pub relative_path: String,
     /// How many query terms the filename's slug segments matched.
     pub matched_terms: Vec<String>,
 }
@@ -51,6 +53,7 @@ pub fn select(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<Baselin
             matched.dedup();
             (!matched.is_empty()).then(|| BaselineMatch {
                 slug: doc.slug.clone(),
+                relative_path: doc.relative_path.clone(),
                 matched_terms: matched,
             })
         })
