@@ -250,24 +250,39 @@ set that will not build, or holds no documents, notes no folders. A read writes
 nothing when its folder is already covered, or when no decision governs its
 file and the folder is already noted as uncovered.
 
-`session summary` turns that record into one line for the end of a response:
-"Actual AI: added X of Y ADRs to context this session." Y is the number of
-decisions the rule set can add to context at all, meaning those with at least
-one MUST or MUST NOT rule. They are keyed the way the brief groups them, so the
-documents of one decision count once and a document whose title names no
-decision counts on its own. X is the recorded decisions still among them, so a
-rule set edited mid-session can lower X but never lift it past Y. "ADRs" is
-singular when Y is 1. Under `--claude-hook` the command reads the `session_id`
-of a `Stop` envelope and nothing else. The rules directory is `--rules-dir`,
-else `<repo>/.actual/rules` with `--repo` or the working directory, the same
-resolution `impl-check` uses; the envelope's `cwd` is never read, because it
-follows the agent's `cd`. The line is printed only when X is above 0 and the
-counts differ from the last ones shown, which are recorded under the record's
-lock before printing. Everything else, every failure included, is empty stdout
-and exit 0. A cold index is built on the spot, and there is no network, runner
-or model call. `--session ID` prints the current line even at 0 and never
-records it as shown; `--json` prints `{x, y, decisions}` instead, where
-`decisions` names the decisions X counted.
+`session summary` turns that record into one line for the end of a response.
+Y is the number of decisions the rule set can add to context at all, meaning
+those with at least one MUST or MUST NOT rule. They are keyed the way the brief
+groups them, so the documents of one decision count once and a document whose
+title names no decision counts on its own. X is the recorded decisions still
+among them, so a rule set edited mid-session can lower X but never lift it past
+Y. The gaps are the folders the record holds with no decision governing any
+file the session worked on there. The line takes one of five forms:
+
+| Session | Line |
+|---|---|
+| X above 0, gaps found | `Actual AI: 3 of 12 ADRs added to context · 2 areas with no ADR` |
+| X above 0, no gap | `Actual AI: 3 of 12 ADRs added to context` |
+| X of 0, gaps found | `Actual AI: no ADR covers the 3 areas you worked in` |
+| X of 0, no gap | `Actual AI: 0 of 12 ADRs added to context` |
+| Y of 0 | no line |
+
+"ADRs" is singular when Y is 1, and a single gap reads `1 area with no ADR` or
+`no ADR covers the area you worked in`. Under `--claude-hook` the command reads
+the `session_id` of a `Stop` envelope and nothing else. The rules directory is
+`--rules-dir`, else `<repo>/.actual/rules` with `--repo` or the working
+directory, the same resolution `impl-check` uses; the envelope's `cwd` is never
+read, because it follows the agent's `cd`. The hook prints a line only when X
+is above 0 or a gap was found, and the line differs from the one made by the
+counts last shown, which are recorded under the record's lock before printing.
+A record written before gaps existed reads as having shown none. Everything
+else, every failure included, is empty stdout and exit 0. A cold index is built
+on the spot, and there is no network, runner or model call. `--session ID`
+prints the current line, the `0 of 12` form included, and never records it as
+shown; `--json` prints `{x, y, decisions, gaps, areas_without_adr, line}`
+instead, where `decisions` names the decisions X counted, `areas_without_adr`
+lists the gaps sorted, and `line` is what plain output prints, or `null`. The
+folder names stay on the machine, and nothing sends them anywhere.
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan, the hook case — and is the whole answer from this stage;

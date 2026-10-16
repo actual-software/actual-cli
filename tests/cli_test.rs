@@ -1492,17 +1492,17 @@ fn actual_in(dir: &std::path::Path, config_dir: &std::path::Path, args: &[&str])
     command
 }
 
-/// What the read hook does in session `s1` when the agent reads a governed
-/// file of `repo`: the decision is briefed and recorded.
-fn brief_a_read(repo: &std::path::Path, config_dir: &std::path::Path) {
+/// The read hook's stdout when the agent reads `file` of `repo` in session
+/// `s1`, after asserting it exited 0.
+fn hook_read(repo: &std::path::Path, config_dir: &std::path::Path, file: &str) -> String {
     let read = serde_json::json!({
         "session_id": "s1",
         "hook_event_name": "PostToolUse",
         "tool_name": "Read",
-        "tool_input": {"file_path": repo.join("services/auth/token.ts")},
+        "tool_input": {"file_path": repo.join(file)},
     })
     .to_string();
-    actual_in(
+    let output = actual_in(
         repo,
         config_dir,
         &[
@@ -1516,7 +1516,17 @@ fn brief_a_read(repo: &std::path::Path, config_dir: &std::path::Path) {
     .write_stdin(read)
     .assert()
     .success()
-    .stdout(predicate::str::contains("R-A-001"));
+    .get_output()
+    .stdout
+    .clone();
+    String::from_utf8(output).unwrap()
+}
+
+/// What the read hook does in session `s1` when the agent reads a governed
+/// file of `repo`: the decision is briefed and recorded.
+fn brief_a_read(repo: &std::path::Path, config_dir: &std::path::Path) {
+    let reply = hook_read(repo, config_dir, "services/auth/token.ts");
+    assert!(reply.contains("R-A-001"), "{reply}");
 }
 
 /// The summary hook's stdout for `envelope`, run from `dir` with `flags`,
@@ -1563,7 +1573,7 @@ fn test_session_summary_hook_reports_a_briefed_decision_once() {
     let stop = stop_envelope(repo.path());
     assert_eq!(
         summary_hook(repo.path(), config_dir.path(), &flags, &stop),
-        "Actual AI: added 1 of 1 ADR to context this session.\n"
+        "Actual AI: 1 of 1 ADR added to context\n"
     );
     assert_eq!(
         summary_hook(repo.path(), config_dir.path(), &flags, &stop),
@@ -1589,7 +1599,7 @@ fn test_session_summary_hook_keys_on_its_own_directory_not_the_envelopes_cwd() {
     );
     assert_eq!(
         summary_hook(briefed.path(), config_dir.path(), &[], &stop),
-        "Actual AI: added 1 of 1 ADR to context this session.\n"
+        "Actual AI: 1 of 1 ADR added to context\n"
     );
 }
 
@@ -1624,7 +1634,7 @@ fn test_session_summary_direct_mode_prints_the_current_counts() {
     )
     .assert()
     .success()
-    .stdout("Actual AI: added 0 of 1 ADR to context this session.\n");
+    .stdout("Actual AI: 0 of 1 ADR added to context\n");
 
     let output = actual_in(
         repo.path(),
@@ -1637,7 +1647,60 @@ fn test_session_summary_direct_mode_prints_the_current_counts() {
     .stdout
     .clone();
     let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(value, serde_json::json!({"x": 0, "y": 1, "decisions": []}));
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "x": 0,
+            "y": 1,
+            "decisions": [],
+            "gaps": 0,
+            "areas_without_adr": [],
+            "line": "Actual AI: 0 of 1 ADR added to context"
+        })
+    );
+}
+
+/// A read of a file no decision governs leaves its folder a gap, which the
+/// summary hook reports with no decision added, then beside the count once
+/// one is. `--json` names the folder.
+#[test]
+fn test_session_summary_hook_reports_the_areas_with_no_adr() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    let stop = stop_envelope(repo.path());
+
+    assert_eq!(
+        hook_read(repo.path(), config_dir.path(), "infra/terraform/main.tf"),
+        ""
+    );
+    assert_eq!(
+        summary_hook(repo.path(), config_dir.path(), &[], &stop),
+        "Actual AI: no ADR covers the area you worked in\n"
+    );
+
+    brief_a_read(repo.path(), config_dir.path());
+    assert_eq!(
+        summary_hook(repo.path(), config_dir.path(), &[], &stop),
+        "Actual AI: 1 of 1 ADR added to context · 1 area with no ADR\n"
+    );
+    assert_eq!(summary_hook(repo.path(), config_dir.path(), &[], &stop), "");
+
+    let output = actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["session", "summary", "--session", "s1", "--json"],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["gaps"], 1);
+    assert_eq!(
+        value["areas_without_adr"],
+        serde_json::json!(["infra/terraform"])
+    );
 }
 
 #[test]
