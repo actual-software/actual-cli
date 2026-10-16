@@ -748,6 +748,35 @@ mod tests {
             .to_string()
     }
 
+    // ── v2 root-relative scope and excludes ──────────────────────────────
+
+    /// A v2 decision rooted at `packages/web`, excluding test files. Its title
+    /// shares the words `src` and `test` with the paths below, so only the
+    /// exclusion — not a lack of word overlap — keeps the test file unbriefed.
+    const WEB_V2: &str = "---\nversion: 2\nname: web-src-test-1a2b\nmetadata:\n  actual:\n    adr_id: adr-web\n  scope:\n    root: packages/web\n    paths:\n      - \"src/**\"\n      - \"!src/**/*.test.ts\"\n---\n\n# Web src test conventions: Components\n\nScope: applies to `src/**`; excludes `!src/**/*.test.ts`.\n\n### Rules\n\n- **R-WEB-001** MUST: Components stay presentational.\n";
+
+    #[test]
+    fn test_a_rooted_adr_briefs_inside_its_root_and_not_for_excluded_or_outside_files() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("web-src-test-1a2b.md"), WEB_V2).unwrap();
+            let a = args(root.path());
+            let path = |file: &str| root.path().join(file).to_string_lossy().to_string();
+
+            assert!(brief_for(root.path(), &path("packages/web/src/x.ts"), &a, None).is_ok());
+            assert_eq!(
+                brief_for(root.path(), &path("packages/web/src/x.test.ts"), &a, None),
+                Err(NoBrief::Ungoverned)
+            );
+            assert_eq!(
+                brief_for(root.path(), &path("packages/api/src/x.ts"), &a, None),
+                Err(NoBrief::Ungoverned)
+            );
+        });
+    }
+
     // ── the answered shapes ──────────────────────────────────────────────
 
     /// The main path: a read of a governed file briefs the decision that

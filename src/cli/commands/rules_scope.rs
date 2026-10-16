@@ -78,6 +78,14 @@ fn render_index_panel(resolved: &ResolvedIndex, root: &Path, width: usize) -> St
             .to_string(),
     );
     panel = panel.kv(
+        "Documents with declared paths",
+        &index.declared_path_documents().to_string(),
+    );
+    panel = panel.kv(
+        "Documents with derived paths",
+        &index.derived_path_documents().to_string(),
+    );
+    panel = panel.kv(
         "Distinct terms",
         &index.document_frequency.len().to_string(),
     );
@@ -118,6 +126,8 @@ struct JsonIndexSummary<'a> {
     format_version: u32,
     documents: usize,
     path_globs: usize,
+    documents_with_declared_paths: usize,
+    documents_with_derived_paths: usize,
     distinct_terms: usize,
     documents_without_globs: usize,
     ubiquitous_terms: Vec<&'a str>,
@@ -135,6 +145,8 @@ fn render_index_json(resolved: &ResolvedIndex) -> String {
         format_version: index.format_version,
         documents: index.len(),
         path_globs: index.documents.iter().map(|d| d.globs.len()).sum(),
+        documents_with_declared_paths: index.declared_path_documents(),
+        documents_with_derived_paths: index.derived_path_documents(),
         distinct_terms: index.document_frequency.len(),
         documents_without_globs: index
             .documents
