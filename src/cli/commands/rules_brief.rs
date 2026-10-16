@@ -179,8 +179,8 @@ pub(crate) enum NoBrief {
     Ungoverned,
     /// Rule documents claim it, and every one was briefed earlier.
     AlreadyBriefed,
-    /// Claimed and unbriefed, but nothing renderable fit: no rule lines, or
-    /// none that `--max-chars` left room for.
+    /// Claimed, and nothing renderable fit: no rule lines, none that
+    /// `--max-chars` left room for, or a `--limit` of 0.
     NothingToShow,
 }
 
@@ -395,12 +395,14 @@ fn brief_for(
     let by_path = Query::new("")
         .with_paths([relative.clone()])
         .with_min_score(floor);
-    let mut decisions = resolved.index.search_adrs(&by_path, args.limit);
+    // Uncapped, so whether a decision governs the file never depends on
+    // `--limit`. The cap is applied below.
+    let mut decisions = resolved.index.search_adrs(&by_path, resolved.index.len());
     if decisions.is_empty() {
         let by_text = Query::new(relative.replace('/', " "))
             .with_paths([relative.clone()])
             .with_min_score(floor);
-        decisions = retry_by_text(&resolved.index, &by_text, args.limit);
+        decisions = retry_by_text(&resolved.index, &by_text);
     }
 
     // Decisions this context was already briefed on are dropped after the
@@ -421,20 +423,22 @@ fn brief_for(
         let state = brief_memory::load(&dir, &key);
         Some((dir, key, state))
     });
-    // Read before the filter: afterwards an empty list cannot say whether the
-    // search found nothing or the session had already stated all of it.
+    // Read before the cap and the filter: afterwards an empty list cannot say
+    // whether the search found nothing, `--limit 0` left no room, or the
+    // session had already stated all of it.
     let governed = !decisions.is_empty();
     if let Some(who) = session {
         record_folder(&resolved.index, who, &key_dir, &relative, governed);
     }
+    decisions.truncate(args.limit);
     if let Some((_, _, state)) = &memory {
         decisions.retain(|decision| !state.has_briefed(&decision.key));
     }
     if decisions.is_empty() {
-        return Err(if governed {
-            NoBrief::AlreadyBriefed
-        } else {
-            NoBrief::Ungoverned
+        return Err(match (governed, args.limit) {
+            (false, _) => NoBrief::Ungoverned,
+            (true, 0) => NoBrief::NothingToShow,
+            (true, _) => NoBrief::AlreadyBriefed,
         });
     }
 
@@ -544,16 +548,16 @@ fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
 /// codebase has — `test`, `config`, `utils` — to say a rule governs the file.
 const MIN_RETRY_TERMS: usize = 2;
 
-/// The text retry's decisions, keeping only documents with at least
-/// [`MIN_RETRY_TERMS`] matched words.
+/// The text retry's decisions in rank order, uncapped, keeping only documents
+/// with at least [`MIN_RETRY_TERMS`] matched words.
 ///
 /// A glob match is no exemption. The retry only runs when the path search
 /// found nothing at the floor, so a glob-matched document reaching it scored
 /// below that floor; one shared word must not lift it back over.
 ///
-/// The filter runs before the cap, so a decision dropped here makes room for
-/// the next one that qualifies rather than leaving the brief short.
-fn retry_by_text(index: &ScopeIndex, query: &Query, limit: usize) -> Vec<AdrGroup> {
+/// The filter runs before the caller's cap, so a decision dropped here makes
+/// room for the next one that qualifies rather than leaving the brief short.
+fn retry_by_text(index: &ScopeIndex, query: &Query) -> Vec<AdrGroup> {
     let mut decisions: Vec<AdrGroup> = index
         .search_adrs(query, index.len())
         .into_iter()
@@ -571,7 +575,6 @@ fn retry_by_text(index: &ScopeIndex, query: &Query, limit: usize) -> Vec<AdrGrou
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    decisions.truncate(limit);
     decisions
 }
 
@@ -1682,6 +1685,69 @@ mod tests {
                 brief_for(root.path(), &governed(root.path()), &a, None),
                 Err(NoBrief::NothingToShow)
             );
+        });
+    }
+
+    /// Governs `ops/` through its `Verify` path alone: `ops/deploy.sh` shares
+    /// only `ops` with it, too few words for the text retry to find it.
+    const BASE_IMAGES: &str = "# Pin Base Images: Container Builds\n\nThese rules are ALWAYS ACTIVE for container builds.\n\n### Rules\n\n- **R-K-001** MUST: pin every base image by digest.\n\n### Verify\n\n```bash\ngrep -rn \"FROM\" ops/\n```\n";
+
+    /// `--limit 0` is a budget of no decisions, as a `--max-chars` too small
+    /// for any rule is. A governed file has nothing to show and is still
+    /// governed, whichever search found its decision, so its folder is
+    /// covered rather than a gap, and nothing counts as added.
+    #[test]
+    fn test_a_limit_of_zero_shows_nothing_and_still_covers_the_folder() {
+        with_scratch_config(|| {
+            let who = SessionIdentity {
+                session_id: "s1",
+                agent_id: None,
+            };
+            let by_path_only = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(by_path_only.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("pin-base-images-5c2a.md"), BASE_IMAGES).unwrap();
+            // The premise: only the path search finds this decision.
+            let index = scope::resolve_in(&dir, by_path_only.path(), false)
+                .unwrap()
+                .index;
+            let by_text = Query::new("ops deploy.sh")
+                .with_paths(["ops/deploy.sh".to_string()])
+                .with_min_score(0.0);
+            assert!(retry_by_text(&index, &by_text).is_empty());
+
+            for (root, file, folder) in [
+                (by_path_only, "ops/deploy.sh", "ops"),
+                (
+                    pathless_repo(),
+                    "app/components/reading-progress/ProgressBar.tsx",
+                    "app/components/reading-progress",
+                ),
+            ] {
+                let mut a = args(root.path());
+                a.limit = 0;
+                let path = |file: &str| root.path().join(file).to_string_lossy().to_string();
+
+                assert_eq!(
+                    brief_for(root.path(), &path(file), &a, Some(who)),
+                    Err(NoBrief::NothingToShow),
+                    "{file}"
+                );
+                assert_eq!(
+                    brief_for(root.path(), &path("infra/terraform/main.tf"), &a, Some(who)),
+                    Err(NoBrief::Ungoverned),
+                    "{file}"
+                );
+                assert_eq!(
+                    folders(root.path(), "s1"),
+                    (
+                        vec![folder.to_string()],
+                        vec!["infra/terraform".to_string()]
+                    ),
+                    "{file}"
+                );
+                assert!(ledger(root.path(), "s1").is_empty(), "{file}");
+            }
         });
     }
 

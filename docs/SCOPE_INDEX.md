@@ -195,7 +195,9 @@ The brief is held to three budgets: `--limit` counts decisions,
 default) caps the whole text. Under the character cap rules are dropped whole,
 lowest-ranked first: a decision that cannot place a rule ends the brief, so what
 is left out is always the tail, and a closing line says how many decisions that
-was. A cap too small for even one rule yields no brief.
+was. A cap too small for even one rule yields no brief. Whether a file is
+governed is settled before any budget applies, so a budget of 0 briefs nothing,
+reports `nothing-to-show`, and still notes the file's folder as covered.
 
 Under `--claude-hook` a decision is briefed **once per session**: state keyed
 by `session_id`, the subagent's `agent_id` when the envelope has one, and the
