@@ -238,8 +238,15 @@ pub struct DocumentSignals {
     /// into the prose scope sentence.
     pub globs: Vec<PathGlob>,
     /// Globs the document declares itself as excluded (`!` paths in its v2
-    /// header, with the `!` removed). Empty for v1 documents.
+    /// header, with the `!` removed), rebased onto the repository root. Empty
+    /// for v1 documents.
     pub excludes: Vec<PathGlob>,
+    /// The subset of `globs` that came from the v2 header rather than being
+    /// derived from Verify or prose. Empty when the header declares none.
+    pub declared_globs: Vec<PathGlob>,
+    /// The repository-relative root the header's paths were written against,
+    /// normalized: `.` for the whole repository.
+    pub root: String,
     /// File-extension globs from `--include=` filters, e.g. `*.ts`.
     pub extensions: Vec<String>,
     /// Terms from the prose scope sentence.
@@ -719,6 +726,34 @@ fn is_content_hash(segment: &str) -> bool {
         && segment.chars().any(|c| c.is_ascii_alphabetic())
 }
 
+/// A header `root` without a `./` prefix or trailing `/`; `.` when it names the
+/// whole repository or is absent.
+pub fn normalize_root(root: Option<&str>) -> String {
+    let trimmed = root
+        .unwrap_or(".")
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/');
+    if trimmed.is_empty() {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// A header path, which is relative to the root, rebased onto the repository.
+///
+/// A leading `/` anchors the pattern at the root in gitignore style, so it is
+/// dropped before prefixing. Root `.` adds no prefix.
+fn rebase_onto_root(root: &str, pattern: &str) -> String {
+    let pattern = pattern.trim_start_matches('/');
+    if root == "." {
+        pattern.to_string()
+    } else {
+        format!("{root}/{pattern}")
+    }
+}
+
 /// Extract every applicability signal from one parsed document.
 pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
     let mut globs: Vec<PathGlob> = Vec::new();
@@ -730,17 +765,21 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
     // header is present. Extensions still come from Verify: they say which
     // language a rule polices, and the header does not.
     let meta = doc.meta.as_ref();
+    // Header paths are relative to the header's root; every other glob is
+    // already repository-relative, so only these are rebased.
+    let root = normalize_root(meta.and_then(|m| m.root.as_deref()));
+    let rebase = |path: &str| normalize_path(&rebase_onto_root(&root, path));
     let declared: Vec<PathGlob> = meta
         .map(|m| m.include_paths())
         .unwrap_or_default()
         .into_iter()
-        .filter_map(normalize_path)
+        .filter_map(rebase)
         .collect();
     let excludes: Vec<PathGlob> = meta
         .map(|m| m.exclude_paths())
         .unwrap_or_default()
         .into_iter()
-        .filter_map(normalize_path)
+        .filter_map(rebase)
         .collect();
     let has_declared = !declared.is_empty();
 
@@ -761,6 +800,7 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
     }
 
     let scope_text = doc.scope.as_deref().unwrap_or_default();
+    let declared_globs = declared.clone();
     if has_declared {
         for glob in declared {
             if !globs.contains(&glob) {
@@ -787,6 +827,8 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
     DocumentSignals {
         globs,
         excludes,
+        declared_globs,
+        root,
         extensions,
         scope_terms: terms(scope_text),
         slug_terms: doc.slug().map(slug_terms).unwrap_or_default(),
