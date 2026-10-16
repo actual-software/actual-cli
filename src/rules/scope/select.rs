@@ -948,6 +948,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            adr_id: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -986,6 +987,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            adr_id: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -1003,6 +1005,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            adr_id: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -1022,6 +1025,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            adr_id: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
@@ -1044,6 +1048,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            adr_id: None,
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
