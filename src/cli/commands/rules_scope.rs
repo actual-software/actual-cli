@@ -285,11 +285,15 @@ fn render_adr_json(
 fn adr_filename_scan(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<AdrBaselineGroup> {
     let mut groups: Vec<AdrBaselineGroup> = Vec::new();
     for hit in baseline::select(index, query_text, index.len()) {
-        let document = index
+        // By path, not slug, so a duplicated stem cannot resolve to the wrong
+        // file. A hit the index no longer holds is skipped, not a panic.
+        let Some(document) = index
             .documents
             .iter()
-            .find(|doc| doc.slug == hit.slug)
-            .expect("a filename-scan hit is always present in the index that produced it");
+            .find(|doc| doc.relative_path == hit.relative_path)
+        else {
+            continue;
+        };
         let key = document.decision_key();
         let baseline_hit = JsonBaselineHit {
             slug: hit.slug,
@@ -859,11 +863,27 @@ fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> V
         // with the selection. Every selected rule came from this same index, so
         // a miss would mean the two disagreed about their own contents.
         .map(|rule| {
+            // By path, not slug: a stem shared by two files must not give one
+            // the other's evidence. A rule the search did not return (it cannot
+            // happen for one the same index selected) gets an evidence-free
+            // entry, which keeps the result aligned with the selection and does
+            // not panic.
             ranked
                 .iter()
-                .find(|hit| hit.slug == rule.slug)
+                .find(|hit| hit.relative_path == rule.relative_path)
                 .cloned()
-                .expect("a selected rule is always present in the index that ranked it")
+                .unwrap_or_else(|| Match {
+                    slug: rule.slug.clone(),
+                    relative_path: rule.relative_path.clone(),
+                    title: rule.title.clone(),
+                    adr: None,
+                    adr_id: rule.adr_id.clone(),
+                    candidate_group_id: rule.candidate_group_id.clone(),
+                    root: rule.root.clone(),
+                    score: rule.score,
+                    contributions: Vec::new(),
+                    matched_globs: Vec::new(),
+                })
         })
         .collect()
 }
@@ -3086,5 +3106,96 @@ mod tests {
         // A multi-byte plan must not panic on a byte-boundary slice.
         assert_eq!(truncate("ααααα", 3), "αα…");
         assert_eq!(truncate("", 0), "");
+    }
+
+    // ── slug collisions and adr_id/root in the output ────────────────────
+
+    /// Helper: two v2 documents with one file stem in different directories,
+    /// told apart only by path (and, secondarily, `adr_id`).
+    fn colliding_index() -> ScopeIndex {
+        let text = |id: &str| {
+            format!(
+                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n    candidate_group_id: grp-{id}\n  scope:\n    root: packages/{id}\n    paths:\n      - \"src/**\"\n---\n\n# Title {id}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
+            )
+        };
+        let documents = ["one", "two"]
+            .iter()
+            .map(|id| {
+                crate::rules::parse_rule_document(
+                    &std::path::PathBuf::from(format!("/repo/.actual/rules/{id}/same-stem.md")),
+                    &text(id),
+                )
+                .unwrap()
+            })
+            .collect();
+        ScopeIndex::build(
+            &crate::rules::RuleSetLoadReport {
+                rules_dir: std::path::PathBuf::from("/repo/.actual/rules"),
+                documents,
+                errors: Vec::new(),
+                digest: String::new(),
+            },
+            Path::new("/repo"),
+            "fp".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_filename_scan_over_a_shared_stem_reports_both_without_panicking() {
+        let groups = adr_filename_scan(&colliding_index(), "same stem", 5);
+        let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+        assert_eq!(keys, vec!["group:grp-one", "group:grp-two"]);
+    }
+
+    #[test]
+    fn test_evidence_follows_the_selected_path_when_stems_collide() {
+        let index = colliding_index();
+        let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+            stage1_candidates: 0,
+        };
+        let evidence = index_evidence(&index, &query, &run.selection);
+        assert_eq!(evidence.len(), run.selection.selected.len());
+        assert_eq!(
+            evidence[0].relative_path,
+            run.selection.selected[0].relative_path
+        );
+        assert_eq!(evidence[0].adr_id.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn test_evidence_for_a_rule_the_search_did_not_return_is_empty_not_a_panic() {
+        let index = colliding_index();
+        let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
+        let mut selection = select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
+            .finish(Stage2::NotRequested);
+        selection.selected[0].relative_path = "gone.md".to_string();
+        let evidence = index_evidence(&index, &query, &selection);
+        assert_eq!(evidence[0].relative_path, "gone.md");
+        assert!(evidence[0].contributions.is_empty());
+    }
+
+    #[test]
+    fn test_select_json_adds_adr_id_and_root_and_keeps_the_existing_fields() {
+        let index = colliding_index();
+        let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+            stage1_candidates: 0,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&render_select_json(&index, &query, &run, false)).unwrap();
+        let rule = &value["selected"][0];
+        assert_eq!(rule["adr_id"], "two");
+        assert_eq!(rule["candidate_group_id"], "grp-two");
+        assert_eq!(rule["root"], "packages/two");
+        for key in ["slug", "relative_path", "title", "score", "stage", "reason"] {
+            assert!(rule.get(key).is_some(), "{key}");
+        }
     }
 }

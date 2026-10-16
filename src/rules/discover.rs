@@ -24,7 +24,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ActualError;
 use crate::rules::parse::parse_rule_document;
-use crate::rules::types::{RuleFileError, RuleIssueKind, RuleSetLoadReport};
+use crate::rules::types::{
+    RuleDocument, RuleFileError, RuleIssue, RuleIssueKind, RuleSetLoadReport,
+};
 
 /// Directory, relative to the repository root, holding rule files.
 pub const RULES_DIR_NAME: &str = ".actual/rules";
@@ -202,7 +204,58 @@ pub fn parse_rule_sources(sources: RuleSources) -> RuleSetLoadReport {
             Err(err) => report.errors.push(err),
         }
     }
+    flag_duplicate_slugs(&mut report.documents);
     report
+}
+
+/// A document's slug (its file stem) is its identity throughout the scope
+/// index, the ranker and the session state. A second file with the same stem
+/// (`a.md` beside `a.markdown`) cannot be told apart by any of those, so each
+/// member of the collision carries a warning naming the others rather than the
+/// set quietly resolving to whichever came first. Nothing is dropped.
+fn flag_duplicate_slugs(documents: &mut [RuleDocument]) {
+    let mut by_slug: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (at, doc) in documents.iter().enumerate() {
+        if let Some(slug) = doc.slug() {
+            by_slug.entry(slug.to_string()).or_default().push(at);
+        }
+    }
+    for (slug, members) in by_slug.into_iter().filter(|(_, m)| m.len() > 1) {
+        for &at in &members {
+            let others: Vec<String> = members
+                .iter()
+                .filter(|&&other| other != at)
+                .map(|&other| documents[other].source_path.display().to_string())
+                .collect();
+            let ids_differ = {
+                let ids: std::collections::BTreeSet<Option<&str>> = members
+                    .iter()
+                    .map(|&m| {
+                        documents[m]
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.adr_id.as_deref())
+                    })
+                    .collect();
+                ids.len() > 1
+            };
+            let detail = format!(
+                "slug `{slug}` is shared with {}{}; lookups by slug can pick the wrong file",
+                others.join(", "),
+                if ids_differ {
+                    " (and their adr_id differs)"
+                } else {
+                    ""
+                },
+            );
+            documents[at].warnings.push(RuleIssue {
+                kind: RuleIssueKind::DuplicateSlug,
+                line: None,
+                detail,
+            });
+        }
+    }
 }
 
 /// Load every rule document under `<root_dir>/.actual/rules/`.
@@ -697,5 +750,78 @@ mod tests {
         assert!(is_markdown(Path::new("a.MD")));
         assert!(!is_markdown(Path::new("a.markdown")));
         assert!(!is_markdown(Path::new("a")));
+    }
+
+    // ── duplicate slugs ──────────────────────────────────────────────────
+
+    fn source(path: &str, text: &str) -> RuleSource {
+        RuleSource {
+            path: PathBuf::from(path),
+            text: Ok(text.to_string()),
+        }
+    }
+
+    fn sources_of(sources: Vec<RuleSource>) -> RuleSources {
+        RuleSources {
+            rules_dir: PathBuf::from("/repo/.actual/rules"),
+            sources,
+            errors: Vec::new(),
+            digest: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_documents_sharing_a_file_stem_each_report_the_collision() {
+        let report = parse_rule_sources(sources_of(vec![
+            source("/repo/.actual/rules/a.md", DOC_A),
+            source("/repo/.actual/rules/sub/a.md", DOC_A),
+            source("/repo/.actual/rules/b.md", DOC_A),
+        ]));
+        assert_eq!(report.documents.len(), 3, "nothing is dropped");
+        let dup = |i: usize| -> Vec<&RuleIssue> {
+            report.documents[i]
+                .warnings
+                .iter()
+                .filter(|w| w.kind == RuleIssueKind::DuplicateSlug)
+                .collect()
+        };
+        assert_eq!(dup(0).len(), 1);
+        assert_eq!(dup(1).len(), 1);
+        assert!(dup(2).is_empty());
+        assert!(dup(0)[0].detail.contains("sub/a.md"), "{:?}", dup(0)[0]);
+        assert!(dup(1)[0].detail.contains("rules/a.md"), "{:?}", dup(1)[0]);
+    }
+
+    #[test]
+    fn test_a_duplicate_stem_with_different_adr_ids_says_so() {
+        let with_id = |id: &str| {
+            format!(
+                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n---\n\n# T\n\n### Rules\n\n- **R-A-001** MUST: x.\n"
+            )
+        };
+        let report = parse_rule_sources(sources_of(vec![
+            source("/repo/.actual/rules/a.md", &with_id("id-1")),
+            source("/repo/.actual/rules/sub/a.md", &with_id("id-2")),
+        ]));
+        let detail = &report.documents[0].warnings[0].detail;
+        assert!(detail.contains("adr_id differs"), "{detail}");
+
+        let same = parse_rule_sources(sources_of(vec![
+            source("/repo/.actual/rules/a.md", &with_id("id-1")),
+            source("/repo/.actual/rules/sub/a.md", &with_id("id-1")),
+        ]));
+        assert!(!same.documents[0].warnings[0].detail.contains("differs"));
+    }
+
+    #[test]
+    fn test_unique_stems_get_no_duplicate_warning() {
+        let report = parse_rule_sources(sources_of(vec![
+            source("/repo/.actual/rules/a.md", DOC_A),
+            source("/repo/.actual/rules/b.md", DOC_A),
+        ]));
+        assert!(report.documents.iter().all(|d| d
+            .warnings
+            .iter()
+            .all(|w| w.kind != RuleIssueKind::DuplicateSlug)));
     }
 }

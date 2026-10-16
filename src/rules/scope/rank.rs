@@ -600,6 +600,7 @@ mod tests {
         let hit = Match {
             slug: "slug".to_string(),
             adr: None,
+            root: None,
             adr_id: None,
             candidate_group_id: None,
             relative_path: ".actual/rules/slug.md".to_string(),

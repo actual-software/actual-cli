@@ -370,6 +370,10 @@ pub struct Match {
     /// document, and then omitted from the JSON form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_group_id: Option<String>,
+    /// The repository root a v2 document's paths are relative to (`.` is the
+    /// whole repository). Absent for a v1 document, and then omitted from JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
     pub score: f64,
     pub contributions: Vec<FieldContribution>,
     /// Document globs that matched a path the query named, with the number of
@@ -390,6 +394,9 @@ pub struct AdrGroup {
     /// from the JSON form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_group_id: Option<String>,
+    /// The root of the group's best document; see [`Match::root`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
     /// The decision's name, absent for a document that stands alone.
     pub title: Option<String>,
     /// The best score among this group's documents, which is what it ranks at.
@@ -781,6 +788,7 @@ impl ScopeIndex {
             adr: doc.adr.clone(),
             adr_id: doc.adr_id.clone(),
             candidate_group_id: doc.candidate_group_id.clone(),
+            root: Some(doc.root.clone()).filter(|root| !root.is_empty()),
             score,
             contributions,
             matched_globs,
@@ -808,6 +816,7 @@ fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
             None => groups.push(AdrGroup {
                 key,
                 candidate_group_id: hit.candidate_group_id.clone(),
+                root: hit.root.clone(),
                 // The first hit of a group is its best, because `matches` is
                 // already in rank order.
                 score: hit.score,
@@ -1870,6 +1879,7 @@ mod tests {
             slug: slug.to_string(),
             relative_path: format!(".actual/rules/{slug}.md"),
             title: Some(format!("{adr}: aspect")),
+            root: None,
             adr: Some(adr.to_string()),
             adr_id: None,
             candidate_group_id: None,
@@ -2247,6 +2257,7 @@ mod tests {
             slug: "scoped".to_string(),
             relative_path: String::new(),
             title: None,
+            root: None,
             adr: None,
             adr_id: None,
             candidate_group_id: None,
@@ -2898,5 +2909,87 @@ mod tests {
             index.decision_keys().into_iter().collect::<Vec<_>>(),
             vec!["group:x", "id:x", "x"]
         );
+    }
+
+    // ── slug collisions and the new output fields ────────────────────────
+
+    /// Helper: two documents with one file stem in different directories, each
+    /// a distinct decision, so only the path tells them apart.
+    fn colliding_index() -> ScopeIndex {
+        let text = |id: &str, title: &str| {
+            format!(
+                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n    candidate_group_id: grp-{id}\n  scope:\n    root: packages/{id}\n    paths:\n      - \"src/**\"\n---\n\n# {title}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
+            )
+        };
+        let documents = [("one", "Alpha Rules"), ("two", "Beta Rules")]
+            .iter()
+            .map(|(id, title)| {
+                parse_rule_document(
+                    &PathBuf::from(format!("/repo/.actual/rules/{id}/same-stem.md")),
+                    &text(id, title),
+                )
+                .unwrap()
+            })
+            .collect();
+        ScopeIndex::build(
+            &RuleSetLoadReport {
+                rules_dir: PathBuf::from("/repo/.actual/rules"),
+                documents,
+                errors: Vec::new(),
+                digest: String::new(),
+            },
+            Path::new("/repo"),
+            "fp".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_a_shared_stem_does_not_give_one_document_the_others_evidence() {
+        let index = colliding_index();
+        let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
+        let prefiltered = crate::rules::scope::select::prefilter(&index, &query, 5, 5);
+        let selection = prefiltered.finish(crate::rules::scope::select::Stage2::NotRequested);
+        assert_eq!(selection.selected.len(), 1);
+        assert_eq!(selection.selected[0].adr_id.as_deref(), Some("two"));
+        assert_eq!(selection.selected[0].root.as_deref(), Some("packages/two"));
+        assert!(selection.selected[0].relative_path.contains("/two/"));
+        // The candidate the ranker would see carries `two`'s globs, not `one`'s.
+        let globs: Vec<String> = prefiltered
+            .candidates()
+            .iter()
+            .flat_map(|c| c.globs.clone())
+            .collect();
+        assert!(
+            globs.iter().all(|g| g.starts_with("packages/two/")),
+            "{globs:?}"
+        );
+    }
+
+    #[test]
+    fn test_match_and_group_carry_ids_and_root_for_v2_only() {
+        let index = colliding_index();
+        let groups = index.search_adrs(
+            &Query::new("").with_paths(["packages/one/src/x.ts".to_string()]),
+            5,
+        );
+        assert_eq!(groups[0].key, "group:grp-one");
+        assert_eq!(groups[0].candidate_group_id.as_deref(), Some("grp-one"));
+        assert_eq!(
+            groups[0].documents[0].candidate_group_id.as_deref(),
+            Some("grp-one")
+        );
+        assert_eq!(groups[0].documents[0].adr_id.as_deref(), Some("one"));
+        assert_eq!(groups[0].root.as_deref(), Some("packages/one"));
+        assert_eq!(groups[0].documents[0].root.as_deref(), Some("packages/one"));
+        // Existing fields keep their names.
+        let json = serde_json::to_value(&groups[0]).unwrap();
+        for key in ["key", "title", "score", "documents"] {
+            assert!(json.get(key).is_some(), "{key}");
+        }
+        assert_eq!(json["documents"][0]["slug"], "same-stem");
+
+        let v1 = index_of(vec![doc("old", "T: A", "Scope.", "grep -r x lib/")]);
+        let json = serde_json::to_value(v1.search_adrs(&Query::new("t"), 5)).unwrap();
+        assert!(json[0].get("root").is_none() && json[0].get("candidate_group_id").is_none());
     }
 }
