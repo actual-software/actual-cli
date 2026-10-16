@@ -621,9 +621,8 @@ mod tests {
                 .map(|entry| entry.path())
                 .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
                 .collect();
-            let [record] = records.as_slice() else {
-                panic!("one record expected: {records:?}");
-            };
+            assert_eq!(records.len(), 1, "one record expected: {records:?}");
+            let record = &records[0];
             std::fs::write(
                 record,
                 r#"{"format_version":1,"briefed":["Adopt RS256"],"last_reported":{"added":1,"available":2}}"#,
