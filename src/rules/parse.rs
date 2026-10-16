@@ -34,7 +34,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::rules::types::{
-    Rule, RuleDocument, RuleFileError, RuleIssue, RuleIssueKind, RuleLevel, VerifyBlock,
+    AdrMeta, Rule, RuleDocument, RuleFileError, RuleIssue, RuleIssueKind, RuleLevel, VerifyBlock,
 };
 
 /// Matches the bold rule-id span and returns it with the rest of the line.
@@ -84,7 +84,14 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
     let mut doc = RuleDocument::empty(path);
     let mut section = Section::Preamble;
     let mut saw_rules_heading = false;
-    let mut i = 0usize;
+    // Skip a v2 frontmatter block. Starting past it keeps later line numbers
+    // pointing at the real file.
+    let mut i = frontmatter_end(&lines)
+        .map(|end| {
+            absorb_frontmatter(&lines[1..end], &mut doc);
+            end + 1
+        })
+        .unwrap_or(0);
 
     while i < lines.len() {
         let trimmed = lines[i].trim();
@@ -179,6 +186,93 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
         ));
     }
     Ok(doc)
+}
+
+// ── frontmatter ──────────────────────────────────────────────────────────
+
+/// The highest header version this parser knows.
+const KNOWN_VERSION: &str = "2";
+
+/// Index of the closing `---` when the file opens with a fenced block.
+fn frontmatter_end(lines: &[&str]) -> Option<usize> {
+    if lines.first()?.trim_end() != "---" {
+        return None;
+    }
+    lines
+        .iter()
+        .skip(1)
+        .position(|line| line.trim_end() == "---")
+        .map(|idx| idx + 1)
+}
+
+fn yaml_str(value: Option<&serde_yaml::Value>) -> Option<String> {
+    match value? {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn yaml_strs(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    match value {
+        Some(serde_yaml::Value::Sequence(items)) => {
+            items.iter().filter_map(|v| yaml_str(Some(v))).collect()
+        }
+        other => yaml_str(other).into_iter().collect(),
+    }
+}
+
+/// Parse the frontmatter body into `doc.meta`. Bad YAML is a warning; the line
+/// scan still runs over the rest of the file.
+fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
+    let value: serde_yaml::Value = match serde_yaml::from_str(&body.join("\n")) {
+        Ok(v @ serde_yaml::Value::Mapping(_)) => v,
+        Ok(_) => {
+            doc.warnings.push(issue(
+                RuleIssueKind::MalformedFrontmatter,
+                1,
+                "frontmatter is not a YAML mapping",
+            ));
+            return;
+        }
+        Err(err) => {
+            doc.warnings.push(issue(
+                RuleIssueKind::MalformedFrontmatter,
+                1,
+                format!("invalid YAML frontmatter: {err}"),
+            ));
+            return;
+        }
+    };
+    let actual = value.get("metadata").and_then(|m| m.get("actual"));
+    let scope = value.get("metadata").and_then(|m| m.get("scope"));
+    let meta = AdrMeta {
+        version: yaml_str(value.get("version")),
+        name: yaml_str(value.get("name")),
+        description: yaml_str(value.get("description")),
+        adr_id: yaml_str(actual.and_then(|a| a.get("adr_id"))),
+        status: yaml_str(actual.and_then(|a| a.get("status"))),
+        candidate_group_id: yaml_str(actual.and_then(|a| a.get("candidate_group_id"))),
+        evidence_source: yaml_str(
+            actual
+                .and_then(|a| a.get("evidence"))
+                .and_then(|e| e.get("source")),
+        ),
+        root: yaml_str(scope.and_then(|s| s.get("root"))),
+        paths: yaml_strs(scope.and_then(|s| s.get("paths"))),
+        languages: yaml_strs(scope.and_then(|s| s.get("languages"))),
+    };
+    if let Some(version) = meta.version.as_deref() {
+        if version != KNOWN_VERSION {
+            doc.warnings.push(issue(
+                RuleIssueKind::UnknownVersion,
+                1,
+                format!("unknown header version `{version}`; reading known fields"),
+            ));
+        }
+    }
+    doc.meta = Some(meta);
 }
 
 // ── line classifiers ─────────────────────────────────────────────────────
@@ -491,6 +585,128 @@ grep -r "randomBytes(16)" apps/actual/lib/oauth/ apps/actual/lib/github/
 <enforcement>
 Claude Code MUST NOT skip or defer verification of these rules. Pull requests using HS256 or other symmetric algorithms for public API tokens must be rejected with explanation. Hardcoded secrets or missing environment variable validation triggers security review. Token verification without revocation checking requires security team approval and documentation.
 </enforcement>"##;
+
+    // ── v2 frontmatter ───────────────────────────────────────────────────
+
+    const V2_HEADER: &str = "---\nversion: 2\nname: jwt-rs256\ndescription: JWT signing\nmetadata:\n  actual:\n    adr_id: adr-123\n    status: approved\n    candidate_group_id: grp-1\n    evidence:\n      source: deep\n  scope:\n    root: services/api\n    paths:\n      - src/**\n      - lib/**\n    languages: [rust, typescript]\n---\n";
+
+    #[test]
+    fn test_frontmatter_v2_matches_v1_body_plus_meta() {
+        let v1 = parse_ok(FIXTURE_REAL);
+        let v2 = parse_ok(&format!("{V2_HEADER}{FIXTURE_REAL}"));
+        assert_eq!(v2.title, v1.title);
+        assert_eq!(v2.scope, v1.scope);
+        // Rule lines are positions in the real file, so they shift by the header.
+        let shift = V2_HEADER.lines().count();
+        assert_eq!(v2.rules.len(), v1.rules.len());
+        for (a, b) in v2.rules.iter().zip(&v1.rules) {
+            assert_eq!(
+                (&a.id, a.level, &a.statement),
+                (&b.id, b.level, &b.statement)
+            );
+            assert_eq!(a.line, b.line + shift);
+        }
+        assert_eq!(v2.verify.len(), v1.verify.len());
+        for (a, b) in v2.verify.iter().zip(&v1.verify) {
+            assert_eq!((&a.lang, &a.body), (&b.lang, &b.body));
+            assert_eq!(a.line, b.line + shift);
+        }
+        assert_eq!(v2.accept_when, v1.accept_when);
+        assert_eq!(v2.enforcement, v1.enforcement);
+        assert!(v2.warnings.is_empty());
+        assert!(v1.meta.is_none());
+        let meta = v2.meta.expect("meta populated");
+        assert_eq!(meta.version.as_deref(), Some("2"));
+        assert_eq!(meta.name.as_deref(), Some("jwt-rs256"));
+        assert_eq!(meta.description.as_deref(), Some("JWT signing"));
+        assert_eq!(meta.adr_id.as_deref(), Some("adr-123"));
+        assert_eq!(meta.status.as_deref(), Some("approved"));
+        assert_eq!(meta.candidate_group_id.as_deref(), Some("grp-1"));
+        assert_eq!(meta.evidence_source.as_deref(), Some("deep"));
+        assert_eq!(meta.root.as_deref(), Some("services/api"));
+        assert_eq!(meta.paths, vec!["src/**", "lib/**"]);
+        assert_eq!(meta.languages, vec!["rust", "typescript"]);
+    }
+
+    #[test]
+    fn test_frontmatter_generator_shape_with_excludes_and_languages() {
+        let text = "---\nversion: 2\nname: a-b-1234\ndescription: \"Title: with colon\"\nmetadata:\n  actual:\n    adr_id: 447dc308\n    status: accepted\n    evidence:\n      source: deep\n  scope:\n    root: services/api\n    paths:\n      - \"**\"\n      - \"!**/*.test.ts\"\n    languages:\n      - typescript\n---\n\n# T\n\nScope: applies to the whole repository.\n\n### Rules\n\n- **R-A-001** MUST_NOT: no.\n";
+        let doc = parse_ok(text);
+        let meta = doc.meta.expect("meta");
+        assert_eq!(meta.description.as_deref(), Some("Title: with colon"));
+        assert_eq!(meta.evidence_source.as_deref(), Some("deep"));
+        assert_eq!(meta.paths, vec!["**", "!**/*.test.ts"]);
+        assert_eq!(meta.languages, vec!["typescript"]);
+        assert_eq!(doc.rules[0].level, RuleLevel::MustNot);
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_keeps_line_numbers_of_the_real_file() {
+        let text = format!("{V2_HEADER}# T\n\nScope.\n\n### Rules\n\n- **R-A-001** BOGUS: x\n- **R-A-002** MUST: ok\n");
+        let doc = parse_ok(&text);
+        let header_lines = V2_HEADER.lines().count();
+        assert_eq!(doc.warnings.len(), 1);
+        assert_eq!(doc.warnings[0].line, Some(header_lines + 7));
+    }
+
+    #[test]
+    fn test_frontmatter_malformed_yaml_warns_and_still_parses() {
+        let text =
+            "---\nname: [unclosed\n---\n# T\n\nScope.\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.title.as_deref(), Some("T"));
+        assert_eq!(doc.scope.as_deref(), Some("Scope."));
+        assert_eq!(doc.rules.len(), 1);
+        assert!(doc.meta.is_none());
+        assert_eq!(doc.warnings.len(), 1);
+        assert_eq!(doc.warnings[0].kind, RuleIssueKind::MalformedFrontmatter);
+    }
+
+    #[test]
+    fn test_frontmatter_non_mapping_warns() {
+        let text = "---\n- a\n- b\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.warnings[0].kind, RuleIssueKind::MalformedFrontmatter);
+        assert!(doc.meta.is_none());
+    }
+
+    #[test]
+    fn test_frontmatter_unknown_version_reads_fields_and_warns() {
+        let text = "---\nversion: 9\nmetadata:\n  actual:\n    adr_id: x\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        let meta = doc.meta.expect("meta");
+        assert_eq!(meta.version.as_deref(), Some("9"));
+        assert_eq!(meta.adr_id.as_deref(), Some("x"));
+        assert_eq!(doc.warnings.len(), 1);
+        assert_eq!(doc.warnings[0].kind, RuleIssueKind::UnknownVersion);
+    }
+
+    #[test]
+    fn test_frontmatter_missing_optional_fields() {
+        let text = "---\nname: only-name\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        let meta = doc.meta.expect("meta");
+        assert_eq!(meta.name.as_deref(), Some("only-name"));
+        assert!(meta.version.is_none() && meta.adr_id.is_none() && meta.root.is_none());
+        assert!(meta.paths.is_empty() && meta.languages.is_empty());
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_unclosed_frontmatter_fence_is_not_frontmatter() {
+        let text = "---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert!(doc.meta.is_none());
+        assert_eq!(doc.rules.len(), 1);
+    }
+
+    #[test]
+    fn test_v1_json_has_no_meta_field() {
+        let doc = parse_ok(FIXTURE_REAL);
+        let json = serde_json::to_value(&doc).unwrap();
+        assert!(json.get("meta").is_none());
+    }
 
     // ── the real corpus shape ────────────────────────────────────────────
 
