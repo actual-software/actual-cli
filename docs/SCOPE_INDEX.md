@@ -263,9 +263,9 @@ file the session worked on there. The line takes one of five forms:
 |---|---|
 | X above 0, gaps found | `Actual AI: 3 of 12 ADRs added to context · 2 areas with no ADR` |
 | X above 0, no gap | `Actual AI: 3 of 12 ADRs added to context` |
-| X of 0, gaps found | `Actual AI: no ADR covers the 3 areas you worked in` |
-| X of 0, no gap | `Actual AI: 0 of 12 ADRs added to context` |
-| Y of 0 | no line |
+| X is 0, gaps found | `Actual AI: no ADR covers the 3 areas you worked in` |
+| X is 0, no gap | `Actual AI: 0 of 12 ADRs added to context` |
+| Y is 0 | no line |
 
 "ADRs" is singular when Y is 1, and a single gap reads `1 area with no ADR` or
 `no ADR covers the area you worked in`. Under `--claude-hook` the command reads
