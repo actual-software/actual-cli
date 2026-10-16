@@ -182,10 +182,11 @@ pub struct RuleDocument {
     pub meta: Option<AdrMeta>,
 }
 
-/// Header v2 frontmatter. `version`, `adr_id`, `status`, `candidate_group_id`
-/// and `evidence_source` come from `metadata.actual.*`; `root`, `paths` and
-/// `languages` from `metadata.scope.*`. `name` and `description` are top level.
-/// Every field is optional.
+/// Header v2 frontmatter, as written by the ADR generator. `version`, `name`
+/// and `description` are top level; `adr_id`, `status`, `candidate_group_id`
+/// and `evidence.source` (kept here as `evidence_source`) come from
+/// `metadata.actual`; `root`, `paths` and `languages` from `metadata.scope`.
+/// `paths` entries may be `!`-prefixed excludes. Every field is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdrMeta {
     pub version: Option<String>,

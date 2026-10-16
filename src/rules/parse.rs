@@ -248,13 +248,17 @@ fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
     let actual = value.get("metadata").and_then(|m| m.get("actual"));
     let scope = value.get("metadata").and_then(|m| m.get("scope"));
     let meta = AdrMeta {
-        version: yaml_str(actual.and_then(|a| a.get("version"))),
+        version: yaml_str(value.get("version")),
         name: yaml_str(value.get("name")),
         description: yaml_str(value.get("description")),
         adr_id: yaml_str(actual.and_then(|a| a.get("adr_id"))),
         status: yaml_str(actual.and_then(|a| a.get("status"))),
         candidate_group_id: yaml_str(actual.and_then(|a| a.get("candidate_group_id"))),
-        evidence_source: yaml_str(actual.and_then(|a| a.get("evidence_source"))),
+        evidence_source: yaml_str(
+            actual
+                .and_then(|a| a.get("evidence"))
+                .and_then(|e| e.get("source")),
+        ),
         root: yaml_str(scope.and_then(|s| s.get("root"))),
         paths: yaml_strs(scope.and_then(|s| s.get("paths"))),
         languages: yaml_strs(scope.and_then(|s| s.get("languages"))),
@@ -584,7 +588,7 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
 
     // ── v2 frontmatter ───────────────────────────────────────────────────
 
-    const V2_HEADER: &str = "---\nname: jwt-rs256\ndescription: JWT signing\nmetadata:\n  actual:\n    version: 2\n    adr_id: adr-123\n    status: approved\n    candidate_group_id: grp-1\n    evidence_source: pr-9\n  scope:\n    root: services/api\n    paths:\n      - src/**\n      - lib/**\n    languages: [rust, typescript]\n---\n";
+    const V2_HEADER: &str = "---\nversion: 2\nname: jwt-rs256\ndescription: JWT signing\nmetadata:\n  actual:\n    adr_id: adr-123\n    status: approved\n    candidate_group_id: grp-1\n    evidence:\n      source: deep\n  scope:\n    root: services/api\n    paths:\n      - src/**\n      - lib/**\n    languages: [rust, typescript]\n---\n";
 
     #[test]
     fn test_frontmatter_v2_matches_v1_body_plus_meta() {
@@ -618,10 +622,23 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert_eq!(meta.adr_id.as_deref(), Some("adr-123"));
         assert_eq!(meta.status.as_deref(), Some("approved"));
         assert_eq!(meta.candidate_group_id.as_deref(), Some("grp-1"));
-        assert_eq!(meta.evidence_source.as_deref(), Some("pr-9"));
+        assert_eq!(meta.evidence_source.as_deref(), Some("deep"));
         assert_eq!(meta.root.as_deref(), Some("services/api"));
         assert_eq!(meta.paths, vec!["src/**", "lib/**"]);
         assert_eq!(meta.languages, vec!["rust", "typescript"]);
+    }
+
+    #[test]
+    fn test_frontmatter_generator_shape_with_excludes_and_languages() {
+        let text = "---\nversion: 2\nname: a-b-1234\ndescription: \"Title: with colon\"\nmetadata:\n  actual:\n    adr_id: 447dc308\n    status: accepted\n    evidence:\n      source: deep\n  scope:\n    root: services/api\n    paths:\n      - \"**\"\n      - \"!**/*.test.ts\"\n    languages:\n      - typescript\n---\n\n# T\n\nScope: applies to the whole repository.\n\n### Rules\n\n- **R-A-001** MUST_NOT: no.\n";
+        let doc = parse_ok(text);
+        let meta = doc.meta.expect("meta");
+        assert_eq!(meta.description.as_deref(), Some("Title: with colon"));
+        assert_eq!(meta.evidence_source.as_deref(), Some("deep"));
+        assert_eq!(meta.paths, vec!["**", "!**/*.test.ts"]);
+        assert_eq!(meta.languages, vec!["typescript"]);
+        assert_eq!(doc.rules[0].level, RuleLevel::MustNot);
+        assert!(doc.warnings.is_empty());
     }
 
     #[test]
@@ -656,7 +673,7 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
 
     #[test]
     fn test_frontmatter_unknown_version_reads_fields_and_warns() {
-        let text = "---\nmetadata:\n  actual:\n    version: 9\n    adr_id: x\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let text = "---\nversion: 9\nmetadata:\n  actual:\n    adr_id: x\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
         let doc = parse_ok(text);
         let meta = doc.meta.expect("meta");
         assert_eq!(meta.version.as_deref(), Some("9"));
