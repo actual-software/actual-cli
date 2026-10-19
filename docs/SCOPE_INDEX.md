@@ -33,7 +33,7 @@ a rank to one of them.
 
 | Signal | Source | Default weight |
 |---|---|---|
-| `path` | path globs from `### Verify` operands | 3.0 |
+| `path` | path globs: a v2 header's declared `paths`, else the `### Verify` operands | 3.0 |
 | `scope` | the prose applicability sentence | 2.0 |
 | `path-terms` | words inside those path operands | 1.0 |
 | `title` | the `#` heading | 1.0 |
@@ -69,6 +69,86 @@ Both are scored by *depth* rather than by the fact of matching, because a `**`
 glob matches everything beneath it — only depth separates the rule governing the
 exact directory from the one governing the whole tree. Partial agreement is
 discounted a further 25%.
+
+## ADR file header v2
+
+Generated rule files may open with a YAML block fenced by `---` lines. The CLI
+reads it alongside the original format; a file without one (every v1 file) is
+indexed exactly as before, and the two can sit in one `.actual/rules/`.
+
+```yaml
+---
+version: 2
+name: cross-cutting-web-components-are-presentational-8a1c
+description: "Adopt Presentational Components in the Web Package: ..."
+metadata:
+  actual:
+    adr_id: 0b6f2a1e-...
+    status: accepted
+    candidate_group_id: 7c1d...
+    evidence:
+      source: deep
+  scope:
+    root: packages/web
+    paths:
+      - "src/components/**"
+      - "!src/**/*.test.tsx"
+    languages:
+      - typescript
+---
+```
+
+The block is stripped before the body is read, so the title, the scope sentence,
+`### Rules` and `### Verify` parse as they always did, and later line numbers
+still point at the real file. Every field is optional.
+
+| Field | Used for |
+|---|---|
+| `metadata.scope.root` | The repository-relative directory the `paths` are written against; `.` is the whole repository. Normalised (`./` and a trailing `/` dropped). |
+| `metadata.scope.paths` | The document's path globs, relative to `root`. A `!` prefix makes an exclude. |
+| `metadata.actual.status` | Whether the decision governs at all; see below. |
+| `metadata.actual.adr_id` | The decision key (see `--by-adr`), and `adr_id` in JSON output. |
+| `version` | Only to warn when it is not `2`; the fields it knows are still read. |
+| `metadata.scope.languages` | Stored in the index. Not used for ranking or selection yet. |
+| `name`, `description`, `metadata.actual.candidate_group_id`, `metadata.actual.evidence.source` | Parsed into the document; no command uses them yet. |
+
+**Declared paths replace derived globs.** When the header declares at least one
+include, those are the document's globs, and neither the `### Verify` operands
+nor path-like tokens in the prose scope sentence contribute any. The body's
+generated `Scope: applies to ...` line restates the header, which is why prose
+is not read for globs once a header is present, even when it declares no
+`paths`. The prose still feeds the `scope` terms. A v2 document with no `paths`
+keeps its Verify-derived globs. A v1 document is unchanged.
+
+**Root.** Each declared glob is prefixed with `root/` when the index is built,
+so everything downstream sees repository-relative globs and path matching is
+unchanged. A file outside a document's root is never governed by it, whatever
+the words say: a decision rooted at `packages/web` is selected for
+`packages/web/src/x.ts` and not for `packages/api/src/x.ts`. A path that is an
+ancestor of the root (`packages`) is still in range, because a plan naming it
+may touch the root. A leading `/` on a path anchors it at the root and is
+dropped before prefixing.
+
+**Excludes.** A file matching a `!` glob never gets that decision. This is a
+hard negative decided before any signal is scored, so it holds for the path
+signal, for word matches, and for the brief's text fallback alike. A query that
+names several files keeps the decision for the ones it can still govern.
+
+**Status.** `deleted`, `draft`, `archived-draft`, `deferred` and `rejected` mark
+a decision that does not govern, as do `superseded` and `deprecated`, which no
+generator emits today. Such a document is left out of the index, so it is never
+selected, ranked, briefed, judged by `plan-check` or `impl-check`, or counted in
+"X of Y ADRs"; `rules index` reports how many were left out. Any other status,
+including one this build does not know, and a missing status, is active: wrongly
+briefing an agent on a rule is a smaller failure than silently dropping one a
+newer generator meant to be enforced. `deleted`, `draft`, `archived-draft` and
+`deferred` are the statuses the generator already withholds from enforcement.
+
+**A bad header is a warning, not an error.** Malformed YAML, or YAML that is not
+a mapping, is recorded as a `malformed_frontmatter` warning on the document and
+the body is still read. An unrecognised `version` is an `unknown_version`
+warning. Two files that share a file stem are each given a `duplicate_slug`
+warning naming the other, with a note when their `adr_id`s differ.
 
 ## Measurements
 
@@ -125,6 +205,19 @@ filename scan wastes nearly two.
   generated and written one level deep, so this avoids governing a repository
   by a vendored copy or an editor backup that happened to land there. A
   hand-organised `.actual/rules/auth/` is ignored.
+- **The v2 header is read, not validated against a schema.** Unknown keys are
+  ignored and a field of the wrong type is read as absent. `languages`,
+  `candidate_group_id`, the evidence source, `name` and `description` are
+  parsed and carried but do not influence any selection yet.
+- **A decision split across v1 and v2 files is two decisions.** Files group on
+  `adr_id` when they have one and on their title prefix otherwise, so a decision
+  whose siblings are only partly converted counts twice in "X of Y ADRs". The
+  generator writes a whole decision at a time, so this arises only in a
+  hand-mixed rule set.
+- **Two files with one stem cannot be told apart by the ranker.** Its schema is
+  keyed by slug by design, so the duplicate-stem warning is the remedy. Only
+  `.md` files are read and the stem is the filename, so this needs something
+  like `a.md` beside `a.MD` on a case-sensitive filesystem.
 - **Retrieval is lexical.** A plan that paraphrases its whole domain without
   naming it will not match, and no amount of weighting fixes that.
 - **Inverse document frequency needs documents to compare.** It scores a term by
@@ -139,14 +232,34 @@ filename scan wastes nearly two.
 ## Cost
 
 Building an index over 425 files takes about 130 ms; a query against a built
-index is sub-millisecond. The index is cached under the user's config directory —
-never inside the repository, where a derived artifact beside committed source
-would get committed with it — and keyed by a stat-only fingerprint of every rule
-file's name, size and modification time. Any edit, add, remove or rename
-invalidates it. Every cache operation is best-effort: an unreadable or
-unwritable cache degrades to a rebuild. `actual rules index --clear` removes
-every cached index — including those left by other repositories — and rebuilds
-this one.
+index is sub-millisecond. The index is cached under the user's config directory
+(`<config>/scope-index/`, one entry per rules directory) — never inside the
+repository, where a derived artifact beside committed source would get committed
+with it. It is keyed by a SHA-256 over the exact bytes of every rule file, so any
+edit, add, remove or rename invalidates it, and a content change that keeps a
+file's size and timestamp cannot be missed. The stored index also carries a
+format version (8 at the time of writing). A cache written by a build with a
+different version is discarded and rebuilt rather than misread: the v2 work
+bumped it from 6 to 8. The per-session brief memory and ledger are versioned
+the same way and were bumped too, because their keys changed, so an agent can be
+briefed once more on a decision after an upgrade. Every cache operation is best-effort: an unreadable or unwritable cache
+degrades to a rebuild. `actual rules index --clear` removes every cached index —
+including those left by other repositories — and rebuilds this one.
+
+## JSON additions
+
+The v2 work only adds fields; none is renamed or removed, and each is left out
+for a v1 document, so v1 output is byte-for-byte what it was.
+
+| Command | Added |
+|---|---|
+| `rules ls --json` | per document: `adr_id`, `status`, `root`; new warning kinds `malformed_frontmatter`, `unknown_version`, `duplicate_slug` |
+| `rules index --json` | `inactive_documents`, `documents_with_declared_paths`, `documents_with_derived_paths` |
+| `rules select --json` | per selected rule: `adr_id`, `root` |
+| `rules select --by-adr --json` | per decision and per document: `adr_id`, `root`; the decision's `key` is the `adr_id` for v2 documents |
+| `session summary --json` | `adr_ids`, aligned with `decisions`, when any counted decision has one |
+
+Judge schemas and override ids are unchanged: they stay `doc_slug::rule_id`.
 
 ## Commands
 
@@ -160,6 +273,12 @@ actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N
 actual session summary --claude-hook [--repo PATH] [--rules-dir PATH]
 actual session summary --session ID [--repo PATH] [--rules-dir PATH] [--json]
 ```
+
+`rules brief --help` ends with a line naming the capability marker
+`adr-header-v2`. The Actual Skill greps for that literal to learn that the CLI
+reads the v2 header, the same way it probes `UserPromptSubmit` in
+`impl-check --help`; a CLI without it is not asked to read v2 files. A test pins
+the literal, so it changes only together with that probe.
 
 `rules brief` is the hook's form of a selection: given the file an agent is
 about to touch, it names the decisions that govern it and their MUST rules.
@@ -380,7 +499,9 @@ the title prefix, or the filename, in that order (the prefixes keep an id from
 meeting a document whose title prefix or filename happens to equal it). A
 decision keyed on a group id also carries a `candidate_group_id` field, as do
 its documents; both are omitted otherwise, so v1 output is unchanged. The same
-key is what the brief's once-per-session state and `session summary` record. A
+key is what the brief's once-per-session state and `session summary` record, so
+`session summary --json` adds an `adr_ids` array, aligned with `decisions`, when
+any counted decision has one. A
 rule set only partly regenerated splits a decision: a policy missing its group
 id is keyed on its own `adr_id`, and regenerating the remaining files is the
 fix. The brief's heading stays the decision's title.
