@@ -17,12 +17,12 @@
 //!
 //! **Folders, beside decisions.** A folder is the directory a file sits in,
 //! named from the repository root. It is covered once a decision governs any
-//! file the agents worked on in it, or any path a plan named there, and a gap
-//! while every one was governed by none, whatever order they arrive in. Docs,
-//! config, lockfiles and generated output never count toward one;
-//! [`folder_of`] holds that list. Every read notes a folder, so
-//! [`record_folders`] checks the record without the lock and takes it only
-//! when a folder's state changes.
+//! file the agents worked on in it, or any file a plan named there, directly
+//! or by naming the folder, and a gap while every one was governed by none,
+//! whatever order they arrive in. Docs, config, lockfiles and generated output
+//! never count toward one; [`folder_of`] holds that list. Every read notes a
+//! folder, so [`record_folders`] checks the record without the lock and takes
+//! it only when a folder's state changes.
 //!
 //! **Writes take a lock.** [`crate::config::paths::write_secure`] stages
 //! every write at one fixed `.tmp` path, so two hook runs writing at once can

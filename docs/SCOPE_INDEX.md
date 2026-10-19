@@ -252,15 +252,17 @@ file and the folder is already noted as uncovered.
 
 `plan-check --claude-hook` adds the folders a plan names to the same record,
 before its judge runs and with no model call. The plan's paths are the ones its
-selection reads, the tokens that carry a slash, and each gets the check a read
-file gets, so a folder both planned and read is one entry. A path names a
-folder when it is a directory in the checkout or, when it is not there yet, has
-no extension, and that folder counts when it holds a file that would. Any other
-path counts toward the folder it sits in, once that folder exists. So prose
-that only looks like a path (`and/or`) notes nothing, a glob counts only toward
-a folder it spells out, and neither a path outside the repository nor a plan
-with no session notes anything. A folder the plan would create is noted when
-the agent first writes a file there.
+selection reads, the tokens that carry a slash. A path names a folder when it
+is a directory in the checkout or, when it is not there yet, has no extension.
+That folder counts when a file directly in it would, and those files decide it,
+each given the check a read file gets: the folder is covered when a decision
+governs any of them, and a decision for a subfolder alone leaves it a gap. Any
+other path counts toward the folder it sits in, once that folder exists, and
+gets that check itself. Either way, a folder both planned and read is one
+entry. So prose that only looks like a path (`and/or`) notes nothing, a glob
+counts only toward a folder it spells out, and neither a path outside the
+repository nor a plan with no session notes anything. A folder the plan would
+create is noted when the agent first writes a file there.
 
 `session summary` turns that record into one line for the end of a response.
 Y is the number of decisions the rule set can add to context at all, meaning
