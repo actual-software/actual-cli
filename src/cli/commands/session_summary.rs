@@ -6,8 +6,11 @@
 //! **One line, built from clauses.** "3 of 12 ADRs added to context" and "2
 //! areas with no ADR" are joined by " · ", and [`line`] is the one place that
 //! builds the line, for plain output, `--json` and the hook alike. A session
-//! that found gaps and added no ADR gets one clause for both, "no ADR covers
-//! the 3 areas you worked in". A rule set holding no decision has no line.
+//! that added no ADR and worked only where none applies gets one clause for
+//! both, "no ADR covers the 3 areas you worked in". One that also worked in a
+//! covered area keeps the count, "0 of 12 ADRs added to context · 2 areas with
+//! no ADR", because its gaps are not every area it worked in. A rule set
+//! holding no decision has no line.
 //!
 //! **X and Y.** X is the decisions [`super::brief_ledger`] recorded as added to
 //! the context of this session's agents. Y is the decisions the rule set can
@@ -17,7 +20,9 @@
 //!
 //! **Gaps.** The folders the same record noted as worked in with no decision
 //! governing any of their files. Their names stay on the machine: `--json`
-//! lists them, and nothing sends them anywhere.
+//! lists them, and nothing sends them anywhere. Every other folder it noted
+//! is covered, even when `--limit 0` or a budget too small for any rule
+//! briefed nothing there.
 //!
 //! **Shown when it changes.** A plugin cannot speak once at the end of a
 //! session, so the hook speaks at the end of a response, when a decision was
@@ -204,12 +209,14 @@ fn added<'a>(
     recorded.briefed.intersection(decisions)
 }
 
-/// X, Y and the gaps for one record against one rule set.
+/// X, Y, the gaps and the covered folders for one record against one rule
+/// set.
 fn counts(recorded: &BriefLedger, decisions: &BTreeSet<String>) -> Reported {
     Reported {
         added: added(recorded, decisions).count(),
         available: decisions.len(),
         gaps: recorded.gaps().count(),
+        covered: recorded.covered_folders.len(),
     }
 }
 
@@ -231,10 +238,10 @@ fn line(counts: Reported) -> Option<String> {
     if counts.available == 0 {
         return None;
     }
-    let clauses = match (counts.added, counts.gaps) {
-        (0, gaps) if gaps > 0 => vec![uncovered_clause(gaps)],
-        (_, 0) => vec![added_clause(counts)],
-        (_, gaps) => vec![added_clause(counts), gaps_clause(gaps)],
+    let clauses = match (counts.added, counts.gaps, counts.covered) {
+        (0, gaps, 0) if gaps > 0 => vec![uncovered_clause(gaps)],
+        (_, 0, _) => vec![added_clause(counts)],
+        (_, gaps, _) => vec![added_clause(counts), gaps_clause(gaps)],
     };
     Some(format!("Actual AI: {}", clauses.join(" · ")))
 }
@@ -395,33 +402,63 @@ mod tests {
 
     // ── the line ─────────────────────────────────────────────────────────
 
+    /// The line for a session that worked in no covered folder.
     fn shown(added: usize, available: usize, gaps: usize) -> Option<String> {
         line(Reported {
             added,
             available,
             gaps,
+            covered: 0,
         })
     }
 
+    /// The gaps stand alone only when they are every area the session worked
+    /// in: nothing added and no folder covered.
     #[test]
     fn test_the_line_takes_every_form() {
-        for (added, gaps, expected) in [
+        for (added, gaps, covered, expected) in [
             (
                 3,
                 2,
+                0,
                 "Actual AI: 3 of 12 ADRs added to context · 2 areas with no ADR",
             ),
             (
                 3,
                 1,
+                2,
                 "Actual AI: 3 of 12 ADRs added to context · 1 area with no ADR",
             ),
-            (3, 0, "Actual AI: 3 of 12 ADRs added to context"),
-            (0, 3, "Actual AI: no ADR covers the 3 areas you worked in"),
-            (0, 1, "Actual AI: no ADR covers the area you worked in"),
-            (0, 0, "Actual AI: 0 of 12 ADRs added to context"),
+            (3, 0, 2, "Actual AI: 3 of 12 ADRs added to context"),
+            (
+                0,
+                2,
+                1,
+                "Actual AI: 0 of 12 ADRs added to context · 2 areas with no ADR",
+            ),
+            (
+                0,
+                1,
+                3,
+                "Actual AI: 0 of 12 ADRs added to context · 1 area with no ADR",
+            ),
+            (
+                0,
+                3,
+                0,
+                "Actual AI: no ADR covers the 3 areas you worked in",
+            ),
+            (0, 1, 0, "Actual AI: no ADR covers the area you worked in"),
+            (0, 0, 1, "Actual AI: 0 of 12 ADRs added to context"),
+            (0, 0, 0, "Actual AI: 0 of 12 ADRs added to context"),
         ] {
-            assert_eq!(shown(added, 12, gaps).as_deref(), Some(expected));
+            let counts = Reported {
+                added,
+                available: 12,
+                gaps,
+                covered,
+            };
+            assert_eq!(line(counts).as_deref(), Some(expected), "{counts:?}");
         }
     }
 
@@ -473,7 +510,8 @@ mod tests {
                 Some(Reported {
                     added: 1,
                     available: 2,
-                    gaps: 0
+                    gaps: 0,
+                    covered: 0
                 })
             );
             assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
@@ -553,7 +591,8 @@ mod tests {
                 Some(Reported {
                     added: 0,
                     available: 2,
-                    gaps: 1
+                    gaps: 1,
+                    covered: 0
                 })
             );
             assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
@@ -563,6 +602,64 @@ mod tests {
                 hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
                 Some("Actual AI: no ADR covers the 2 areas you worked in")
             );
+        });
+    }
+
+    /// The state a `--limit 0` brief leaves: `ops` covered with nothing added,
+    /// and `infra/terraform` a gap. The gap is not every area the session
+    /// worked in, so the line keeps the count.
+    #[test]
+    fn test_the_hook_keeps_the_count_when_a_covered_area_added_nothing() {
+        with_scratch_config(|| {
+            let root = repo();
+            work_in(root.path(), "ops", true);
+            work_in(root.path(), "infra/terraform", false);
+            let line = "Actual AI: 0 of 2 ADRs added to context · 1 area with no ADR";
+
+            assert_eq!(
+                direct_output("s1", &direct_args(root.path()))
+                    .unwrap()
+                    .as_deref(),
+                Some(line)
+            );
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some(line)
+            );
+            assert_eq!(
+                recorded(root.path()).last_reported,
+                Some(Reported {
+                    added: 0,
+                    available: 2,
+                    gaps: 1,
+                    covered: 1
+                })
+            );
+            assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
+        });
+    }
+
+    /// A session shown its gaps alone hears again once it works in a covered
+    /// area, because the line now keeps the count. Another covered area leaves
+    /// the line as it was.
+    #[test]
+    fn test_the_hook_speaks_again_when_a_covered_area_follows_the_gaps() {
+        with_scratch_config(|| {
+            let root = repo();
+            work_in(root.path(), "infra/terraform", false);
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: no ADR covers the area you worked in")
+            );
+
+            work_in(root.path(), "ops", true);
+            assert_eq!(
+                hook_line(&stop("s1"), &hook_args(root.path())).as_deref(),
+                Some("Actual AI: 0 of 2 ADRs added to context · 1 area with no ADR")
+            );
+
+            work_in(root.path(), "services/auth", true);
+            assert_eq!(hook_line(&stop("s1"), &hook_args(root.path())), None);
         });
     }
 
@@ -643,7 +740,8 @@ mod tests {
                 Some(Reported {
                     added: 1,
                     available: 2,
-                    gaps: 1
+                    gaps: 1,
+                    covered: 0
                 })
             );
         });
@@ -903,7 +1001,8 @@ mod tests {
     }
 
     /// The JSON lists the gaps sorted, leaves covered folders out, and its
-    /// line is the one plain output prints.
+    /// line is the one plain output prints, which keeps the count because
+    /// two of the four areas are covered.
     #[test]
     fn test_direct_mode_json_lists_the_areas_with_no_adr() {
         with_scratch_config(|| {
@@ -917,7 +1016,7 @@ mod tests {
             ] {
                 work_in(root.path(), folder, covered);
             }
-            let line = "Actual AI: no ADR covers the 2 areas you worked in";
+            let line = "Actual AI: 0 of 2 ADRs added to context · 2 areas with no ADR";
 
             assert_eq!(
                 direct_output("s1", &direct_args(root.path()))

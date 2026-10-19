@@ -133,6 +133,10 @@ pub struct Reported {
     /// to load would empty the whole record.
     #[serde(default)]
     pub gaps: usize,
+    /// How many folders worked in a decision governs, defaulted for the same
+    /// reason.
+    #[serde(default)]
+    pub covered: usize,
 }
 
 /// The directory the records live in, under the user's config directory.
@@ -406,6 +410,7 @@ mod tests {
             added: 1,
             available: 12,
             gaps: 2,
+            covered: 3,
         };
         record(dir.path(), &key("s1"), ["Adopt RS256"]);
         update(dir.path(), &key("s1"), |ledger| {
@@ -584,8 +589,9 @@ mod tests {
     }
 
     /// A record in the shape v0.7.0 writes loads with no folders, and with no
-    /// gap count in `last_reported`, which reads as none rather than emptying
-    /// the record. The first folder noted keeps its decisions and counts.
+    /// gap or covered count in `last_reported`, which reads as none rather
+    /// than emptying the record. The first folder noted keeps its decisions
+    /// and counts.
     #[test]
     fn test_a_record_written_before_folders_keeps_its_decisions() {
         let dir = tempdir().unwrap();
@@ -605,7 +611,8 @@ mod tests {
             Some(Reported {
                 added: 1,
                 available: 12,
-                gaps: 0
+                gaps: 0,
+                covered: 0
             })
         );
         assert_eq!(folders(dir.path(), &key("s1")).1, ["infra/terraform"]);
