@@ -953,6 +953,12 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
     field_terms.insert(Field::Title, tally(extracted.title_terms));
     field_terms.insert(Field::Slug, tally(extracted.slug_terms));
 
+    let declared: Vec<String> = extracted
+        .declared_globs
+        .into_iter()
+        .map(|g| g.pattern)
+        .collect();
+
     IndexedDocument {
         slug: doc.slug().unwrap_or("<unnamed>").to_string(),
         relative_path: doc
@@ -971,16 +977,17 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
         scope: doc.scope.clone(),
         globs: extracted.globs.into_iter().map(|g| g.pattern).collect(),
         adr_id: doc.meta.as_ref().and_then(|m| m.adr_id.clone()),
-        root: if doc.meta.is_some() {
+        // The root is the frame header paths are written against. A header
+        // that declares none leaves its globs derived from Verify, which are
+        // repository-relative, so enforcing the root would shut the document
+        // out of its own globs (`root: packages/web` with a Verify path in
+        // `shared/lib/`). Without declared paths the root does not apply.
+        root: if doc.meta.is_some() && !declared.is_empty() {
             extracted.root
         } else {
             String::new()
         },
-        include_globs: extracted
-            .declared_globs
-            .into_iter()
-            .map(|g| g.pattern)
-            .collect(),
+        include_globs: declared,
         exclude_globs: extracted.excludes.into_iter().map(|g| g.pattern).collect(),
         languages: doc
             .meta
@@ -2277,6 +2284,18 @@ mod tests {
             .into_iter()
             .map(|hit| hit.slug)
             .collect()
+    }
+
+    /// A rooted header with no `paths` takes its globs from Verify, which are
+    /// repository-relative, so the root must not shut the document out of a
+    /// Verify path that sits outside it.
+    #[test]
+    fn test_root_without_declared_paths_does_not_block_verify_globs() {
+        let text = "---\nversion: 2\nname: shared-rules\nmetadata:\n  actual:\n    adr_id: id-shared\n  scope:\n    root: packages/web\n---\n\n# Quux\n\nScope: applies to the lot.\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n\n### Verify\n\n```bash\ngrep -r foo shared/lib/\n```\n";
+        let doc = parse_rule_document(&PathBuf::from("/repo/.actual/rules/shared-rules.md"), text)
+            .expect("fixture parses");
+        let index = index_of(vec![doc]);
+        assert_eq!(slugs_for(&index, "shared/lib/x.ts"), vec!["shared-rules"]);
     }
 
     #[test]
