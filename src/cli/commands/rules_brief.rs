@@ -376,34 +376,9 @@ fn brief_for(
         return Err(NoBrief::NoRules);
     };
 
-    // A glob in a `verify` block is the evidence a rule governs this file, so
-    // the path alone is searched first. Only when no rule claims the file is
-    // the path retried as query text, so the title and scope fields can match
-    // the terms it spells. That keeps a rule set whose `verify` blocks name no
-    // paths from being briefed on nothing, without letting a word match
-    // displace a glob match under `--limit`. The retry also needs more than
-    // one shared word; see [`MIN_RETRY_TERMS`].
-    //
-    // The text is the path with `/` turned into spaces. The tokenizer splits
-    // on both, so the terms are the same, but text with no slash names no
-    // path: the query also reads paths out of its text, splitting on
-    // whitespace, and `docs/My Notes/a.md` would add `Notes/a.md` as a second,
-    // wrong path. The file's contents are not used: imports and boilerplate
-    // swamp the terms that say what the file is about, and it would cost a
-    // read on every brief.
-    let floor = min_score(args, root);
-    let by_path = Query::new("")
-        .with_paths([relative.clone()])
-        .with_min_score(floor);
     // Uncapped, so whether a decision governs the file never depends on
     // `--limit`. The cap is applied below.
-    let mut decisions = resolved.index.search_adrs(&by_path, resolved.index.len());
-    if decisions.is_empty() {
-        let by_text = Query::new(relative.replace('/', " "))
-            .with_paths([relative.clone()])
-            .with_min_score(floor);
-        decisions = retry_by_text(&resolved.index, &by_text);
-    }
+    let mut decisions = governing(&resolved.index, &relative, min_score(args, root));
 
     // Decisions this context was already briefed on are dropped after the
     // search, so `--limit` still means "the top N for this file" rather than
@@ -543,6 +518,38 @@ fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
     super::rules_scope::effective_min_score(args.min_score, root).unwrap_or(0.0)
 }
 
+/// Every decision governing the repository-relative `relative`, in rank
+/// order and uncapped. `plan-check` asks this of the paths a plan names, so a
+/// planned path and a read one are judged alike.
+///
+/// A glob in a `verify` block is the evidence a rule governs a path, so the
+/// path alone is searched first. Only when no rule claims it is the path
+/// retried as query text, so the title and scope fields can match the terms
+/// it spells. That keeps a rule set whose `verify` blocks name no paths from
+/// being briefed on nothing, without letting a word match displace a glob
+/// match under `--limit`. The retry also needs more than one shared word; see
+/// [`MIN_RETRY_TERMS`].
+///
+/// The text is the path with `/` turned into spaces. The tokenizer splits on
+/// both, so the terms are the same, but text with no slash names no path: the
+/// query also reads paths out of its text, splitting on whitespace, and
+/// `docs/My Notes/a.md` would add `Notes/a.md` as a second, wrong path. A
+/// file's contents are not used: imports and boilerplate swamp the terms that
+/// say what the file is about, and it would cost a read on every brief.
+pub(crate) fn governing(index: &ScopeIndex, relative: &str, floor: f64) -> Vec<AdrGroup> {
+    let by_path = Query::new("")
+        .with_paths([relative.to_string()])
+        .with_min_score(floor);
+    let decisions = index.search_adrs(&by_path, index.len());
+    if !decisions.is_empty() {
+        return decisions;
+    }
+    let by_text = Query::new(relative.replace('/', " "))
+        .with_paths([relative.to_string()])
+        .with_min_score(floor);
+    retry_by_text(index, &by_text)
+}
+
 /// Distinct words a document must share with the path before the text retry
 /// briefs it on words alone. One shared word is too often a folder name every
 /// codebase has — `test`, `config`, `utils` — to say a rule governs the file.
@@ -624,7 +631,7 @@ fn envelope_root(cwd: Option<String>) -> PathBuf {
 /// repository". A path that really is outside yields `None` rather than a
 /// guess — briefing a file in another checkout against these rules would be
 /// wrong, not merely unhelpful.
-fn relative_to_root(root: &Path, file: &str) -> Option<String> {
+pub(crate) fn relative_to_root(root: &Path, file: &str) -> Option<String> {
     let path = Path::new(file);
     let joined = if path.is_absolute() {
         path.to_path_buf()

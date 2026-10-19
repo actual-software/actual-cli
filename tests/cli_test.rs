@@ -1712,6 +1712,74 @@ fn test_session_summary_needs_a_session_or_the_hook() {
         .code(2);
 }
 
+/// The read hook and the plan hook, run as `plan-gate.sh` runs the second,
+/// add to one set of folders. The folder read and then planned is one gap,
+/// the planned `scripts/` is a second, and the folder of the plan's governed
+/// file is none. No runner is available, so the plan is never judged.
+#[test]
+fn test_session_summary_counts_the_folders_a_plan_names() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    for file in [
+        "infra/terraform/main.tf",
+        "scripts/deploy.sh",
+        "services/auth/token.ts",
+    ] {
+        let path = repo.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    assert_eq!(
+        hook_read(repo.path(), config_dir.path(), "infra/terraform/main.tf"),
+        ""
+    );
+
+    let exit_plan_mode = serde_json::json!({
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "ExitPlanMode",
+        "tool_input": {"plan": "1. Pin the provider in `infra/terraform/main.tf` and \
+            `infra/terraform/versions.tf`.\n2. Run it from `scripts/deploy.sh`.\n3. Sign \
+            the deploy token in `services/auth/token.ts`."},
+    })
+    .to_string();
+    let rules_dir = repo.path().join(".actual").join("rules");
+    actual_in(
+        repo.path(),
+        config_dir.path(),
+        &[
+            "plan-check",
+            "--claude-hook",
+            "--rules-dir",
+            rules_dir.to_str().unwrap(),
+            "--runner",
+            "claude-cli",
+        ],
+    )
+    .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
+    .write_stdin(exit_plan_mode)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no runner available"));
+
+    let output = actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["session", "summary", "--session", "s1", "--json"],
+    )
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["gaps"], 2);
+    assert_eq!(
+        value["areas_without_adr"],
+        serde_json::json!(["infra/terraform", "scripts"])
+    );
+}
+
 /// Run from a subfolder the agent changed into, a hook given the conventional
 /// `--rules-dir` and no `--repo` still places files from the repository root:
 /// a governed file is briefed under its root-relative path, and a file outside

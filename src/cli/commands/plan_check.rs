@@ -133,20 +133,23 @@
 //! behavior: `requires_decision` still only sets `--json`'s status field
 //! there and exits 0, matching its documented, unchanged contract.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::args::PlanCheckArgs;
+use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::{
     capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline, HookRun,
     Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
+use crate::cli::commands::{rules_brief, rules_scope};
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
 #[cfg(feature = "telemetry")]
 use crate::rules::check::Verdict;
 use crate::rules::check::{ArtifactKind, CheckedRule};
+use crate::rules::scope::{self, Query};
 
 #[cfg(feature = "telemetry")]
 use crate::cli::commands::check_engine::send_governance_events;
@@ -373,6 +376,12 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         .unwrap_or_default();
     let plan_digest = governance_session::content_digest(&plan_text);
 
+    // Noted before the judge runs, so a judge that outlasts the hook's
+    // timeout cannot lose them.
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        record_plan_folders(&plan_text, session_id, &root, &rules_dir);
+    }
+
     #[cfg(feature = "telemetry")]
     let started_at = std::time::Instant::now();
 
@@ -412,6 +421,78 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         &mut session,
         outcome,
     );
+}
+
+/// Note the folders the plan names in the session record `rules brief` keeps,
+/// judged by the check a read file gets, so a folder both planned and read is
+/// one entry. No model call.
+///
+/// The paths are the ones selection reads from the plan, [`Query::all_paths`].
+/// A plan naming none notes nothing, and so does a rule set with no documents,
+/// which would make every folder a gap.
+fn record_plan_folders(plan: &str, session_id: &str, root: &Path, rules_dir: &Path) {
+    let paths = Query::new(plan).all_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let (Ok(resolved), Some(dir)) = (
+        scope::resolve_in(rules_dir, root, false),
+        brief_ledger::ledger_dir(),
+    ) else {
+        return;
+    };
+    if resolved.index.is_empty() {
+        return;
+    }
+    let floor = rules_scope::effective_min_score(None, root).unwrap_or(0.0);
+    let folders: Vec<(String, bool)> = paths
+        .iter()
+        .filter_map(|path| planned_folder(root, path))
+        .map(|(relative, folder)| {
+            let governed = !rules_brief::governing(&resolved.index, &relative, floor).is_empty();
+            (folder, governed)
+        })
+        .collect();
+    let key_dir = rules_brief::resolve(rules_dir);
+    let key = LedgerKey {
+        session_id,
+        rules_dir: &key_dir,
+    };
+    brief_ledger::record_folders(&dir, &key, &folders);
+}
+
+/// The repository-relative form of a planned path and the folder it counts
+/// toward, or `None` when it counts toward none.
+///
+/// A path names a folder when it is a directory in the checkout or, when it
+/// is not there yet, has no extension, the reading the index gives a query
+/// path. That folder counts when it holds a file that would. Any other path
+/// counts toward the folder it sits in, as a read file does, once that folder
+/// exists. So prose that only looks like a path (`and/or`) notes nothing, a
+/// glob counts only toward a folder it spells out, and a path outside the
+/// root notes nothing. A folder the plan would create is noted by the brief
+/// when a file is first written there.
+fn planned_folder(root: &Path, path: &str) -> Option<(String, String)> {
+    let relative = rules_brief::relative_to_root(root, path)?;
+    let on_disk = root.join(&relative);
+    let names_a_folder = if on_disk.exists() {
+        on_disk.is_dir()
+    } else {
+        Path::new(&relative).extension().is_none()
+    };
+    let folder = if names_a_folder {
+        std::fs::read_dir(&on_disk)
+            .ok()?
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .find_map(|entry| {
+                let name = entry.file_name();
+                brief_ledger::folder_of(&format!("{relative}/{}", name.to_string_lossy()))
+            })?
+    } else {
+        brief_ledger::folder_of(&relative).filter(|folder| root.join(folder).is_dir())?
+    };
+    Some((relative, folder))
 }
 
 #[cfg(test)]
@@ -1788,5 +1869,260 @@ mod tests {
         // only ever adds to `cleared`, never to `overrides`).
         let session = governance_session::load("sess-override-1", &rules_dir);
         assert_eq!(session.overrides.len(), 2);
+    }
+
+    // ── the plan's folders ───────────────────────────────────────────────
+
+    /// Rules governing `services/auth/oauth/`, beside a source file there and
+    /// in `infra/terraform/`, and nothing but docs in `docs/`.
+    fn planned_repo() -> TempDir {
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        for file in [
+            "services/auth/oauth/token.ts",
+            "infra/terraform/main.tf",
+            "docs/guide.md",
+        ] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        root
+    }
+
+    fn plan(root: &Path, text: &str) {
+        record_plan_folders(text, "s1", root, &crate::rules::rules_dir(root));
+    }
+
+    /// The covered folders and the gaps in session `s1`'s record for the rules
+    /// under `root`.
+    fn noted(root: &Path) -> (Vec<String>, Vec<String>) {
+        let rules_dir = rules_brief::resolve(&crate::rules::rules_dir(root));
+        let key = LedgerKey {
+            session_id: "s1",
+            rules_dir: &rules_dir,
+        };
+        let record = brief_ledger::load(&brief_ledger::ledger_dir().unwrap(), &key);
+        let gaps = record.gaps().map(str::to_string).collect();
+        (record.covered_folders.into_iter().collect(), gaps)
+    }
+
+    fn nothing_noted() -> bool {
+        !brief_ledger::ledger_dir().unwrap().exists()
+    }
+
+    /// A planned file no decision governs leaves its folder a gap, and one a
+    /// decision governs covers its own, both named from the repository root.
+    #[test]
+    fn test_a_planned_folder_no_decision_governs_is_a_gap() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+
+        plan(
+            root.path(),
+            "Pin `infra/terraform/main.tf`, then sign in `services/auth/oauth/token.ts`.",
+        );
+
+        assert_eq!(
+            noted(root.path()),
+            (
+                vec!["services/auth/oauth".to_string()],
+                vec!["infra/terraform".to_string()]
+            )
+        );
+    }
+
+    /// Through the hook, with no runner to judge the plan, the folders are
+    /// noted all the same. An envelope with no session notes nothing.
+    #[test]
+    fn test_exec_hook_with_notes_the_plans_folders_without_a_runner() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let root = planned_repo();
+        let mut args = base_args();
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let plan = "Sign access tokens in `services/auth/oauth/token.ts` and pin `infra/terraform/main.tf`.";
+
+        for session in [None, Some("")] {
+            let raw = serde_json::json!({"session_id": session, "tool_input": {"plan": plan}});
+            exec_hook_with(&args, &raw.to_string());
+        }
+        assert!(nothing_noted());
+
+        let raw = serde_json::json!({"session_id": "s1", "tool_input": {"plan": plan}});
+        exec_hook_with(&args, &raw.to_string());
+        assert_eq!(
+            noted(root.path()),
+            (
+                vec!["services/auth/oauth".to_string()],
+                vec!["infra/terraform".to_string()]
+            )
+        );
+    }
+
+    /// A folder a read already noted, then named twice by the plan, is still
+    /// one gap.
+    #[test]
+    fn test_a_folder_both_read_and_planned_counts_once() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+        let rules_dir = rules_brief::resolve(&crate::rules::rules_dir(root.path()));
+        let key = LedgerKey {
+            session_id: "s1",
+            rules_dir: &rules_dir,
+        };
+        let dir = brief_ledger::ledger_dir().unwrap();
+        brief_ledger::record_folder(&dir, &key, "infra/terraform", false);
+
+        plan(
+            root.path(),
+            "Pin `infra/terraform/main.tf` and add `infra/terraform/versions.tf`.",
+        );
+
+        assert_eq!(
+            noted(root.path()),
+            (vec![], vec!["infra/terraform".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_a_plan_naming_no_path_notes_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+
+        plan(
+            root.path(),
+            "Sign access tokens with RS256 and rotate the keys.",
+        );
+
+        assert!(nothing_noted());
+    }
+
+    /// A glob counts toward a folder it spells out, and one spanning folders
+    /// notes nothing.
+    #[test]
+    fn test_a_glob_counts_only_toward_a_folder_it_spells_out() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+
+        plan(
+            root.path(),
+            "Pin every `infra/terraform/*.tf` and lint `services/**/*.ts`.",
+        );
+
+        assert_eq!(
+            noted(root.path()),
+            (vec![], vec!["infra/terraform".to_string()])
+        );
+    }
+
+    /// Prose that only looks like a path, a path outside the root, a folder
+    /// not in the checkout yet, and docs, config or generated output note
+    /// nothing, named as a file or as a folder.
+    #[test]
+    fn test_a_plan_notes_only_folders_that_would_count() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+        for file in ["node_modules/react/index.js", ".github/workflows/ci.sh"] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        // Not a dot-named directory, which would never count anyway.
+        let outside = tempfile::Builder::new()
+            .prefix("outside")
+            .tempdir()
+            .unwrap();
+        let elsewhere = outside.path().join("lib/sign.ts");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::write(&elsewhere, "").unwrap();
+
+        plan(
+            root.path(),
+            &format!(
+                "Read and/or write through client/server, and touch `{}`. \
+                 Create `src/payments/stripe.ts` under `src/payments/`. Update \
+                 `docs/guide.md`, `docs/`, `config/app.yaml`, `node_modules/react/` and \
+                 `.github/workflows/`.",
+                elsewhere.display()
+            ),
+        );
+
+        assert!(nothing_noted());
+    }
+
+    /// A folder named outright counts as itself when it holds a file that
+    /// would count, and one holding only folders notes nothing.
+    #[test]
+    fn test_a_folder_named_outright_counts_as_itself() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+
+        plan(
+            root.path(),
+            "Work in `infra/terraform/`, `services/auth/oauth/` and `services/auth/`.",
+        );
+
+        assert_eq!(
+            noted(root.path()),
+            (
+                vec!["services/auth/oauth".to_string()],
+                vec!["infra/terraform".to_string()]
+            )
+        );
+    }
+
+    /// A planned path spelled from the filesystem root is named from the
+    /// repository root, as a read file is.
+    #[test]
+    fn test_an_absolute_planned_path_is_named_from_the_repository_root() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+        let main_tf = root.path().join("infra/terraform/main.tf");
+
+        plan(root.path(), &format!("Pin `{}`.", main_tf.display()));
+
+        assert_eq!(
+            noted(root.path()),
+            (vec![], vec!["infra/terraform".to_string()])
+        );
+    }
+
+    /// A rule set with no documents, or one that cannot be read, notes no
+    /// folder: against no rules every folder would read as a gap.
+    #[test]
+    fn test_a_plan_without_a_rule_set_notes_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = tempdir().unwrap();
+        let main_tf = root.path().join("infra/terraform/main.tf");
+        std::fs::create_dir_all(main_tf.parent().unwrap()).unwrap();
+        std::fs::write(&main_tf, "").unwrap();
+        std::fs::create_dir_all(crate::rules::rules_dir(root.path())).unwrap();
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "not a directory").unwrap();
+        let text = "Pin `infra/terraform/main.tf`.";
+
+        plan(root.path(), text);
+        record_plan_folders(text, "s1", root.path(), &not_a_dir);
+
+        assert!(nothing_noted());
     }
 }
