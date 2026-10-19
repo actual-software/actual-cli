@@ -64,7 +64,7 @@ struct StopEnvelope {
     session_id: Option<String>,
 }
 
-/// `--json`: the counts behind the line, what they count, and the line itself.
+/// `--json`: X, Y and the gaps, what they count, and the line itself.
 #[derive(Serialize)]
 struct SummaryJson<'a> {
     x: usize,
