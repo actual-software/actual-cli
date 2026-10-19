@@ -213,14 +213,17 @@ impl IndexedDocument {
         self.root.is_empty() || self.root == "."
     }
 
-    /// Whether `path` is a file one of this document's `!` excludes matches.
+    /// Whether `path` is excluded: one of this document's `!` excludes matches
+    /// it, or matches a child of it, which is how a directory the exclude
+    /// wholly covers (`!src/generated/**` against `src/generated`) is told
+    /// from one it only partly covers (`!**/*.test.ts` against `src`).
     fn excludes_path(&self, path: &str) -> bool {
+        let probe = format!("{}/x", path.trim_end_matches('/'));
         self.exclude_globs.iter().any(|pattern| {
-            PathGlob {
+            let glob = PathGlob {
                 pattern: pattern.clone(),
-            }
-            .matches_path(path)
-                == Some(true)
+            };
+            glob.matches_path(path) == Some(true) || glob.matches_path(&probe) == Some(true)
         })
     }
 
@@ -2296,6 +2299,25 @@ mod tests {
             .expect("fixture parses");
         let index = index_of(vec![doc]);
         assert_eq!(slugs_for(&index, "shared/lib/x.ts"), vec!["shared-rules"]);
+    }
+
+    /// An exclude that wholly covers a directory excludes a query naming that
+    /// directory, as it does a file inside it. One that covers only some of its
+    /// files does not, and a sibling sharing the name prefix is untouched.
+    #[test]
+    fn test_directory_query_is_excluded_only_when_wholly_covered() {
+        let index = index_of(vec![v2_doc(
+            "w",
+            "packages/web",
+            &["src/**", "!src/generated/**", "!**/*.test.ts"],
+        )]);
+        assert!(slugs_for(&index, "packages/web/src/generated").is_empty());
+        assert!(slugs_for(&index, "packages/web/src/generated/a.ts").is_empty());
+        assert_eq!(slugs_for(&index, "packages/web/src"), vec!["w"]);
+        assert_eq!(
+            slugs_for(&index, "packages/web/src/generated-other"),
+            vec!["w"]
+        );
     }
 
     #[test]
