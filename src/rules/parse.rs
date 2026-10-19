@@ -71,6 +71,9 @@ enum Section {
 /// document that parsed with local problems is returned as `Ok` with those
 /// problems in [`RuleDocument::warnings`].
 pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, RuleFileError> {
+    // A UTF-8 byte-order mark would otherwise hide a leading `---` from
+    // frontmatter detection. It sits on line 1, so line numbers are unchanged.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     if text.trim().is_empty() {
         return Err(RuleFileError::new(
             path,
@@ -223,13 +226,29 @@ fn yaml_str(value: Option<&serde_yaml::Value>) -> Option<String> {
     }
 }
 
-fn yaml_strs(value: Option<&serde_yaml::Value>) -> Vec<String> {
-    match value {
-        Some(serde_yaml::Value::Sequence(items)) => {
-            items.iter().filter_map(|v| yaml_str(Some(v))).collect()
-        }
-        other => yaml_str(other).into_iter().collect(),
+/// A string list field. A bare scalar where a list is expected
+/// (`paths: src/**`) is read as a one-item list. Entries that are not plain
+/// values, such as a nested mapping, are dropped with a warning naming `field`.
+fn yaml_strs(
+    value: Option<&serde_yaml::Value>,
+    field: &str,
+    doc: &mut RuleDocument,
+) -> Vec<String> {
+    let items: &[serde_yaml::Value] = match value {
+        None | Some(serde_yaml::Value::Null) => return Vec::new(),
+        Some(serde_yaml::Value::Sequence(items)) => items,
+        Some(single) => std::slice::from_ref(single),
+    };
+    let out: Vec<String> = items.iter().filter_map(|v| yaml_str(Some(v))).collect();
+    let dropped = items.len() - out.len();
+    if dropped > 0 {
+        doc.warnings.push(issue(
+            RuleIssueKind::MalformedFrontmatter,
+            1,
+            format!("frontmatter `{field}`: ignored {dropped} entries that are not plain values"),
+        ));
     }
+    out
 }
 
 /// Parse the frontmatter body into `doc.meta`. Bad YAML is a warning; the line
@@ -273,8 +292,8 @@ fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
                 .and_then(|e| e.get("source")),
         ),
         root: yaml_str(scope.and_then(|s| s.get("root"))),
-        paths: yaml_strs(scope.and_then(|s| s.get("paths"))),
-        languages: yaml_strs(scope.and_then(|s| s.get("languages"))),
+        paths: yaml_strs(scope.and_then(|s| s.get("paths")), "paths", doc),
+        languages: yaml_strs(scope.and_then(|s| s.get("languages")), "languages", doc),
     };
     if let Some(version) = meta.version.as_deref() {
         if version != KNOWN_VERSION {
@@ -714,6 +733,35 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert_eq!(doc.warnings.len(), 1);
         let line = doc.warnings[0].line.expect("line");
         assert_eq!(line, 4);
+    }
+
+    #[test]
+    fn test_frontmatter_bom_does_not_hide_header() {
+        let text = "\u{feff}---\nname: n\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.meta.expect("meta").name.as_deref(), Some("n"));
+        assert_eq!(doc.title.as_deref(), Some("T"));
+        assert!(doc.scope.is_none());
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_bare_scalar_list_is_one_item() {
+        let text = "---\nmetadata:\n  scope:\n    paths: src/**\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.meta.expect("meta").paths, vec!["src/**".to_string()]);
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_non_scalar_list_entries_are_dropped_with_warning() {
+        let text = "---\nmetadata:\n  scope:\n    paths:\n      - src/**\n      - {a: b}\n      - [x]\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.meta.expect("meta").paths, vec!["src/**".to_string()]);
+        assert_eq!(doc.warnings.len(), 1);
+        assert_eq!(doc.warnings[0].kind, RuleIssueKind::MalformedFrontmatter);
+        assert!(doc.warnings[0].detail.contains("paths"));
+        assert!(doc.warnings[0].detail.contains('2'));
     }
 
     #[test]
