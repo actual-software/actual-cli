@@ -91,7 +91,15 @@ fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
         panel = panel.separator();
         for doc in &report.documents {
             let name = doc.slug().unwrap_or("<unnamed>");
-            panel = panel.kv(name, &level_histogram(doc));
+            let mut detail = level_histogram(doc);
+            if !doc.is_active() {
+                let status = doc.meta.as_ref().and_then(|m| m.status.as_deref());
+                detail.push_str(&format!(
+                    " ({}, not enforced)",
+                    status.unwrap_or_default().trim()
+                ));
+            }
+            panel = panel.kv(name, &detail);
         }
     }
 
@@ -112,13 +120,18 @@ fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
         }
     }
 
-    panel = panel.separator().line(&format!(
+    let inactive = report.documents.iter().filter(|d| !d.is_active()).count();
+    let mut summary = format!(
         "{} · {} · {} · {}",
         counted(report.documents.len(), "document"),
         counted(report.rule_count(), "rule"),
         counted(report.warning_count(), "warning"),
         counted(report.errors.len(), "error"),
-    ));
+    );
+    if inactive > 0 {
+        summary.push_str(&format!(" · {inactive} not enforced"));
+    }
+    panel = panel.separator().line(&summary);
     panel.render(width)
 }
 
@@ -163,6 +176,9 @@ struct JsonDocument<'a> {
     /// The stable decision id from a v2 header; omitted for a v1 document.
     #[serde(skip_serializing_if = "Option::is_none")]
     adr_id: Option<&'a str>,
+    /// The decision's `metadata.actual.status`; omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'a str>,
     /// The decision this policy belongs to, from a v2 header; omitted for v1.
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_group_id: Option<&'a str>,
@@ -223,6 +239,7 @@ fn render_json(report: &RuleSetLoadReport, root: &Path) -> String {
                     .as_ref()
                     .and_then(|m| m.candidate_group_id.as_deref())
                     .filter(|id| !id.trim().is_empty()),
+                status: doc.meta.as_ref().and_then(|m| m.status.as_deref()),
                 root: crate::rules::scope::signals::declared_root(doc),
                 scope: doc.scope.as_deref(),
                 rules: &doc.rules,
@@ -316,6 +333,19 @@ mod tests {
     }
 
     #[test]
+    fn test_render_panel_marks_documents_that_are_not_enforced() {
+        let retired =
+            format!("---\nversion: 2\nmetadata:\n  actual:\n    status: superseded\n---\n\n{DOC}");
+        let root = seed(&[("a.md", &retired), ("b.md", DOC)]);
+        let report = load_rule_set(root.path()).unwrap();
+        let out = render_panel(&report, 120);
+
+        assert!(out.contains("(superseded, not enforced)"), "{out}");
+        assert!(out.contains("2 documents"), "{out}");
+        assert!(out.contains("1 not enforced"), "{out}");
+    }
+
+    #[test]
     fn test_render_panel_lists_failures() {
         let root = seed(&[("a.md", DOC), ("b.md", BAD)]);
         let report = load_rule_set(root.path()).unwrap();
@@ -381,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_render_json_adds_ids_and_root_for_v2_documents_only() {
-        const V2: &str = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-1\n    candidate_group_id: grp-1\n  scope:\n    root: packages/web\n    paths:\n      - \"src/**\"\n---\n\n# Beta\n\n### Rules\n\n- **R-B-001** MUST: b\n";
+        const V2: &str = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-1\n    candidate_group_id: grp-1\n    status: accepted\n  scope:\n    root: packages/web\n    paths:\n      - \"src/**\"\n---\n\n# Beta\n\n### Rules\n\n- **R-B-001** MUST: b\n";
         let root = seed(&[("a.md", DOC), ("b.md", V2)]);
         let report = load_rule_set(root.path()).unwrap();
         let value: serde_json::Value =
@@ -394,6 +424,8 @@ mod tests {
         assert_eq!(v2["adr_id"], "adr-1");
         assert_eq!(v2["candidate_group_id"], "grp-1");
         assert_eq!(v2["root"], "packages/web");
+        assert_eq!(v2["status"], "accepted");
+        assert!(v1.get("status").is_none());
         // Nothing existing was renamed.
         for key in ["path", "slug", "title", "scope", "rules", "warnings"] {
             assert!(v2.get(key).is_some(), "{key}");

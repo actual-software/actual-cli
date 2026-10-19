@@ -213,7 +213,61 @@ pub struct AdrMeta {
     pub languages: Vec<String>,
 }
 
+/// `metadata.actual.status` values under which a decision does not govern.
+///
+/// The first four are sprintreview's own non-enforceable statuses
+/// (`adr-status-utils.ts`): it withholds them from rule files, PR comments and
+/// content hashes. `rejected` is a suggestion the user turned down, and
+/// `suggested` is an AI proposal the user has not accepted yet. The last two
+/// are not statuses sprintreview defines today; they are listed so a file
+/// carrying one is treated as retired rather than enforced.
+///
+/// A deny-list on purpose: a status this build has never heard of is treated
+/// as active, because wrongly briefing an agent on a rule is a smaller failure
+/// than silently dropping a rule a newer generator meant to be enforced.
+const INACTIVE_STATUSES: &[&str] = &[
+    "deleted",
+    "draft",
+    "archived-draft",
+    "deferred",
+    "rejected",
+    "suggested",
+    "superseded",
+    "deprecated",
+];
+
+/// `metadata.actual.status` values that are enforced. Not an allow-list: an
+/// unlisted status is still active (see [`INACTIVE_STATUSES`]), but the parser
+/// warns about it, since it is most likely a typo of a retired status.
+pub const KNOWN_ACTIVE_STATUSES: &[&str] = &[
+    "accepted",
+    "created-from-user",
+    "created-from-suggestion",
+    "updated",
+];
+
+fn normalize_status(status: &str) -> String {
+    status.trim().to_ascii_lowercase()
+}
+
 impl AdrMeta {
+    /// Whether the decision governs: no `status` (a v1 file, or a header that
+    /// omits it) means active.
+    pub fn is_active(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_none_or(|status| !INACTIVE_STATUSES.contains(&normalize_status(status).as_str()))
+    }
+
+    /// Whether `status` is absent or one this build knows, active or not.
+    pub fn has_known_status(&self) -> bool {
+        self.status.as_deref().is_none_or(|status| {
+            let status = normalize_status(status);
+            INACTIVE_STATUSES.contains(&status.as_str())
+                || KNOWN_ACTIVE_STATUSES.contains(&status.as_str())
+        })
+    }
+
     /// Declared `paths` that include files: everything not `!`-prefixed.
     pub fn include_paths(&self) -> Vec<&str> {
         self.paths
@@ -246,6 +300,12 @@ impl RuleDocument {
             warnings: Vec::new(),
             meta: None,
         }
+    }
+
+    /// Whether this document governs. A v1 document, with no header, always
+    /// does; see [`AdrMeta::is_active`].
+    pub fn is_active(&self) -> bool {
+        self.meta.as_ref().is_none_or(AdrMeta::is_active)
     }
 
     /// The file stem — `<topic>-<aspect-slug>-<hash>` — which is the document's
@@ -409,6 +469,63 @@ mod tests {
         };
         assert_eq!(meta.include_paths(), vec!["src/**", "lib/**"]);
         assert_eq!(meta.exclude_paths(), vec!["src/**/*.test.ts"]);
+    }
+
+    #[test]
+    fn test_adr_meta_is_active_by_status() {
+        let with = |status: Option<&str>| AdrMeta {
+            status: status.map(str::to_string),
+            ..AdrMeta::default()
+        };
+        assert!(with(None).is_active());
+        for active in [
+            "accepted",
+            "created-from-user",
+            "created-from-suggestion",
+            "updated",
+            "something-new",
+        ] {
+            assert!(with(Some(active)).is_active(), "{active}");
+        }
+        for retired in [
+            "deleted",
+            "draft",
+            "archived-draft",
+            "deferred",
+            "rejected",
+            "suggested",
+            "superseded",
+            "deprecated",
+        ] {
+            assert!(!with(Some(retired)).is_active(), "{retired}");
+        }
+        // Spelling and case do not matter.
+        assert!(!with(Some("  Superseded ")).is_active());
+    }
+
+    #[test]
+    fn test_has_known_status_flags_typos() {
+        let with = |status: Option<&str>| AdrMeta {
+            status: status.map(str::to_string),
+            ..AdrMeta::default()
+        };
+        for known in [
+            None,
+            Some("accepted"),
+            Some(" Superseded "),
+            Some("suggested"),
+        ] {
+            assert!(with(known).has_known_status(), "{known:?}");
+        }
+        for typo in ["supersede", "retired", "archived_draft", "deprecated."] {
+            assert!(!with(Some(typo)).has_known_status(), "{typo}");
+            assert!(with(Some(typo)).is_active(), "{typo}");
+        }
+    }
+
+    #[test]
+    fn test_a_document_without_a_header_is_active() {
+        assert!(RuleDocument::empty(Path::new("/x/a.md")).is_active());
     }
 
     // ── RuleLevel ────────────────────────────────────────────────────────

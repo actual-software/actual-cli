@@ -322,6 +322,18 @@ fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
             ));
         }
     }
+    // An unknown status stays active, so a typo of a retired status would be
+    // enforced without anyone noticing. Keep the safe default but say so.
+    if !meta.has_known_status() {
+        doc.warnings.push(issue(
+            RuleIssueKind::MalformedFrontmatter,
+            1,
+            format!(
+                "frontmatter `status`: `{}` is not a known status and is treated as active",
+                meta.status.as_deref().unwrap_or_default().trim()
+            ),
+        ));
+    }
     if let Some(version) = meta.version.as_deref() {
         if version != KNOWN_VERSION {
             doc.warnings.push(issue(
@@ -647,7 +659,7 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
 
     // ── v2 frontmatter ───────────────────────────────────────────────────
 
-    const V2_HEADER: &str = "---\nversion: 2\nname: jwt-rs256\ndescription: JWT signing\nmetadata:\n  actual:\n    adr_id: adr-123\n    status: approved\n    candidate_group_id: grp-1\n    evidence:\n      source: deep\n  scope:\n    root: services/api\n    paths:\n      - src/**\n      - lib/**\n    languages: [rust, typescript]\n---\n";
+    const V2_HEADER: &str = "---\nversion: 2\nname: jwt-rs256\ndescription: JWT signing\nmetadata:\n  actual:\n    adr_id: adr-123\n    status: accepted\n    candidate_group_id: grp-1\n    evidence:\n      source: deep\n  scope:\n    root: services/api\n    paths:\n      - src/**\n      - lib/**\n    languages: [rust, typescript]\n---\n";
 
     #[test]
     fn test_frontmatter_v2_matches_v1_body_plus_meta() {
@@ -679,7 +691,7 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert_eq!(meta.name.as_deref(), Some("jwt-rs256"));
         assert_eq!(meta.description.as_deref(), Some("JWT signing"));
         assert_eq!(meta.adr_id.as_deref(), Some("adr-123"));
-        assert_eq!(meta.status.as_deref(), Some("approved"));
+        assert_eq!(meta.status.as_deref(), Some("accepted"));
         assert_eq!(meta.candidate_group_id.as_deref(), Some("grp-1"));
         assert_eq!(meta.evidence_source.as_deref(), Some("deep"));
         assert_eq!(meta.root.as_deref(), Some("services/api"));
@@ -694,6 +706,30 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         );
         let doc = parse_rule_document(Path::new("a-b-1234.md"), &text).unwrap();
         doc.warnings.into_iter().map(|w| w.detail).collect()
+    }
+
+    fn status_warnings(status: &str) -> Vec<String> {
+        let text = format!(
+            "---\nversion: 2\nname: a-b-1234\nmetadata:\n  actual:\n    status: \"{status}\"\n---\n\n# T\n\nScope: x.\n\n### Rules\n\n- **R-A-001** MUST: do.\n"
+        );
+        let doc = parse_rule_document(Path::new("a-b-1234.md"), &text).unwrap();
+        doc.warnings.into_iter().map(|w| w.detail).collect()
+    }
+
+    #[test]
+    fn test_an_unknown_status_is_warned_but_stays_active() {
+        for typo in ["supersede", "retired", "archived_draft", "deprecated."] {
+            let warnings = status_warnings(typo);
+            assert_eq!(warnings.len(), 1, "{typo}: {warnings:?}");
+            assert!(warnings[0].contains(typo), "{warnings:?}");
+        }
+    }
+
+    #[test]
+    fn test_known_statuses_do_not_warn() {
+        for status in ["accepted", "updated", "suggested", " Superseded ", "draft"] {
+            assert!(status_warnings(status).is_empty(), "{status}");
+        }
     }
 
     #[test]

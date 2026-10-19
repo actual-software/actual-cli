@@ -455,7 +455,8 @@ fn brief_for(
                 // A document that no longer parses is skipped rather than
                 // failing the brief: the rest still governs the file.
                 let document = crate::rules::parse_rule_document(&path, &text).ok()?;
-                Some((position, document))
+                // As in the index: a retired decision is never briefed.
+                document.is_active().then_some((position, document))
             })
         })
         .collect();
@@ -836,6 +837,38 @@ mod tests {
             let brief = brief_for(root.path(), &file, &a, None).unwrap();
             assert!(brief.contains("## Pin Terraform Providers"), "{brief}");
             assert!(!brief.contains("3f9c-uuid"), "{brief}");
+        });
+    }
+
+    #[test]
+    fn test_a_retired_v2_decision_is_not_briefed_but_an_active_one_is() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            let a = args(root.path());
+            let file = root
+                .path()
+                .join("infra/main.tf")
+                .to_string_lossy()
+                .to_string();
+
+            for (status, briefed) in [("accepted", true), ("superseded", false)] {
+                std::fs::write(
+                    dir.join("pinning-1a2b.md"),
+                    titled_v2("3f9c-uuid").replacen(
+                        "  scope:",
+                        &format!("    status: {status}\n  scope:"),
+                        1,
+                    ),
+                )
+                .unwrap();
+                let result = brief_for(root.path(), &file, &a, None);
+                assert_eq!(result.is_ok(), briefed, "{status}: {result:?}");
+                if !briefed {
+                    assert_eq!(result, Err(NoBrief::Ungoverned));
+                }
+            }
         });
     }
 
