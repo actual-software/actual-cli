@@ -260,7 +260,7 @@ actual impl-check                     # working tree vs HEAD, including untracke
 git diff HEAD | actual impl-check
 ```
 
-`plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`. With `--claude-hook`, both commands speak Claude Code's hook contract, which is how the skill manages them in Claude Code. See [Rule selection](docs/RULE_SELECTION.md) and [Scope index](docs/SCOPE_INDEX.md) for details.
+`plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`. With `--claude-hook`, both commands speak Claude Code's hook contract, which is how the skill manages them in Claude Code. Rule files may open with a YAML header (ADR file header v2) that declares the decision's id, status, root and path scope; files without one work as before, and the two can share a directory. A decision whose status is `draft`, `deferred`, `rejected` or similar does not govern. See [Rule selection](docs/RULE_SELECTION.md) and [Scope index](docs/SCOPE_INDEX.md) for details.
 
 </details>
 
@@ -284,7 +284,7 @@ actual config         # show, set, or locate configuration
 actual runners        # list available AI backend runners
 actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
-actual rules          # list, index, and select rule documents under .actual/rules/
+actual rules          # list, index, and select rule documents under .actual/rules/ (ADR file header v2 or the original format)
 actual plan-check     # check a plan against the rules selected for it
 actual impl-check     # check a git diff against the rules selected for it
 actual check-override # human override for a rule plan-check/impl-check denied

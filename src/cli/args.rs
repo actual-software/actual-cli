@@ -799,7 +799,17 @@ pub enum RulesAction {
 /// The hook this serves runs on every file an agent reads, so every default
 /// here is a budget: `--limit` counts decisions, `--rules-per-decision` caps
 /// what each one contributes, and `--max-chars` caps the whole brief.
+///
+/// The `after_help` carries a capability marker, `adr-header-v2`, which the
+/// Actual Skill greps for in `rules brief --help` to learn that this CLI reads
+/// ADR file header v2 (`have_adr_v2` in its `bootstrap.sh`), the same way it
+/// probes `UserPromptSubmit` in `impl-check --help`. A test pins the literal;
+/// do not reword it without changing the skill's probe in step.
 #[derive(Parser, Debug)]
+#[command(
+    after_help = "Rule files: reads ADR file header v2 (YAML frontmatter) as well as \
+    the original format. Capability marker: adr-header-v2"
+)]
 pub struct RulesBriefArgs {
     /// Read a Claude Code hook envelope from stdin and emit the hook's JSON
     /// contract on stdout.

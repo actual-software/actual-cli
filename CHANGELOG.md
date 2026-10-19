@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ADR file header v2: rule files may open with a YAML frontmatter block, as the ADR generator now writes. The CLI uses `metadata.scope.{root,paths}` and `metadata.actual.{adr_id,status}`; `languages` and the other fields are parsed and carried but do not affect selection yet. **Requires CLI 0.8.0 or later**; an earlier CLI folds the block into the scope sentence and scopes the decision wrongly. Files without a header work exactly as before, and both formats can share a directory
+- Declared `paths` replace the globs derived from `### Verify` and prose; `!` paths are excludes, and paths are relative to `root`. A file outside a decision's root, or matching its exclude, is never governed by it, in selection, the brief, `plan-check` and `impl-check`
+- Decisions with a retired status (`deleted`, `draft`, `archived-draft`, `deferred`, `rejected`, `superseded`, `deprecated`) are not indexed, so they are never selected, briefed, judged or counted; a missing or unknown status is active. `rules index` reports how many were left out
+- Decisions are keyed on `candidate_group_id`, else `adr_id`, when a file has one, so files sharing an id are one decision and renaming a file does not re-brief it within a session
+- Additive JSON fields: `adr_id`, `status` and `root` in `rules ls`, and `adr_id` and `root` in `rules select` and `rules select --by-adr`; `inactive_documents` and declared-versus-derived path counts in `rules index`; `adr_ids` in `session summary --json`. Fields are omitted for files without a header
+- Warnings for a malformed or unrecognised header (`malformed_frontmatter`, `unknown_version`) and for two rule files that share a file stem (`duplicate_slug`)
+- `rules brief --help` names the capability marker `adr-header-v2`, which the Actual Skill probes to learn that the CLI reads the v2 header
+
+### Changed
+- The scope index cache format moves to version 8 and the brief memory and ledger to version 2, so existing caches rebuild on first use and a session may be briefed once more on a decision after upgrading
+- The reported decision key for a file with a v2 header is `group:<candidate_group_id>` when it has one, else `id:<adr_id>` (`rules select --by-adr` `key`); the brief heading is still the decision title
+
+### Fixed
+- When two rule files share a file stem, `rules select` and its `--explain` output no longer resolve both to the first one; lookups key on the file path
+
 ## [0.8.0] - 2026-10-19
 
 ### Added

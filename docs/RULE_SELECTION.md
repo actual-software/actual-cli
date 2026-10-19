@@ -12,8 +12,10 @@ document covers the selection built on top of it.
 ## Two stages
 
 **Stage 1 is the deterministic prefilter.** The scope index ranks every rule
-document against the plan using path globs from `### Verify` operands, the prose
-scope sentence, the aspect slug and the title. No model, no network,
+document against the plan using path globs (a v2 header's declared `paths`, else
+the `### Verify` operands), the prose scope sentence, the aspect slug and the
+title. Decisions a v2 header marks inactive are not indexed, so neither stage
+sees them; see [SCOPE_INDEX.md](SCOPE_INDEX.md#adr-file-header-v2). No model, no network,
 sub-millisecond against a built index. It is the whole answer whenever it can be.
 
 **Stage 2 is a runner-backed rank over what stage 1 retrieved.** It is asked one

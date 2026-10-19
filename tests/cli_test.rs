@@ -2017,3 +2017,30 @@ fn test_rules_ls_and_index_json_show_the_v2_header_across_a_mixed_repo() {
     assert_eq!(index["inactive_documents"], 1);
     assert_eq!(index["documents_with_declared_paths"], 1);
 }
+
+/// The Actual Skill probes for ADR header v2 support by grepping this literal in
+/// `rules brief --help` (`have_adr_v2`, AK-963). It is a contract with that
+/// repository: changing it here without changing the probe there silently turns
+/// v2 support off for every user, so it is pinned.
+#[test]
+fn test_rules_brief_help_carries_the_adr_header_v2_capability_marker() {
+    cmd()
+        .args(["rules", "brief", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("adr-header-v2"));
+}
+
+/// The marker is absent from the sibling commands, so the probe is about this
+/// one help text and not a string that happens to appear everywhere.
+#[test]
+fn test_the_adr_header_v2_marker_is_specific_to_rules_brief() {
+    let others: [&[&str]; 2] = [&["rules", "ls", "--help"], &["impl-check", "--help"]];
+    for args in others {
+        cmd()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("adr-header-v2").not());
+    }
+}
