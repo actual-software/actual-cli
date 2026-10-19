@@ -704,6 +704,24 @@ pub fn globs_from_prose(text: &str) -> Vec<PathGlob> {
     globs
 }
 
+/// `text` with its `!` exclude tokens removed.
+///
+/// An excluded path is where the document does *not* apply, so its words
+/// (`test`, `ts` from `!src/**/*.test.ts`) must not become scope terms that
+/// boost a text-only query naming the excluded area. This is the term-side
+/// counterpart of [`globs_from_prose`] skipping `!` tokens.
+fn without_excludes(text: &str) -> String {
+    split_prose_tokens(text)
+        .into_iter()
+        .filter(|raw| {
+            !raw.trim_start_matches('(')
+                .trim_start_matches('"')
+                .starts_with('!')
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The aspect segments of a rule filename.
 ///
 /// A rule file is named `<topic>-<aspect>-<hash>`. The trailing hash is dropped
@@ -830,7 +848,7 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
         declared_globs,
         root,
         extensions,
-        scope_terms: terms(scope_text),
+        scope_terms: terms(&without_excludes(scope_text)),
         slug_terms: doc.slug().map(slug_terms).unwrap_or_default(),
         title_terms: terms(doc.title.as_deref().unwrap_or_default()),
         path_terms: path_terms.into_iter().collect(),
@@ -1435,6 +1453,19 @@ grep -r "jwt.sign" services/auth/jwks/ --include="*.ts"
         // Extensions still come from Verify, and the Scope line still feeds terms.
         assert_eq!(signals.extensions, vec!["*.ts"]);
         assert!(signals.scope_terms.contains(&"finance".to_string()));
+    }
+
+    #[test]
+    fn test_excluded_paths_contribute_no_scope_terms() {
+        let signals = extract(&doc_from(&format!("{V2_HEAD}{V2_BODY}")));
+        assert!(signals.scope_terms.contains(&"finance".to_string()));
+        for word in ["test", "ts"] {
+            assert!(
+                !signals.scope_terms.contains(&word.to_string()),
+                "{word} leaked from the exclude: {:?}",
+                signals.scope_terms
+            );
+        }
     }
 
     #[test]
