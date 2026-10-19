@@ -17,11 +17,12 @@
 //!
 //! **Folders, beside decisions.** A folder is the directory a file sits in,
 //! named from the repository root. It is covered once a decision governs any
-//! file the agents worked on in it, and a gap while every such file was
-//! governed by none, whatever order the reads arrive in. Docs, config,
-//! lockfiles and generated output never count toward one; [`folder_of`] holds
-//! that list. Every read notes a folder, so [`record_folder`] checks the
-//! record without the lock and takes it only when a folder's state changes.
+//! file the agents worked on in it, or any path a plan named there, and a gap
+//! while every one was governed by none, whatever order they arrive in. Docs,
+//! config, lockfiles and generated output never count toward one;
+//! [`folder_of`] holds that list. Every read notes a folder, so
+//! [`record_folders`] checks the record without the lock and takes it only
+//! when a folder's state changes.
 //!
 //! **Writes take a lock.** [`crate::config::paths::write_secure`] stages
 //! every write at one fixed `.tmp` path, so two hook runs writing at once can
@@ -85,9 +86,9 @@ pub struct BriefLedger {
     pub briefed: BTreeSet<String>,
     /// Absent until the summary has been shown.
     pub last_reported: Option<Reported>,
-    /// Folders holding a file a decision governs.
+    /// Folders holding a path a decision governs.
     pub covered_folders: BTreeSet<String>,
-    /// Folders holding a file no decision governs, noted only while the
+    /// Folders holding a path no decision governs, noted only while the
     /// folder is not covered. A gap is a folder here and not in
     /// `covered_folders`, whichever order the two were noted in.
     pub uncovered_folders: BTreeSet<String>,
@@ -180,11 +181,24 @@ pub fn record<'k>(
 }
 
 /// Note that the session worked on a file in `folder`, and whether a decision
-/// governs that file, best effort. The lock is taken only when the record's
-/// lock-free read says the folder's state would change.
+/// governs that file, best effort.
 pub fn record_folder(dir: &Path, key: &LedgerKey<'_>, folder: &str, covered: bool) {
-    if load(dir, key).would_change(folder, covered) {
-        update(dir, key, |ledger| ledger.note_folder(folder, covered));
+    record_folders(dir, key, &[(folder, covered)]);
+}
+
+/// [`record_folder`] for several folders under one lock, which is taken only
+/// when the record's lock-free read says one of them would change.
+pub fn record_folders<S: AsRef<str>>(dir: &Path, key: &LedgerKey<'_>, folders: &[(S, bool)]) {
+    let recorded = load(dir, key);
+    if folders
+        .iter()
+        .any(|(folder, covered)| recorded.would_change(folder.as_ref(), *covered))
+    {
+        update(dir, key, |ledger| {
+            for (folder, covered) in folders {
+                ledger.note_folder(folder.as_ref(), *covered);
+            }
+        });
     }
 }
 
@@ -689,6 +703,36 @@ mod tests {
             "public/jquery.min.js",
             "src/schema.generated.ts",
         ]);
+    }
+
+    /// A batch is noted in one write. One that changes nothing, the empty one
+    /// included, writes nothing, and returns at once with the lock held
+    /// elsewhere.
+    #[test]
+    fn test_a_batch_of_folders_is_noted_under_one_lock() {
+        let dir = tempdir().unwrap();
+        let none: [(&str, bool); 0] = [];
+        record_folders(dir.path(), &key("s1"), &none);
+        assert!(!ledger_path(dir.path(), &key("s1")).exists());
+
+        let batch = [
+            ("src/billing", false),
+            ("services/auth", true),
+            ("services/auth", false),
+        ];
+        record_folders(dir.path(), &key("s1"), &batch);
+        assert_eq!(
+            folders(dir.path(), &key("s1")),
+            (
+                vec!["services/auth".to_string()],
+                vec!["src/billing".to_string()]
+            )
+        );
+
+        let _held = lock(dir.path(), Duration::ZERO).expect("the lock");
+        let started = Instant::now();
+        record_folders(dir.path(), &key("s1"), &batch);
+        assert!(started.elapsed() < LOCK_WAIT, "a no-op waited on the lock");
     }
 
     // ── the lock ─────────────────────────────────────────────────────────
