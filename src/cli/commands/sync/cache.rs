@@ -34,33 +34,7 @@ pub(crate) fn compute_repo_key_with_timeout(
             .build()
             .ok()?;
 
-        rt.block_on(async move {
-            let mut cmd = tokio::process::Command::new("git");
-            cmd.args(["remote", "get-url", "origin"]);
-            cmd.current_dir(&root_dir_buf);
-            cmd.stdin(std::process::Stdio::null());
-            cmd.kill_on_drop(true);
-
-            let child = cmd
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .ok()?;
-
-            let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-
-            match result {
-                Ok(Ok(output)) if output.status.success() => {
-                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s)
-                    }
-                }
-                _ => None,
-            }
-        })
+        rt.block_on(async move { crate::git::origin_remote_url(&root_dir_buf, timeout).await })
     })();
 
     let input = url.unwrap_or_else(|| root_dir.to_string_lossy().to_string());
