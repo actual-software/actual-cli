@@ -424,8 +424,8 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
 }
 
 /// Note the folders the plan names in the session record `rules brief` keeps,
-/// judged by the check a read file gets, so a folder both planned and read is
-/// one entry. No model call.
+/// each judged by the check a read of its files gets, so a folder both
+/// planned and read is one entry. No model call.
 ///
 /// The paths are the ones selection reads from the plan, [`Query::all_paths`].
 /// A plan naming none notes nothing, and so does a rule set with no documents,
@@ -448,8 +448,10 @@ fn record_plan_folders(plan: &str, session_id: &str, root: &Path, rules_dir: &Pa
     let folders: Vec<(String, bool)> = paths
         .iter()
         .filter_map(|path| planned_folder(root, path))
-        .map(|(relative, folder)| {
-            let governed = !rules_brief::governing(&resolved.index, &relative, floor).is_empty();
+        .map(|(folder, files)| {
+            let governed = files
+                .iter()
+                .any(|file| !rules_brief::governing(&resolved.index, file, floor).is_empty());
             (folder, governed)
         })
         .collect();
@@ -461,18 +463,21 @@ fn record_plan_folders(plan: &str, session_id: &str, root: &Path, rules_dir: &Pa
     brief_ledger::record_folders(&dir, &key, &folders);
 }
 
-/// The repository-relative form of a planned path and the folder it counts
-/// toward, or `None` when it counts toward none.
+/// The folder a planned path counts toward and the repository-relative files
+/// that decide whether a decision governs it, or `None` when it counts toward
+/// none.
 ///
 /// A path names a folder when it is a directory in the checkout or, when it
 /// is not there yet, has no extension, the reading the index gives a query
-/// path. That folder counts when it holds a file that would. Any other path
-/// counts toward the folder it sits in, as a read file does, once that folder
-/// exists. So prose that only looks like a path (`and/or`) notes nothing, a
-/// glob counts only toward a folder it spells out, and a path outside the
-/// root notes nothing. A folder the plan would create is noted by the brief
-/// when a file is first written there.
-fn planned_folder(root: &Path, path: &str) -> Option<(String, String)> {
+/// path. That folder counts when it holds a file that would, and those files
+/// decide it as reading each of them would: it is covered when a decision
+/// governs any of them, and a decision for a subfolder alone leaves it a gap.
+/// Any other path counts toward the folder it sits in, as a read file does,
+/// once that folder exists. So prose that only looks like a path (`and/or`)
+/// notes nothing, a glob counts only toward a folder it spells out, and a path
+/// outside the root notes nothing. A folder the plan would create is noted by
+/// the brief when a file is first written there.
+fn planned_folder(root: &Path, path: &str) -> Option<(String, Vec<String>)> {
     let relative = rules_brief::relative_to_root(root, path)?;
     let on_disk = root.join(&relative);
     let names_a_folder = if on_disk.exists() {
@@ -480,19 +485,19 @@ fn planned_folder(root: &Path, path: &str) -> Option<(String, String)> {
     } else {
         Path::new(&relative).extension().is_none()
     };
-    let folder = if names_a_folder {
-        std::fs::read_dir(&on_disk)
-            .ok()?
-            .flatten()
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .find_map(|entry| {
-                let name = entry.file_name();
-                brief_ledger::folder_of(&format!("{relative}/{}", name.to_string_lossy()))
-            })?
-    } else {
-        brief_ledger::folder_of(&relative).filter(|folder| root.join(folder).is_dir())?
-    };
-    Some((relative, folder))
+    if !names_a_folder {
+        let folder =
+            brief_ledger::folder_of(&relative).filter(|folder| root.join(folder).is_dir())?;
+        return Some((folder, vec![relative]));
+    }
+    let files: Vec<String> = std::fs::read_dir(&on_disk)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| format!("{relative}/{}", entry.file_name().to_string_lossy()))
+        .filter(|file| brief_ledger::folder_of(file).is_some())
+        .collect();
+    (!files.is_empty()).then_some((relative, files))
 }
 
 #[cfg(test)]
@@ -2082,6 +2087,87 @@ mod tests {
             (
                 vec!["services/auth/oauth".to_string()],
                 vec!["infra/terraform".to_string()]
+            )
+        );
+    }
+
+    /// A decision for `lib/oauth/` governs no file directly in `lib/`, so a
+    /// plan naming `lib/` outright leaves the gap a read of `lib/format.ts`
+    /// found, whichever comes first.
+    #[test]
+    fn test_a_read_gap_survives_a_plan_naming_the_folder_when_a_subfolder_is_governed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        for read_first in [true, false] {
+            let home = tempdir().unwrap();
+            let _guards = isolated_config(&home);
+            let root = seed(&[(
+                "oauth-signing-a1b2.md",
+                "# Adopt RS256: Token Signing\n\nThese rules are ALWAYS ACTIVE for token \
+                 signing in `lib/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+            )]);
+            for file in ["lib/format.ts", "lib/oauth/token.ts"] {
+                let path = root.path().join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "").unwrap();
+            }
+            let rules_dir = rules_brief::resolve(&crate::rules::rules_dir(root.path()));
+            let key = LedgerKey {
+                session_id: "s1",
+                rules_dir: &rules_dir,
+            };
+            let dir = brief_ledger::ledger_dir().unwrap();
+            let read = || brief_ledger::record_folder(&dir, &key, "lib", false);
+
+            if read_first {
+                read();
+            }
+            plan(root.path(), "Add a date formatter under `lib/`.");
+            if !read_first {
+                read();
+            }
+
+            assert_eq!(
+                noted(root.path()),
+                (vec![], vec!["lib".to_string()]),
+                "read first: {read_first}"
+            );
+        }
+    }
+
+    /// A folder named outright is judged by the files directly in it, so a
+    /// decision for every `.tf` file covers `infra/terraform/`, though no glob
+    /// names the folder and its shell script is governed by nothing.
+    #[test]
+    fn test_a_folder_named_outright_is_judged_by_its_files() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[(
+            "terraform-pins-7e2a.md",
+            "# Pin Providers: Terraform Versions\n\nThese rules are ALWAYS ACTIVE for all \
+             code matching: **/*.tf\n\n### Rules\n\n- **R-T-001** MUST: pin every provider \
+             version.\n",
+        )]);
+        for file in [
+            "infra/terraform/main.tf",
+            "infra/terraform/plan.sh",
+            "scripts/deploy.sh",
+        ] {
+            let path = root.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+
+        plan(
+            root.path(),
+            "Pin the providers in `infra/terraform/` and run them from `scripts/`.",
+        );
+
+        assert_eq!(
+            noted(root.path()),
+            (
+                vec!["infra/terraform".to_string()],
+                vec!["scripts".to_string()]
             )
         );
     }
