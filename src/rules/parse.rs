@@ -295,6 +295,22 @@ fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
         paths: yaml_strs(scope.and_then(|s| s.get("paths")), "paths", doc),
         languages: yaml_strs(scope.and_then(|s| s.get("languages")), "languages", doc),
     };
+    // A glob that does not compile answers nothing: an include never matches
+    // and an exclude never excludes, which over-briefs rather than failing. Say
+    // so, since the author meant it to take effect.
+    for path in &meta.paths {
+        let pattern = path.strip_prefix('!').unwrap_or(path);
+        let glob = crate::rules::scope::signals::PathGlob {
+            pattern: pattern.to_string(),
+        };
+        if glob.matches_path("").is_none() {
+            doc.warnings.push(issue(
+                RuleIssueKind::MalformedFrontmatter,
+                1,
+                format!("frontmatter `paths`: `{path}` is not a valid glob and is ignored"),
+            ));
+        }
+    }
     if let Some(version) = meta.version.as_deref() {
         if version != KNOWN_VERSION {
             doc.warnings.push(issue(
@@ -658,6 +674,33 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert_eq!(meta.root.as_deref(), Some("services/api"));
         assert_eq!(meta.paths, vec!["src/**", "lib/**"]);
         assert_eq!(meta.languages, vec!["rust", "typescript"]);
+    }
+
+    fn path_warnings(paths: &[&str]) -> Vec<String> {
+        let list: String = paths.iter().map(|p| format!("      - \"{p}\"\n")).collect();
+        let text = format!(
+            "---\nversion: 2\nname: a-b-1234\nmetadata:\n  scope:\n    root: .\n    paths:\n{list}---\n\n# T\n\nScope: x.\n\n### Rules\n\n- **R-A-001** MUST: do.\n"
+        );
+        let doc = parse_rule_document(Path::new("a-b-1234.md"), &text).unwrap();
+        doc.warnings.into_iter().map(|w| w.detail).collect()
+    }
+
+    #[test]
+    fn test_unbalanced_brace_in_an_exclude_is_warned_not_silent() {
+        let warnings = path_warnings(&["src/**", "!src/{a,b/**"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("!src/{a,b/**"), "{warnings:?}");
+    }
+
+    #[test]
+    fn test_invalid_include_glob_is_warned() {
+        let warnings = path_warnings(&["src/[**"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn test_valid_brace_and_exclude_globs_are_not_warned() {
+        assert!(path_warnings(&["src/{a,b}/**", "!**/*.test.{ts,tsx}"]).is_empty());
     }
 
     #[test]
