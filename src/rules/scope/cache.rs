@@ -250,6 +250,39 @@ mod tests {
     }
 
     #[test]
+    fn test_store_then_load_keeps_the_v2_fields_and_the_inactive_count() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let v2 = |status: &str| {
+            format!(
+                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-1\n    status: {status}\n  scope:\n    root: packages/web\n    paths:\n      - \"src/**\"\n      - \"!src/**/*.test.ts\"\n    languages:\n      - typescript\n---\n\n# Web Rules: Components\n\n### Rules\n\n- **R-W-001** MUST: a rule.\n"
+            )
+        };
+        let repo = seed(&[
+            ("a.md", &v2("accepted")),
+            ("b.md", &v2("superseded")),
+            ("c.md", DOC),
+        ]);
+        let dir = rules_dir(repo.path());
+        let index = build(repo.path());
+        assert_eq!(index.inactive_documents, 1);
+        store(&dir, &index);
+
+        let loaded = load(&dir, &index.content_digest).expect("cache hit");
+        assert_eq!(loaded, index);
+        let web = loaded.documents.iter().find(|d| d.slug == "a").unwrap();
+        assert_eq!(web.root, "packages/web");
+        assert_eq!(web.include_globs, vec!["packages/web/src/**"]);
+        assert_eq!(web.exclude_globs, vec!["packages/web/src/**/*.test.ts"]);
+        assert_eq!(web.languages, vec!["typescript"]);
+        assert_eq!(web.adr_id.as_deref(), Some("adr-1"));
+        assert_eq!(loaded.inactive_documents, 1);
+    }
+
+    #[test]
     fn test_load_misses_when_the_digest_no_longer_matches() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let home = tempdir().unwrap();

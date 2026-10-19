@@ -201,6 +201,188 @@ fn test_index_beats_the_scan_without_the_title_signal() {
     );
 }
 
+// ── the mixed v1/v2 corpus ───────────────────────────────────────────────
+//
+// Twenty of the corpus's files carry a v2 header (six whole decisions, with
+// their roots, statuses, languages and an exclude varied), eighteen stay v1,
+// and four more are monorepo-rooted v2 files added for root scoping, excludes
+// and status. A decision is converted whole, so no decision is split across
+// the two formats.
+
+const WEB_COMPONENTS: &str = "cross-cutting-web-components-are-presentational-8a1c";
+const WEB_TESTS: &str = "cross-cutting-web-test-files-use-factories-5d3e";
+const API_HANDLERS: &str = "cross-cutting-api-handlers-validate-input-2f9d";
+const LEGACY_SUPERSEDED: &str = "cross-cutting-legacy-web-widgets-are-frozen-7b4a";
+
+/// The golden cases added for v2 roots and excludes. Everything else in the
+/// golden set predates v2 and is held to its pre-v2 numbers.
+fn is_v2_case(name: &str) -> bool {
+    matches!(
+        name,
+        "web-component-edit" | "api-handler-edit" | "web-test-edit"
+    )
+}
+
+fn slugs_for_path(index: &ScopeIndex, path: &str) -> Vec<String> {
+    index
+        .search(&Query::new("").with_paths([path.to_string()]), 10)
+        .into_iter()
+        .map(|hit| hit.slug)
+        .collect()
+}
+
+#[test]
+fn test_the_corpus_mixes_v1_and_v2_documents() {
+    let index = build_index(&corpus_root());
+    let v2 = index
+        .documents
+        .iter()
+        .filter(|d| !d.root.is_empty())
+        .count();
+    let v1 = index.documents.len() - v2;
+    assert!(v2 >= 20 && v1 >= 18, "v2={v2} v1={v1}");
+
+    let roots: std::collections::BTreeSet<&str> = index
+        .documents
+        .iter()
+        .filter(|d| !d.root.is_empty())
+        .map(|d| d.root.as_str())
+        .collect();
+    for root in [".", "web", "backend/db", "packages/web", "packages/api"] {
+        assert!(
+            roots.contains(root),
+            "no v2 document rooted at {root}: {roots:?}"
+        );
+    }
+    assert!(index.documents.iter().any(|d| !d.exclude_globs.is_empty()));
+    assert!(index.documents.iter().any(|d| !d.languages.is_empty()));
+}
+
+/// The original golden cases, on the mixed corpus, are held to what they scored
+/// on the all-v1 corpus before v2 existed (micro recall 0.87, F1 0.76).
+#[test]
+fn test_the_original_golden_cases_are_not_worse_on_the_mixed_corpus() {
+    let index = build_index(&corpus_root());
+    let cases: Vec<GoldenCase> = golden_cases()
+        .into_iter()
+        .filter(|c| !is_v2_case(&c.name))
+        .collect();
+    assert_eq!(cases.len(), 16);
+    let report = index_report(&index, &cases, baseline::DEFAULT_LIMIT);
+    assert!(report.micro.recall >= 0.865, "{}", report.summary_line());
+    assert!(report.micro.f1 >= 0.755, "{}", report.summary_line());
+}
+
+#[test]
+fn test_a_rooted_decision_governs_its_own_package_and_not_a_sibling() {
+    let index = build_index(&corpus_root());
+    let web = slugs_for_path(&index, "packages/web/src/components/Button.tsx");
+    let api = slugs_for_path(&index, "packages/api/src/handlers/orders.ts");
+    assert_eq!(
+        web.first().map(String::as_str),
+        Some(WEB_COMPONENTS),
+        "{web:?}"
+    );
+    assert_eq!(
+        api.first().map(String::as_str),
+        Some(API_HANDLERS),
+        "{api:?}"
+    );
+    assert!(!web.contains(&API_HANDLERS.to_string()), "{web:?}");
+    assert!(!api.contains(&WEB_COMPONENTS.to_string()), "{api:?}");
+    // A package nobody rooted a decision at gets neither.
+    let other = slugs_for_path(&index, "packages/other/src/components/x.tsx");
+    assert!(!other.contains(&WEB_COMPONENTS.to_string()), "{other:?}");
+}
+
+#[test]
+fn test_an_excluded_test_file_gets_no_brief_for_the_decision_that_excludes_it() {
+    let index = build_index(&corpus_root());
+    let test_file = slugs_for_path(&index, "packages/web/src/components/Button.test.tsx");
+    assert!(
+        !test_file.contains(&WEB_COMPONENTS.to_string()),
+        "{test_file:?}"
+    );
+    assert_eq!(
+        test_file.first().map(String::as_str),
+        Some(WEB_TESTS),
+        "{test_file:?}"
+    );
+    // Even with words that match it, the excluded decision stays out.
+    let words = index.search(
+        &Query::new("web components are presentational")
+            .with_paths(["packages/web/src/components/Button.test.tsx".to_string()]),
+        10,
+    );
+    assert!(words.iter().all(|hit| hit.slug != WEB_COMPONENTS));
+}
+
+#[test]
+fn test_a_superseded_decision_is_not_indexed_and_never_selected() {
+    let index = build_index(&corpus_root());
+    assert!(index.documents.iter().all(|d| d.slug != LEGACY_SUPERSEDED));
+    assert_eq!(index.inactive_documents, 1);
+    let hits = slugs_for_path(&index, "packages/web/src/components/Button.tsx");
+    assert!(!hits.contains(&LEGACY_SUPERSEDED.to_string()), "{hits:?}");
+}
+
+/// The api document's Verify block names `services/legacy-api/`. Its header
+/// declares paths, so that decoy must not become a glob.
+#[test]
+fn test_declared_paths_win_over_a_decoy_verify_path() {
+    let index = build_index(&corpus_root());
+    let api = index
+        .documents
+        .iter()
+        .find(|d| d.slug == API_HANDLERS)
+        .expect("api document is indexed");
+    assert_eq!(api.globs, vec!["packages/api/src/handlers/**"]);
+    // Other (v1) decisions may govern `services/**`; this one must not.
+    let decoy = slugs_for_path(&index, "services/legacy-api/x.ts");
+    assert!(!decoy.contains(&API_HANDLERS.to_string()), "{decoy:?}");
+}
+
+#[test]
+fn test_a_decision_converted_to_v2_keeps_its_documents_together() {
+    let index = build_index(&corpus_root());
+    // Four OAuth documents, one decision, one adr_id.
+    let oauth: Vec<_> = index
+        .documents
+        .iter()
+        .filter(|d| d.slug.contains("token-"))
+        .filter(|d| d.adr_id.is_some())
+        .collect();
+    assert_eq!(oauth.len(), 3, "token-signing, -verification, -expiration");
+    let ids: std::collections::BTreeSet<_> =
+        oauth.iter().filter_map(|d| d.adr_id.clone()).collect();
+    assert_eq!(ids.len(), 1);
+    let keys: std::collections::BTreeSet<String> = oauth.iter().map(|d| d.decision_key()).collect();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(
+        keys.into_iter().next().unwrap(),
+        ids.into_iter().next().unwrap()
+    );
+}
+
+#[test]
+fn test_the_v2_fields_survive_a_serialization_round_trip() {
+    let index = build_index(&corpus_root());
+    let restored: ScopeIndex =
+        serde_json::from_str(&serde_json::to_string(&index).unwrap()).unwrap();
+    assert_eq!(restored, index);
+    let web = restored
+        .documents
+        .iter()
+        .find(|d| d.slug == WEB_COMPONENTS)
+        .unwrap();
+    assert_eq!(web.root, "packages/web");
+    assert_eq!(web.include_globs, vec!["packages/web/src/components/**"]);
+    assert_eq!(web.exclude_globs, vec!["packages/web/src/**/*.test.tsx"]);
+    assert_eq!(web.languages, vec!["typescript"]);
+    assert!(web.adr_id.is_some());
+    assert_eq!(restored.inactive_documents, 1);
+}
+
 // ── determinism and offline operation ────────────────────────────────────
 
 /// Retrieval takes no model and no network, so the same index and query must

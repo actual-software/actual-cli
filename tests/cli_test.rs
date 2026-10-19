@@ -1958,3 +1958,59 @@ fn test_rules_brief_takes_the_root_from_a_conventional_rules_dir() {
             "no-brief=ungoverned infra/main.tf",
         ));
 }
+
+/// A repository with one v1 rule file and two v2 ones, one of them superseded.
+fn mixed_format_repo() -> tempfile::TempDir {
+    let repo = governed_repo();
+    let rules = repo.path().join(".actual").join("rules");
+    let v2 = |status: &str| {
+        format!(
+            "---\nversion: 2\nname: web-1a2b\ndescription: \"Web Rules: Components\"\nmetadata:\n  actual:\n    adr_id: adr-web\n    status: {status}\n  scope:\n    root: packages/web\n    paths:\n      - \"src/**\"\n      - \"!src/**/*.test.ts\"\n---\n\n# Web Rules: Components\n\nScope: applies to `packages/web/src/**`.\n\n### Rules\n\n- **R-W-001** MUST: keep components presentational.\n"
+        )
+    };
+    std::fs::write(rules.join("web-1a2b.md"), v2("accepted")).unwrap();
+    std::fs::write(
+        rules.join("old-3c4d.md"),
+        v2("superseded")
+            .replace("web-1a2b", "old-3c4d")
+            .replace("adr-web", "adr-old"),
+    )
+    .unwrap();
+    repo
+}
+
+/// `rules ls --json` carries the v2 header's fields for a v2 file and nothing
+/// new for a v1 file, and `rules index --json` says how many files were left
+/// out as inactive.
+#[test]
+fn test_rules_ls_and_index_json_show_the_v2_header_across_a_mixed_repo() {
+    let repo = mixed_format_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| -> serde_json::Value {
+        let out = actual_in(repo.path(), config_dir.path(), args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&out).expect("json")
+    };
+
+    let ls = run(&["rules", "ls", "--json"]);
+    let docs = ls["documents"].as_array().unwrap();
+    let by_slug = |slug: &str| docs.iter().find(|d| d["slug"] == slug).unwrap();
+    let v1 = by_slug("cross-cutting-signing-a1b2");
+    assert!(v1.get("adr_id").is_none() && v1.get("root").is_none() && v1.get("status").is_none());
+    let v2 = by_slug("web-1a2b");
+    assert_eq!(v2["adr_id"], "adr-web");
+    assert_eq!(v2["root"], "packages/web");
+    assert_eq!(v2["status"], "accepted");
+    // The frontmatter did not leak into the scope sentence.
+    assert!(!v2["scope"].as_str().unwrap_or("").contains("adr_id"));
+    assert_eq!(by_slug("old-3c4d")["status"], "superseded");
+
+    let index = run(&["rules", "index", "--json"]);
+    assert_eq!(index["documents"], 2);
+    assert_eq!(index["inactive_documents"], 1);
+    assert_eq!(index["documents_with_declared_paths"], 1);
+}

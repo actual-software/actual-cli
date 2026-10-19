@@ -165,5 +165,35 @@
       "cross-cutting-workflow-determinism-is-preserved-940b",
       "cross-cutting-activity-results-are-serialisable-7cd5"
     ]
+  },
+  {
+    "name": "web-component-edit",
+    "plan": "Change the props of the web button.",
+    "paths": [
+      "packages/web/src/components/Button.tsx"
+    ],
+    "expected": [
+      "cross-cutting-web-components-are-presentational-8a1c"
+    ]
+  },
+  {
+    "name": "api-handler-edit",
+    "plan": "Add a field to the orders handler.",
+    "paths": [
+      "packages/api/src/handlers/orders.ts"
+    ],
+    "expected": [
+      "cross-cutting-api-handlers-validate-input-2f9d"
+    ]
+  },
+  {
+    "name": "web-test-edit",
+    "plan": "Update the web button test.",
+    "paths": [
+      "packages/web/src/components/Button.test.tsx"
+    ],
+    "expected": [
+      "cross-cutting-web-test-files-use-factories-5d3e"
+    ]
   }
 ]
