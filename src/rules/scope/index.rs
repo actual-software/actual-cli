@@ -198,7 +198,7 @@ impl IndexedDocument {
     /// `packages/web`). Every document is in scope of a path when it has no
     /// root, or the root is the whole repository.
     fn root_admits(&self, path: &str) -> bool {
-        if self.root.is_empty() || self.root == "." {
+        if self.root_admits_all() {
             return true;
         }
         let path: Vec<&str> = path
