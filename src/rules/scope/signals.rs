@@ -825,7 +825,10 @@ pub fn extract(doc: &crate::rules::RuleDocument) -> DocumentSignals {
                 globs.push(glob);
             }
         }
-    } else if meta.is_none() {
+    } else {
+        // No declared includes, so the Scope: line has no header paths to
+        // restate and its prose is read as for a v1 document. `!` tokens (a
+        // restated exclude) are never read as includes.
         for glob in globs_from_prose(scope_text) {
             if !globs.contains(&glob) {
                 globs.push(glob);
@@ -1469,12 +1472,22 @@ grep -r "jwt.sign" services/auth/jwks/ --include="*.ts"
     }
 
     #[test]
-    fn test_v2_without_paths_keeps_verify_globs_and_skips_prose() {
+    fn test_v2_without_paths_keeps_verify_and_prose_globs() {
         let head = "---\nversion: 2\nmetadata:\n  scope:\n    root: .\n---\n\n";
         let signals = extract(&doc_from(&format!("{head}{V2_BODY}")));
         let globs: Vec<&str> = signals.globs.iter().map(|g| g.pattern.as_str()).collect();
-        assert_eq!(globs, vec!["services/other/**"]);
+        assert!(globs.contains(&"services/other/**"), "{globs:?}");
+        assert!(globs.contains(&"lib/legacy/**"), "{globs:?}");
         assert!(signals.excludes.is_empty());
+    }
+
+    #[test]
+    fn test_v2_with_only_excludes_reads_no_glob_from_the_restated_exclude() {
+        let head = "---\nversion: 2\nmetadata:\n  scope:\n    root: .\n    paths:\n      - \"!src/finance/**/*.test.ts\"\n---\n\n";
+        let body = "# Finance\n\nScope: excludes `!src/finance/**/*.test.ts`.\n\n### Rules\n\n- **R-F-001** MUST: x.\n";
+        let signals = extract(&doc_from(&format!("{head}{body}")));
+        assert!(signals.globs.is_empty(), "{:?}", signals.globs);
+        assert_eq!(signals.excludes.len(), 1);
     }
 
     #[test]
