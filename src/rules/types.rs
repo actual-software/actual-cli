@@ -186,18 +186,30 @@ pub struct RuleDocument {
 /// and `description` are top level; `adr_id`, `status`, `candidate_group_id`
 /// and `evidence.source` (kept here as `evidence_source`) come from
 /// `metadata.actual`; `root`, `paths` and `languages` from `metadata.scope`.
-/// `paths` entries may be `!`-prefixed excludes. Every field is optional.
+/// `paths` entries may be `!`-prefixed excludes. Every field is optional, and
+/// absent fields are omitted from the JSON form, as `meta` itself is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AdrMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub adr_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub languages: Vec<String>,
 }
 
@@ -529,6 +541,24 @@ mod tests {
     fn test_rule_document_slug_is_none_without_a_stem() {
         let doc = RuleDocument::empty(Path::new(".."));
         assert_eq!(doc.slug(), None);
+    }
+
+    #[test]
+    fn test_adr_meta_omits_absent_fields_and_deserializes_from_partial_json() {
+        assert_eq!(serde_json::to_string(&AdrMeta::default()).unwrap(), "{}");
+        let partial: AdrMeta = serde_json::from_str(r#"{"name":"n"}"#).unwrap();
+        assert_eq!(partial.name.as_deref(), Some("n"));
+        assert!(partial.paths.is_empty() && partial.languages.is_empty());
+
+        let full = AdrMeta {
+            version: Some("2".into()),
+            adr_id: Some("x".into()),
+            paths: vec!["src/**".into(), "!src/gen/**".into()],
+            languages: vec!["rust".into()],
+            ..AdrMeta::default()
+        };
+        let back: AdrMeta = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
     }
 
     #[test]
