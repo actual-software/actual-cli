@@ -49,7 +49,7 @@ use crate::rules::{RuleDocument, RuleLevel, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 9;
+pub const INDEX_FORMAT_VERSION: u32 = 10;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -271,6 +271,10 @@ pub struct ScopeIndex {
     pub documents: Vec<IndexedDocument>,
     /// term → number of documents containing it, in any field.
     pub document_frequency: BTreeMap<String, usize>,
+    /// Documents left out because their v2 `status` says they do not govern
+    /// (see [`RuleDocument::is_active`]). Counted so `rules index` can say so.
+    #[serde(default)]
+    pub inactive_documents: usize,
 }
 
 /// A plan to be matched against the index.
@@ -466,9 +470,17 @@ impl ScopeIndex {
         root: &std::path::Path,
         content_digest: String,
     ) -> Self {
+        // An inactive decision never enters the index, so nothing downstream —
+        // selection, the ranker, the brief, the X-of-Y count — can reach it.
+        let inactive_documents = report
+            .documents
+            .iter()
+            .filter(|doc| !doc.is_active())
+            .count();
         let mut documents: Vec<IndexedDocument> = report
             .documents
             .iter()
+            .filter(|doc| doc.is_active())
             .map(|doc| index_document(doc, root))
             .collect();
         documents.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -491,6 +503,7 @@ impl ScopeIndex {
             content_digest,
             documents,
             document_frequency,
+            inactive_documents,
         }
     }
 
@@ -2052,6 +2065,7 @@ mod tests {
             content_digest: "fp".to_string(),
             documents,
             document_frequency: BTreeMap::new(),
+            inactive_documents: 0,
         }
     }
 
@@ -2950,5 +2964,53 @@ mod tests {
         let v1 = index_of(vec![doc("old", "T: A", "Scope.", "grep -r x lib/")]);
         let json = serde_json::to_value(v1.search_adrs(&Query::new("t"), 5)).unwrap();
         assert!(json[0].get("root").is_none() && json[0].get("candidate_group_id").is_none());
+    }
+
+    // ── inactive decisions ───────────────────────────────────────────────
+
+    fn status_doc(slug: &str, adr_id: &str, status: &str) -> RuleDocument {
+        let text = format!(
+            "---\nversion: 2\nname: {slug}\nmetadata:\n  actual:\n    adr_id: {adr_id}\n    status: {status}\n  scope:\n    root: .\n    paths:\n      - \"src/**\"\n---\n\n# Title {adr_id}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
+        );
+        parse_rule_document(
+            &PathBuf::from(format!("/repo/.actual/rules/{slug}.md")),
+            &text,
+        )
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn test_inactive_decisions_are_not_indexed_and_are_counted() {
+        let index = index_of(vec![
+            status_doc("live", "adr-live", "accepted"),
+            status_doc("old", "adr-old", "superseded"),
+            status_doc("gone", "adr-gone", "rejected"),
+        ]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.inactive_documents, 2);
+        assert_eq!(index.documents[0].slug, "live");
+    }
+
+    #[test]
+    fn test_an_inactive_decision_is_never_selected_or_counted() {
+        let index = index_of(vec![
+            status_doc("live", "adr-live", "accepted"),
+            status_doc("old", "adr-old", "superseded"),
+        ]);
+        let query = Query::new("").with_paths(["src/x.ts".to_string()]);
+        assert_eq!(
+            index
+                .search(&query, 10)
+                .into_iter()
+                .map(|h| h.slug)
+                .collect::<Vec<_>>(),
+            vec!["live"]
+        );
+        assert_eq!(index.decision_count(), 1);
+    }
+
+    #[test]
+    fn test_a_v1_corpus_has_no_inactive_documents() {
+        assert_eq!(sample_index().inactive_documents, 0);
     }
 }

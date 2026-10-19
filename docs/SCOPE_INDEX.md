@@ -383,7 +383,9 @@ its documents; both are omitted otherwise, so v1 output is unchanged. The same
 key is what the brief's once-per-session state and `session summary` record. A
 rule set only partly regenerated splits a decision: a policy missing its group
 id is keyed on its own `adr_id`, and regenerating the remaining files is the
-fix. The brief's heading stays the decision's title. Decisions appear where their best
+fix. The brief's heading stays the decision's title.
+
+Decisions appear where their best
 document ranked, and documents retain their relative rank within each
 decision. Making each group contiguous can change the flattened document
 order when decisions were interleaved. Grouping is stage 1 only, since what
@@ -391,6 +393,20 @@ is being capped is decisions while the rank judges documents. Measured on the
 425-document reference corpus, over the edited files of 35 merged pull
 requests: the top two decisions reach 38% precision at 56% recall, against
 31%/30% for the top five documents.
+
+A v2 header's `metadata.actual.status` decides whether a decision governs at
+all. `deleted`, `draft`, `archived-draft`, `deferred`, `rejected` and `suggested` (and the
+not-yet-defined `superseded` and `deprecated`) are inactive: such a document is
+left out of the index, so it is never selected, ranked, briefed, judged by
+`plan-check` or `impl-check`, or counted in "X of Y ADRs". `rules index` reports
+how many were left out. Any other status, including one this build does not
+know, and a missing status (every v1 file) is active. The first four mirror the
+statuses sprintreview itself withholds from enforcement. `suggested` is an AI
+proposal nobody has accepted. A status this build does not know stays active but
+raises a `rules ls` warning, so a typo of a retired status is visible. `rules ls`
+marks retired documents `(<status>, not enforced)`. Status is read per file, so a
+decision whose files carry different statuses enforces only its active files; as
+with a partly regenerated rule set, regenerating the remaining files is the fix.
 
 Because grouped selection is stage 1 only, `--runner`, `--model`, and
 `--candidates` conflict with `--by-adr` instead of being silently ignored.

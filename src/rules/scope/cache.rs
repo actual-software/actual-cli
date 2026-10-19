@@ -289,6 +289,7 @@ mod tests {
         let repo = seed(&[("a.md", DOC)]);
         let dir = rules_dir(repo.path());
         let mut index = build(repo.path());
+        // v9 held inactive documents; it must rebuild, not be misread.
         index.format_version = INDEX_FORMAT_VERSION - 1;
         store(&dir, &index);
 

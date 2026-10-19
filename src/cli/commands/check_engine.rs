@@ -379,6 +379,11 @@ fn gather_rules(
         let Ok(doc) = crate::rules::parse_rule_document(&path, &text) else {
             continue;
         };
+        // The index already leaves inactive decisions out; this is the same
+        // check for a file edited to a retired status after selection.
+        if !doc.is_active() {
+            continue;
+        }
         for rule in doc.rules {
             if session.excludes(
                 kind,
@@ -2725,6 +2730,185 @@ pub(crate) mod tests {
             "test-digest",
         );
         assert!(gathered.rules.is_empty());
+    }
+
+    // ── v2 ADR status: only active decisions are judged ──────────────────
+
+    /// `OAUTH_DOC` behind a v2 header carrying `status`.
+    fn v2_oauth(status: &str) -> String {
+        format!(
+            "---\nversion: 2\nname: cross-cutting-token-signing-1c57\nmetadata:\n  actual:\n    adr_id: adr-oauth\n    status: {status}\n  scope:\n    root: .\n---\n\n{OAUTH_DOC}"
+        )
+    }
+
+    /// A judge that calls R-A-001 conflicting, so reaching it means a deny.
+    #[cfg(unix)]
+    fn conflicting_judge(dir: &Path) -> PathBuf {
+        fake_claude(
+            dir,
+            &check_output(serde_json::json!([
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "skips signing", "reason": "unsigned"},
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "fine"},
+            ])),
+        )
+    }
+
+    #[cfg(unix)]
+    fn run_plan_gate(root: &Path) -> Outcome {
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        run_pipeline(
+            "Sign access tokens with RS256",
+            root,
+            &crate::rules::rules_dir(root),
+            &args.check_knobs(),
+            check::ArtifactKind::Plan,
+            false,
+            &GovernanceSession::default(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_an_active_v2_adr_with_a_violated_rule_still_denies_in_the_same_shape() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", &v2_oauth("accepted"))]);
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            conflicting_judge(bin.path()).to_str().unwrap(),
+        );
+
+        let Outcome::Verdicts { verdicts, .. } = run_plan_gate(root.path()) else {
+            panic!("an active ADR must reach the judge");
+        };
+        let conflicts: Vec<&CheckedRule> = verdicts
+            .iter()
+            .filter(|v| v.verdict == Verdict::Conflicting)
+            .collect();
+        assert_eq!(conflicts.len(), 1);
+        let reason = hook_deny_reason(&conflicts, None, None, check::ArtifactKind::Plan);
+        assert!(reason.contains("CONFLICT R-A-001 (MUST)"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_retired_v2_adr_with_a_violated_rule_produces_no_deny() {
+        for status in [
+            "superseded",
+            "deprecated",
+            "rejected",
+            "deferred",
+            "draft",
+            "deleted",
+            "archived-draft",
+            "suggested",
+        ] {
+            let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let home = tempdir().unwrap();
+            let _guards = isolated_config(&home);
+            let root = seed(&[("cross-cutting-token-signing-1c57.md", &v2_oauth(status))]);
+            let bin = tempdir().unwrap();
+            // The judge would deny if it were ever asked.
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                conflicting_judge(bin.path()).to_str().unwrap(),
+            );
+            assert!(
+                matches!(run_plan_gate(root.path()), Outcome::NothingApplies),
+                "{status}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_v2_adr_with_an_unrecognised_or_absent_status_is_judged() {
+        for header_status in ["status: something-new\n", ""] {
+            let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let home = tempdir().unwrap();
+            let _guards = isolated_config(&home);
+            let text = format!(
+                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-oauth\n    {header_status}---\n\n{OAUTH_DOC}"
+            );
+            let root = seed(&[("cross-cutting-token-signing-1c57.md", &text)]);
+            let bin = tempdir().unwrap();
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                conflicting_judge(bin.path()).to_str().unwrap(),
+            );
+            assert!(
+                matches!(run_plan_gate(root.path()), Outcome::Verdicts { .. }),
+                "{header_status:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_the_impl_gate_honours_status_the_same_way() {
+        for (status, judged) in [("accepted", true), ("superseded", false)] {
+            let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let home = tempdir().unwrap();
+            let _guards = isolated_config(&home);
+            let root = seed(&[("cross-cutting-token-signing-1c57.md", &v2_oauth(status))]);
+            let bin = tempdir().unwrap();
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                conflicting_judge(bin.path()).to_str().unwrap(),
+            );
+            let mut args = base_args();
+            args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+            let outcome = run_pipeline(
+                "Sign access tokens with RS256",
+                root.path(),
+                &crate::rules::rules_dir(root.path()),
+                &args.check_knobs(),
+                check::ArtifactKind::Diff,
+                false,
+                &GovernanceSession::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                matches!(outcome, Outcome::Verdicts { .. }),
+                judged,
+                "{status}"
+            );
+            assert_eq!(
+                matches!(outcome, Outcome::NothingApplies),
+                !judged,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gather_rules_skips_a_document_edited_to_a_retired_status_after_selection() {
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", &v2_oauth("accepted"))]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Sign tokens".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+        let gather = || {
+            gather_rules(
+                &selection,
+                root.path(),
+                &GovernanceSession::default(),
+                check::ArtifactKind::Plan,
+                "test-digest",
+            )
+        };
+        assert_eq!(gather().rules.len(), 2);
+
+        std::fs::write(
+            crate::rules::rules_dir(root.path()).join("cross-cutting-token-signing-1c57.md"),
+            v2_oauth("superseded"),
+        )
+        .unwrap();
+        assert!(gather().rules.is_empty());
     }
 
     // ── run_pipeline: branches that need a resolved (or unavailable) runner ─

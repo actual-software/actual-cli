@@ -78,6 +78,10 @@ fn render_index_panel(resolved: &ResolvedIndex, root: &Path, width: usize) -> St
             .to_string(),
     );
     panel = panel.kv(
+        "Inactive documents (not indexed)",
+        &index.inactive_documents.to_string(),
+    );
+    panel = panel.kv(
         "Documents with declared paths",
         &index.declared_path_documents().to_string(),
     );
@@ -125,6 +129,7 @@ struct JsonIndexSummary<'a> {
     content_digest: &'a str,
     format_version: u32,
     documents: usize,
+    inactive_documents: usize,
     path_globs: usize,
     documents_with_declared_paths: usize,
     documents_with_derived_paths: usize,
@@ -144,6 +149,7 @@ fn render_index_json(resolved: &ResolvedIndex) -> String {
         content_digest: &index.content_digest,
         format_version: index.format_version,
         documents: index.len(),
+        inactive_documents: index.inactive_documents,
         path_globs: index.documents.iter().map(|d| d.globs.len()).sum(),
         documents_with_declared_paths: index.declared_path_documents(),
         documents_with_derived_paths: index.derived_path_documents(),
