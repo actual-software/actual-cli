@@ -97,7 +97,8 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
         let trimmed = lines[i].trim();
         let lineno = i + 1;
 
-        if trimmed.is_empty() {
+        // A horizontal rule before `### Rules` is decoration, not scope text.
+        if trimmed.is_empty() || (trimmed == "---" && section == Section::Preamble) {
             i += 1;
             continue;
         }
@@ -194,15 +195,23 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
 const KNOWN_VERSION: &str = "2";
 
 /// Index of the closing `---` when the file opens with a fenced block.
+///
+/// A leading `---` can also be a markdown horizontal rule. A block that
+/// contains a heading line is document content, not YAML, so it is not
+/// treated as frontmatter and the scan starts from line 0.
 fn frontmatter_end(lines: &[&str]) -> Option<usize> {
     if lines.first()?.trim_end() != "---" {
         return None;
     }
-    lines
+    let end = lines
         .iter()
         .skip(1)
         .position(|line| line.trim_end() == "---")
-        .map(|idx| idx + 1)
+        .map(|idx| idx + 1)?;
+    let has_heading = lines[1..end].iter().any(|line| {
+        !line.starts_with(char::is_whitespace) && heading_of(line.trim_end()).is_some()
+    });
+    (!has_heading).then_some(end)
 }
 
 fn yaml_str(value: Option<&serde_yaml::Value>) -> Option<String> {
@@ -661,6 +670,25 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert!(doc.meta.is_none());
         assert_eq!(doc.warnings.len(), 1);
         assert_eq!(doc.warnings[0].kind, RuleIssueKind::MalformedFrontmatter);
+    }
+
+    #[test]
+    fn test_leading_horizontal_rule_is_not_frontmatter() {
+        let text = "---\n# T\n\nScope.\n---\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.title.as_deref(), Some("T"));
+        assert_eq!(doc.scope.as_deref(), Some("Scope."));
+        assert_eq!(doc.rules.len(), 1);
+        assert!(doc.meta.is_none());
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_leading_horizontal_rule_enclosing_rules_heading_still_parses() {
+        let text = "---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n---\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.rules.len(), 1);
+        assert!(doc.warnings.is_empty());
     }
 
     #[test]
