@@ -765,6 +765,20 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
     }
 
     #[test]
+    fn test_frontmatter_number_and_bool_scalars_read_as_strings() {
+        let text = "---\nname: true\nversion: 2\nmetadata:\n  scope:\n    languages: [rust, false]\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        let meta = doc.meta.expect("meta");
+        assert_eq!(meta.name.as_deref(), Some("true"));
+        assert_eq!(meta.version.as_deref(), Some("2"));
+        assert_eq!(
+            meta.languages,
+            vec!["rust".to_string(), "false".to_string()]
+        );
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
     fn test_frontmatter_non_mapping_warns() {
         let text = "---\n- a\n- b\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
         let doc = parse_ok(text);
