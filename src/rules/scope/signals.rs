@@ -744,18 +744,22 @@ fn is_content_hash(segment: &str) -> bool {
         && segment.chars().any(|c| c.is_ascii_alphabetic())
 }
 
-/// A header `root` without a `./` prefix or trailing `/`; `.` when it names the
-/// whole repository or is absent.
+/// A header `root` as clean repository-relative segments: empty and `.`
+/// segments (`./x`, `x//y`, `/x`, a trailing `/`) are collapsed away. `.` when it
+/// names the whole repository or is absent. A root that climbs out with `..`
+/// cannot name a place in the repository, so it is read as the whole
+/// repository, and the parser warns.
 pub fn normalize_root(root: Option<&str>) -> String {
-    let trimmed = root
+    let segments: Vec<&str> = root
         .unwrap_or(".")
         .trim()
-        .trim_start_matches("./")
-        .trim_end_matches('/');
-    if trimmed.is_empty() {
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if segments.is_empty() || segments.contains(&"..") {
         ".".to_string()
     } else {
-        trimmed.to_string()
+        segments.join("/")
     }
 }
 
@@ -1469,6 +1473,23 @@ grep -r "jwt.sign" services/auth/jwks/ --include="*.ts"
                 signals.scope_terms
             );
         }
+    }
+
+    #[test]
+    fn test_unusual_roots_are_normalized_to_clean_segments() {
+        for (raw, want) in [
+            ("./packages/web/", "packages/web"),
+            ("/packages/web", "packages/web"),
+            ("packages//web", "packages/web"),
+            ("packages/./web", "packages/web"),
+            ("", "."),
+            ("/", "."),
+            ("../outside", "."),
+            ("packages/../..", "."),
+        ] {
+            assert_eq!(normalize_root(Some(raw)), want, "{raw:?}");
+        }
+        assert_eq!(normalize_root(None), ".");
     }
 
     #[test]

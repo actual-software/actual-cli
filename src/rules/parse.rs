@@ -295,6 +295,17 @@ fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
         paths: yaml_strs(scope.and_then(|s| s.get("paths")), "paths", doc),
         languages: yaml_strs(scope.and_then(|s| s.get("languages")), "languages", doc),
     };
+    if meta
+        .root
+        .as_deref()
+        .is_some_and(|root| root.split('/').any(|segment| segment == ".."))
+    {
+        doc.warnings.push(issue(
+            RuleIssueKind::MalformedFrontmatter,
+            1,
+            "frontmatter `root` climbs out of the repository with `..` and is ignored",
+        ));
+    }
     // A glob that does not compile answers nothing: an include never matches
     // and an exclude never excludes, which over-briefs rather than failing. Say
     // so, since the author meant it to take effect.
@@ -690,6 +701,14 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         let warnings = path_warnings(&["src/**", "!src/{a,b/**"]);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("!src/{a,b/**"), "{warnings:?}");
+    }
+
+    #[test]
+    fn test_root_that_climbs_out_is_warned() {
+        let text = "---\nversion: 2\nname: a-b-1234\nmetadata:\n  scope:\n    root: ../x\n---\n\n# T\n\nScope: x.\n\n### Rules\n\n- **R-A-001** MUST: do.\n";
+        let doc = parse_rule_document(Path::new("a-b-1234.md"), text).unwrap();
+        assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
+        assert!(doc.warnings[0].detail.contains("`root`"));
     }
 
     #[test]
