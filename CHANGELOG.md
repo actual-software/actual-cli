@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
+### Added
+- `rules brief` records the folder of every file it is asked about in the session record: covered when the search finds a decision, uncovered when it finds none. Docs, config, lockfiles and generated output never count. The brief also takes the repository root from a `--rules-dir` shaped `<root>/.actual/rules` when no `--repo` is given
+- `plan-check --claude-hook` notes the folders a plan names, with no model call, so a planned folder no ADR covers counts as a gap. A folder a plan names is judged by the files directly in it
+- `session summary` shows the areas with no ADR beside the ADR count, e.g. `Actual AI: 3 of 12 ADRs added to context · 2 areas with no ADR`, or `Actual AI: no ADR covers the 3 areas you worked in` when every area is a gap. `--json` adds `line`, `gaps` and a sorted `areas_without_adr`
+
+### Changed
+- The session summary line replaces "Actual AI: added 3 of 12 ADRs to context this session."
+
+### Fixed
+- `rules brief` decides whether a file is governed before `--limit` caps the search, so `--limit 0` no longer reports every governed read as `ungoverned` and records a gap for every folder
+- The session summary keeps the count beside the gaps when the session also worked in a folder a decision covers
+
 ## [0.7.0] - 2026-10-14
 
 ### Added
