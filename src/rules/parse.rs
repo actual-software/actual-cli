@@ -191,7 +191,7 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
 
 // ── frontmatter ──────────────────────────────────────────────────────────
 
-/// The highest header version this parser knows.
+/// The header version this parser targets. Any other value warns.
 const KNOWN_VERSION: &str = "2";
 
 /// Index of the closing `---` when the file opens with a fenced block.
@@ -237,6 +237,8 @@ fn yaml_strs(value: Option<&serde_yaml::Value>) -> Vec<String> {
 fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
     let value: serde_yaml::Value = match serde_yaml::from_str(&body.join("\n")) {
         Ok(v @ serde_yaml::Value::Mapping(_)) => v,
+        // An empty (or comment-only) header carries no metadata; not an error.
+        Ok(serde_yaml::Value::Null) => return,
         Ok(_) => {
             doc.warnings.push(issue(
                 RuleIssueKind::MalformedFrontmatter,
@@ -246,9 +248,11 @@ fn absorb_frontmatter(body: &[&str], doc: &mut RuleDocument) {
             return;
         }
         Err(err) => {
+            // The body starts on file line 2, so its line N is file line N + 1.
+            let line = err.location().map_or(1, |loc| loc.line() + 1);
             doc.warnings.push(issue(
                 RuleIssueKind::MalformedFrontmatter,
-                1,
+                line,
                 format!("invalid YAML frontmatter: {err}"),
             ));
             return;
@@ -689,6 +693,27 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         let doc = parse_ok(text);
         assert_eq!(doc.rules.len(), 1);
         assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_empty_is_silent() {
+        for header in ["---\n---\n", "---\n\n---\n", "---\n# note\n---\n"] {
+            let text = format!("{header}# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n");
+            let doc = parse_ok(&text);
+            assert!(doc.meta.is_none(), "{header:?}");
+            assert!(doc.warnings.is_empty(), "{header:?}");
+            assert_eq!(doc.rules.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_frontmatter_yaml_error_points_at_file_line() {
+        let text =
+            "---\nname: ok\nversion: 2\nbad: a: b\n---\n# T\n\n### Rules\n\n- **R-A-001** MUST: ok\n";
+        let doc = parse_ok(text);
+        assert_eq!(doc.warnings.len(), 1);
+        let line = doc.warnings[0].line.expect("line");
+        assert_eq!(line, 4);
     }
 
     #[test]
