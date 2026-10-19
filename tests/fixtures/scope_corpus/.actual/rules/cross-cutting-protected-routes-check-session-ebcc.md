@@ -1,4 +1,26 @@
+---
+version: 2
+name: cross-cutting-protected-routes-check-session-ebcc
+description: "Adopt Server-Side Session Handling for Next.js Authentication: Protected Routes Check Session"
+metadata:
+  actual:
+    adr_id: 1eca5e80-f15f-5533-bf19-40d04cc04bbb
+    status: accepted
+    candidate_group_id: bb49cc65-8800-584b-9730-d793a599ad49
+    evidence:
+      source: deep
+  scope:
+    root: web
+    paths:
+      - lib/auth.ts
+      - "app/**"
+    languages:
+      - typescript
+---
+
 # Adopt Server-Side Session Handling for Next.js Authentication: Protected Routes Check Session
+
+Scope: applies to `web/lib/auth.ts`, `web/app/**`.
 
 These rules are ALWAYS ACTIVE for all server-side authentication operations in the Next.js application, including user sign-in, registration, session refresh, and demo user authentication flows.
 

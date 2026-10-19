@@ -1,4 +1,24 @@
+---
+version: 2
+name: cross-cutting-memory-is-sized-from-measurement-289c
+description: "Adopt Explicit Timeout and Memory Sizing for Lambda Functions: Memory Is Sized From Measurement"
+metadata:
+  actual:
+    adr_id: 014a15ec-8ff3-5961-9d21-e6a5eb76f45a
+    status: accepted
+    candidate_group_id: beb08fda-1bd1-59b6-a789-07ee0af5b81e
+    evidence:
+      source: signal
+  scope:
+    root: .
+    paths:
+      - "infra/terraform/lambda/**"
+      - "infra/terraform/modules/lambda/**"
+---
+
 # Adopt Explicit Timeout and Memory Sizing for Lambda Functions: Memory Is Sized From Measurement
+
+Scope: applies to `infra/terraform/lambda/**`, `infra/terraform/modules/lambda/**`.
 
 These rules are ALWAYS ACTIVE for all AWS Lambda function definitions in Terraform targeting production environments with external service dependencies and timeout values at or above thirty seconds.
 

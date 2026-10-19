@@ -260,6 +260,35 @@ fn stage_one_alone_answers_with_no_runner_in_the_loop() {
     );
 }
 
+/// A v2 header's root and excludes reach the selection: the rooted decision is
+/// selected for a file in its package and carries its `adr_id` and `root`, and
+/// it is not selected for the test file its header excludes.
+#[test]
+fn a_selection_honours_a_v2_decisions_root_excludes_and_reports_its_id() {
+    let index = build_index();
+    let web = "cross-cutting-web-components-are-presentational-8a1c";
+    let select_for = |file: &str| {
+        let query = Query::new("").with_paths([file.to_string()]);
+        select::prefilter(&index, &query, 5, select::DEFAULT_CANDIDATES)
+            .finish(Stage2::NotRequested)
+    };
+
+    let component = select_for("packages/web/src/components/Button.tsx");
+    let rule = component
+        .selected
+        .iter()
+        .find(|r| r.slug == web)
+        .expect("the rooted decision is selected for a file in its package");
+    assert_eq!(rule.root.as_deref(), Some("packages/web"));
+    assert!(rule.adr_id.is_some());
+
+    let test_file = select_for("packages/web/src/components/Button.test.tsx");
+    assert!(test_file.selected.iter().all(|r| r.slug != web));
+
+    let elsewhere = select_for("packages/api/src/handlers/orders.ts");
+    assert!(elsewhere.selected.iter().all(|r| r.slug != web));
+}
+
 /// A runner that is reachable and useless is the same as no runner: the
 /// deterministic answer comes back, with the failure recorded.
 #[test]
