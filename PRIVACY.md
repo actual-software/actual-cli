@@ -281,7 +281,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 |-------------|------|----------|
 | `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
-| `registry.npmjs.org` | A request for the latest CLI version, at most once a day; no account or repository data | HTTPS |
+| `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
