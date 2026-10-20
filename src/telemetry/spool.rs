@@ -194,11 +194,11 @@ fn joined(lines: &[impl AsRef<str>]) -> String {
 /// file; dropping it (or the process exiting) releases the lock.
 ///
 /// The lock serializes the read-modify-write in [`Spool::append_lines`] against
-/// another append's cap-trim rename and against [`flush`]'s post-delivery
-/// removal — the two windows in which a concurrent writer could otherwise
-/// clobber a queued event or delete one that landed mid-flush. The network send
-/// itself is deliberately *not* held under the lock, so a slow uploader never
-/// blocks any command from appending.
+/// another append's cap-trim rename, against [`flush`]'s post-delivery removal,
+/// and against [`Spool::take`]'s rewrite — the windows in which a concurrent
+/// writer could otherwise clobber a queued event or delete one that landed
+/// mid-flush. The network send itself is deliberately *not* held under the
+/// lock, so a slow uploader never blocks any command from appending.
 struct SpoolLock {
     // Held only for its lock; the OS releases the advisory lock when the fd is
     // closed on drop, so the field is never read directly.
