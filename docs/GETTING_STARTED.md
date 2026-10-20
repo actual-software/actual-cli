@@ -18,14 +18,15 @@ npm install -g @actualai/actual
 
 ### Manual download
 
-Download the binary for your platform, then:
+Download the archive for your platform from the [releases repository](https://github.com/actual-software/actual-releases/releases): `actual-darwin-arm64.tar.gz`, `actual-darwin-x64.tar.gz`, `actual-linux-arm64.tar.gz`, or `actual-linux-x64.tar.gz`. Extract it and move the binary onto your `PATH`. On Apple Silicon:
 
 ```bash
-chmod +x ./actual
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/actual-darwin-arm64.tar.gz
+tar -xzf actual-darwin-arm64.tar.gz
 sudo mv ./actual /usr/local/bin/actual
 ```
 
-**macOS only:** remove quarantine before running:
+**macOS only:** if you downloaded the archive in a browser, remove quarantine before running:
 
 ```bash
 xattr -dr com.apple.quarantine /usr/local/bin/actual
