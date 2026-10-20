@@ -376,8 +376,7 @@ it a new one. In `--by-adr --json` each decision's `key` is therefore
 document whose title prefix or filename happens to equal it), and the decision then also carries an `adr_id`
 field (and each of its documents does); both are omitted for v1 documents,
 whose `key` is unchanged. The same key is what the brief's once-per-session
-state and `session summary` record, so `session summary --json` adds an
-`adr_ids` array, aligned with `decisions`, when any counted decision has one.
+state and `session summary` record.
 The brief's heading stays the decision's title. Decisions appear where their best
 document ranked, and documents retain their relative rank within each
 decision. Making each group contiguous can change the flattened document

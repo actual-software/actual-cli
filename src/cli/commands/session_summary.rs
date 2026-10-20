@@ -76,16 +76,6 @@ struct SummaryJson<'a> {
     areas_without_adr: Vec<&'a str>,
     /// What plain output prints, or `null` when it prints nothing.
     line: Option<String>,
-    /// The `adr_id` of each entry in `decisions`, in the same order: the key
-    /// itself for a v2 decision, `null` for a v1 one. Additive, and left out
-    /// when no counted decision has one, so a v1 rule set's output is
-    /// unchanged.
-    #[serde(skip_serializing_if = "all_none")]
-    adr_ids: Vec<Option<String>>,
-}
-
-fn all_none(ids: &[Option<String>]) -> bool {
-    ids.iter().all(Option::is_none)
 }
 
 pub fn exec(args: &SessionArgs) -> Result<(), ActualError> {
@@ -177,8 +167,6 @@ fn direct_output(
 
     if args.json {
         let counted: Vec<&str> = added(&recorded, &decisions).map(String::as_str).collect();
-        let ids = rule_set_adr_ids(&root, &rules_dir)?;
-        let adr_ids = counted.iter().map(|key| ids.get(*key).cloned()).collect();
         let json = serde_json::to_string_pretty(&SummaryJson {
             x: now.added,
             y: now.available,
@@ -186,7 +174,6 @@ fn direct_output(
             gaps: now.gaps,
             areas_without_adr: recorded.gaps().collect(),
             line: line(now),
-            adr_ids,
         })
         .expect("session summary is serializable — this is a programmer error");
         return Ok(Some(json));
@@ -213,16 +200,6 @@ fn rule_set_decisions(root: &Path, rules_dir: &Path) -> Result<BTreeSet<String>,
     Ok(scope::resolve_in(rules_dir, root, false)?
         .index
         .decision_keys())
-}
-
-/// The `adr_id` of each decision that has one, keyed the way Y's members are.
-fn rule_set_adr_ids(
-    root: &Path,
-    rules_dir: &Path,
-) -> Result<std::collections::BTreeMap<String, String>, ActualError> {
-    Ok(scope::resolve_in(rules_dir, root, false)?
-        .index
-        .decision_adr_ids())
 }
 
 /// The recorded decisions the rule set still holds: X's members.
@@ -1037,8 +1014,7 @@ mod tests {
                     "decisions": ["id:adr-1"],
                     "gaps": 0,
                     "areas_without_adr": [],
-                    "line": "Actual AI: 1 of 2 ADRs added to context",
-                    "adr_ids": ["adr-1"]
+                    "line": "Actual AI: 1 of 2 ADRs added to context"
                 })
             );
         });
