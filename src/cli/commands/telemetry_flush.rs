@@ -8,11 +8,16 @@
 //! a detached thread happens to outlive `main` — the parent returns immediately
 //! while this process drains the spool through the proxy and exits.
 //!
+//! `rules brief --claude-hook` spawns it the same way for the OTLP log spool,
+//! and every run drains both spools (see [`crate::telemetry::otlp::flush`]).
+//!
 //! Hidden from `--help`: it is an internal delivery mechanism, never a
 //! user-facing command. It is deliberately incurious about its outcome — a slow,
 //! failed, or opted-out send simply leaves events queued for the next run, and
 //! an event the proxy refuses on its own is dropped (see
-//! [`crate::telemetry::spool::flush`]).
+//! [`crate::telemetry::spool::flush`]). OTLP records leave their spool
+//! before they are sent, so a failed send drops them; an opted-out run leaves
+//! them queued.
 
 use crate::error::ActualError;
 
