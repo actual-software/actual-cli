@@ -261,12 +261,27 @@ privacy policy for how they handle this data:
 - [Anthropic Usage Policy](https://www.anthropic.com/policies)
 - [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy)
 
+### Update check (sent to the npm registry)
+
+At most once a day, after a command run at a terminal, the CLI asks the npm
+registry for the latest published version of `@actualai/actual`. It is one
+HTTPS `GET` of `https://registry.npmjs.org/@actualai/actual/latest` with a
+`User-Agent: actual-cli/<version>` header, made by a background process so the
+command never waits for it. It carries no account, repository, file or
+telemetry data; like any web request, it shows npm your IP address.
+`actual version --check` makes the same request when you run it. The answer is
+kept in `~/.actualai/actual/update-check.yaml`.
+
+`ACTUAL_NO_UPDATE_CHECK=1`, or `update_check.enabled: false` in the config
+file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
+
 ## Where data is sent
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
 | `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
+| `registry.npmjs.org` | A request for the latest CLI version, at most once a day; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject

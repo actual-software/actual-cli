@@ -33,6 +33,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rsa",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

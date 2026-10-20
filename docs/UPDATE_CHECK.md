@@ -1,0 +1,84 @@
+# Update check
+
+Once a day, `actual` tells you when a newer release is out and prints the command that upgrades the copy you're running. It never replaces its own binary: Homebrew and npm keep track of the files they install, so the upgrade stays with them.
+
+## The notice
+
+After a command finishes you may see:
+
+```
+actual 0.9.0 is available (you have 0.8.0).
+To upgrade, run: brew upgrade actual-software/actual/actual
+```
+
+The command depends on how the running binary was installed, which `actual` reads from its own path:
+
+| Installed with | The binary's path contains | Upgrade |
+|---|---|---|
+| Homebrew | `/Cellar/actual/` | `brew upgrade actual-software/actual/actual` |
+| npm | `/node_modules/@actualai/actual-` | `npm install -g @actualai/actual@latest` |
+| Anything else | | A link to the [latest release](https://github.com/actual-software/actual-releases/releases/latest) |
+
+The Homebrew command names the tap in full because a bare `brew upgrade actual` reaches Homebrew's unrelated `actual` cask.
+
+## When it runs
+
+No command waits for the check. After a command finishes, `actual` prints the notice from a small cache file, `~/.actualai/actual/update-check.yaml`, at most once a day. When the cache's last lookup is more than a day old, `actual` records the attempt and starts a background copy of itself that asks the npm registry for the latest version and writes the answer to the cache, so the notice reaches you on a later run.
+
+```mermaid
+flowchart TD
+    A["A command finishes"] --> B{"Turned off, CI, no terminal,<br/>a hook mode or --json?"}
+    B -- yes --> Z["Nothing happens"]
+    B -- no --> C{"The cache names a newer version<br/>and no notice was shown today?"}
+    C -- yes --> D["Print the notice"]
+    C -- no --> E{"Last lookup more than<br/>a day ago?"}
+    D --> E
+    E -- yes --> F["Record the attempt,<br/>start the background lookup"]
+    E -- no --> Z
+```
+
+It stays quiet when:
+
+- stderr isn't a terminal, or `CI` is set;
+- the command runs in a mode a program reads: any `--json` output, the `--claude-hook` and `--claude-session-start` modes the actual skill's hooks use, and `mint-token`;
+- `actual` runs inside a `claude` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
+- the check is turned off.
+
+A lookup that fails or times out is silent, and the next one waits a day.
+
+## Turning it off
+
+Either of these stops every request to the registry, including the one `actual version --check` makes:
+
+```bash
+export ACTUAL_NO_UPDATE_CHECK=1                # any non-empty value
+actual config set update_check.enabled false
+```
+
+## `actual version`
+
+`actual version` prints the running version, how it was installed and how to upgrade it. It makes no network request unless you add `--check`, which asks the npm registry for the latest version (one HTTPS request, at most 3 seconds) and records the answer in the cache.
+
+`--json` prints one object, for scripts and for the actual skill:
+
+```json
+{
+  "current_version": "0.8.0",
+  "latest_version": "0.9.0",
+  "update_available": true,
+  "channel": "homebrew",
+  "upgrade_command": "brew upgrade actual-software/actual/actual",
+  "release_url": "https://github.com/actual-software/actual-releases/releases/latest"
+}
+```
+
+| Field | Value |
+|---|---|
+| `current_version` | The running version. |
+| `latest_version` | The latest published version. `null` without `--check`, with the check turned off, or when the registry didn't answer. |
+| `update_available` | Whether `latest_version` is newer than `current_version`. `null` whenever `latest_version` is. |
+| `channel` | `homebrew`, `npm` or `other`. |
+| `upgrade_command` | The upgrade command for `channel`, or `null` for `other`. |
+| `release_url` | The latest release's page, which is the way to upgrade when `upgrade_command` is `null`. |
+
+New fields may be added; existing ones keep their names and meanings. A minimum-version check needs only the local facts, so `actual version --json` answers it without a request. A release from before this command existed rejects `version` as an unknown subcommand and exits with status 2.

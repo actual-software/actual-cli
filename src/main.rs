@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 
-use actual_cli::{handle_result, run, Cli, Command};
+use actual_cli::{handle_result, run, update_check, Cli, Command};
 use clap::Parser;
 
 fn main() {
     let cli = Cli::parse();
     init_logging(&cli);
+    let update_notice = update_check::should_run_after(&cli.command);
     let exit_code = handle_result(run(cli));
+    if update_notice {
+        update_check::after_command();
+    }
     std::process::exit(exit_code);
 }
 

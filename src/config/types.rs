@@ -189,6 +189,10 @@ pub struct Config {
     /// [`crate::config::rules_floor`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules_min_score_by_repo: Option<HashMap<String, f64>>,
+
+    /// Update check settings. See [`crate::update_check`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check: Option<UpdateCheckConfig>,
 }
 
 /// Validate the score floor shared by CLI flags, config mutation and config
@@ -233,8 +237,18 @@ impl Default for Config {
             max_tokens: None,
             rules_min_score: None,
             rules_min_score_by_repo: None,
+            update_check: None,
         }
     }
+}
+
+/// Update check configuration.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct UpdateCheckConfig {
+    /// Whether the CLI may ask the npm registry for its latest version
+    /// (default: true, opt-out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// A repository scope remembered for the `actual advisor` command, stored per
@@ -405,6 +419,9 @@ mod tests {
             max_tokens: Some(32768),
             rules_min_score: Some(1.5),
             rules_min_score_by_repo: Some(HashMap::from([("repo-key".to_string(), 2.0)])),
+            update_check: Some(UpdateCheckConfig {
+                enabled: Some(false),
+            }),
         };
 
         let yaml = serde_yml::to_string(&config).expect("serialize to YAML");

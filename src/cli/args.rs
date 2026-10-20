@@ -444,6 +444,18 @@ pub enum Command {
     /// from `--help`; not a user-facing command.
     #[command(name = "__telemetry-flush", hide = true)]
     TelemetryFlush,
+
+    /// Print the version, how this copy was installed, and how to upgrade it
+    Version(VersionArgs),
+
+    /// Internal: look up the latest published version once, record it in the
+    /// update-check cache, then exit.
+    ///
+    /// Started as a detached child after a command that shows the update
+    /// notice, so no command waits on the registry. Hidden from `--help`; not
+    /// a user-facing command.
+    #[command(name = "__update-check", hide = true)]
+    UpdateCheck,
 }
 
 /// Arguments for the `advisor` command
@@ -1401,6 +1413,26 @@ pub struct PlanCheckOverrideArgs {
     /// unrelated one.
     #[arg(long, value_name = "PATH")]
     pub rules_dir: Option<std::path::PathBuf>,
+}
+
+/// Arguments for the `version` command
+///
+/// Without `--check` it makes no network request: the version is built in,
+/// and the install channel comes from the binary's own path.
+#[derive(Parser, Debug)]
+pub struct VersionArgs {
+    /// Also ask the npm registry for the latest published version. One HTTPS
+    /// request, made only when update checks are on
+    /// (`ACTUAL_NO_UPDATE_CHECK` and `update_check.enabled: false` turn them
+    /// off).
+    #[arg(long)]
+    pub check: bool,
+
+    /// Print one JSON object: `current_version`, `latest_version`,
+    /// `update_available`, `channel`, `upgrade_command` and `release_url`.
+    /// See docs/UPDATE_CHECK.md.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(test)]
