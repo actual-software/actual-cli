@@ -1112,16 +1112,8 @@ fn not_interactive() -> ActualError {
 /// `--rule`.
 fn validate_override_rules(rules_dir: &Path, keys: &[String]) -> Result<(), ActualError> {
     let report = crate::rules::parse_rule_sources(crate::rules::read_rule_sources_in(rules_dir)?);
-    let known: std::collections::HashSet<String> = report
-        .documents
-        .iter()
-        .flat_map(|doc| {
-            let slug = doc.slug().unwrap_or("<unnamed>").to_string();
-            doc.rules
-                .iter()
-                .map(move |rule| governance_session::key(&slug, &rule.id))
-        })
-        .collect();
+    let known: std::collections::HashSet<String> =
+        report.documents.iter().flat_map(override_keys).collect();
     let unknown: Vec<&str> = keys
         .iter()
         .map(String::as_str)
@@ -1144,6 +1136,18 @@ fn validate_override_rules(rules_dir: &Path, keys: &[String]) -> Result<(), Actu
     )))
 }
 
+/// The `<doc-slug>::<rule-id>` key of each rule in `document`, the form
+/// `check-override --rule` names a rule by.
+pub(super) fn override_keys(
+    document: &crate::rules::types::RuleDocument,
+) -> impl Iterator<Item = String> + '_ {
+    let slug = document.slug().unwrap_or("<unnamed>").to_string();
+    document
+        .rules
+        .iter()
+        .map(move |rule| governance_session::key(&slug, &rule.id))
+}
+
 /// The testable core of `actual check-override`: a human explicitly
 /// clearing one or more rules for a specific session. Validates every named
 /// rule against the corpus first (see [`validate_override_rules`]) and
@@ -1164,6 +1168,8 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     governance_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &args.rules, &args.reason);
+    #[cfg(feature = "telemetry")]
+    super::override_telemetry::report(&rules_dir, &args.session, &args.rules);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", &args.session);
@@ -3996,6 +4002,77 @@ pub(crate) mod tests {
             !home.path().join("telemetry-id").exists(),
             "opted-out user must get no persistent telemetry id file"
         );
+    }
+
+    /// With an OTLP output configured, an override also sends one
+    /// `actual.gate.evaluated` record per ADR it names, with the outcome
+    /// `overridden` and the gate that had denied it. A file without a v2 header sends nothing, and the
+    /// reason is never sent.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_sends_an_otlp_event_per_overridden_adr() {
+        use super::super::brief_telemetry::tests::{attribute, take_captured};
+        use super::super::override_telemetry::tests::v2_rule;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-override-test.jsonl\n",
+        )
+        .unwrap();
+        let repo = seed(&[
+            ("signing-a1.md", &v2_rule("adr-sign-1", Some("grp-sign"))),
+            ("signing-a2.md", &v2_rule("adr-sign-2", Some("grp-sign"))),
+            ("doc.md", OAUTH_DOC),
+        ]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let denied = governance_session::key("signing-a1", "R-adr-sign-1-1");
+        let mut session = governance_session::load("sess-otlp-1", &rules_dir);
+        session.record_denial(check::ArtifactKind::Plan, &denied);
+        governance_session::store("sess-otlp-1", &rules_dir, &session);
+        take_captured();
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-otlp-1".to_string(),
+            rules: vec![
+                denied,
+                governance_session::key("signing-a2", "R-adr-sign-2-2"),
+                governance_session::key("doc", "R-A-001"),
+            ],
+            reason: "reviewed and accepted".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+        assert!(exec_override_impl(&args).is_ok());
+
+        let records = take_captured();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record["eventName"], crate::telemetry::otlp::GATE_EVALUATED);
+        assert_eq!(attribute(record, "actual.gate.outcome"), "overridden");
+        assert_eq!(attribute(record, "actual.session.id"), "sess-otlp-1");
+        assert_eq!(attribute(record, "actual.agent.id"), "");
+        assert_eq!(attribute(record, "actual.adr.ref"), "grp-sign");
+        assert_eq!(
+            attribute(record, "actual.adr.ids"),
+            serde_json::json!(["adr-sign-1", "adr-sign-2"])
+        );
+        assert_eq!(
+            attribute(record, "actual.gate.denied_types"),
+            serde_json::json!(["planning"])
+        );
+        assert!(!record.to_string().contains("reviewed and accepted"));
     }
 
     /// The override must land in the same governed context (`rules_dir`) the
