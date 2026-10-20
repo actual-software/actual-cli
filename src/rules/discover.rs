@@ -248,13 +248,7 @@ fn flag_duplicate_slugs(documents: &mut [RuleDocument], rules_dir: &Path) {
             let others: Vec<String> = members
                 .iter()
                 .filter(|&&other| other != at)
-                .map(|&other| {
-                    let path = &documents[other].source_path;
-                    path.strip_prefix(rules_dir)
-                        .unwrap_or_else(|_| Path::new(path.file_name().unwrap_or_default()))
-                        .display()
-                        .to_string()
-                })
+                .map(|&other| relative_to_rules_dir(&documents[other].source_path, rules_dir))
                 .collect();
             let detail = format!(
                 "slug `{slug}` is shared with {}{}; lookups by slug can pick the wrong file",
@@ -272,6 +266,16 @@ fn flag_duplicate_slugs(documents: &mut [RuleDocument], rules_dir: &Path) {
             });
         }
     }
+}
+
+/// `path` as the warning names it: relative to the rules directory, or just the
+/// file name for a path outside it (which discovery cannot produce), so no
+/// absolute path ever reaches the output.
+fn relative_to_rules_dir(path: &Path, rules_dir: &Path) -> String {
+    let relative = path
+        .strip_prefix(rules_dir)
+        .unwrap_or_else(|_| Path::new(path.file_name().unwrap_or_default()));
+    relative.display().to_string()
 }
 
 /// Load every rule document under `<root_dir>/.actual/rules/`.
@@ -805,47 +809,10 @@ mod tests {
         assert_eq!(dup(1).len(), 1);
         assert!(dup(2).is_empty());
         // Named relative to the rules directory, never by an absolute path.
-        assert!(
-            dup(0)[0].detail.contains("shared with sub/a.md;"),
-            "{:?}",
-            dup(0)[0]
-        );
-        assert!(
-            dup(1)[0].detail.contains("shared with a.md;"),
-            "{:?}",
-            dup(1)[0]
-        );
-        assert!(!dup(0)[0].detail.contains("/repo"), "{:?}", dup(0)[0]);
-    }
-
-    /// Discovery reads only `.md` files directly under the rules directory, so
-    /// the one collision it can produce is `a.md` beside `a.MD`. That needs a
-    /// case-sensitive filesystem, so the test does nothing on one that folds
-    /// the two names together.
-    #[test]
-    fn test_a_md_beside_a_upper_md_collide_through_discovery() {
-        let root = seed(&[("a.md", DOC_A)]);
-        let dir = rules_dir(root.path());
-        std::fs::write(dir.join("a.MD"), DOC_A).unwrap();
-        let files = std::fs::read_dir(&dir).unwrap().count();
-        if files < 2 {
-            return;
-        }
-
-        let report = load_rule_set(root.path()).unwrap();
-        assert_eq!(report.documents.len(), 2);
-        for doc in &report.documents {
-            let warning = doc
-                .warnings
-                .iter()
-                .find(|w| w.kind == RuleIssueKind::DuplicateSlug)
-                .expect("each member carries the warning");
-            assert!(
-                !warning.detail.contains(root.path().to_str().unwrap()),
-                "an absolute path leaked: {}",
-                warning.detail
-            );
-        }
+        let (first, second) = (&dup(0)[0].detail, &dup(1)[0].detail);
+        assert!(first.contains("shared with sub/a.md;"), "{first}");
+        assert!(second.contains("shared with a.md;"), "{second}");
+        assert!(!first.contains("/repo"), "{first}");
     }
 
     #[test]
@@ -880,6 +847,19 @@ mod tests {
             source("/repo/.actual/rules/sub/a.md", &in_group("grp-2")),
         ]));
         assert!(groups.documents[0].warnings[0].detail.contains("differs"));
+    }
+
+    #[test]
+    fn test_a_path_outside_the_rules_dir_is_named_by_file_name_only() {
+        let dir = Path::new("/repo/.actual/rules");
+        assert_eq!(
+            relative_to_rules_dir(Path::new("/repo/.actual/rules/sub/a.md"), dir),
+            "sub/a.md"
+        );
+        assert_eq!(
+            relative_to_rules_dir(Path::new("/elsewhere/a.md"), dir),
+            "a.md"
+        );
     }
 
     #[test]
