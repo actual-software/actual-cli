@@ -190,18 +190,26 @@ pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp_path, path)
 }
 
-/// Append `bytes` to `path`, creating it with owner-only permissions if it
-/// does not already exist. Unlike [`write_secure`], never truncates — for an
-/// append-only log where every prior line must survive.
+/// Append `bytes` to `path`, leaving it readable and writable by the owner
+/// only. A missing file is created that way, and an existing one is
+/// restricted before anything is written, so a file made by another tool or
+/// under a looser umask stops exposing what is appended to it. Unlike
+/// [`write_secure`], never truncates — for an append-only log where every
+/// prior line must survive. A path that is not a regular file, or whose mode
+/// this account cannot change, gets nothing.
 #[cfg(unix)]
 pub fn append_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
         .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)
 }
 
@@ -685,6 +693,53 @@ mod tests {
         write_secure(&path, b"hello").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// A file that already exists keeps its lines and loses any access it gave
+    /// other accounts before the new line lands.
+    #[cfg(unix)]
+    #[test]
+    fn test_append_secure_restricts_an_existing_file_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, b"earlier\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        append_secure(&path, b"later\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "earlier\nlater\n");
+    }
+
+    /// A path that is not a regular file gets nothing and keeps its mode. A
+    /// pipe the test owns is used because it is one whose mode this account
+    /// could change.
+    #[cfg(unix)]
+    #[test]
+    fn test_append_secure_leaves_a_path_that_is_not_a_regular_file_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("events.fifo");
+        let made = std::process::Command::new("mkfifo")
+            .args(["-m", "644"])
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Holding both ends lets the append open the pipe without blocking.
+        let _ends = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        let before = std::fs::metadata(&fifo).unwrap().permissions().mode();
+
+        assert!(append_secure(&fifo, b"line\n").is_err());
+
+        let after = std::fs::metadata(&fifo).unwrap().permissions().mode();
+        assert_eq!(after, before);
     }
 
     #[test]
