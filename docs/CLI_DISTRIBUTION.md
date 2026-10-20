@@ -1,6 +1,6 @@
 # CLI Distribution
 
-How the `actual` binary is built, signed, and published to Homebrew, npm, and GitHub Releases.
+How the `actual` binary is built and published to Homebrew, npm, and GitHub Releases.
 
 ---
 
@@ -21,6 +21,10 @@ Both workflows build from the same tag but run independently.
 
 ## Cutting a release
 
+First land a commit on `main` that bumps `version` in `Cargo.toml`, with the matching `Cargo.lock` change, and adds the release's `CHANGELOG.md` entry, the way `chore: release v0.8.0` did. `actual --version` reports the `Cargo.toml` version while npm and Homebrew take theirs from the tag, so a tag without the bump would publish npm 0.9.0 with a binary that reports 0.8.0.
+
+Then tag that commit and push the tag:
+
 ```bash
 # Ensure you're on main and up to date
 git checkout main && git pull origin main
@@ -30,7 +34,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-That's it. Both workflows fire automatically on tag push.
+Both workflows fire automatically on tag push.
 
 **Pre-release tag** (does not publish):
 ```bash
@@ -46,8 +50,8 @@ Both workflows build the same four targets in parallel:
 
 | Target | Runner | Signing |
 |--------|--------|---------|
-| `aarch64-apple-darwin` (macOS arm64) | `macos-latest` | Signed + notarized |
-| `x86_64-apple-darwin` (macOS x64) | `macos-latest` | Signed + notarized |
+| `aarch64-apple-darwin` (macOS arm64) | `macos-latest` | Ad hoc only (see below) |
+| `x86_64-apple-darwin` (macOS x64) | `macos-latest` | Ad hoc only (see below) |
 | `x86_64-unknown-linux-gnu` (Linux x64) | `ubuntu-latest` | None |
 | `aarch64-unknown-linux-gnu` (Linux arm64) | `ubuntu-latest` (cross) | None |
 
@@ -59,11 +63,15 @@ All builds use `cargo build --release` (LTO, stripped, single codegen unit — s
 
 ## macOS signing and notarization
 
-macOS binaries are signed with an Apple Developer ID certificate and notarized via `xcrun notarytool`. This allows Gatekeeper to pass without the quarantine prompt users would otherwise see.
+Both workflows have steps that sign the macOS binaries with an Apple Developer ID certificate and notarize them with `xcrun notarytool`, which would let Gatekeeper accept them without a quarantine prompt. The steps run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets, and no release has had it: the import, sign, and notarize steps were skipped in both macOS jobs of both workflows for every release from v0.2.0, when the steps were added, through v0.8.0. Every published macOS binary carries only the linker's ad hoc signature (`codesign -dv` reports `Signature=adhoc`), and Gatekeeper rejects it (`spctl --assess --type execute` reports `rejected`).
 
-The signing steps run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets. Without it (e.g. in forks), builds succeed but produce unsigned binaries.
+Until the binaries are signed, each channel handles Gatekeeper its own way:
 
-**Secrets required:**
+- **Manual download**: a browser marks the downloaded archive as quarantined and `tar` carries the mark onto the extracted binary, so the README's install steps end with `xattr -dr com.apple.quarantine`.
+- **npm**: the macOS platform packages run a `postinstall` script that re-signs the binary ad hoc (`codesign --sign -`).
+- **Homebrew**: the formula's caveat gives an `xattr` command for when Gatekeeper blocks the binary.
+
+The same caveat says the Apple Developer application is under review. Once a certificate exists, these secrets turn the steps on:
 
 | Secret | Purpose |
 |--------|---------|
@@ -78,12 +86,12 @@ The signing steps run only when `APPLE_CERTIFICATE_P12` is set in the repo secre
 
 ## GitHub Releases
 
-The `release.yml` workflow creates two GitHub Releases from the same artifacts:
+The `release.yml` workflow creates two GitHub Releases from the same artifacts, and both are public:
 
-1. **Private release** on `actual-software/actual-cli` (this repo)
-2. **Public mirror** on `actual-software/actual-releases`
+1. On `actual-software/actual-cli` (this repo)
+2. On `actual-software/actual-releases`
 
-The public releases repo is the canonical download source for the Homebrew tap and for users doing manual installs. It has no source code — only release assets.
+`actual-releases` is the download source for the Homebrew formula and for manual installs. It holds no CLI source, only the release assets and the npm package scaffolding.
 
 **Artifact filenames** (each is a `.tar.gz` containing a single `actual` binary):
 
@@ -132,9 +140,7 @@ The npm package scaffolding (package.json files, install scripts) lives in `actu
 npm install -g @actualai/actual
 ```
 
-**Secrets required:**
-- `NPM_TOKEN` — npm publish token with write access to the `@actualai` scope
-- `TAP_GITHUB_TOKEN` — to check out `actual-software/actual-releases`
+**Credentials:** the publish job authenticates through npm trusted publishing (GitHub OIDC, from the job's `id-token: write` permission, with npm 11.5.1 or later), so it uses no npm token, and npm records a provenance attestation for each package it publishes. Apart from the optional Apple signing secrets, the workflow needs only `TAP_GITHUB_TOKEN`, to check out `actual-software/actual-releases`.
 
 ---
 
@@ -145,5 +151,5 @@ npm install -g @actualai/actual
 | 1 | Separate `release.yml` and `npm-publish.yml` workflows | Keeps concerns isolated; a failed npm publish doesn't block a GitHub Release |
 | 2 | Pre-release tag detection via suffix pattern | Allows staging releases (`-beta`, `-rc`) without publishing to users |
 | 3 | Tarballs contain a single `actual` binary at root (no subdirectory) | Simplifies Homebrew formula and manual install — `tar xzf` drops the binary directly into the current directory |
-| 4 | Public releases mirrored to `actual-software/actual-releases` | Homebrew and npm scaffolding need a public, stable download URL; keeping it separate from the private source repo gives more control over public asset availability |
-| 5 | Signing conditional on `APPLE_CERTIFICATE_P12` presence | Forks and contributors can still build and test release artifacts without Apple credentials |
+| 4 | Release assets mirrored to `actual-software/actual-releases` | Gave Homebrew, manual installs, and the npm scaffolding a public home while this repo was private. This repo is public now and its releases carry the same assets, but the formula and the README still download from `actual-releases` |
+| 5 | Signing conditional on `APPLE_CERTIFICATE_P12` presence | Forks and contributors can still build and test release artifacts without Apple credentials. No release run has had the secret, so no release has been Developer ID signed yet |
