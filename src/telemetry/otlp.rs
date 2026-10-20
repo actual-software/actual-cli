@@ -445,21 +445,20 @@ fn is_retryable(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
-/// The wait before retry number `retry`, counting from 1: the server's
-/// `Retry-After` when it sent one, else exponential backoff from
-/// [`BACKOFF_BASE`], jittered to a point between half and all of the nominal
-/// wait. `None` when the wait would leave no time to try again.
+/// The wait before retry number `retry`, counting from 1: exponential backoff
+/// from [`BACKOFF_BASE`], jittered to a point between half and all of the
+/// nominal wait, or the server's `Retry-After` when that is longer. `None`
+/// when the wait would leave no time to try again.
 fn retry_delay(
     retry: u32,
     retry_after: Option<Duration>,
     remaining: Duration,
     jitter: f64,
 ) -> Option<Duration> {
-    let wait = retry_after.unwrap_or_else(|| {
-        BACKOFF_BASE
-            .saturating_mul(1 << retry.saturating_sub(1).min(16))
-            .mul_f64(0.5 + jitter / 2.0)
-    });
+    let backoff = BACKOFF_BASE
+        .saturating_mul(1 << retry.saturating_sub(1).min(16))
+        .mul_f64(0.5 + jitter / 2.0);
+    let wait = retry_after.unwrap_or_default().max(backoff);
     (wait < remaining).then_some(wait)
 }
 
@@ -1249,10 +1248,41 @@ mod tests {
         mock.assert_async().await;
     }
 
-    /// An HTTP-date already past asks for no wait, so the retry goes at once,
-    /// as it does for `Retry-After: 0`.
+    /// `Retry-After: 0` waits the first backoff step, so a collector that
+    /// keeps throttling can't drive back-to-back retries.
     #[tokio::test]
-    async fn test_a_past_http_date_retries_without_waiting() {
+    async fn test_a_zero_retry_after_still_backs_off() {
+        let mut server = mockito::Server::new_async().await;
+        let throttled = server
+            .mock("POST", "/v1/logs")
+            .with_status(503)
+            .with_header("retry-after", "0")
+            .expect(1)
+            .create_async()
+            .await;
+        let accepted = server
+            .mock("POST", "/v1/logs")
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (sent, waits) = post_recording(&format!("{}/v1/logs", server.url()), SEND_BUDGET).await;
+
+        assert_eq!(sent, Sent::Accepted);
+        assert_eq!(waits.len(), 1, "{waits:?}");
+        assert!(
+            waits[0] >= Duration::from_millis(250) && waits[0] < Duration::from_millis(500),
+            "{waits:?}"
+        );
+        throttled.assert_async().await;
+        accepted.assert_async().await;
+    }
+
+    /// An HTTP-date already past, as a clock running ahead of the collector's
+    /// sees one, waits the first backoff step too.
+    #[tokio::test]
+    async fn test_a_past_http_date_backs_off() {
         let mut server = mockito::Server::new_async().await;
         let throttled = server
             .mock("POST", "/v1/logs")
@@ -1271,7 +1301,11 @@ mod tests {
         let (sent, waits) = post_recording(&format!("{}/v1/logs", server.url()), SEND_BUDGET).await;
 
         assert_eq!(sent, Sent::Accepted);
-        assert_eq!(waits, [Duration::ZERO]);
+        assert_eq!(waits.len(), 1, "{waits:?}");
+        assert!(
+            waits[0] >= Duration::from_millis(250) && waits[0] < Duration::from_millis(500),
+            "{waits:?}"
+        );
         throttled.assert_async().await;
         accepted.assert_async().await;
     }
@@ -1356,9 +1390,14 @@ mod tests {
             retry_delay(1, Some(Duration::from_secs(2)), ten, 0.7),
             Some(Duration::from_secs(2))
         );
+        // A `Retry-After` shorter than the backoff step waits the step.
         assert_eq!(
-            retry_delay(1, Some(Duration::ZERO), ten, 0.7),
-            Some(Duration::ZERO)
+            retry_delay(1, Some(Duration::ZERO), ten, 0.0),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            retry_delay(3, Some(Duration::from_millis(100)), ten, 0.0),
+            Some(Duration::from_secs(1))
         );
         assert_eq!(retry_delay(1, Some(ten), ten, 0.7), None);
         // Half to all of 500 ms, doubling per retry.
