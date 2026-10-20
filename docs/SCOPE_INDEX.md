@@ -371,8 +371,9 @@ whose title has no colon names no decision and forms its own group rather
 than pooling with other unnamed ones. A document whose v2 header carries an
 `adr_id` is grouped on that id instead, whatever its title or filename say, so
 several files sharing one id are one decision and renaming a file does not make
-it a new one. In `--by-adr --json` each decision's `key` is therefore the
-`adr_id` for v2 documents, and the decision then also carries an `adr_id`
+it a new one. In `--by-adr --json` each decision's `key` is therefore
+`id:<adr_id>` for v2 documents (the prefix keeps an id from meeting a v1
+document whose title prefix or filename happens to equal it), and the decision then also carries an `adr_id`
 field (and each of its documents does); both are omitted for v1 documents,
 whose `key` is unchanged. The same key is what the brief's once-per-session
 state and `session summary` record, so `session summary --json` adds an

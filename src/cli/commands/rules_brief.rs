@@ -371,7 +371,7 @@ fn brief_heading(decision: &AdrGroup) -> &str {
                 .as_ref()
                 .and_then(|_| decision.documents.first()?.title.as_deref())
         })
-        .unwrap_or(&decision.key)
+        .unwrap_or_else(|| decision.label())
 }
 
 /// The brief for one file, or the reason none was produced.
