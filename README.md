@@ -98,16 +98,17 @@ brew install actual-software/actual/actual
 <details>
 <summary><strong>Install Actual.ai CLI — Manual download / Build from source</strong></summary>
 
-Download the binary for your platform from the
-[releases repository](https://github.com/actual-software/actual-releases/releases)
-(binaries are published separately from source), then:
+Each release in the [releases repository](https://github.com/actual-software/actual-releases/releases) (binaries are published separately from source) has one archive per platform: `actual-darwin-arm64.tar.gz`, `actual-darwin-x64.tar.gz`, `actual-linux-arm64.tar.gz`, and `actual-linux-x64.tar.gz`. Each holds a single `actual` binary. Download the one for your platform, extract it, move the binary onto your `PATH`, and run it. On Apple Silicon:
 
 ```bash
-chmod +x ./actual
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/actual-darwin-arm64.tar.gz
+tar -xzf actual-darwin-arm64.tar.gz
 sudo mv ./actual /usr/local/bin/actual
 
-# macOS only: remove quarantine before running
+# macOS, if you downloaded the archive in a browser: remove quarantine before running
 xattr -dr com.apple.quarantine /usr/local/bin/actual
+
+actual --version
 ```
 
 To build from source you need a C compiler for the tree-sitter native dependencies:
