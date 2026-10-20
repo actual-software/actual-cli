@@ -53,6 +53,10 @@ use crate::telemetry::spool::OTLP_LOGS;
 /// context for the first time.
 pub(crate) const ADR_DETECTED: &str = "actual.adr.detected";
 
+/// The event sent when a gate is evaluated, here by a human overriding an
+/// ADR's rules with `check-override`.
+pub(crate) const GATE_EVALUATED: &str = "actual.gate.evaluated";
+
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 const SCHEMA_VERSION: i64 = 1;
 
@@ -293,6 +297,24 @@ impl Origin {
         record
             .attributes
             .push(text("actual.detection.method", Some("context")));
+        record
+    }
+
+    /// The [`GATE_EVALUATED`] record for one logical ADR a human overrode:
+    /// no agent, since a human ran the command, then the outcome, then the
+    /// gates whose loop in this session had denied the overridden rules.
+    pub(crate) fn overridden(
+        &self,
+        session_id: &str,
+        adr_ref: &str,
+        adr_ids: &[String],
+        denied_gates: &[&str],
+    ) -> LogRecord {
+        let mut record = self.adr_record(GATE_EVALUATED, session_id, None, adr_ref, adr_ids);
+        record.attributes.extend([
+            text("actual.gate.outcome", Some("overridden")),
+            strings("actual.gate.denied_types", denied_gates),
+        ]);
         record
     }
 
@@ -893,6 +915,68 @@ mod tests {
         assert_eq!(agent["stringValue"], "");
     }
 
+    /// An override record carries the same attributes as a context record, in
+    /// the same order and with no agent, then its outcome and the gates that
+    /// had denied the overridden rules.
+    #[test]
+    fn test_overridden_carries_the_common_attributes_then_the_outcome_and_gates() {
+        let origin = origin(None);
+        let record = record_json(&origin.overridden(
+            "session-1",
+            "grp-1",
+            &ids(&["adr-1", "adr-2"]),
+            &["planning", "implementation"],
+        ));
+        let context = record_json(&origin.context_added(
+            "session-1",
+            None,
+            "grp-1",
+            &ids(&["adr-1", "adr-2"]),
+        ));
+        // Everything but the per-record ids.
+        let shared = |record: &Value| -> Vec<(String, Value)> {
+            attributes(record)
+                .into_iter()
+                .filter(|(key, _)| key != "log.record.uid" && key != "actual.event.id")
+                .collect()
+        };
+
+        assert_eq!(record["eventName"], GATE_EVALUATED);
+        assert_eq!(record["severityNumber"], 9);
+        let mut overridden = shared(&record);
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
+                "actual.gate.denied_types".to_string(),
+                serde_json::json!({"arrayValue": {"values": [{"stringValue": "planning"}, {"stringValue": "implementation"}]}})
+            )
+        );
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
+                "actual.gate.outcome".to_string(),
+                serde_json::json!({"stringValue": "overridden"})
+            )
+        );
+        let mut context = shared(&context);
+        assert_eq!(context.pop().unwrap().0, "actual.detection.method");
+        assert_eq!(overridden, context);
+    }
+
+    /// An override before any denial sends the gate list empty, not absent.
+    #[test]
+    fn test_overridden_with_no_denial_sends_an_empty_list() {
+        let record = record_json(&origin(None).overridden("s", "adr-9", &ids(&["adr-9"]), &[]));
+        let attributes = attributes(&record);
+        assert_eq!(
+            attributes.last().unwrap(),
+            &(
+                "actual.gate.denied_types".to_string(),
+                serde_json::json!({"arrayValue": {"values": []}})
+            )
+        );
+    }
+
     /// Each record gets its own event id, which `log.record.uid` repeats, and
     /// every record from one run shares the run's action id.
     #[test]
@@ -1207,6 +1291,25 @@ mod tests {
         assert_eq!(record.event_name, ADR_DETECTED);
         assert_eq!(record.time_unix_nano, 1_792_446_915_838_119_000);
         assert_eq!(record.trace_id.len(), 16);
+    }
+
+    /// Override records round-trip too, with the gate list full and empty.
+    #[test]
+    fn test_an_override_request_round_trips_through_the_official_types() {
+        let origin = origin(None);
+        let records = [
+            origin.overridden("session-1", "grp-1", &ids(&["adr-1"]), &["planning"]),
+            origin.overridden("session-1", "adr-3", &ids(&["adr-3"]), &[]),
+        ];
+        let request = decoded(&records);
+        let line: Value = serde_json::from_str(&json_request(&records)).unwrap();
+
+        assert_eq!(official_json(&request, &line), line);
+        let decoded = &request.resource_logs[0].scope_logs[0].log_records;
+        assert_eq!(decoded.len(), 2);
+        assert!(decoded
+            .iter()
+            .all(|record| record.event_name == GATE_EVALUATED));
     }
 
     /// The negative control: one renamed key in the line, and the comparison
