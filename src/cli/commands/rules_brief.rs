@@ -474,7 +474,7 @@ fn brief_for(
         })
         .collect();
 
-    let Some((brief, shown)) =
+    let Some(rendered) =
         render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)
     else {
         return Err(NoBrief::NothingToShow);
@@ -488,20 +488,20 @@ fn brief_for(
             session_id: who.session_id,
             rules_dir: &key_dir,
         };
-        let added = shown
+        let added = rendered
+            .shown
             .iter()
             .map(|&position| decisions[position].key.as_str());
         brief_ledger::record(&dir, &key, added);
+        // Telemetry counts by a different rule: any ADR with a rule the agent
+        // was just given, however its decision was trimmed.
         #[cfg(feature = "telemetry")]
         super::brief_telemetry::report(
             &dir,
             &key,
             who.agent_id,
             root,
-            parsed
-                .iter()
-                .filter(|(position, _)| shown.contains(position))
-                .map(|(_, document)| document),
+            rendered.reached.iter().copied(),
         );
     }
 
@@ -510,12 +510,12 @@ fn brief_for(
     // no later read can lift. A decision `--max-chars` left out or trimmed
     // stays eligible, because a read with less competition can fit it whole.
     if let Some((dir, key, mut state)) = memory {
-        for position in shown {
+        for position in rendered.shown {
             state.record(&decisions[position].key);
         }
         brief_memory::store(&dir, &key, &state);
     }
-    Ok(brief)
+    Ok(rendered.brief)
 }
 
 /// Note the folder `relative` sits in, in the session's record: covered when
@@ -2654,6 +2654,79 @@ mod tests {
             assert!(hook_reply(&read, &args(root.path())).is_some());
 
             assert_eq!(reported(), []);
+        });
+    }
+
+    /// [`v2_repo`] without the rotation decision: one decision, two files of
+    /// one group, a rule each.
+    #[cfg(feature = "telemetry")]
+    fn signing_repo() -> TempDir {
+        let root = v2_repo();
+        std::fs::remove_file(crate::rules::rules_dir(root.path()).join("oauth-rotation-b1.md"))
+            .unwrap();
+        root
+    }
+
+    /// The `adr_id` of the one signing file whose rule `reply` carries.
+    #[cfg(feature = "telemetry")]
+    fn the_signing_file_in(reply: &str) -> String {
+        let carried: Vec<&str> = ["adr-sign-1", "adr-sign-2"]
+            .into_iter()
+            .filter(|adr_id| reply.contains(&format!("R-{adr_id}-001")))
+            .collect();
+        assert_eq!(carried.len(), 1, "{reply}");
+        carried[0].to_string()
+    }
+
+    /// A decision `--max-chars` cut after one rule reports its ADR, listing
+    /// only the file whose rule reached the agent. The cut decision stays
+    /// eligible, so a later read briefs it whole, and that read reports
+    /// nothing: the ADR was counted when its first rule entered context.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_decision_the_character_cap_cut_is_reported_once_when_cut() {
+        with_otlp_configured(|| {
+            let root = signing_repo();
+            let file = governed(root.path());
+            let whole = brief_for(root.path(), &file, &args(root.path()), None).unwrap();
+            let mut cut = args(root.path());
+            cut.max_chars = whole.chars().count() - 1;
+            let read = session_envelope(root.path(), "s1", None, &file);
+
+            let first = hook_reply(&read, &cut).expect("a shortened brief");
+            assert!(first.contains("(1 of 2 rules shown)"), "{first}");
+            let reached = the_signing_file_in(&first);
+            assert_eq!(
+                reported(),
+                [("grp-sign".to_string(), serde_json::json!([reached]))]
+            );
+
+            let again = hook_reply(&read, &args(root.path())).expect("the whole decision");
+            assert!(again.contains("R-adr-sign-1-001"), "{again}");
+            assert!(again.contains("R-adr-sign-2-001"), "{again}");
+            assert_eq!(reported(), []);
+        });
+    }
+
+    /// A file none of whose rules made `--rules-per-decision` is not listed.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_file_the_per_decision_cap_cut_is_not_listed() {
+        with_otlp_configured(|| {
+            let root = signing_repo();
+            let mut one = args(root.path());
+            one.rules_per_decision = 1;
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+
+            let reply = hook_reply(&read, &one).expect("a brief");
+
+            assert_eq!(
+                reported(),
+                [(
+                    "grp-sign".to_string(),
+                    serde_json::json!([the_signing_file_in(&reply)])
+                )]
+            );
         });
     }
 }
