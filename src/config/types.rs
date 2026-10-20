@@ -287,11 +287,40 @@ impl StickyScope {
 }
 
 /// Telemetry configuration.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TelemetryConfig {
     /// Whether telemetry is enabled (default: true, opt-out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// The OTLP/HTTP logs URL ADR events are sent to, used as-is. Unset by
+    /// default, which sends nothing. `ACTUAL_OTLP_LOGS_ENDPOINT` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otlp_logs_endpoint: Option<String>,
+    /// A local file each OTLP request body is appended to, one per line.
+    /// Unset by default. `ACTUAL_OTLP_FILE` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otlp_file: Option<String>,
+}
+
+/// Validate an OTLP logs endpoint by the rule the API URL follows: HTTPS, or
+/// plain HTTP only to a loopback host.
+pub(crate) fn validate_otlp_logs_endpoint(value: &str) -> Result<(), String> {
+    let https = url::Url::parse(value).is_ok_and(|url| url.scheme() == "https");
+    if https || crate::net::is_loopback_http_url(value) {
+        return Ok(());
+    }
+    Err(format!(
+        "expected an https:// URL (http:// only to localhost, 127.0.0.1 or [::1]), got \"{value}\""
+    ))
+}
+
+/// Validate the OTLP file sink. It must be absolute: the uploader is spawned
+/// from a hook, whose working directory is whatever the agent last moved to.
+pub(crate) fn validate_otlp_file(value: &str) -> Result<(), String> {
+    if std::path::Path::new(value).is_absolute() {
+        return Ok(());
+    }
+    Err(format!("expected an absolute path, got \"{value}\""))
 }
 
 /// Cached tailoring result, keyed by a hash of all tailoring inputs.
@@ -405,6 +434,7 @@ mod tests {
             invocation_timeout_secs: Some(300),
             telemetry: Some(TelemetryConfig {
                 enabled: Some(false),
+                ..Default::default()
             }),
             rejected_adrs: Some(rejected),
             sticky_repo_scope: None,

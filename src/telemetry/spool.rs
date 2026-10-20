@@ -392,6 +392,7 @@ mod tests {
             api_url: Some(api_url.to_string()),
             telemetry: Some(TelemetryConfig {
                 enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         }
