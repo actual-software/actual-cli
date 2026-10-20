@@ -214,16 +214,28 @@ impl IndexedDocument {
     }
 
     /// Whether `path` is excluded: one of this document's `!` excludes matches
-    /// it, or matches a child of it, which is how a directory the exclude
-    /// wholly covers (`!src/generated/**` against `src/generated`) is told
-    /// from one it only partly covers (`!**/*.test.ts` against `src`).
+    /// it, or matches every one of several differently shaped children of it.
+    ///
+    /// A directory has no answer of its own from a glob, so "wholly covered" is
+    /// approximated: `!src/generated/**` matches all the probes and excludes
+    /// `src/generated`, while `!**/*.test.ts`, `!src/x*` and `!src/*` each miss
+    /// one (a bare name, a name with an extension, a nested file) and leave the
+    /// directory governed. It is a heuristic, not a proof for every pattern.
     fn excludes_path(&self, path: &str) -> bool {
-        let probe = format!("{}/x", path.trim_end_matches('/'));
+        let dir = path.trim_end_matches('/');
+        let probes = [
+            format!("{dir}/a"),
+            format!("{dir}/zz.q"),
+            format!("{dir}/q/zz/a.q"),
+        ];
         self.exclude_globs.iter().any(|pattern| {
             let glob = PathGlob {
                 pattern: pattern.clone(),
             };
-            glob.matches_path(path) == Some(true) || glob.matches_path(&probe) == Some(true)
+            glob.matches_path(path) == Some(true)
+                || probes
+                    .iter()
+                    .all(|probe| glob.matches_path(probe) == Some(true))
         })
     }
 
@@ -378,6 +390,12 @@ const CONTAINMENT_DISCOUNT: f64 = 0.75;
 /// Depth at which path agreement is considered total. Four segments is
 /// `apps/actual/lib/oauth` — specific enough that more agreement adds nothing.
 const PATH_SATURATION_SEGMENTS: usize = 4;
+
+/// Coverage of an exact glob match that names no literal directory (`**`,
+/// `**/*.ts`). It governs every file it matches, so it must score above zero or
+/// a path-only query drops it; it stays below one segment of depth
+/// (`1 / PATH_SATURATION_SEGMENTS`) so any rule naming a directory outranks it.
+const WILDCARD_EXACT_COVERAGE: f64 = 0.1;
 
 impl ScopeIndex {
     /// Build an index from a loaded rule set.
@@ -846,7 +864,7 @@ fn term_coverage(
 fn glob_match_coverage(segments: usize, exact: bool) -> f64 {
     let depth = (segments as f64 / PATH_SATURATION_SEGMENTS as f64).min(1.0);
     if exact {
-        depth
+        depth.max(WILDCARD_EXACT_COVERAGE)
     } else {
         depth * CONTAINMENT_DISCOUNT
     }
@@ -2330,6 +2348,35 @@ mod tests {
         assert!(slugs_for(&index, "src/generated/a.ts").is_empty());
         let doc = &index.documents[0];
         assert!(doc.root_admits("anything/at/all"));
+    }
+
+    /// Partial excludes do not drop a directory that still holds governed
+    /// files: a name prefix or a character class. (The glob matcher's `*`
+    /// crosses `/`, so `!src/*` covers the subtree and does exclude it.)
+    #[test]
+    fn test_partial_excludes_leave_a_directory_query_governed() {
+        for exclude in ["!src/x*", "!src/[a-m]*"] {
+            let index = index_of(vec![v2_doc("w", ".", &["src/**", exclude])]);
+            assert_eq!(slugs_for(&index, "src"), vec!["w"], "{exclude}");
+        }
+        let index = index_of(vec![v2_doc("w", ".", &["src/**", "!src/*"])]);
+        assert!(slugs_for(&index, "src").is_empty());
+    }
+
+    /// A declared wildcard-first include has no literal prefix but governs every
+    /// file it matches, with or without an exclude, and ranks below a rule that
+    /// names a directory.
+    #[test]
+    fn test_wildcard_first_includes_are_selectable_and_rank_below_specific() {
+        for paths in [vec!["**"], vec!["**/*.ts"], vec!["**", "!**/*.test.ts"]] {
+            let index = index_of(vec![v2_doc("all", ".", &paths)]);
+            assert_eq!(slugs_for(&index, "src/a.ts"), vec!["all"], "{paths:?}");
+        }
+        let index = index_of(vec![
+            v2_doc("all", ".", &["**"]),
+            v2_doc("specific", ".", &["src/lib/**"]),
+        ]);
+        assert_eq!(slugs_for(&index, "src/lib/a.ts"), vec!["specific", "all"]);
     }
 
     #[test]
