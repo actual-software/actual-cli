@@ -1,13 +1,17 @@
-//! Shared HTTP retry utilities for the OpenAI and Anthropic API runners.
+//! Shared HTTP retry utilities for the OpenAI and Anthropic API runners and
+//! the OTLP sender.
 //!
 //! This module provides:
 //! - [`MAX_RATE_LIMIT_RETRIES`]: shared retry limit constant
-//! - [`parse_retry_after`]: parse the `Retry-After` header
+//! - [`parse_retry_after`]: parse a `Retry-After` header given in seconds
+//! - [`parse_retry_after_delay`]: parse a `Retry-After` header in either form
 //! - [`extract_error_body`]: read and truncate an HTTP error body
 //! - [`backoff_secs`]: compute exponential backoff wait time
 //! - [`RetryState`]: track per-loop retry attempt state
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use chrono::{DateTime, NaiveDateTime, Utc};
 
 /// Maximum number of retries on HTTP 429 / 529 rate-limit responses.
 pub const MAX_RATE_LIMIT_RETRIES: u32 = 3;
@@ -16,10 +20,45 @@ pub const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 ///
 /// Returns `Some(seconds)` if the header is present and contains a valid
 /// non-negative integer.  Returns `None` if the header is absent, non-UTF-8,
-/// or not an integer (e.g., an HTTP-date string).
+/// or not an integer (e.g., an HTTP-date string, which
+/// [`parse_retry_after_delay`] reads).
 pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let value = headers.get("retry-after")?.to_str().ok()?;
     value.trim().parse::<u64>().ok()
+}
+
+/// IMF-fixdate, then the obsolete RFC 850 and asctime formats.
+const HTTP_DATE_FORMATS: [&str; 3] = [
+    "%a, %d %b %Y %H:%M:%S GMT",
+    "%A, %d-%b-%y %H:%M:%S GMT",
+    "%a %b %e %H:%M:%S %Y",
+];
+
+/// Parse the `Retry-After` header into how long to wait from `now`.
+///
+/// Reads both forms the header takes: delay-seconds, and an HTTP-date in any
+/// of the three formats a recipient must accept (RFC 9110 §5.6.7). A date at
+/// or before `now` is no wait. Returns `None` if the header is absent or holds
+/// neither form.
+pub fn parse_retry_after_delay(
+    headers: &reqwest::header::HeaderMap,
+    now: SystemTime,
+) -> Option<Duration> {
+    if let Some(seconds) = parse_retry_after(headers) {
+        return Some(Duration::from_secs(seconds));
+    }
+    let value = headers.get("retry-after")?.to_str().ok()?.trim();
+    let at = HTTP_DATE_FORMATS
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())?
+        .and_utc();
+    // Subtracted in chrono: SystemTime can't hold every date chrono parses on
+    // every platform, and converting one it can't hold panics.
+    Some(
+        at.signed_duration_since(DateTime::<Utc>::from(now))
+            .to_std()
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 /// Extract a truncated body string from an HTTP response byte result,
@@ -160,6 +199,114 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("-1"));
         assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    // ── parse_retry_after_delay ───────────────────────────────────────────
+
+    /// 1994-11-06 08:49:37 UTC, the instant RFC 9110's HTTP-date examples use.
+    fn rfc_example_instant() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(784_111_777)
+    }
+
+    fn retry_after(value: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn test_parse_retry_after_delay_reads_delay_seconds() {
+        let now = rfc_example_instant();
+        assert_eq!(
+            parse_retry_after_delay(&retry_after("120"), now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after_delay(&retry_after("  5  "), now),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            parse_retry_after_delay(&retry_after("0"), now),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_after_delay_reads_all_three_http_date_formats() {
+        for value in [
+            "Sun, 06 Nov 1994 08:49:42 GMT",
+            "Sunday, 06-Nov-94 08:49:42 GMT",
+            "Sun Nov  6 08:49:42 1994",
+            " Sun, 06 Nov 1994 08:49:42 GMT ",
+        ] {
+            assert_eq!(
+                parse_retry_after_delay(&retry_after(value), rfc_example_instant()),
+                Some(Duration::from_secs(5)),
+                "{value}"
+            );
+        }
+    }
+
+    /// The wait runs from `now` to the date, so a quarter-second into the
+    /// date's second the same date is 4.75 s away.
+    #[test]
+    fn test_parse_retry_after_delay_counts_from_now() {
+        let now = rfc_example_instant() + Duration::from_millis(250);
+        assert_eq!(
+            parse_retry_after_delay(&retry_after("Sun, 06 Nov 1994 08:49:42 GMT"), now),
+            Some(Duration::from_millis(4_750))
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_after_delay_a_date_now_or_past_is_no_wait() {
+        for value in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:36 GMT",
+            "Thu, 01 Jan 1970 00:00:00 GMT",
+            "Mon, 01 Jan 0001 00:00:00 GMT",
+        ] {
+            assert_eq!(
+                parse_retry_after_delay(&retry_after(value), rfc_example_instant()),
+                Some(Duration::ZERO),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_retry_after_delay_reaches_the_last_representable_date() {
+        assert_eq!(
+            parse_retry_after_delay(
+                &retry_after("Fri, 31 Dec 9999 23:59:59 GMT"),
+                rfc_example_instant()
+            ),
+            Some(Duration::from_secs(253_402_300_799 - 784_111_777))
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_after_delay_rejects_values_in_neither_form() {
+        for value in [
+            "",
+            "soon",
+            "-1",
+            "Sun, 06 Nov 1994 08:49:42",
+            "Sun, 06 Nov 1994 08:49:42 +0000",
+            "Mon, 06 Nov 1994 08:49:42 GMT",
+            "Sun, 31 Nov 1994 08:49:42 GMT",
+            "Sun, 06 Nov 1994 08:49:42 GMT tomorrow",
+        ] {
+            assert_eq!(
+                parse_retry_after_delay(&retry_after(value), rfc_example_instant()),
+                None,
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            parse_retry_after_delay(&HeaderMap::new(), rfc_example_instant()),
+            None
+        );
     }
 
     // ── extract_error_body ────────────────────────────────────────────────
