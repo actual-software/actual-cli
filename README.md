@@ -173,8 +173,8 @@ The skill works inside the coding agent your team already uses: Claude Code, Cod
 |----------|--------------|----------------|
 | macOS | Apple Silicon (arm64) | Actual.ai Skill, Homebrew, npm, manual download |
 | macOS | Intel (x64) | Actual.ai Skill, Homebrew, npm, manual download |
-| Linux | x64 | Actual.ai Skill, npm, manual download |
-| Linux | arm64 | Actual.ai Skill, npm, manual download |
+| Linux | x64 | Actual.ai Skill, Homebrew, npm, manual download |
+| Linux | arm64 | Actual.ai Skill, Homebrew, npm, manual download |
 
 Windows is not currently supported.
 
