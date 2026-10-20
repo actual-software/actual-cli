@@ -359,17 +359,22 @@ struct SessionIdentity<'a> {
 
 /// What a decision is headed with: its title. A v2 decision keyed on an
 /// `adr_id` whose title names no decision falls back to its best document's
-/// title, since the id is not something to show an agent. A v1 decision falls
-/// back to its key, which is its slug, as it always has.
+/// title, then to that document's slug, since the id is not something to show
+/// an agent. A v1 decision falls back to its key, which is its slug, as it
+/// always has.
+///
+/// The title comes from the best-ranked document, so files sharing an `adr_id`
+/// under different titles head the decision differently depending on which one
+/// ranked best for the file read. A decision is briefed once per session, so a
+/// session sees one heading; two sessions can see different ones.
 fn brief_heading(decision: &AdrGroup) -> &str {
     decision
         .title
         .as_deref()
         .or_else(|| {
-            decision
-                .adr_id
-                .as_ref()
-                .and_then(|_| decision.documents.first()?.title.as_deref())
+            decision.adr_id.as_ref()?;
+            let best = decision.documents.first()?;
+            Some(best.title.as_deref().unwrap_or(&best.slug))
         })
         .unwrap_or_else(|| decision.label())
 }
@@ -828,6 +833,27 @@ mod tests {
 
             let brief = brief_for(root.path(), &file, &a, None).unwrap();
             assert!(brief.contains("## Pin Terraform Providers"), "{brief}");
+            assert!(!brief.contains("3f9c-uuid"), "{brief}");
+        });
+    }
+
+    #[test]
+    fn test_an_untitled_v2_brief_is_headed_by_its_slug_not_its_adr_id() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            let untitled = "---\nversion: 2\nname: pinning\nmetadata:\n  actual:\n    adr_id: 3f9c-uuid\n  scope:\n    root: .\n    paths:\n      - \"infra/**\"\n---\n\n### Rules\n\n- **R-TF-001** MUST: pin every provider.\n";
+            std::fs::write(dir.join("pinning-1a2b.md"), untitled).unwrap();
+            let a = args(root.path());
+            let file = root
+                .path()
+                .join("infra/main.tf")
+                .to_string_lossy()
+                .to_string();
+
+            let brief = brief_for(root.path(), &file, &a, None).unwrap();
+            assert!(brief.contains("## pinning-1a2b"), "{brief}");
             assert!(!brief.contains("3f9c-uuid"), "{brief}");
         });
     }
