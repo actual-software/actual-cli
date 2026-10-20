@@ -918,7 +918,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             ledger_path(dir.path(), &key("s1")),
-            r#"{"format_version":1,"briefed":["Adopt RS256"]}"#,
+            format!(r#"{{"format_version":{FORMAT_VERSION},"briefed":["Adopt RS256"]}}"#),
         )
         .unwrap();
 
