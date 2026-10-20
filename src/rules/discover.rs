@@ -204,16 +204,23 @@ pub fn parse_rule_sources(sources: RuleSources) -> RuleSetLoadReport {
             Err(err) => report.errors.push(err),
         }
     }
-    flag_duplicate_slugs(&mut report.documents);
+    let rules_dir = report.rules_dir.clone();
+    flag_duplicate_slugs(&mut report.documents, &rules_dir);
     report
 }
 
 /// A document's slug (its file stem) is its identity throughout the scope
 /// index, the ranker and the session state. A second file with the same stem
-/// (`a.md` beside `a.markdown`) cannot be told apart by any of those, so each
-/// member of the collision carries a warning naming the others rather than the
-/// set quietly resolving to whichever came first. Nothing is dropped.
-fn flag_duplicate_slugs(documents: &mut [RuleDocument]) {
+/// cannot be told apart by any of those, so each member of the collision carries
+/// a warning naming the others rather than the set quietly resolving to
+/// whichever came first. Nothing is dropped.
+///
+/// Discovery reads `.md` files directly under the rules directory, matching the
+/// extension without regard to case. The collision this can see is therefore
+/// `a.md` beside `a.MD`, on a filesystem that keeps them apart. Other files are
+/// named relative to `rules_dir`, so the warning, which `rules ls --json`
+/// emits, never carries a path that names this machine.
+fn flag_duplicate_slugs(documents: &mut [RuleDocument], rules_dir: &Path) {
     let mut by_slug: std::collections::BTreeMap<String, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (at, doc) in documents.iter().enumerate() {
@@ -222,29 +229,38 @@ fn flag_duplicate_slugs(documents: &mut [RuleDocument]) {
         }
     }
     for (slug, members) in by_slug.into_iter().filter(|(_, m)| m.len() > 1) {
+        // A decision is keyed on its group id, then its id, so the members
+        // differ in a way that matters when either does.
+        let ids_differ = {
+            let ids: std::collections::BTreeSet<(Option<&str>, Option<&str>)> = members
+                .iter()
+                .map(|&m| {
+                    let meta = documents[m].meta.as_ref();
+                    (
+                        meta.and_then(|meta| meta.candidate_group_id.as_deref()),
+                        meta.and_then(|meta| meta.adr_id.as_deref()),
+                    )
+                })
+                .collect();
+            ids.len() > 1
+        };
         for &at in &members {
             let others: Vec<String> = members
                 .iter()
                 .filter(|&&other| other != at)
-                .map(|&other| documents[other].source_path.display().to_string())
+                .map(|&other| {
+                    let path = &documents[other].source_path;
+                    path.strip_prefix(rules_dir)
+                        .unwrap_or_else(|_| Path::new(path.file_name().unwrap_or_default()))
+                        .display()
+                        .to_string()
+                })
                 .collect();
-            let ids_differ = {
-                let ids: std::collections::BTreeSet<Option<&str>> = members
-                    .iter()
-                    .map(|&m| {
-                        documents[m]
-                            .meta
-                            .as_ref()
-                            .and_then(|meta| meta.adr_id.as_deref())
-                    })
-                    .collect();
-                ids.len() > 1
-            };
             let detail = format!(
                 "slug `{slug}` is shared with {}{}; lookups by slug can pick the wrong file",
                 others.join(", "),
                 if ids_differ {
-                    " (and their adr_id differs)"
+                    " (and their adr_id or candidate_group_id differs)"
                 } else {
                     ""
                 },
@@ -788,8 +804,48 @@ mod tests {
         assert_eq!(dup(0).len(), 1);
         assert_eq!(dup(1).len(), 1);
         assert!(dup(2).is_empty());
-        assert!(dup(0)[0].detail.contains("sub/a.md"), "{:?}", dup(0)[0]);
-        assert!(dup(1)[0].detail.contains("rules/a.md"), "{:?}", dup(1)[0]);
+        // Named relative to the rules directory, never by an absolute path.
+        assert!(
+            dup(0)[0].detail.contains("shared with sub/a.md;"),
+            "{:?}",
+            dup(0)[0]
+        );
+        assert!(
+            dup(1)[0].detail.contains("shared with a.md;"),
+            "{:?}",
+            dup(1)[0]
+        );
+        assert!(!dup(0)[0].detail.contains("/repo"), "{:?}", dup(0)[0]);
+    }
+
+    /// Discovery reads only `.md` files directly under the rules directory, so
+    /// the one collision it can produce is `a.md` beside `a.MD`. That needs a
+    /// case-sensitive filesystem, so the test does nothing on one that folds
+    /// the two names together.
+    #[test]
+    fn test_a_md_beside_a_upper_md_collide_through_discovery() {
+        let root = seed(&[("a.md", DOC_A)]);
+        let dir = rules_dir(root.path());
+        std::fs::write(dir.join("a.MD"), DOC_A).unwrap();
+        let files = std::fs::read_dir(&dir).unwrap().count();
+        if files < 2 {
+            return;
+        }
+
+        let report = load_rule_set(root.path()).unwrap();
+        assert_eq!(report.documents.len(), 2);
+        for doc in &report.documents {
+            let warning = doc
+                .warnings
+                .iter()
+                .find(|w| w.kind == RuleIssueKind::DuplicateSlug)
+                .expect("each member carries the warning");
+            assert!(
+                !warning.detail.contains(root.path().to_str().unwrap()),
+                "an absolute path leaked: {}",
+                warning.detail
+            );
+        }
     }
 
     #[test]
@@ -804,13 +860,26 @@ mod tests {
             source("/repo/.actual/rules/sub/a.md", &with_id("id-2")),
         ]));
         let detail = &report.documents[0].warnings[0].detail;
-        assert!(detail.contains("adr_id differs"), "{detail}");
+        assert!(detail.contains("differs"), "{detail}");
 
         let same = parse_rule_sources(sources_of(vec![
             source("/repo/.actual/rules/a.md", &with_id("id-1")),
             source("/repo/.actual/rules/sub/a.md", &with_id("id-1")),
         ]));
         assert!(!same.documents[0].warnings[0].detail.contains("differs"));
+
+        // Two policies with one `adr_id` but different groups are different
+        // decisions, which is the difference that matters now.
+        let in_group = |group: &str| {
+            format!(
+                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: id-1\n    candidate_group_id: {group}\n---\n\n# T\n\n### Rules\n\n- **R-A-001** MUST: x.\n"
+            )
+        };
+        let groups = parse_rule_sources(sources_of(vec![
+            source("/repo/.actual/rules/a.md", &in_group("grp-1")),
+            source("/repo/.actual/rules/sub/a.md", &in_group("grp-2")),
+        ]));
+        assert!(groups.documents[0].warnings[0].detail.contains("differs"));
     }
 
     #[test]

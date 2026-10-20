@@ -148,7 +148,8 @@ pub struct SelectedRule {
     /// The decision this policy belongs to, from a v2 header; omitted for v1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_group_id: Option<String>,
-    /// The root a v2 document's paths are relative to; omitted for v1.
+    /// The root a v2 document's declared paths are relative to; omitted for a
+    /// v1 document and for a v2 one that declares no paths.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     /// The stage-1 score. Kept even on a ranked result so the two orderings can

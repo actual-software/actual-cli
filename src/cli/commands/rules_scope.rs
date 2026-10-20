@@ -859,15 +859,12 @@ fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> V
     selection
         .selected
         .iter()
-        // One entry per selected rule, so the result is positionally aligned
-        // with the selection. Every selected rule came from this same index, so
-        // a miss would mean the two disagreed about their own contents.
         .map(|rule| {
-            // By path, not slug: a stem shared by two files must not give one
-            // the other's evidence. A rule the search did not return (it cannot
-            // happen for one the same index selected) gets an evidence-free
-            // entry, which keeps the result aligned with the selection and does
-            // not panic.
+            // One entry per selected rule, so the result stays aligned with the
+            // selection. By path, not slug: a stem shared by two files must not
+            // give one the other's evidence. Every selected rule came from this
+            // same index, so a miss would mean the two disagreed about their
+            // own contents; it gets an evidence-free entry rather than a panic.
             ranked
                 .iter()
                 .find(|hit| hit.relative_path == rule.relative_path)
@@ -3110,46 +3107,16 @@ mod tests {
 
     // ── slug collisions and adr_id/root in the output ────────────────────
 
-    /// Helper: two v2 documents with one file stem in different directories,
-    /// told apart only by path (and, secondarily, `adr_id`).
-    fn colliding_index() -> ScopeIndex {
-        let text = |id: &str| {
-            format!(
-                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n    candidate_group_id: grp-{id}\n  scope:\n    root: packages/{id}\n    paths:\n      - \"src/**\"\n---\n\n# Title {id}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
-            )
-        };
-        let documents = ["one", "two"]
-            .iter()
-            .map(|id| {
-                crate::rules::parse_rule_document(
-                    &std::path::PathBuf::from(format!("/repo/.actual/rules/{id}/same-stem.md")),
-                    &text(id),
-                )
-                .unwrap()
-            })
-            .collect();
-        ScopeIndex::build(
-            &crate::rules::RuleSetLoadReport {
-                rules_dir: std::path::PathBuf::from("/repo/.actual/rules"),
-                documents,
-                errors: Vec::new(),
-                digest: String::new(),
-            },
-            Path::new("/repo"),
-            "fp".to_string(),
-        )
-    }
-
     #[test]
     fn test_filename_scan_over_a_shared_stem_reports_both_without_panicking() {
-        let groups = adr_filename_scan(&colliding_index(), "same stem", 5);
+        let groups = adr_filename_scan(&crate::testutil::colliding_index(), "same stem", 5);
         let keys: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
         assert_eq!(keys, vec!["group:grp-one", "group:grp-two"]);
     }
 
     #[test]
     fn test_evidence_follows_the_selected_path_when_stems_collide() {
-        let index = colliding_index();
+        let index = crate::testutil::colliding_index();
         let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
         let run = SelectionRun {
             selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
@@ -3168,7 +3135,7 @@ mod tests {
 
     #[test]
     fn test_evidence_for_a_rule_the_search_did_not_return_is_empty_not_a_panic() {
-        let index = colliding_index();
+        let index = crate::testutil::colliding_index();
         let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
         let mut selection = select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
             .finish(Stage2::NotRequested);
@@ -3180,7 +3147,7 @@ mod tests {
 
     #[test]
     fn test_select_json_adds_adr_id_and_root_and_keeps_the_existing_fields() {
-        let index = colliding_index();
+        let index = crate::testutil::colliding_index();
         let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
         let run = SelectionRun {
             selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
