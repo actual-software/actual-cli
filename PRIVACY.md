@@ -257,7 +257,8 @@ were given.
 default:
 
 - `telemetry.otlp_logs_endpoint` (or the `ACTUAL_OTLP_LOGS_ENDPOINT` env var):
-  an OTLP/HTTP logs URL, used as-is. It must use HTTPS unless it's localhost.
+  an OTLP/HTTP logs URL, used as-is. It must use HTTPS unless it's localhost,
+  and the CLI doesn't follow redirects, so events reach that URL and no other.
   The standard `OTEL_EXPORTER_OTLP_*` variables aren't read.
 - `telemetry.otlp_file` (or `ACTUAL_OTLP_FILE`): an absolute path on your
   machine. Each request is appended to it as one line, in a file readable only
