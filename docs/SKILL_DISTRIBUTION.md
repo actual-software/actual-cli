@@ -234,10 +234,10 @@ git add -A && git commit -m "update: <what changed>" && git push
 
 This step hasn't been run since the 2026-03-10 publish, which is why ClawHub still serves 0.1.0.
 
-Choose a new semver version (must be higher than the current one). Check the current version:
+Choose a semver version that hasn't been published yet, since ClawHub refuses one that already exists. The entry holds 1.0.0 as well as the `latest` 0.1.0, both from 2026-03-10, so pick a version above 1.0.0 to keep the history in order. List the published versions:
 
 ```bash
-clawhub inspect actual
+clawhub inspect actual --versions
 ```
 
 Then publish (use the next version):
