@@ -264,6 +264,17 @@ counts only toward a folder it spells out, and neither a path outside the
 repository nor a plan with no session notes anything. A folder the plan would
 create is noted when the agent first writes a file there.
 
+The pass is bounded, because it runs inside the hook's timeout ahead of the
+judge. Each folder is decided once, by every file any planned path brings to
+it, smallest folder first. In one folder it searches at most 500 files, in name
+order, and it searches nothing once 3 seconds have passed since it started. A
+folder either limit stops before a governed file turns up is undecided, and the
+record notes it as neither covered nor a gap. `plan-check --json` runs the same
+pass without noting anything and reports it as `folders`: `elapsed_ms`,
+`files_searched`, the `covered` folders, the `gaps`, and the `undecided` ones,
+each with the `reason` (`file_cap` or `deadline`), its `files` and how many were
+`searched`.
+
 `session summary` turns that record into one line for the end of a response.
 Y is the number of decisions the rule set can add to context at all, meaning
 those with at least one MUST or MUST NOT rule. They are keyed the way the brief

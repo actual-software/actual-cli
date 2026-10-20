@@ -133,13 +133,17 @@
 //! behavior: `requires_decision` still only sets `--json`'s status field
 //! there and exits 0, matching its documented, unchanged contract.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
 
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::{
-    capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline, HookRun,
-    Outcome,
+    capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
+    CheckJson, HookRun, Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
@@ -178,6 +182,13 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
+    // The pass the hook runs before its judge, reported by `--json` and noted
+    // nowhere, since there is no session outside a hook envelope.
+    let folders = args
+        .json
+        .then(|| folder_pass(&plan_text, &root, &rules_dir, FOLDER_BOUND))
+        .flatten();
+
     #[cfg(feature = "telemetry")]
     let started_at = std::time::Instant::now();
 
@@ -193,10 +204,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
 
     let width = term_size::terminal_width();
     if args.json {
-        println!(
-            "{}",
-            render_json(&outcome, crate::rules::check::ArtifactKind::Plan)
-        );
+        println!("{}", plan_json(&outcome, folders.as_ref()));
     } else {
         println!(
             "{}",
@@ -379,7 +387,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     // Noted before the judge runs, so a judge that outlasts the hook's
     // timeout cannot lose them.
     if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
-        record_plan_folders(&plan_text, session_id, &root, &rules_dir);
+        record_plan_folders(&plan_text, session_id, &root, &rules_dir, FOLDER_BOUND);
     }
 
     #[cfg(feature = "telemetry")]
@@ -423,37 +431,101 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     );
 }
 
+/// Direct mode's `--json`: the check, and beside it the folder pass when the
+/// plan names a folder it could judge.
+#[derive(Serialize)]
+struct PlanJson<'a> {
+    #[serde(flatten)]
+    check: CheckJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folders: Option<&'a FolderPass>,
+}
+
+fn plan_json(outcome: &Outcome, folders: Option<&FolderPass>) -> String {
+    let report = PlanJson {
+        check: check_json(outcome, ArtifactKind::Plan),
+        folders,
+    };
+    serde_json::to_string_pretty(&report)
+        .expect("plan check report is serializable — this is a programmer error")
+}
+
+/// How far the folder pass may go before the judge: at most `file_cap` files
+/// searched in one folder, and none once `deadline` has passed since the pass
+/// began.
+#[derive(Clone, Copy)]
+struct FolderBound {
+    file_cap: usize,
+    deadline: Duration,
+}
+
+/// 500 files is more than any tracked folder holds across the eleven
+/// repositories measured, so the cap stops only generated or fixture output.
+/// Three seconds is about a tenth of what the hook's timeout leaves around
+/// the judge's [`crate::rules::check::CHECK_BUDGET`].
+const FOLDER_BOUND: FolderBound = FolderBound {
+    file_cap: 500,
+    deadline: Duration::from_secs(3),
+};
+
+/// What the folder pass decided about the folders a plan names, and what it
+/// cost.
+#[derive(Debug, Default, Serialize)]
+struct FolderPass {
+    elapsed_ms: f64,
+    files_searched: usize,
+    covered: Vec<String>,
+    gaps: Vec<String>,
+    undecided: Vec<UndecidedFolder>,
+}
+
+/// A folder the bound stopped on before a governed file turned up or every
+/// file was searched, so it is neither covered nor a gap.
+#[derive(Debug, PartialEq, Serialize)]
+struct UndecidedFolder {
+    folder: String,
+    reason: Stop,
+    /// How many files decide the folder.
+    files: usize,
+    /// How many of them the pass searched.
+    searched: usize,
+}
+
+/// Which half of [`FolderBound`] stopped a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Stop {
+    FileCap,
+    Deadline,
+}
+
+enum Decision {
+    Covered,
+    Gap,
+    Undecided(Stop),
+}
+
 /// Note the folders the plan names in the session record `rules brief` keeps,
-/// each judged by the check a read of its files gets, so a folder both
-/// planned and read is one entry. No model call.
-///
-/// The paths are the ones selection reads from the plan, [`Query::all_paths`].
-/// A plan naming none notes nothing, and so does a rule set with no documents,
-/// which would make every folder a gap.
-fn record_plan_folders(plan: &str, session_id: &str, root: &Path, rules_dir: &Path) {
-    let paths = Query::new(plan).all_paths();
-    if paths.is_empty() {
-        return;
-    }
-    let (Ok(resolved), Some(dir)) = (
-        scope::resolve_in(rules_dir, root, false),
+/// so a folder both planned and read is one entry. An undecided folder notes
+/// nothing.
+fn record_plan_folders(
+    plan: &str,
+    session_id: &str,
+    root: &Path,
+    rules_dir: &Path,
+    bound: FolderBound,
+) {
+    let (Some(pass), Some(dir)) = (
+        folder_pass(plan, root, rules_dir, bound),
         brief_ledger::ledger_dir(),
     ) else {
         return;
     };
-    if resolved.index.is_empty() {
-        return;
-    }
-    let floor = rules_scope::effective_min_score(None, root).unwrap_or(0.0);
-    let folders: Vec<(String, bool)> = paths
+    let folders: Vec<(&String, bool)> = pass
+        .covered
         .iter()
-        .filter_map(|path| planned_folder(root, path))
-        .map(|(folder, files)| {
-            let governed = files
-                .iter()
-                .any(|file| !rules_brief::governing(&resolved.index, file, floor).is_empty());
-            (folder, governed)
-        })
+        .map(|folder| (folder, true))
+        .chain(pass.gaps.iter().map(|folder| (folder, false)))
         .collect();
     let key_dir = rules_brief::resolve(rules_dir);
     let key = LedgerKey {
@@ -461,6 +533,91 @@ fn record_plan_folders(plan: &str, session_id: &str, root: &Path, rules_dir: &Pa
         rules_dir: &key_dir,
     };
     brief_ledger::record_folders(&dir, &key, &folders);
+}
+
+/// Decide the folders the plan names, each by the check a read of its files
+/// gets, within `bound`. No model call.
+///
+/// The paths are the ones selection reads from the plan, [`Query::all_paths`].
+/// Each folder is decided once, by every file any of them brings to it, and
+/// the smallest go first, so a deadline cuts the largest. `None` when the plan
+/// names no path, or the rule set holds no documents, which would make every
+/// folder a gap.
+fn folder_pass(
+    plan: &str,
+    root: &Path,
+    rules_dir: &Path,
+    bound: FolderBound,
+) -> Option<FolderPass> {
+    let started = Instant::now();
+    let paths = Query::new(plan).all_paths();
+    if paths.is_empty() {
+        return None;
+    }
+    let resolved = scope::resolve_in(rules_dir, root, false).ok()?;
+    if resolved.index.is_empty() {
+        return None;
+    }
+    let floor = rules_scope::effective_min_score(None, root).unwrap_or(0.0);
+    let mut pass = FolderPass::default();
+    for (folder, files) in planned_folders(root, &paths) {
+        let (decision, searched) = decide(&files, bound, started, |file| {
+            !rules_brief::governing(&resolved.index, file, floor).is_empty()
+        });
+        pass.files_searched += searched;
+        match decision {
+            Decision::Covered => pass.covered.push(folder),
+            Decision::Gap => pass.gaps.push(folder),
+            Decision::Undecided(reason) => pass.undecided.push(UndecidedFolder {
+                folder,
+                reason,
+                files: files.len(),
+                searched,
+            }),
+        }
+    }
+    pass.covered.sort();
+    pass.gaps.sort();
+    pass.undecided.sort_by(|a, b| a.folder.cmp(&b.folder));
+    pass.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    Some(pass)
+}
+
+/// Search `files` in order until one is governed or `bound` stops the
+/// search. Returns the decision and how many files were searched.
+fn decide(
+    files: &[String],
+    bound: FolderBound,
+    started: Instant,
+    governed: impl Fn(&str) -> bool,
+) -> (Decision, usize) {
+    for (searched, file) in files.iter().enumerate() {
+        if searched == bound.file_cap {
+            return (Decision::Undecided(Stop::FileCap), searched);
+        }
+        if started.elapsed() >= bound.deadline {
+            return (Decision::Undecided(Stop::Deadline), searched);
+        }
+        if governed(file) {
+            return (Decision::Covered, searched + 1);
+        }
+    }
+    (Decision::Gap, files.len())
+}
+
+/// Each folder the paths count toward, once, with the files that decide it in
+/// name order, smallest folder first.
+fn planned_folders(root: &Path, paths: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut folders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (folder, files) in paths.iter().filter_map(|path| planned_folder(root, path)) {
+        folders.entry(folder).or_default().extend(files);
+    }
+    let mut folders: Vec<(String, Vec<String>)> = folders
+        .into_iter()
+        .map(|(folder, files)| (folder, files.into_iter().collect()))
+        .collect();
+    folders.sort_by_key(|(_, files)| files.len());
+    folders
 }
 
 /// The folder a planned path counts toward and the repository-relative files
@@ -1895,7 +2052,24 @@ mod tests {
     }
 
     fn plan(root: &Path, text: &str) {
-        record_plan_folders(text, "s1", root, &crate::rules::rules_dir(root));
+        plan_within(root, text, FOLDER_BOUND);
+    }
+
+    fn plan_within(root: &Path, text: &str, bound: FolderBound) {
+        record_plan_folders(text, "s1", root, &crate::rules::rules_dir(root), bound);
+    }
+
+    fn pass_within(root: &Path, text: &str, bound: FolderBound) -> FolderPass {
+        folder_pass(text, root, &crate::rules::rules_dir(root), bound).unwrap()
+    }
+
+    /// Empty files at `files` under `root`, with their folders.
+    fn touch(root: &Path, files: &[&str]) {
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
     }
 
     /// The covered folders and the gaps in session `s1`'s record for the rules
@@ -2207,8 +2381,214 @@ mod tests {
         let text = "Pin `infra/terraform/main.tf`.";
 
         plan(root.path(), text);
-        record_plan_folders(text, "s1", root.path(), &not_a_dir);
+        record_plan_folders(text, "s1", root.path(), &not_a_dir, FOLDER_BOUND);
 
         assert!(nothing_noted());
+    }
+
+    /// A folder named outright, again from the filesystem root, and again
+    /// through a file in it is decided once, searching each of its files one
+    /// time.
+    #[test]
+    fn test_a_folder_the_plan_names_three_ways_is_searched_once() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+        touch(
+            root.path(),
+            &["infra/terraform/outputs.tf", "infra/terraform/vars.tf"],
+        );
+        let text = format!(
+            "Pin `infra/terraform/`, check `{}/` and keep `infra/terraform/main.tf`.",
+            root.path().join("infra/terraform").display()
+        );
+
+        let pass = pass_within(root.path(), &text, FOLDER_BOUND);
+
+        assert_eq!(pass.files_searched, 3);
+        assert_eq!(pass.gaps, vec!["infra/terraform".to_string()]);
+        assert!(pass.elapsed_ms > 0.0);
+        plan(root.path(), &text);
+        assert_eq!(
+            noted(root.path()),
+            (vec![], vec!["infra/terraform".to_string()])
+        );
+    }
+
+    /// A folder holding more files than the cap, none governed among those
+    /// searched, is undecided, and the record notes it as neither covered nor
+    /// a gap. A governed file inside the cap still covers its folder, and a
+    /// folder holding exactly the cap is decided.
+    #[test]
+    fn test_a_folder_past_the_file_cap_is_undecided_not_a_gap() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+        touch(
+            root.path(),
+            &[
+                "infra/terraform/outputs.tf",
+                "infra/terraform/vars.tf",
+                "services/auth/oauth/keys.ts",
+                "services/auth/oauth/rotate.ts",
+                "scripts/deploy.sh",
+                "scripts/seed.sh",
+            ],
+        );
+        let text = "Pin `infra/terraform/`, sign in `services/auth/oauth/` and run `scripts/`.";
+        let bound = FolderBound {
+            file_cap: 2,
+            ..FOLDER_BOUND
+        };
+
+        let pass = pass_within(root.path(), text, bound);
+
+        assert_eq!(pass.covered, vec!["services/auth/oauth".to_string()]);
+        assert_eq!(pass.gaps, vec!["scripts".to_string()]);
+        assert_eq!(
+            pass.undecided,
+            vec![UndecidedFolder {
+                folder: "infra/terraform".to_string(),
+                reason: Stop::FileCap,
+                files: 3,
+                searched: 2,
+            }]
+        );
+        assert_eq!(pass.files_searched, 5);
+        plan_within(root.path(), text, bound);
+        assert_eq!(
+            noted(root.path()),
+            (
+                vec!["services/auth/oauth".to_string()],
+                vec!["scripts".to_string()]
+            )
+        );
+    }
+
+    /// Once the deadline has passed, the pass searches nothing more: every
+    /// folder it had not decided is undecided, listed by name, and nothing is
+    /// noted.
+    #[test]
+    fn test_a_pass_out_of_time_leaves_its_folders_undecided() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = planned_repo();
+        touch(
+            root.path(),
+            &["infra/terraform/outputs.tf", "infra/terraform/vars.tf"],
+        );
+        let text = "Pin `infra/terraform/`, then sign in `services/auth/oauth/token.ts`.";
+        let bound = FolderBound {
+            deadline: Duration::ZERO,
+            ..FOLDER_BOUND
+        };
+
+        let pass = pass_within(root.path(), text, bound);
+
+        assert_eq!(pass.files_searched, 0);
+        assert!(pass.covered.is_empty() && pass.gaps.is_empty());
+        assert_eq!(
+            pass.undecided
+                .iter()
+                .map(|folder| (
+                    folder.folder.as_str(),
+                    folder.reason,
+                    folder.files,
+                    folder.searched
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("infra/terraform", Stop::Deadline, 3, 0),
+                ("services/auth/oauth", Stop::Deadline, 1, 0)
+            ]
+        );
+        plan_within(root.path(), text, bound);
+        assert!(nothing_noted());
+    }
+
+    /// Every file a path brings to a folder decides it once, in name order,
+    /// and the folders come smallest first, so a deadline cuts the largest.
+    #[test]
+    fn test_planned_folders_list_each_file_once_smallest_folder_first() {
+        let root = planned_repo();
+        touch(
+            root.path(),
+            &["infra/terraform/outputs.tf", "infra/terraform/vars.tf"],
+        );
+        let paths = [
+            "infra/terraform",
+            "services/auth/oauth/token.ts",
+            "infra/terraform/main.tf",
+        ]
+        .map(String::from);
+
+        assert_eq!(
+            planned_folders(root.path(), &paths),
+            vec![
+                (
+                    "services/auth/oauth".to_string(),
+                    vec!["services/auth/oauth/token.ts".to_string()]
+                ),
+                (
+                    "infra/terraform".to_string(),
+                    vec![
+                        "infra/terraform/main.tf".to_string(),
+                        "infra/terraform/outputs.tf".to_string(),
+                        "infra/terraform/vars.tf".to_string(),
+                    ]
+                ),
+            ]
+        );
+    }
+
+    /// `--json` reports the folder pass beside the check, and leaves it out
+    /// when the plan named no folder to judge.
+    #[test]
+    fn test_the_json_report_carries_the_folder_pass() {
+        let pass = FolderPass {
+            elapsed_ms: 12.5,
+            files_searched: 4,
+            covered: vec!["src/billing".to_string()],
+            gaps: vec!["scripts".to_string()],
+            undecided: vec![
+                UndecidedFolder {
+                    folder: "fixtures".to_string(),
+                    reason: Stop::FileCap,
+                    files: 3,
+                    searched: 2,
+                },
+                UndecidedFolder {
+                    folder: "generated".to_string(),
+                    reason: Stop::Deadline,
+                    files: 9,
+                    searched: 0,
+                },
+            ],
+        };
+
+        let report: serde_json::Value =
+            serde_json::from_str(&plan_json(&Outcome::NothingApplies, Some(&pass))).unwrap();
+        let without: serde_json::Value =
+            serde_json::from_str(&plan_json(&Outcome::NothingApplies, None)).unwrap();
+
+        assert_eq!(report["status"], "not_checked");
+        assert_eq!(
+            report["folders"],
+            serde_json::json!({
+                "elapsed_ms": 12.5,
+                "files_searched": 4,
+                "covered": ["src/billing"],
+                "gaps": ["scripts"],
+                "undecided": [
+                    {"folder": "fixtures", "reason": "file_cap", "files": 3, "searched": 2},
+                    {"folder": "generated", "reason": "deadline", "files": 9, "searched": 0},
+                ],
+            })
+        );
+        assert_eq!(without["status"], "not_checked");
+        assert!(without.get("folders").is_none());
     }
 }
