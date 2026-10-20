@@ -143,3 +143,10 @@ tui-test = { path = "crates/tui-test" }
 rsa = { version = "0.9", features = ["pem"] }
 p256 = { version = "0.13", features = ["pem", "pkcs8"] }
 rand = "0.8"
+# The official OTLP types, to check the hand-built OTLP/JSON log requests
+# against: the release build sends them without this crate.
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = [
+    "logs",
+    "gen-tonic-messages",
+    "with-serde",
+] }

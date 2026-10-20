@@ -77,7 +77,7 @@ pub struct LedgerKey<'a> {
 }
 
 /// The decisions briefed to a session's agents, the counts last shown to the
-/// user, and the folders the agents worked in.
+/// user, the folders the agents worked in, and the ADRs reported as briefed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BriefLedger {
@@ -92,6 +92,9 @@ pub struct BriefLedger {
     /// folder is not covered. A gap is a folder here and not in
     /// `covered_folders`, whichever order the two were noted in.
     pub uncovered_folders: BTreeSet<String>,
+    /// Logical ADRs already reported as added to context, keyed by candidate
+    /// group else `adr_id`, so each is reported once per session.
+    pub reported_adrs: BTreeSet<String>,
 }
 
 impl BriefLedger {
@@ -184,6 +187,31 @@ pub fn record<'k>(
     });
 }
 
+/// Add `adr_keys` to the record's reported set, best effort, and return the
+/// keys this write added. A key already there, a change dropped for want of
+/// the lock and a write that failed all return nothing, so a caller reporting
+/// each returned key can undercount but never report one twice.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn report_adrs<'k>(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    adr_keys: impl IntoIterator<Item = &'k str>,
+) -> Vec<String> {
+    let mut added = Vec::new();
+    let written = update_within(dir, key, LOCK_WAIT, |ledger| {
+        added = adr_keys
+            .into_iter()
+            .filter(|adr| ledger.reported_adrs.insert(adr.to_string()))
+            .map(str::to_string)
+            .collect();
+    });
+    if written {
+        added
+    } else {
+        Vec::new()
+    }
+}
+
 /// Note that the session worked on a file in `folder`, and whether a decision
 /// governs that file, best effort.
 pub fn record_folder(dir: &Path, key: &LedgerKey<'_>, folder: &str, covered: bool) {
@@ -269,34 +297,36 @@ pub fn update(dir: &Path, key: &LedgerKey<'_>, change: impl FnOnce(&mut BriefLed
     update_within(dir, key, LOCK_WAIT, change);
 }
 
+/// [`update`], also saying whether the changed record was written.
 fn update_within(
     dir: &Path,
     key: &LedgerKey<'_>,
     wait: Duration,
     change: impl FnOnce(&mut BriefLedger),
-) {
+) -> bool {
     if std::fs::create_dir_all(dir).is_err() {
-        return;
+        return false;
     }
     // Held to the end of this function, so the read, the write and the prune
     // all happen under it.
     let Some(_lock) = lock(dir, wait) else {
-        return;
+        return false;
     };
     let before = load(dir, key);
     let mut ledger = before.clone();
     change(&mut ledger);
     if ledger == before {
-        return;
+        return false;
     }
     ledger.format_version = FORMAT_VERSION;
     // Serializing a version, sets of strings and four counts cannot fail, so
     // there is no error path to take here; writing nothing is still the right
     // fallback.
-    if let Ok(json) = serde_json::to_string(&ledger) {
-        let _ = crate::config::paths::write_secure(&ledger_path(dir, key), json.as_bytes());
-    }
+    let written = serde_json::to_string(&ledger).is_ok_and(|json| {
+        crate::config::paths::write_secure(&ledger_path(dir, key), json.as_bytes()).is_ok()
+    });
     prune_stale(dir);
+    written
 }
 
 /// Take the directory's write lock, waiting up to `wait` while another writer
@@ -834,5 +864,66 @@ mod tests {
         let text = std::fs::read_to_string(ledger_path(dir.path(), &key("s1"))).unwrap();
         let ledger: BriefLedger = serde_json::from_str(&text).expect("a whole record");
         assert_eq!(ledger.briefed.len(), writers);
+    }
+
+    // ── reported ADRs ────────────────────────────────────────────────────
+
+    /// A key is returned by the write that added it and never again, and the
+    /// decisions the record already holds are left alone.
+    #[test]
+    fn test_a_reported_adr_is_returned_once() {
+        let dir = tempdir().unwrap();
+        record(dir.path(), &key("s1"), ["Adopt RS256"]);
+
+        assert_eq!(
+            report_adrs(dir.path(), &key("s1"), ["grp-1", "adr-9"]),
+            ["grp-1", "adr-9"]
+        );
+        assert_eq!(
+            report_adrs(dir.path(), &key("s1"), ["adr-9", "grp-2"]),
+            ["grp-2"]
+        );
+        assert!(report_adrs(dir.path(), &key("s1"), ["grp-1"]).is_empty());
+        assert!(report_adrs(dir.path(), &key("s1"), []).is_empty());
+
+        assert_eq!(report_adrs(dir.path(), &key("s2"), ["grp-1"]), ["grp-1"]);
+        assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
+    }
+
+    /// A report that cannot take the lock returns nothing, so its caller
+    /// sends nothing. This waits out the real [`LOCK_WAIT`].
+    #[test]
+    fn test_a_report_that_cannot_take_the_lock_returns_nothing() {
+        let dir = tempdir().unwrap();
+        let _held = lock(dir.path(), Duration::ZERO).expect("the lock");
+
+        assert!(report_adrs(dir.path(), &key("s1"), ["grp-1"]).is_empty());
+        assert!(!ledger_path(dir.path(), &key("s1")).exists());
+    }
+
+    /// A report whose write fails returns nothing either: the key was never
+    /// recorded, and returning it would let a later write report it again.
+    #[test]
+    fn test_a_report_whose_write_fails_returns_nothing() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(ledger_path(dir.path(), &key("s1"))).unwrap();
+
+        assert!(report_adrs(dir.path(), &key("s1"), ["grp-1"]).is_empty());
+    }
+
+    /// A record written before the reported set existed still loads whole:
+    /// the new field defaults to empty rather than emptying the session.
+    #[test]
+    fn test_a_record_without_reported_adrs_still_loads() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            ledger_path(dir.path(), &key("s1")),
+            r#"{"format_version":1,"briefed":["Adopt RS256"]}"#,
+        )
+        .unwrap();
+
+        let ledger = load(dir.path(), &key("s1"));
+        assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
+        assert!(ledger.reported_adrs.is_empty());
     }
 }
