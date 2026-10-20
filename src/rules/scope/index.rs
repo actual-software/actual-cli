@@ -2320,6 +2320,18 @@ mod tests {
         );
     }
 
+    /// A document with excludes but no root still asks `root_admits`, which
+    /// must admit every path rather than filter on an empty root.
+    #[test]
+    fn test_unrooted_document_admits_every_path_and_still_applies_excludes() {
+        let index = index_of(vec![v2_doc("w", ".", &["src/**", "!src/generated/**"])]);
+        assert_eq!(slugs_for(&index, "src/a.ts"), vec!["w"]);
+        assert_eq!(slugs_for(&index, "other/a.ts"), Vec::<String>::new());
+        assert!(slugs_for(&index, "src/generated/a.ts").is_empty());
+        let doc = &index.documents[0];
+        assert!(doc.root_admits("anything/at/all"));
+    }
+
     #[test]
     fn test_rooted_adr_is_selected_inside_its_root_and_not_outside() {
         let index = index_of(vec![
