@@ -2650,4 +2650,36 @@ mod tests {
             vec!["Sign Tokens"]
         );
     }
+
+    /// A partly migrated rule set: the document with an id is keyed on it and
+    /// the one without on its title prefix, so the decision splits in two.
+    /// Deliberate, since joining by title would make a document's group depend
+    /// on which other documents exist and is ambiguous when two ids share a
+    /// title. Regenerating the remaining files is the fix.
+    #[test]
+    fn test_a_partly_migrated_decision_splits_into_two() {
+        let index = index_of(vec![
+            id_doc("with-id", "adr-1", "Sign Tokens: Algorithm"),
+            doc(
+                "without-id",
+                "Sign Tokens: Expiry",
+                "Scope.",
+                "grep -r x lib/",
+            ),
+            // A document lacking the query's words, so they are worth something.
+            id_doc("other", "adr-3", "Pin Providers: Versions"),
+        ]);
+        assert_eq!(index.decision_count(), 3);
+        assert_eq!(
+            index.decision_keys().into_iter().collect::<Vec<_>>(),
+            vec!["Sign Tokens", "adr-1", "adr-3"]
+        );
+        let groups = index.search_adrs(&Query::new("sign tokens"), 5);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups.iter().filter(|g| g.adr_id.is_some()).count(),
+            1,
+            "only the migrated document carries an id"
+        );
+    }
 }
