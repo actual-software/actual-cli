@@ -57,6 +57,8 @@ Both workflows build the same four targets in parallel:
 
 Linux arm64 is cross-compiled using `gcc-aarch64-linux-gnu`.
 
+Both Linux binaries link against the runner's glibc, which on `ubuntu-latest` (Ubuntu 24.04) is 2.39, and they need glibc 2.39 or newer on the user's machine. The README's platform table and `docs/GETTING_STARTED.md` state that floor for users, so re-check it when `ubuntu-latest` moves to a newer Ubuntu (`readelf -V actual | grep GLIBC_` on a release binary lists the versions it requires). In v0.8.0 the only 2.39 symbols are `pidfd_spawnp` and `pidfd_getpid`, which Rust's standard library links weakly. The x64 binary marks that version requirement weak and the arm64 binary doesn't, so glibc 2.34 to 2.38 runs the x64 binary with a `weak version` warning and refuses to start the arm64 one.
+
 All builds use `cargo build --release` (LTO, stripped, single codegen unit — see `[profile.release]` in `Cargo.toml`).
 
 ---
