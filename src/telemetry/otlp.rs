@@ -1266,14 +1266,15 @@ mod tests {
         assert_eq!(retryable, [429, 502, 503, 504]);
     }
 
-    /// A non-loopback endpoint gets a client that refuses plain HTTP, and a
-    /// request the client refuses to build is final, not retried.
+    /// A non-loopback endpoint gets a client that refuses plain HTTP, even to
+    /// loopback, and a request the client refuses to build is final, not
+    /// retried.
     #[tokio::test]
     async fn test_the_client_refuses_plain_http_off_loopback() {
         let client = client_for("https://collector.example.com/v1/logs").unwrap();
 
         let (sent, waits) =
-            post_recording_with(&client, "http://collector.example.com/v1/logs", SEND_BUDGET).await;
+            post_recording_with(&client, "http://127.0.0.1:1/v1/logs", SEND_BUDGET).await;
 
         assert_eq!(sent, Sent::Dropped);
         assert!(waits.is_empty());
