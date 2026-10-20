@@ -278,10 +278,12 @@ Set either with `actual config set`, and clear it by setting it to `""`. These
 events don't go to PostHog or to `api-service.api.prod.actual.ai`, only where
 you point them.
 
-Each event carries these attributes, every one on every event except the last
-three, which are particular to one kind of event as noted, as an empty string
-when unknown. None of them names you, your organization, your repository or
-this installation, so an event carries the same fields logged in or out:
+Every event carries each of these attributes except `actual.detection.method`,
+which only context events carry, and `actual.gate.outcome` and
+`actual.gate.denied_types`, which only override events carry. An unknown value
+is sent as an empty string. None of them names you, your organization, your
+repository or this installation, so an event carries the same fields logged in
+or out:
 
 | Attribute | What it is | Privacy class |
 |-----------|------------|---------------|
