@@ -1,16 +1,12 @@
 # CLI Distribution
 
-How the `actual` binary is built, signed, and published to Homebrew, npm, and
-GitHub Releases.
+How the `actual` binary is built, signed, and published to Homebrew, npm, and GitHub Releases.
 
 ---
 
 ## Overview
 
-A release is triggered by pushing a `v*` tag to `main`. Pre-release tags
-(suffixed with `-alpha`, `-beta`, `-rc`, or `-test`) are detected and skipped
-by all release workflows — only clean semver tags (e.g. `v0.2.0`) produce
-published artifacts.
+A release is triggered by pushing a `v*` tag to `main`. Pre-release tags (suffixed with `-alpha`, `-beta`, `-rc`, or `-test`) are detected and skipped by all release workflows — only clean semver tags (e.g. `v0.2.0`) produce published artifacts.
 
 The two release workflows are:
 
@@ -57,20 +53,15 @@ Both workflows build the same four targets in parallel:
 
 Linux arm64 is cross-compiled using `gcc-aarch64-linux-gnu`.
 
-All builds use `cargo build --release` (LTO, stripped, single codegen unit — see
-`[profile.release]` in `Cargo.toml`).
+All builds use `cargo build --release` (LTO, stripped, single codegen unit — see `[profile.release]` in `Cargo.toml`).
 
 ---
 
 ## macOS signing and notarization
 
-macOS binaries are signed with an Apple Developer ID certificate and notarized
-via `xcrun notarytool`. This allows Gatekeeper to pass without the quarantine
-prompt users would otherwise see.
+macOS binaries are signed with an Apple Developer ID certificate and notarized via `xcrun notarytool`. This allows Gatekeeper to pass without the quarantine prompt users would otherwise see.
 
-The signing steps run only when `APPLE_CERTIFICATE_P12` is set in the repo
-secrets. Without it (e.g. in forks), builds succeed but produce unsigned
-binaries.
+The signing steps run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets. Without it (e.g. in forks), builds succeed but produce unsigned binaries.
 
 **Secrets required:**
 
@@ -92,9 +83,7 @@ The `release.yml` workflow creates two GitHub Releases from the same artifacts:
 1. **Private release** on `actual-software/actual-cli` (this repo)
 2. **Public mirror** on `actual-software/actual-releases`
 
-The public releases repo is the canonical download source for the Homebrew tap
-and for users doing manual installs. It has no source code — only release
-assets.
+The public releases repo is the canonical download source for the Homebrew tap and for users doing manual installs. It has no source code — only release assets.
 
 **Artifact filenames** (each is a `.tar.gz` containing a single `actual` binary):
 
@@ -109,30 +98,24 @@ actual-linux-arm64.tar.gz
 
 ## Homebrew tap
 
-After the GitHub Release is created, `release.yml` automatically updates the
-formula in `actual-software/homebrew-actual`.
+After the GitHub Release is created, `release.yml` automatically updates the formula in `actual-software/homebrew-actual`.
 
-The update script (`scripts/update-formula.py` in the tap repo) takes the new
-version and SHA256 hashes computed from the release tarballs and rewrites
-`Formula/actual.rb` from `template/actual.rb`.
+The update script (`scripts/update-formula.py` in the tap repo) takes the new version and SHA256 hashes computed from the release tarballs and rewrites `Formula/actual.rb` from `template/actual.rb`.
 
-The formula is committed directly to `main` on the tap repo. Homebrew picks it
-up immediately when users run `brew upgrade` or `brew install`.
+The formula is committed directly to `main` on the tap repo. Homebrew picks it up immediately when users run `brew upgrade` or `brew install`.
 
 **Homebrew install (user-facing):**
 ```bash
 brew install actual-software/actual/actual
 ```
 
-**Secret required:** `TAP_GITHUB_TOKEN` — a PAT with write access to
-`actual-software/homebrew-actual` and `actual-software/actual-releases`.
+**Secret required:** `TAP_GITHUB_TOKEN` — a PAT with write access to `actual-software/homebrew-actual` and `actual-software/actual-releases`.
 
 ---
 
 ## npm packages
 
-The `npm-publish.yml` workflow publishes five packages to the `@actualai` scope
-on the public npm registry:
+The `npm-publish.yml` workflow publishes five packages to the `@actualai` scope on the public npm registry:
 
 | Package | Contents |
 |---------|---------|
@@ -142,9 +125,7 @@ on the public npm registry:
 | `@actualai/actual-linux-x64` | Linux x64 binary |
 | `@actualai/actual-linux-arm64` | Linux arm64 binary |
 
-The npm package scaffolding (package.json files, install scripts) lives in
-`actual-software/actual-releases` under `npm/`. Versions are synced from the
-git tag via `scripts/sync-npm-version.sh` before publishing.
+The npm package scaffolding (package.json files, install scripts) lives in `actual-software/actual-releases` under `npm/`. Versions are synced from the git tag via `scripts/sync-npm-version.sh` before publishing.
 
 **npm install (user-facing):**
 ```bash
