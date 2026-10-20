@@ -368,13 +368,18 @@ pub(crate) async fn flush(config: &Config) {
 }
 
 /// A client with the API client's User-Agent that refuses plain HTTP unless
-/// `endpoint` is loopback.
+/// `endpoint` is loopback, and follows no redirect: the relaxed check covers
+/// `endpoint` alone, so a 3xx is the final answer and the body goes nowhere
+/// else.
 fn client_for(endpoint: &str) -> Option<reqwest::Client> {
+    client_builder(endpoint).build().ok()
+}
+
+fn client_builder(endpoint: &str) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(crate::api::client::USER_AGENT_VALUE)
         .https_only(!crate::net::is_loopback_http_url(endpoint))
-        .build()
-        .ok()
+        .redirect(reqwest::redirect::Policy::none())
 }
 
 /// How one request ended.
@@ -1445,6 +1450,52 @@ mod tests {
 
         assert_eq!(sent, Sent::Dropped);
         assert!(waits.is_empty());
+    }
+
+    /// A loopback endpoint that redirects to a plain-HTTP host elsewhere gets
+    /// a final answer, not a resend: nothing reaches the host it names, by
+    /// POST or by GET, and nothing is retried.
+    #[tokio::test]
+    async fn test_a_redirect_is_final_and_sends_nothing_to_its_target() {
+        let mut remote = mockito::Server::new_async().await;
+        let remote_posts = remote
+            .mock("POST", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let remote_gets = remote
+            .mock("GET", mockito::Matcher::Any)
+            .expect(0)
+            .create_async()
+            .await;
+        let location = format!(
+            "http://collector.example:{}/v1/logs",
+            remote.socket_address().port()
+        );
+        let mut local = mockito::Server::new_async().await;
+        let endpoint = format!("{}/v1/logs", local.url());
+        let client = client_builder(&endpoint)
+            .resolve("collector.example", remote.socket_address())
+            .build()
+            .unwrap();
+
+        for status in [301, 302, 303, 307, 308] {
+            let redirect = local
+                .mock("POST", "/v1/logs")
+                .with_status(status)
+                .with_header("location", &location)
+                .create_async()
+                .await;
+
+            let (sent, waits) = post_recording_with(&client, &endpoint, SEND_BUDGET).await;
+
+            assert_eq!(sent, Sent::Rejected(status as u16));
+            assert!(waits.is_empty());
+            redirect.assert_async().await;
+            redirect.remove_async().await;
+        }
+        remote_posts.assert_async().await;
+        remote_gets.assert_async().await;
     }
 
     // ── the uploader ────────────────────────────────────────────────────
