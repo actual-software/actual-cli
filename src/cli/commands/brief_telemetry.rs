@@ -19,6 +19,9 @@
 //! **Nothing until configured.** With telemetry opted out or no output set,
 //! [`report`] returns before it reads an id, writes the ledger or spawns
 //! anything.
+//!
+//! `check-override`'s event groups ADRs with [`logical_adrs`] and sends with
+//! [`dispatch`] too, so both events count an ADR the same way.
 
 use std::path::Path;
 
@@ -28,15 +31,17 @@ use crate::telemetry::otlp;
 
 /// One logical ADR among the documents a brief carried rules from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BriefedAdr {
+pub(super) struct BriefedAdr {
     /// The candidate group, else the one file's `adr_id`.
-    key: String,
+    pub(super) key: String,
     /// The `adr_id` of each of its files, in brief order.
-    adr_ids: Vec<String>,
+    pub(super) adr_ids: Vec<String>,
 }
 
 /// `documents` grouped into logical ADRs, in the order the brief ranked them.
-fn logical_adrs<'a>(documents: impl IntoIterator<Item = &'a RuleDocument>) -> Vec<BriefedAdr> {
+pub(super) fn logical_adrs<'a>(
+    documents: impl IntoIterator<Item = &'a RuleDocument>,
+) -> Vec<BriefedAdr> {
     let mut adrs: Vec<BriefedAdr> = Vec::new();
     for meta in documents
         .into_iter()
@@ -97,13 +102,13 @@ pub(super) fn report<'a>(
 /// `#[cfg(test)]` twin captures them instead, so unit tests neither write the
 /// real spool nor spawn a process; the subprocess integration test runs this.
 #[cfg(not(test))]
-fn dispatch(records: Vec<otlp::LogRecord>) {
+pub(super) fn dispatch(records: Vec<otlp::LogRecord>) {
     otlp::spool(&records);
     super::rules_scope::spawn_uploader();
 }
 
 #[cfg(test)]
-fn dispatch(records: Vec<otlp::LogRecord>) {
+pub(super) fn dispatch(records: Vec<otlp::LogRecord>) {
     tests::CAPTURED.with(|cell| cell.borrow_mut().extend(records));
 }
 
