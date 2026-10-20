@@ -1915,6 +1915,51 @@ fn test_session_summary_counts_the_folders_a_plan_names() {
     );
 }
 
+/// Direct mode's `--json` reports the folder pass the hook runs before its
+/// judge, and notes nothing, since there is no session to note it in.
+#[test]
+fn test_plan_check_json_reports_the_folder_pass() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    for file in ["scripts/deploy.sh", "services/auth/token.ts"] {
+        let path = repo.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    let output = actual_in(
+        repo.path(),
+        config_dir.path(),
+        &[
+            "plan-check",
+            "--json",
+            "--no-rank",
+            "--runner",
+            "claude-cli",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "Run `scripts/deploy.sh` and sign the token in `services/auth/token.ts`.",
+        ],
+    )
+    .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["status"], "not_checked");
+    assert_eq!(
+        value["folders"]["covered"],
+        serde_json::json!(["services/auth"])
+    );
+    assert_eq!(value["folders"]["gaps"], serde_json::json!(["scripts"]));
+    assert_eq!(value["folders"]["undecided"], serde_json::json!([]));
+    assert_eq!(value["folders"]["files_searched"], 2);
+    assert!(value["folders"]["elapsed_ms"].as_f64().unwrap() > 0.0);
+    assert!(!config_dir.path().join("brief-ledger").exists());
+}
+
 /// Run from a subfolder the agent changed into, a hook given the conventional
 /// `--rules-dir` and no `--repo` still places files from the repository root:
 /// a governed file is briefed under its root-relative path, and a file outside

@@ -644,7 +644,7 @@ struct PartialCoverage {
 }
 
 #[derive(Serialize)]
-struct CheckJson {
+pub(super) struct CheckJson {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
@@ -662,8 +662,15 @@ struct CheckJson {
 }
 
 pub(super) fn render_json(outcome: &Outcome, kind: check::ArtifactKind) -> String {
+    serde_json::to_string_pretty(&check_json(outcome, kind))
+        .expect("plan check report is serializable — this is a programmer error")
+}
+
+/// [`render_json`]'s report, for a caller that prints fields of its own
+/// beside it.
+pub(super) fn check_json(outcome: &Outcome, kind: check::ArtifactKind) -> CheckJson {
     let copy = artifact_copy(kind);
-    let payload = match outcome {
+    match outcome {
         Outcome::NothingApplies => CheckJson {
             status: "not_checked",
             detail: Some(format!(
@@ -722,9 +729,7 @@ pub(super) fn render_json(outcome: &Outcome, kind: check::ArtifactKind) -> Strin
                 partial: partial.map(|(judged, total)| PartialCoverage { judged, total }),
             }
         }
-    };
-    serde_json::to_string_pretty(&payload)
-        .expect("plan check report is serializable — this is a programmer error")
+    }
 }
 
 /// The direct-mode error summary: every conflicting rule id, one per line.
