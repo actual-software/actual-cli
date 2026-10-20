@@ -173,10 +173,12 @@ The skill works inside the coding agent your team already uses: Claude Code, Cod
 |----------|--------------|----------------|
 | macOS | Apple Silicon (arm64) | Actual.ai Skill, Homebrew, npm, manual download |
 | macOS | Intel (x64) | Actual.ai Skill, Homebrew, npm, manual download |
-| Linux | x64 | Actual.ai Skill, Homebrew, npm, manual download |
-| Linux | arm64 | Actual.ai Skill, Homebrew, npm, manual download |
+| Linux (glibc 2.39 or newer) | x64 | Actual.ai Skill, Homebrew, npm, manual download |
+| Linux (glibc 2.39 or newer) | arm64 | Actual.ai Skill, Homebrew, npm, manual download |
 
 Windows is not currently supported.
+
+On Linux, every install method in the table puts a prebuilt binary on your machine that needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40, RHEL 10, or a later release of any of them. Run `ldd --version` to see which glibc you have. Ubuntu 22.04, Debian 12, RHEL 9 and Amazon Linux 2023 ship an older one. There the arm64 binary exits with ``version `GLIBC_2.39' not found``, and the x64 binary runs but prints ``weak version `GLIBC_2.39' not found`` every time it starts. On those releases, build from source instead (see **Manual download / Build from source** above).
 
 ## When do the Actual.ai Skill and CLI run?
 
