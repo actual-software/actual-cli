@@ -51,7 +51,7 @@ Both workflows build the same four targets in parallel:
 | Target | Runner | Signing |
 |--------|--------|---------|
 | `aarch64-apple-darwin` (macOS arm64) | `macos-latest` | Ad hoc only (see below) |
-| `x86_64-apple-darwin` (macOS x64) | `macos-latest` | Ad hoc only (see below) |
+| `x86_64-apple-darwin` (macOS x64) | `macos-latest` | None (see below) |
 | `x86_64-unknown-linux-gnu` (Linux x64) | `ubuntu-latest` | None |
 | `aarch64-unknown-linux-gnu` (Linux arm64) | `ubuntu-latest` (cross) | None |
 
@@ -63,12 +63,12 @@ All builds use `cargo build --release` (LTO, stripped, single codegen unit — s
 
 ## macOS signing and notarization
 
-Both workflows have steps that sign the macOS binaries with an Apple Developer ID certificate and notarize them with `xcrun notarytool`, which would let Gatekeeper accept them without a quarantine prompt. The steps run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets, and no release has had it: the import, sign, and notarize steps were skipped in both macOS jobs of both workflows for every release from v0.2.0, when the steps were added, through v0.8.0. Every published macOS binary carries only the linker's ad hoc signature (`codesign -dv` reports `Signature=adhoc`), and Gatekeeper rejects it (`spctl --assess --type execute` reports `rejected`).
+Both workflows have steps that sign the macOS binaries with an Apple Developer ID certificate and notarize them with `xcrun notarytool`, which would let Gatekeeper accept them without a quarantine prompt. The steps have been in both workflows since v0.1.0, but they run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets, and no release has had it. The runs for v0.2.0 through v0.8.0 show the import, sign, and notarize steps skipped in both macOS jobs of both workflows. GitHub no longer keeps step records for the v0.1.x runs, and their binaries carry no Developer ID signature either. Every published arm64 binary carries only the linker's ad hoc signature (`codesign -dv` reports `Signature=adhoc`), every x64 binary is unsigned (`codesign -dv` reports `code object is not signed at all`), and Gatekeeper rejects both (`spctl --assess --type execute` reports `rejected`).
 
 Until the binaries are signed, each channel handles Gatekeeper its own way:
 
-- **Manual download**: a browser marks the downloaded archive as quarantined and `tar` carries the mark onto the extracted binary, so the README's install steps end with `xattr -dr com.apple.quarantine`.
-- **npm**: the macOS platform packages run a `postinstall` script that re-signs the binary ad hoc (`codesign --sign -`).
+- **Manual download**: a browser marks the downloaded archive as quarantined and `tar` carries the mark onto the extracted binary, so the README's install steps include `xattr -dr com.apple.quarantine` for a browser download.
+- **npm**: the macOS platform packages run a `postinstall` script that signs the binary ad hoc (`codesign --sign -`).
 - **Homebrew**: the formula's caveat gives an `xattr` command for when Gatekeeper blocks the binary.
 
 The same caveat says the Apple Developer application is under review. Once a certificate exists, these secrets turn the steps on:
