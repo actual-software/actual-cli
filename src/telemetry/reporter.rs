@@ -143,6 +143,7 @@ mod tests {
         let config = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(false),
+                ..Default::default()
             }),
             ..Default::default()
         };
