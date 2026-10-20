@@ -200,7 +200,11 @@ pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(unix)]
 pub fn append_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+    // Opening a pipe to write waits for a reader, so one is refused unopened.
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_fifo()) {
+        return Err(std::io::Error::other("not a regular file"));
+    }
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -713,12 +717,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "earlier\nlater\n");
     }
 
-    /// A path that is not a regular file gets nothing and keeps its mode. A
-    /// pipe the test owns is used because it is one whose mode this account
-    /// could change.
+    /// A pipe is refused without waiting for a reader, so an uploader pointed
+    /// at one nobody reads still returns, and the pipe keeps its mode.
     #[cfg(unix)]
     #[test]
-    fn test_append_secure_leaves_a_path_that_is_not_a_regular_file_alone() {
+    fn test_append_secure_refuses_a_pipe_without_waiting_for_a_reader() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
         let fifo = dir.path().join("events.fifo");
@@ -728,17 +731,35 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        // Holding both ends lets the append open the pipe without blocking.
-        let _ends = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&fifo)
-            .unwrap();
         let before = std::fs::metadata(&fifo).unwrap().permissions().mode();
 
-        assert!(append_secure(&fifo, b"line\n").is_err());
+        let (sent, received) = std::sync::mpsc::channel();
+        let target = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = sent.send(append_secure(&target, b"line\n").is_err());
+        });
+        let refused = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the append waited for a reader");
 
+        assert!(refused);
         let after = std::fs::metadata(&fifo).unwrap().permissions().mode();
+        assert_eq!(after, before);
+    }
+
+    /// The type is checked again once the path is open, so a device gets
+    /// nothing and keeps its mode as well.
+    #[cfg(unix)]
+    #[test]
+    fn test_append_secure_refuses_a_device() {
+        use std::os::unix::fs::PermissionsExt;
+        let null = Path::new("/dev/null");
+        let before = std::fs::metadata(null).unwrap().permissions().mode();
+
+        let error = append_secure(null, b"line\n").unwrap_err();
+
+        assert_eq!(error.to_string(), "not a regular file");
+        let after = std::fs::metadata(null).unwrap().permissions().mode();
         assert_eq!(after, before);
     }
 
