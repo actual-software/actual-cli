@@ -601,6 +601,7 @@ mod tests {
             slug: "slug".to_string(),
             adr: None,
             adr_id: None,
+            candidate_group_id: None,
             relative_path: ".actual/rules/slug.md".to_string(),
             title: Some("Title".to_string()),
             score: 1.0,

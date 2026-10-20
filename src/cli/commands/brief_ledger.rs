@@ -475,7 +475,7 @@ mod tests {
         }
     }
 
-    /// A record written before decisions were keyed on `adr_id` carries keys the
+    /// A record written before decisions were keyed on their ids carries keys the
     /// new code would never produce; it reads as empty rather than miscounting.
     #[test]
     fn test_a_version_1_record_reads_as_empty_after_the_key_change() {

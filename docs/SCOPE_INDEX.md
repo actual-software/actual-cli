@@ -368,16 +368,22 @@ subject while the next relevant decision never appears. The decision name is
 the title prefix before the last colon, derived at index time so colons within
 the decision title remain part of its identity; a document
 whose title has no colon names no decision and forms its own group rather
-than pooling with other unnamed ones. A document whose v2 header carries an
-`adr_id` is grouped on that id instead, whatever its title or filename say, so
-several files sharing one id are one decision and renaming a file does not make
-it a new one. In `--by-adr --json` each decision's `key` is therefore
-`id:<adr_id>` for v2 documents (the prefix keeps an id from meeting a v1
-document whose title prefix or filename happens to equal it), and the decision then also carries an `adr_id`
-field (and each of its documents does); both are omitted for v1 documents,
-whose `key` is unchanged. The same key is what the brief's once-per-session
-state and `session summary` record.
-The brief's heading stays the decision's title. Decisions appear where their best
+than pooling with other unnamed ones. A document whose v2 header carries a
+`candidate_group_id` is grouped on that id instead, whatever its title or
+filename say. That is the id the app lists one decision under, and the generator
+gives each policy of a decision its own `adr_id`, so grouping on `adr_id` would
+count a decision with nine policies as nine. A v2 document with an `adr_id` but
+no group id is grouped on its `adr_id`; one with neither falls back to its title
+as above. Renaming a file does not make it a new decision. In `--by-adr --json`
+each decision's `key` is therefore `group:<candidate_group_id>`, `id:<adr_id>`,
+the title prefix, or the filename, in that order (the prefixes keep an id from
+meeting a document whose title prefix or filename happens to equal it). A
+decision keyed on a group id also carries a `candidate_group_id` field, as do
+its documents; both are omitted otherwise, so v1 output is unchanged. The same
+key is what the brief's once-per-session state and `session summary` record. A
+rule set only partly regenerated splits a decision: a policy missing its group
+id is keyed on its own `adr_id`, and regenerating the remaining files is the
+fix. The brief's heading stays the decision's title. Decisions appear where their best
 document ranked, and documents retain their relative rank within each
 decision. Making each group contiguous can change the flattened document
 order when decisions were interleaved. Grouping is stage 1 only, since what
