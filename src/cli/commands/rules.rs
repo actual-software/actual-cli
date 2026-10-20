@@ -166,9 +166,11 @@ struct JsonDocument<'a> {
     /// The decision this policy belongs to, from a v2 header; omitted for v1.
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_group_id: Option<&'a str>,
-    /// The root a v2 document's paths are relative to; omitted for v1.
+    /// The root a v2 document's declared paths are relative to, normalized, as
+    /// `rules select` shows it; omitted for a v1 document and for a v2 one that
+    /// declares no paths.
     #[serde(skip_serializing_if = "Option::is_none")]
-    root: Option<&'a str>,
+    root: Option<String>,
     scope: Option<&'a str>,
     rules: &'a [Rule],
     verify: &'a [VerifyBlock],
@@ -221,7 +223,7 @@ fn render_json(report: &RuleSetLoadReport, root: &Path) -> String {
                     .as_ref()
                     .and_then(|m| m.candidate_group_id.as_deref())
                     .filter(|id| !id.trim().is_empty()),
-                root: doc.meta.as_ref().and_then(|m| m.root.as_deref()),
+                root: crate::rules::scope::signals::declared_root(doc),
                 scope: doc.scope.as_deref(),
                 rules: &doc.rules,
                 verify: &doc.verify,
@@ -379,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_render_json_adds_ids_and_root_for_v2_documents_only() {
-        const V2: &str = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-1\n    candidate_group_id: grp-1\n  scope:\n    root: packages/web\n---\n\n# Beta\n\n### Rules\n\n- **R-B-001** MUST: b\n";
+        const V2: &str = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: adr-1\n    candidate_group_id: grp-1\n  scope:\n    root: packages/web\n    paths:\n      - \"src/**\"\n---\n\n# Beta\n\n### Rules\n\n- **R-B-001** MUST: b\n";
         let root = seed(&[("a.md", DOC), ("b.md", V2)]);
         let report = load_rule_set(root.path()).unwrap();
         let value: serde_json::Value =
@@ -396,6 +398,57 @@ mod tests {
         for key in ["path", "slug", "title", "scope", "rules", "warnings"] {
             assert!(v2.get(key).is_some(), "{key}");
         }
+    }
+
+    /// `rules ls` shows the root the index enforces: normalized, and absent for
+    /// a v2 header that declares no paths, where the root does not apply.
+    #[test]
+    fn test_render_json_root_is_the_normalized_declared_root_and_absent_without_paths() {
+        let with_paths = "---\nversion: 2\nmetadata:\n  scope:\n    root: ./packages/web/\n    paths:\n      - \"src/**\"\n---\n\n# Beta\n\n### Rules\n\n- **R-B-001** MUST: b\n";
+        let without_paths = "---\nversion: 2\nmetadata:\n  scope:\n    root: packages/web\n---\n\n# Gamma\n\n### Rules\n\n- **R-C-001** MUST: c\n";
+        let root = seed(&[("b.md", with_paths), ("c.md", without_paths)]);
+        let report = load_rule_set(root.path()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&report, root.path())).unwrap();
+        assert_eq!(value["documents"][0]["root"], "packages/web");
+        assert!(value["documents"][1].get("root").is_none());
+    }
+
+    /// A duplicate-slug warning is part of the JSON, so it must not name this
+    /// machine either. The collision is built from hand-made sources under the
+    /// real root, since `a.md` beside `a.MD` needs a case-sensitive filesystem.
+    #[test]
+    fn test_render_json_duplicate_slug_warnings_carry_no_absolute_path() {
+        use crate::rules::{parse_rule_sources, RuleSource, RuleSources};
+
+        let root = tempdir().unwrap();
+        let dir = crate::rules::rules_dir(root.path());
+        let source = |name: &str| RuleSource {
+            path: dir.join(name),
+            text: Ok(DOC.to_string()),
+        };
+        let report = parse_rule_sources(RuleSources {
+            rules_dir: dir.clone(),
+            sources: vec![source("a.md"), source("a.MD")],
+            errors: Vec::new(),
+            digest: String::new(),
+        });
+        let json = render_json(&report, root.path());
+        let root_display = root.path().display().to_string();
+        assert_eq!(
+            json.matches(root_display.as_str()).count(),
+            1,
+            "temp root leaked outside rules_dir: {json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let duplicate = value["documents"][0]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["kind"] == "duplicate_slug")
+            .unwrap_or_else(|| panic!("no duplicate_slug warning in {json}"));
+        let detail = duplicate["detail"].as_str().unwrap();
+        assert!(detail.contains("shared with a.MD;"), "{detail}");
     }
 
     /// The one field that names this machine is `rules_dir`. Every per-file

@@ -76,3 +76,38 @@ impl Drop for EnvGuard {
         }
     }
 }
+
+/// Two v2 rule documents with one file stem (`same-stem.md`) in different
+/// directories, each a distinct decision with its own `adr_id`,
+/// `candidate_group_id` and root, so only the path tells them apart. Discovery
+/// does not descend into subdirectories, so this bypasses it on purpose to test
+/// the index and the output over a slug collision.
+pub fn colliding_index() -> crate::rules::scope::index::ScopeIndex {
+    use std::path::{Path, PathBuf};
+
+    let text = |id: &str, title: &str| {
+        format!(
+            "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n    candidate_group_id: grp-{id}\n  scope:\n    root: packages/{id}\n    paths:\n      - \"src/**\"\n---\n\n# {title}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
+        )
+    };
+    let documents = [("one", "Alpha Rules"), ("two", "Beta Rules")]
+        .iter()
+        .map(|(id, title)| {
+            crate::rules::parse_rule_document(
+                &PathBuf::from(format!("/repo/.actual/rules/{id}/same-stem.md")),
+                &text(id, title),
+            )
+            .unwrap()
+        })
+        .collect();
+    crate::rules::scope::index::ScopeIndex::build(
+        &crate::rules::RuleSetLoadReport {
+            rules_dir: PathBuf::from("/repo/.actual/rules"),
+            documents,
+            errors: Vec::new(),
+            digest: String::new(),
+        },
+        Path::new("/repo"),
+        "fp".to_string(),
+    )
+}

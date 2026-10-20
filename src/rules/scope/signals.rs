@@ -763,6 +763,23 @@ pub fn normalize_root(root: Option<&str>) -> String {
     }
 }
 
+/// The root a document's declared paths are written against, normalized, or
+/// `None` when the root does not apply: a v1 document, or a v2 header that
+/// declares no usable include path. A header without declared paths leaves its
+/// globs derived from Verify, which are repository-relative, so enforcing the
+/// root would shut the document out of its own globs. `.` is the whole
+/// repository. The index and every output that shows a root use this, so they
+/// cannot disagree.
+pub fn declared_root(doc: &crate::rules::RuleDocument) -> Option<String> {
+    let meta = doc.meta.as_ref()?;
+    let root = normalize_root(meta.root.as_deref());
+    let declares = meta
+        .include_paths()
+        .into_iter()
+        .any(|path| normalize_path(&rebase_onto_root(&root, path)).is_some());
+    declares.then_some(root)
+}
+
 /// A header path, which is relative to the root, rebased onto the repository.
 ///
 /// A leading `/` anchors the pattern at the root in gitignore style, so it is

@@ -370,8 +370,10 @@ pub struct Match {
     /// document, and then omitted from the JSON form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_group_id: Option<String>,
-    /// The repository root a v2 document's paths are relative to (`.` is the
-    /// whole repository). Absent for a v1 document, and then omitted from JSON.
+    /// The repository root a v2 document's declared paths are relative to
+    /// (`.` is the whole repository); see [`signals::declared_root`]. Absent,
+    /// and then omitted from JSON, for a v1 document and for a v2 one that
+    /// declares no paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     pub score: f64,
@@ -394,9 +396,6 @@ pub struct AdrGroup {
     /// from the JSON form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_group_id: Option<String>,
-    /// The root of the group's best document; see [`Match::root`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<String>,
     /// The decision's name, absent for a document that stands alone.
     pub title: Option<String>,
     /// The best score among this group's documents, which is what it ranks at.
@@ -816,7 +815,6 @@ fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
             None => groups.push(AdrGroup {
                 key,
                 candidate_group_id: hit.candidate_group_id.clone(),
-                root: hit.root.clone(),
                 // The first hit of a group is its best, because `matches` is
                 // already in rank order.
                 score: hit.score,
@@ -1094,16 +1092,8 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
             .as_ref()
             .and_then(|m| m.candidate_group_id.clone())
             .filter(|id| !id.trim().is_empty()),
-        // The root is the frame header paths are written against. A header
-        // that declares none leaves its globs derived from Verify, which are
-        // repository-relative, so enforcing the root would shut the document
-        // out of its own globs (`root: packages/web` with a Verify path in
-        // `shared/lib/`). Without declared paths the root does not apply.
-        root: if doc.meta.is_some() && !declared.is_empty() {
-            extracted.root
-        } else {
-            String::new()
-        },
+        // See [`signals::declared_root`] for when the root applies.
+        root: signals::declared_root(doc).unwrap_or_default(),
         include_globs: declared,
         exclude_globs: extracted.excludes.into_iter().map(|g| g.pattern).collect(),
         languages: doc
@@ -2913,39 +2903,9 @@ mod tests {
 
     // ── slug collisions and the new output fields ────────────────────────
 
-    /// Helper: two documents with one file stem in different directories, each
-    /// a distinct decision, so only the path tells them apart.
-    fn colliding_index() -> ScopeIndex {
-        let text = |id: &str, title: &str| {
-            format!(
-                "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n    candidate_group_id: grp-{id}\n  scope:\n    root: packages/{id}\n    paths:\n      - \"src/**\"\n---\n\n# {title}\n\n### Rules\n\n- **R-A-001** MUST: a rule.\n"
-            )
-        };
-        let documents = [("one", "Alpha Rules"), ("two", "Beta Rules")]
-            .iter()
-            .map(|(id, title)| {
-                parse_rule_document(
-                    &PathBuf::from(format!("/repo/.actual/rules/{id}/same-stem.md")),
-                    &text(id, title),
-                )
-                .unwrap()
-            })
-            .collect();
-        ScopeIndex::build(
-            &RuleSetLoadReport {
-                rules_dir: PathBuf::from("/repo/.actual/rules"),
-                documents,
-                errors: Vec::new(),
-                digest: String::new(),
-            },
-            Path::new("/repo"),
-            "fp".to_string(),
-        )
-    }
-
     #[test]
     fn test_a_shared_stem_does_not_give_one_document_the_others_evidence() {
-        let index = colliding_index();
+        let index = crate::testutil::colliding_index();
         let query = Query::new("").with_paths(["packages/two/src/x.ts".to_string()]);
         let prefiltered = crate::rules::scope::select::prefilter(&index, &query, 5, 5);
         let selection = prefiltered.finish(crate::rules::scope::select::Stage2::NotRequested);
@@ -2967,7 +2927,7 @@ mod tests {
 
     #[test]
     fn test_match_and_group_carry_ids_and_root_for_v2_only() {
-        let index = colliding_index();
+        let index = crate::testutil::colliding_index();
         let groups = index.search_adrs(
             &Query::new("").with_paths(["packages/one/src/x.ts".to_string()]),
             5,
@@ -2979,7 +2939,6 @@ mod tests {
             Some("grp-one")
         );
         assert_eq!(groups[0].documents[0].adr_id.as_deref(), Some("one"));
-        assert_eq!(groups[0].root.as_deref(), Some("packages/one"));
         assert_eq!(groups[0].documents[0].root.as_deref(), Some("packages/one"));
         // Existing fields keep their names.
         let json = serde_json::to_value(&groups[0]).unwrap();
