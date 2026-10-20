@@ -1978,6 +1978,39 @@ mod tests {
         assert!(value.get("explain").is_none());
     }
 
+    /// The filename scan reports a v2 decision the way the grouped search does:
+    /// keyed `id:<adr_id>` and carrying the `adr_id`. A v1 group has neither.
+    #[test]
+    fn test_adr_json_filename_scan_reports_adr_id_for_v2_groups_only() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let v2 = "---\nversion: 2\nname: token-signing\nmetadata:\n  actual:\n    adr_id: adr-7\n  scope:\n    root: .\n---\n\n# Adopt RS256: Token Signing\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n";
+        let root = seed(&[
+            ("cross-cutting-token-signing-e410.md", v2),
+            ("token-expiry-a1b2.md", OAUTH),
+            ("terraform-providers-c3d4.md", TERRAFORM),
+        ]);
+        let index = resolved(root.path()).index;
+        let query = Query::new("token");
+        let groups = index.search_adrs(&query, 5);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_adr_json(&index, &query, &groups, 5, true)).unwrap();
+        let scan = value["explain"]["filename_scan"].as_array().unwrap();
+        let v2_group = scan
+            .iter()
+            .find(|group| group["key"] == "id:adr-7")
+            .unwrap_or_else(|| panic!("no id-keyed group in {scan:?}"));
+        assert_eq!(v2_group["adr_id"], "adr-7");
+        let v1_group = scan
+            .iter()
+            .find(|group| group["key"] != "id:adr-7")
+            .unwrap_or_else(|| panic!("no v1 group in {scan:?}"));
+        assert!(v1_group.get("adr_id").is_none(), "{v1_group}");
+    }
+
     /// Grouped `--explain` keeps the per-document attribution and compares it
     /// with a filename scan regrouped under the same decision-level cap.
     #[test]
