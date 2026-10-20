@@ -7,8 +7,9 @@
 //! **A logical ADR, keyed the way Actual's platform keys it.** Each rule file
 //! is one policy with its own `adr_id`, and the files of one decision share a
 //! `candidate_group_id`. The key is the group, else the file's own `adr_id`,
-//! and a record lists the `adr_id` of every file behind it. A file without a
-//! v2 header has neither id, so it sends nothing.
+//! and a record lists the `adr_id` of every file behind it that the brief
+//! carried a rule from. A file without a v2 header has neither id, so it sends
+//! nothing.
 //!
 //! **Once per session.** Keys go into the session's brief ledger, the record
 //! that subagents share and compaction never resets, and a record is built
@@ -25,7 +26,7 @@ use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::rules::types::RuleDocument;
 use crate::telemetry::otlp;
 
-/// One logical ADR among the documents a brief recorded as briefed.
+/// One logical ADR among the documents a brief carried rules from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BriefedAdr {
     /// The candidate group, else the one file's `adr_id`.

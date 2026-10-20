@@ -62,23 +62,35 @@ pub fn render_brief(
     rules_per_decision: usize,
     max_chars: usize,
 ) -> Option<String> {
-    render_brief_shown(file, decisions, rules_per_decision, max_chars).map(|(brief, _)| brief)
+    render_brief_shown(file, decisions, rules_per_decision, max_chars)
+        .map(|rendered| rendered.brief)
 }
 
-/// [`render_brief`], also naming which of `decisions` it contributed
-/// everything it could, by position. A caller that remembers what an agent
-/// has been told records only those. That means a decision shown in full, and
-/// one trimmed only to `rules_per_decision` — the cap is a ceiling on what the
-/// decision can ever contribute, so a later read cannot show more. A decision
-/// `max_chars` left out or trimmed is not named: a read with less competition
-/// can still fit it whole.
-pub fn render_brief_shown(
+/// A rendered brief, and what it gave the agent.
+pub struct ShownBrief<'a> {
+    pub brief: String,
+    /// Which of the decisions the brief contributed everything it could, by
+    /// position. A caller that remembers what an agent has been told records
+    /// only those. That means a decision shown in full, and one trimmed only
+    /// to `rules_per_decision` — the cap is a ceiling on what the decision can
+    /// ever contribute, so a later read cannot show more. A decision
+    /// `max_chars` left out or trimmed is not named: a read with less
+    /// competition can still fit it whole.
+    pub shown: Vec<usize>,
+    /// Every document with at least one rule line in the brief, in brief
+    /// order, however its decision was trimmed.
+    pub reached: Vec<&'a RuleDocument>,
+}
+
+/// [`render_brief`], also saying which decisions it contributed everything it
+/// could and which documents' rules it carried.
+pub fn render_brief_shown<'a>(
     file: &str,
-    decisions: &[BriefDecision<'_>],
+    decisions: &[BriefDecision<'a>],
     rules_per_decision: usize,
     max_chars: usize,
-) -> Option<(String, Vec<usize>)> {
-    let candidates: Vec<(usize, &str, Vec<String>)> = decisions
+) -> Option<ShownBrief<'a>> {
+    let candidates: Vec<(usize, &str, Vec<Line<'a>>)> = decisions
         .iter()
         .enumerate()
         .filter_map(|(position, decision)| {
@@ -97,16 +109,17 @@ pub fn render_brief_shown(
 /// One packing pass. With `reserve_note`, room is kept for the omission note
 /// whenever it is or may yet be owed; without, the note is added only if it
 /// still fits, so the cap holds either way.
-fn pack(
+fn pack<'a>(
     frame: &str,
-    candidates: &[(usize, &str, Vec<String>)],
+    candidates: &[(usize, &str, Vec<Line<'a>>)],
     rules_per_decision: usize,
     max_chars: usize,
     reserve_note: bool,
-) -> Option<(String, Vec<usize>)> {
+) -> Option<ShownBrief<'a>> {
     let mut used = frame.chars().count();
     let mut blocks: Vec<String> = Vec::new();
     let mut shown: Vec<usize> = Vec::new();
+    let mut reached: Vec<&'a RuleDocument> = Vec::new();
     let mut omitted = 0usize;
 
     for (at, (position, heading, lines)) in candidates.iter().enumerate() {
@@ -127,6 +140,11 @@ fn pack(
             Some((block, placed)) => {
                 used += 2 + block.chars().count();
                 blocks.push(block);
+                for &(_, source) in &lines[..placed] {
+                    if !reached.iter().any(|seen| std::ptr::eq(*seen, source)) {
+                        reached.push(source);
+                    }
+                }
                 // Briefed means "everything this decision could contribute
                 // was shown". `rules_per_decision` is a ceiling on that: a
                 // decision cut only by the per-decision cap can never show
@@ -159,11 +177,16 @@ fn pack(
             blocks.push(note);
         }
     }
-    Some((format!("{frame}\n\n{}", blocks.join("\n\n")), shown))
+    Some(ShownBrief {
+        brief: format!("{frame}\n\n{}", blocks.join("\n\n")),
+        shown,
+        reached,
+    })
 }
 
-fn decision_block(heading: &str, shown: &[String], total: usize) -> String {
-    let mut block = format!("## {heading}\n{}", shown.join("\n"));
+fn decision_block(heading: &str, shown: &[Line<'_>], total: usize) -> String {
+    let lines: Vec<&str> = shown.iter().map(|(line, _)| line.as_str()).collect();
+    let mut block = format!("## {heading}\n{}", lines.join("\n"));
     if total > shown.len() {
         block.push_str(&format!("\n- ({} of {total} rules shown)", shown.len()));
     }
@@ -179,13 +202,16 @@ fn level_word(level: RuleLevel) -> &'static str {
     }
 }
 
+/// A rule line, and the document it was written under.
+type Line<'a> = (String, &'a RuleDocument);
+
 /// Every obligation of a decision as a line, identical statements merged
 /// under the first document that stated them.
-fn decision_lines(decision: &BriefDecision<'_>) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
+fn decision_lines<'a>(decision: &BriefDecision<'a>) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line<'a>> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
 
-    for document in &decision.documents {
+    for &document in &decision.documents {
         let slug = document.slug().unwrap_or("<unnamed>");
         for rule in &document.rules {
             if !matches!(rule.level, RuleLevel::Must | RuleLevel::MustNot) {
@@ -195,12 +221,13 @@ fn decision_lines(decision: &BriefDecision<'_>) -> Vec<String> {
                 continue;
             }
             seen.push(&rule.statement);
-            lines.push(format!(
+            let line = format!(
                 "- [{slug}/{}] {} {}",
                 rule.id,
                 level_word(rule.level),
                 rule.statement
-            ));
+            );
+            lines.push((line, document));
         }
     }
     lines
@@ -591,7 +618,7 @@ mod tests {
             decision("Adopt RS256", vec![&a]),
             decision("Pin Providers", vec![&b]),
         ];
-        let (brief, shown) =
+        let ShownBrief { brief, shown, .. } =
             render_brief_shown(FILE, &decisions, 1, DEFAULT_MAX_CHARS).expect("a brief");
 
         assert!(brief.contains("(1 of 2 rules shown)"), "{brief}");
@@ -610,14 +637,127 @@ mod tests {
         );
         let decisions = [decision("Adopt RS256", vec![&a])];
         let full = render_brief_shown(FILE, &decisions, 8, DEFAULT_MAX_CHARS).unwrap();
-        assert_eq!(full.1, vec![0]);
+        assert_eq!(full.shown, vec![0]);
 
         let one_rule = render_brief(FILE, &decisions, 1, DEFAULT_MAX_CHARS).unwrap();
-        let (brief, shown) =
+        let ShownBrief { brief, shown, .. } =
             render_brief_shown(FILE, &decisions, 8, one_rule.chars().count()).expect("a brief");
 
         assert!(brief.contains("(1 of 2 rules shown)"), "{brief}");
         assert!(shown.is_empty(), "{shown:?}");
+    }
+
+    fn slugs<'a>(reached: &[&'a RuleDocument]) -> Vec<&'a str> {
+        reached
+            .iter()
+            .map(|document| document.slug().unwrap())
+            .collect()
+    }
+
+    /// Three documents with a rule each that no other states: two for one
+    /// decision, one for another.
+    fn reach_fixture() -> [RuleDocument; 3] {
+        [
+            doc(
+                "cross-cutting-signing-e410",
+                "Adopt RS256: Token Signing",
+                "- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: sign with HS256.",
+            ),
+            doc(
+                "cross-cutting-verification-a1b2",
+                "Adopt RS256: Token Verification",
+                "- **R-B-001** MUST: check revocation before trusting any token.",
+            ),
+            doc(
+                "cross-cutting-pinning-c3d4",
+                "Pin Providers: Terraform",
+                "- **R-C-001** MUST: pin every provider.",
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_reached_names_every_document_of_a_whole_brief_in_order() {
+        let [a, b, c] = reach_fixture();
+        let decisions = [
+            decision("Adopt RS256", vec![&a, &b]),
+            decision("Pin Providers", vec![&c]),
+        ];
+
+        let rendered = render_brief_shown(FILE, &decisions, 8, DEFAULT_MAX_CHARS).unwrap();
+
+        assert_eq!(
+            slugs(&rendered.reached),
+            [
+                "cross-cutting-signing-e410",
+                "cross-cutting-verification-a1b2",
+                "cross-cutting-pinning-c3d4"
+            ]
+        );
+    }
+
+    /// A decision the character cap cut after its first rule is not shown,
+    /// but the document that rule came from was reached. The document whose
+    /// rule was cut, and the decision left out, were not.
+    #[test]
+    fn test_reached_counts_a_decision_the_character_cap_cut_short() {
+        let [a, b, c] = reach_fixture();
+        let decisions = [
+            decision("Adopt RS256", vec![&a, &b]),
+            decision("Pin Providers", vec![&c]),
+        ];
+        let first_rule = render_brief(FILE, &decisions[..1], 1, DEFAULT_MAX_CHARS).unwrap();
+
+        let rendered = render_brief_shown(FILE, &decisions, 8, first_rule.chars().count()).unwrap();
+
+        assert!(
+            rendered.brief.contains("(1 of 3 rules shown)"),
+            "{}",
+            rendered.brief
+        );
+        assert!(rendered.shown.is_empty(), "{:?}", rendered.shown);
+        assert_eq!(slugs(&rendered.reached), ["cross-cutting-signing-e410"]);
+    }
+
+    /// The per-decision cap works the same way: a document none of whose
+    /// rules made the cut was not reached.
+    #[test]
+    fn test_reached_leaves_out_a_document_the_per_decision_cap_cut() {
+        let [a, b, c] = reach_fixture();
+        let decisions = [
+            decision("Adopt RS256", vec![&a, &b]),
+            decision("Pin Providers", vec![&c]),
+        ];
+
+        let rendered = render_brief_shown(FILE, &decisions, 2, DEFAULT_MAX_CHARS).unwrap();
+
+        assert_eq!(rendered.shown, vec![0, 1]);
+        assert_eq!(
+            slugs(&rendered.reached),
+            ["cross-cutting-signing-e410", "cross-cutting-pinning-c3d4"]
+        );
+    }
+
+    /// A document whose only obligation repeats one an earlier document
+    /// stated has no line of its own, so it was not reached.
+    #[test]
+    fn test_reached_leaves_out_a_document_whose_rules_were_all_merged() {
+        let [a, _, _] = reach_fixture();
+        let repeat = doc(
+            "cross-cutting-verification-a1b2",
+            "Adopt RS256: Token Verification",
+            "- **R-B-001** MUST: sign with RS256.",
+        );
+
+        let rendered = render_brief_shown(
+            FILE,
+            &[decision("Adopt RS256", vec![&a, &repeat])],
+            8,
+            DEFAULT_MAX_CHARS,
+        )
+        .unwrap();
+
+        assert_eq!(slugs(&rendered.reached), ["cross-cutting-signing-e410"]);
     }
 
     /// The invariant: whatever the cap, a brief never exceeds it.
