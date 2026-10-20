@@ -882,6 +882,7 @@ mod tests {
         let cfg = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(false),
+                ..Default::default()
             }),
             ..Config::default()
         };
@@ -895,6 +896,7 @@ mod tests {
         let cfg = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(true),
+                ..Default::default()
             }),
             ..Config::default()
         };
@@ -906,7 +908,10 @@ mod tests {
     #[test]
     fn test_format_verbose_section_telemetry_none_in_struct() {
         let cfg = Config {
-            telemetry: Some(TelemetryConfig { enabled: None }),
+            telemetry: Some(TelemetryConfig {
+                enabled: None,
+                ..Default::default()
+            }),
             ..Config::default()
         };
         let output = format_verbose_section(&cfg, 80);
