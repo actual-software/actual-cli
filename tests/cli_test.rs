@@ -29,6 +29,114 @@ fn test_version() {
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
+// ---- update check and `actual version` ----
+
+/// `actual version --json` is the contract the actual skill reads: these six
+/// fields, answered without a network request or a cache write.
+#[test]
+fn test_version_json_answers_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = cmd()
+        .args(["version", "--json"])
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "current_version": env!("CARGO_PKG_VERSION"),
+            "latest_version": null,
+            "update_available": null,
+            "channel": "other",
+            "upgrade_command": null,
+            "release_url": "https://github.com/actual-software/actual-releases/releases/latest",
+        })
+    );
+    assert!(!dir.path().join("update-check.yaml").exists());
+}
+
+#[test]
+fn test_version_check_makes_no_request_when_turned_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = cmd()
+        .args(["version", "--check", "--json"])
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_NO_UPDATE_CHECK", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert!(value["latest_version"].is_null());
+    assert!(!dir.path().join("update-check.yaml").exists());
+
+    cmd()
+        .args(["version", "--check"])
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_NO_UPDATE_CHECK", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "not checked (update checks are turned off)",
+        ));
+}
+
+/// With stderr piped, as under an agent's tool call or a script, a command
+/// neither prints the notice nor starts a lookup, even with a newer version
+/// cached and the last lookup days old.
+#[test]
+fn test_update_notice_stays_silent_when_stderr_is_not_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("update-check.yaml");
+    let seeded = "checked_at: 2020-01-01T00:00:00Z\nlatest_version: 999.0.0\n";
+    std::fs::write(&cache, seeded).unwrap();
+    cmd()
+        .arg("runners")
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("CI")
+        .env_remove("ACTUAL_NO_UPDATE_CHECK")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("is available").not());
+    assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
+}
+
+#[test]
+fn test_help_lists_version_and_hides_update_check() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Print the version, how this copy was installed, and how to upgrade it",
+        ))
+        .stdout(predicate::str::contains("__update-check").not());
+}
+
+#[test]
+fn test_update_check_command_makes_no_request_when_turned_off() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .arg("__update-check")
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_NO_UPDATE_CHECK", "1")
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+    assert!(!dir.path().join("update-check.yaml").exists());
+}
+
 #[test]
 fn test_sync_without_claude_binary() {
     // When Claude binary is not found, sync should exit with code 2.

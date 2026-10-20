@@ -92,6 +92,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 which = "8"
 tempfile = "3"
+# Comparing the running version with the npm registry's latest
+semver = "1"
 
 # Browser launch for OAuth login (best-effort; CLI always prints the URL too)
 open = "5"

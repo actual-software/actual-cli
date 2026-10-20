@@ -13,6 +13,7 @@ pub mod runner;
 pub mod tailoring;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
+pub mod update_check;
 
 pub use cli::commands::handle_result;
 
@@ -49,6 +50,8 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::ImplCheck(args) => cli::commands::impl_check::exec(args),
         Command::Session(args) => cli::commands::session_summary::exec(args),
         Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
+        Command::Version(args) => cli::commands::version::exec(args),
+        Command::UpdateCheck => cli::commands::version::exec_refresh(),
     }
 }
 
@@ -224,5 +227,21 @@ mod tests {
             "/no/such/mint-token-key.pem",
         ]);
         assert!(run(cli).is_err());
+    }
+
+    #[test]
+    fn test_run_version_and_update_check_dispatch_return_ok() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        // Exercises the Command::Version and Command::UpdateCheck arms with
+        // update checks turned off, so neither touches the network.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _off = EnvGuard::set(update_check::OPT_OUT_ENV, "1");
+        assert!(run(Cli::parse_from(["actual", "version", "--check"])).is_ok());
+        assert!(run(Cli::parse_from(["actual", "__update-check"])).is_ok());
     }
 }

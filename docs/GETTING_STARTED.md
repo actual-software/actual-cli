@@ -172,6 +172,7 @@ actual config path    # print config file location
 actual runners        # list available AI backend runners
 actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
+actual version        # print the version and how to upgrade it (--check compares with the latest)
 ```
 
 ## Configuration
@@ -200,6 +201,7 @@ on first run. All fields are optional — missing fields use sensible defaults.
 | `exclude_categories` | list | — | ADR categories to always exclude |
 | `include_general` | boolean | — | Whether to include language-agnostic ADRs |
 | `max_per_framework` | integer | — | Max ADRs per framework |
+| `update_check.enabled` | boolean | `true` | Daily update notice and `actual version --check` (see [UPDATE_CHECK.md](UPDATE_CHECK.md)) |
 | `telemetry.enabled` | boolean | `true` | Enable/disable telemetry (see [PRIVACY.md](../PRIVACY.md)) |
 
 ### Example config
@@ -222,4 +224,5 @@ telemetry:
 | `ANTHROPIC_API_KEY` | Anthropic API key (overrides config file) |
 | `OPENAI_API_KEY` | OpenAI API key (overrides config file) |
 | `CURSOR_API_KEY` | Cursor API key (overrides config file) |
+| `ACTUAL_NO_UPDATE_CHECK` | Set to any value to turn off the update check |
 | `ACTUAL_NO_TELEMETRY` | Set to any value to disable telemetry |

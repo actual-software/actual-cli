@@ -82,6 +82,7 @@ define_config_keys! {
     (CursorApiKey,          "cursor_api_key"),
     (MaxTurns,              "max_turns"),
     (RulesMinScore,         "rules_min_score"),
+    (UpdateCheckEnabled,    "update_check.enabled"),
 }
 
 /// Get a config value by dotpath, returning its string representation.
@@ -169,6 +170,12 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::RulesMinScore => config
             .rules_min_score
+            .map(|v| v.to_string())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::UpdateCheckEnabled => config
+            .update_check
+            .as_ref()
+            .and_then(|u| u.enabled)
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
     }
@@ -355,6 +362,21 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<Option<String
             })?;
             config.rules_min_score =
                 Some(validate_rules_min_score(v).map_err(ActualError::ConfigError)?);
+        }
+        ConfigKey::UpdateCheckEnabled => {
+            let enabled = value.parse::<bool>().map_err(|_| {
+                ActualError::ConfigError(format!(
+                    "invalid value for {path}: expected bool, got \"{value}\""
+                ))
+            })?;
+            match config.update_check.as_mut() {
+                Some(u) => u.enabled = Some(enabled),
+                None => {
+                    config.update_check = Some(crate::config::types::UpdateCheckConfig {
+                        enabled: Some(enabled),
+                    });
+                }
+            }
         }
     }
     Ok(None)
@@ -1042,6 +1064,7 @@ mod tests {
             ("cursor_api_key", "cursor-test-key"),
             ("max_turns", "10"),
             ("rules_min_score", "1.5"),
+            ("update_check.enabled", "false"),
         ];
 
         // Sanity-check: valid_values must cover every variant in ConfigKey::ALL.
@@ -1256,5 +1279,29 @@ mod tests {
             msg.contains("cursor_model") && msg.contains("removed"),
             "expected deprecation error mentioning 'cursor_model' and 'removed', got: {msg}"
         );
+    }
+
+    // --- update_check.enabled ---
+
+    #[test]
+    fn test_set_update_check_enabled_updates_existing() {
+        let mut config = Config::default();
+        set(&mut config, "update_check.enabled", "false").unwrap();
+        set(&mut config, "update_check.enabled", "true").unwrap();
+        assert_eq!(get(&config, "update_check.enabled").unwrap(), "true");
+    }
+
+    #[test]
+    fn test_set_invalid_update_check_enabled() {
+        let mut config = Config::default();
+        let err = set(&mut config, "update_check.enabled", "off").unwrap_err();
+        assert!(err.to_string().contains("expected bool"), "got: {err}");
+        assert!(config.update_check.is_none());
+    }
+
+    #[test]
+    fn test_get_unset_update_check_enabled() {
+        let err = get(&Config::default(), "update_check.enabled").unwrap_err();
+        assert!(err.to_string().contains("not set"), "got: {err}");
     }
 }

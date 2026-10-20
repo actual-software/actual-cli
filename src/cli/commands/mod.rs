@@ -35,6 +35,7 @@ pub mod sync;
 pub(crate) mod sync_kb_poller;
 pub(crate) mod sync_wiring;
 pub mod telemetry_flush;
+pub mod version;
 pub mod whoami;
 
 /// Non-hidden directory names to skip when walking the file tree for
