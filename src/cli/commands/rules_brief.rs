@@ -372,8 +372,10 @@ fn brief_heading(decision: &AdrGroup) -> &str {
         .title
         .as_deref()
         .or_else(|| {
-            decision.adr_id.as_ref()?;
-            let best = decision.documents.first()?;
+            let best = decision
+                .documents
+                .first()
+                .filter(|_| decision.keyed_on_id())?;
             Some(best.title.as_deref().unwrap_or(&best.slug))
         })
         .unwrap_or_else(|| decision.label())
@@ -855,6 +857,57 @@ mod tests {
             let brief = brief_for(root.path(), &file, &a, None).unwrap();
             assert!(brief.contains("## pinning-1a2b"), "{brief}");
             assert!(!brief.contains("3f9c-uuid"), "{brief}");
+        });
+    }
+
+    /// Policies of one generated decision each carry their own `adr_id`, so
+    /// the decision is briefed once and an untitled one is headed by a slug.
+    #[test]
+    fn test_policies_sharing_a_group_id_are_briefed_once_under_a_readable_heading() {
+        with_scratch_config(|| {
+            let root = tempdir().unwrap();
+            let dir = crate::rules::rules_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            let policy = |id: &str, rule: &str| {
+                format!(
+                    "---\nversion: 2\nname: p\nmetadata:\n  actual:\n    adr_id: {id}\n    candidate_group_id: grp-1\n  scope:\n    root: .\n    paths:\n      - \"infra/**\"\n---\n\n### Rules\n\n- **R-TF-001** MUST: {rule}.\n"
+                )
+            };
+            std::fs::write(
+                dir.join("pin-1a2b.md"),
+                policy("adr-1", "pin every provider"),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("lock-3c4d.md"),
+                policy("adr-2", "commit the lockfile"),
+            )
+            .unwrap();
+            let a = args(root.path());
+            let file = root
+                .path()
+                .join("infra/main.tf")
+                .to_string_lossy()
+                .to_string();
+            let who = SessionIdentity {
+                session_id: "s1",
+                agent_id: None,
+            };
+
+            let brief = brief_for(root.path(), &file, &a, Some(who)).unwrap();
+            assert_eq!(
+                brief.matches("\n## ").count() + usize::from(brief.starts_with("## ")),
+                1,
+                "{brief}"
+            );
+            assert!(
+                !brief.contains("grp-1") && !brief.contains("adr-1"),
+                "{brief}"
+            );
+            assert_eq!(
+                brief_for(root.path(), &file, &a, Some(who)),
+                Err(NoBrief::AlreadyBriefed)
+            );
         });
     }
 

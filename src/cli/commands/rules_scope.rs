@@ -248,9 +248,9 @@ struct JsonAdrExplain<'a> {
 #[derive(Serialize)]
 struct AdrBaselineGroup {
     key: String,
-    /// The decision id, when `key` is one. Omitted for a v1 group.
+    /// The decision's `candidate_group_id`, when `key` is one. Omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
-    adr_id: Option<String>,
+    candidate_group_id: Option<String>,
     title: Option<String>,
     documents: Vec<JsonBaselineHit>,
 }
@@ -299,7 +299,7 @@ fn adr_filename_scan(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<
             Some(group) => group.documents.push(baseline_hit),
             None => groups.push(AdrBaselineGroup {
                 key,
-                adr_id: document.adr_id.clone(),
+                candidate_group_id: document.candidate_group_id.clone(),
                 title: document.adr.clone(),
                 documents: vec![baseline_hit],
             }),
@@ -382,7 +382,7 @@ fn render_adr_panel(
                 let label = group
                     .title
                     .as_deref()
-                    .or(group.adr_id.as_deref())
+                    .or(group.candidate_group_id.as_deref())
                     .unwrap_or(&group.key);
                 panel = panel.line(&format!("  {label}"));
                 for document in group.documents {
@@ -1979,14 +1979,15 @@ mod tests {
     }
 
     /// The filename scan reports a v2 decision the way the grouped search does:
-    /// keyed `id:<adr_id>` and carrying the `adr_id`. A v1 group has neither.
+    /// keyed `group:<candidate_group_id>` and carrying that id. A decision
+    /// keyed on an `adr_id` or a title has no group id to report.
     #[test]
-    fn test_adr_json_filename_scan_reports_adr_id_for_v2_groups_only() {
+    fn test_adr_json_filename_scan_reports_the_group_id_for_grouped_decisions_only() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
-        let v2 = "---\nversion: 2\nname: token-signing\nmetadata:\n  actual:\n    adr_id: adr-7\n  scope:\n    root: .\n---\n\n# Adopt RS256: Token Signing\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n";
+        let v2 = "---\nversion: 2\nname: token-signing\nmetadata:\n  actual:\n    adr_id: adr-7\n    candidate_group_id: grp-7\n  scope:\n    root: .\n---\n\n# Adopt RS256: Token Signing\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n";
         let root = seed(&[
             ("cross-cutting-token-signing-e410.md", v2),
             ("token-expiry-a1b2.md", OAUTH),
@@ -1999,16 +2000,16 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&render_adr_json(&index, &query, &groups, 5, true)).unwrap();
         let scan = value["explain"]["filename_scan"].as_array().unwrap();
-        let v2_group = scan
+        let grouped = scan
             .iter()
-            .find(|group| group["key"] == "id:adr-7")
-            .unwrap_or_else(|| panic!("no id-keyed group in {scan:?}"));
-        assert_eq!(v2_group["adr_id"], "adr-7");
-        let v1_group = scan
+            .find(|group| group["key"] == "group:grp-7")
+            .unwrap_or_else(|| panic!("no group-keyed decision in {scan:?}"));
+        assert_eq!(grouped["candidate_group_id"], "grp-7");
+        let ungrouped = scan
             .iter()
-            .find(|group| group["key"] != "id:adr-7")
-            .unwrap_or_else(|| panic!("no v1 group in {scan:?}"));
-        assert!(v1_group.get("adr_id").is_none(), "{v1_group}");
+            .find(|group| group["key"] != "group:grp-7")
+            .unwrap_or_else(|| panic!("no ungrouped decision in {scan:?}"));
+        assert!(ungrouped.get("candidate_group_id").is_none(), "{ungrouped}");
     }
 
     /// Grouped `--explain` keeps the per-document attribution and compares it
