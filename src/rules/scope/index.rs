@@ -673,16 +673,6 @@ impl ScopeIndex {
             .collect()
     }
 
-    /// The decision id for each briefable decision that has one: the v2
-    /// decisions among [`Self::decision_keys`], keyed the same way.
-    pub fn decision_adr_ids(&self) -> BTreeMap<String, String> {
-        self.documents
-            .iter()
-            .filter(|doc| doc.obligations > 0)
-            .filter_map(|doc| Some((doc.decision_key(), doc.adr_id.clone()?)))
-            .collect()
-    }
-
     /// How many decisions [`Self::decision_keys`] holds: the Y of "X of Y
     /// ADRs added to context".
     pub fn decision_count(&self) -> usize {
@@ -2606,10 +2596,6 @@ mod tests {
             index.decision_keys().into_iter().collect::<Vec<_>>(),
             vec!["id:adr-1"]
         );
-        assert_eq!(
-            index.decision_adr_ids().get("id:adr-1").map(String::as_str),
-            Some("adr-1")
-        );
     }
 
     #[test]
@@ -2677,7 +2663,6 @@ mod tests {
         let json = serde_json::to_value(&groups[0]).unwrap();
         assert!(json.get("adr_id").is_none());
         assert!(json["documents"][0].get("adr_id").is_none());
-        assert!(index.decision_adr_ids().is_empty());
     }
 
     #[test]
