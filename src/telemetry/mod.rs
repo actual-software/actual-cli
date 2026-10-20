@@ -8,6 +8,8 @@
 pub mod identity;
 pub mod metrics;
 pub mod opt_out;
+#[cfg(feature = "telemetry")]
+pub mod otlp;
 pub mod plan_governance;
 pub mod reporter;
 pub mod scope;

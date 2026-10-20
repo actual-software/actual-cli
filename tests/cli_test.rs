@@ -2292,3 +2292,189 @@ fn test_the_adr_header_v2_marker_is_specific_to_rules_brief() {
             .stdout(predicate::str::contains("adr-header-v2").not());
     }
 }
+
+// ── ADR context events over OTLP ───────────────────────────────────────────
+//
+// These drive the read hook through the process boundary and observe only the
+// supported outputs: the OTLP endpoint and the file sink.
+
+/// A repo whose rule set has two v2 decisions governing `services/auth/oauth/`:
+/// one of two policy files sharing a candidate group, one of a single file.
+#[cfg(feature = "telemetry")]
+fn repo_with_v2_rules() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let rules = repo.path().join(".actual").join("rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    for (file, adr_id, group, title) in [
+        (
+            "oauth-signing-a1.md",
+            "adr-sign-1",
+            "grp-sign",
+            "Sign With Asymmetric Keys: Token Signing",
+        ),
+        (
+            "oauth-signing-a2.md",
+            "adr-sign-2",
+            "grp-sign",
+            "Sign With Asymmetric Keys: Key Storage",
+        ),
+        (
+            "oauth-rotation-b1.md",
+            "adr-rotate-1",
+            "grp-rotate",
+            "Rotate Signing Keys: Rotation",
+        ),
+    ] {
+        std::fs::write(
+            rules.join(file),
+            format!(
+                "---\nversion: 2\nname: {adr_id}\ndescription: \"{title}\"\nmetadata:\n  actual:\n    \
+                 adr_id: {adr_id}\n    status: accepted\n    candidate_group_id: {group}\n---\n# {title}\n\n\
+                 These rules are ALWAYS ACTIVE for OAuth token handling in `services/auth/oauth/`.\n\n\
+                 ### Rules\n\n- **R-{adr_id}-001** MUST: follow {adr_id}.\n\n### Verify\n\n```bash\n\
+                 grep -r \"jwt\" services/auth/oauth/ --include=\"*.ts\"\n```\n"
+            ),
+        )
+        .unwrap();
+    }
+    repo
+}
+
+/// Run the read hook on a governed file of `repo` for `session` and `agent`,
+/// opted in with `config_yaml`. Returns the hook's stdout and how long it took.
+#[cfg(feature = "telemetry")]
+fn otlp_brief_hook(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    config_yaml: &str,
+    agent: Option<&str>,
+) -> (String, std::time::Duration) {
+    std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
+    let mut envelope = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": repo.join("services/auth/oauth/token.ts")},
+    });
+    if let Some(agent) = agent {
+        envelope["agent_id"] = agent.into();
+    }
+    let started = std::time::Instant::now();
+    let output = cmd()
+        .args([
+            "rules",
+            "brief",
+            "--claude-hook",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--min-score",
+            "0",
+        ])
+        .env("ACTUAL_CONFIG_DIR", config_dir)
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("ACTUAL_NO_TELEMETRY")
+        .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
+        .env_remove("ACTUAL_OTLP_FILE")
+        .env_remove("TRACEPARENT")
+        .write_stdin(envelope.to_string())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    (String::from_utf8(output).unwrap(), started.elapsed())
+}
+
+/// One brief adds two ADRs, and the detached uploader delivers both as one
+/// request, which it also appends to the file sink. A subagent briefed on the
+/// same ADRs later sends nothing more.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("content-type", "application/json")
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::Regex("ai\\.actual\\.adr\\.context_added".to_string()),
+            mockito::Matcher::Regex("grp-sign".to_string()),
+            mockito::Matcher::Regex("grp-rotate".to_string()),
+        ]))
+        .with_status(200)
+        .expect(1)
+        .create();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_brief_hook(config_dir.path(), repo.path(), &config_yaml, None);
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    // The uploader outlives the hook; poll until it has delivered.
+    let mut delivered = false;
+    for _ in 0..100 {
+        if mock.matched() {
+            delivered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(delivered, "the uploader never delivered the request");
+    let mut written = String::new();
+    for _ in 0..50 {
+        written = std::fs::read_to_string(&sink).unwrap_or_default();
+        if !written.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let lines: Vec<&str> = written.lines().collect();
+    assert_eq!(lines.len(), 1, "{written}");
+    let body: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let records = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(records
+        .iter()
+        .all(|r| r["eventName"] == "ai.actual.adr.context_added"));
+
+    let (reply, _) = otlp_brief_hook(config_dir.path(), repo.path(), &config_yaml, Some("sub-1"));
+    assert!(
+        reply.contains("R-adr-sign-1-001"),
+        "the subagent is still briefed: {reply}"
+    );
+    assert!(!config_dir.path().join("otlp-logs-spool.jsonl").exists());
+    assert_eq!(std::fs::read_to_string(&sink).unwrap().lines().count(), 1);
+    mock.assert();
+}
+
+/// An endpoint that never answers costs the hook nothing: it spools, hands
+/// off to the uploader and returns.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_brief_hook_returns_promptly_when_the_endpoint_never_answers() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    // Bind but never accept: the uploader connects and waits for an answer.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: http://{}/v1/logs\n",
+        listener.local_addr().unwrap()
+    );
+
+    let (reply, elapsed) = otlp_brief_hook(config_dir.path(), repo.path(), &config_yaml, None);
+
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the hook took {elapsed:?}"
+    );
+    drop(listener);
+}
