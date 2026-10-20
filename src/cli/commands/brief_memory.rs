@@ -274,7 +274,7 @@ mod tests {
             r#"{"format_version":1,"briefed":["Adopt RS256"]}"#,
         )
         .unwrap();
-        assert_eq!(FORMAT_VERSION, 2);
+        assert_ne!(FORMAT_VERSION, 1, "the fixture must be an older version");
         assert!(!load(dir.path(), &k).has_briefed("Adopt RS256"));
     }
 
