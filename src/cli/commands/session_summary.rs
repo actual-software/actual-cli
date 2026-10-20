@@ -1022,10 +1022,10 @@ mod tests {
                 rule_set_decisions(root.path(), &crate::rules::rules_dir(root.path())).unwrap();
             assert_eq!(
                 decisions.iter().map(String::as_str).collect::<Vec<_>>(),
-                vec!["adr-1", "provider-pinning"]
+                vec!["id:adr-1", "provider-pinning"]
             );
 
-            brief(root.path(), &["adr-1"]);
+            brief(root.path(), &["id:adr-1"]);
             let mut args = direct_args(root.path());
             args.json = true;
             let text = direct_output("s1", &args).unwrap().unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
                 serde_json::json!({
                     "x": 1,
                     "y": 2,
-                    "decisions": ["adr-1"],
+                    "decisions": ["id:adr-1"],
                     "gaps": 0,
                     "areas_without_adr": [],
                     "line": "Actual AI: 1 of 2 ADRs added to context",

@@ -248,6 +248,9 @@ struct JsonAdrExplain<'a> {
 #[derive(Serialize)]
 struct AdrBaselineGroup {
     key: String,
+    /// The decision id, when `key` is one. Omitted for a v1 group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adr_id: Option<String>,
     title: Option<String>,
     documents: Vec<JsonBaselineHit>,
 }
@@ -296,6 +299,7 @@ fn adr_filename_scan(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<
             Some(group) => group.documents.push(baseline_hit),
             None => groups.push(AdrBaselineGroup {
                 key,
+                adr_id: document.adr_id.clone(),
                 title: document.adr.clone(),
                 documents: vec![baseline_hit],
             }),
@@ -346,10 +350,7 @@ fn render_adr_panel(
 
     panel = panel.separator();
     for group in groups {
-        panel = panel.kv(
-            &format!("{:.2}", group.score),
-            &truncate(group.title.as_deref().unwrap_or(&group.key), 64),
-        );
+        panel = panel.kv(&format!("{:.2}", group.score), &truncate(group.label(), 64));
         for document in &group.documents {
             panel = panel.line(&format!("{STAGE2_INDENT}{}", document.slug));
             if explain {
@@ -378,10 +379,12 @@ fn render_adr_panel(
             panel = panel.line("  nothing — no filename segment matched");
         } else {
             for group in scan {
-                panel = panel.line(&format!(
-                    "  {}",
-                    group.title.as_deref().unwrap_or(&group.key)
-                ));
+                let label = group
+                    .title
+                    .as_deref()
+                    .or(group.adr_id.as_deref())
+                    .unwrap_or(&group.key);
+                panel = panel.line(&format!("  {label}"));
                 for document in group.documents {
                     panel = panel.line(&format!(
                         "    {} ({})",

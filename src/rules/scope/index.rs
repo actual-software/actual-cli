@@ -368,8 +368,9 @@ pub struct Match {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdrGroup {
     /// What documents were grouped on: the v2 header's `adr_id` when the
-    /// documents carry one, else the decision name from the title, else the
-    /// slug of a document whose title names none.
+    /// documents carry one (as `id:<adr_id>`, so it cannot meet a title or
+    /// slug), else the decision name from the title, else the slug of a
+    /// document whose title names none.
     pub key: String,
     /// The decision id, when `key` is one. Absent for a v1 group, and then
     /// omitted from the JSON form.
@@ -381,6 +382,17 @@ pub struct AdrGroup {
     pub score: f64,
     /// Its matching documents, in document rank order.
     pub documents: Vec<Match>,
+}
+
+impl AdrGroup {
+    /// What to call the decision to a reader: its title, else its `adr_id`,
+    /// else the key, which is then a slug. Never the namespaced key.
+    pub fn label(&self) -> &str {
+        self.title
+            .as_deref()
+            .or(self.adr_id.as_deref())
+            .unwrap_or(&self.key)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,13 +798,22 @@ fn group_matches(matches: Vec<Match>, limit: usize) -> Vec<AdrGroup> {
     groups
 }
 
-/// What a document is grouped under: the stable `adr_id` its v2 header carries,
-/// else the decision its title names, else its own slug when it names none, since pooling every unnamed document under one
-/// heading would present unrelated rules as one subject. Grouping and
+/// Prefix that keeps a decision keyed on its `adr_id` apart from one keyed on
+/// a title prefix or slug. Without it a v1 document titled or named `ADR-001`
+/// would merge into the group of a v2 document whose id is `ADR-001`.
+const ADR_ID_KEY_PREFIX: &str = "id:";
+
+/// What a document is grouped under: the stable `adr_id` its v2 header carries
+/// (namespaced by [`ADR_ID_KEY_PREFIX`]), else the decision its title names,
+/// else its own slug when it names none, since pooling every unnamed document
+/// under one heading would present unrelated rules as one subject. Grouping and
 /// [`ScopeIndex::decision_keys`] both key on this, so the decisions briefed
 /// and the decisions counted cannot drift apart.
 fn decision_key(adr_id: Option<&str>, adr: Option<&str>, slug: &str) -> String {
-    adr_id.or(adr).unwrap_or(slug).to_string()
+    match adr_id {
+        Some(id) => format!("{ADR_ID_KEY_PREFIX}{id}"),
+        None => adr.unwrap_or(slug).to_string(),
+    }
 }
 
 /// First tie-break: how many documents declare the rarest glob that reached
@@ -2583,10 +2604,10 @@ mod tests {
         assert_eq!(index.decision_count(), 1);
         assert_eq!(
             index.decision_keys().into_iter().collect::<Vec<_>>(),
-            vec!["adr-1"]
+            vec!["id:adr-1"]
         );
         assert_eq!(
-            index.decision_adr_ids().get("adr-1").map(String::as_str),
+            index.decision_adr_ids().get("id:adr-1").map(String::as_str),
             Some("adr-1")
         );
     }
@@ -2611,10 +2632,28 @@ mod tests {
         ]);
         let groups = index.search_adrs(&Query::new("sign tokens"), 5);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].key, "adr-1");
+        assert_eq!(groups[0].key, "id:adr-1");
         assert_eq!(groups[0].adr_id.as_deref(), Some("adr-1"));
         assert_eq!(groups[0].title.as_deref(), Some("Sign Tokens"));
         assert_eq!(groups[0].documents.len(), 2);
+    }
+
+    /// A v1 document titled or named like some `adr_id` is not that decision.
+    #[test]
+    fn test_a_title_or_slug_equal_to_an_adr_id_does_not_join_its_group() {
+        let by_title = index_of(vec![
+            id_doc("with-id", "adr-1", "Sign Tokens: Algorithm"),
+            doc("old", "adr-1: Expiry", "Scope.", "grep -r x lib/"),
+        ]);
+        assert_eq!(
+            by_title.decision_keys().into_iter().collect::<Vec<_>>(),
+            vec!["adr-1", "id:adr-1"]
+        );
+        let by_slug = index_of(vec![
+            id_doc("with-id", "adr-1", "Sign Tokens: Algorithm"),
+            doc("adr-1", "Standalone Rules", "Scope.", "grep -r x lib/"),
+        ]);
+        assert_eq!(by_slug.decision_count(), 2);
     }
 
     #[test]
@@ -2672,7 +2711,7 @@ mod tests {
         assert_eq!(index.decision_count(), 3);
         assert_eq!(
             index.decision_keys().into_iter().collect::<Vec<_>>(),
-            vec!["Sign Tokens", "adr-1", "adr-3"]
+            vec!["Sign Tokens", "id:adr-1", "id:adr-3"]
         );
         let groups = index.search_adrs(&Query::new("sign tokens"), 5);
         assert_eq!(groups.len(), 2);
