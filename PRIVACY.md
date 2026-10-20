@@ -260,7 +260,9 @@ default:
   The standard `OTEL_EXPORTER_OTLP_*` variables aren't read.
 - `telemetry.otlp_file` (or `ACTUAL_OTLP_FILE`): an absolute path on your
   machine. Each request is appended to it as one line, in a file readable only
-  by the owner.
+  by the owner. A file that already exists is restricted to its owner before
+  anything is added, and nothing is written to a path that isn't a regular
+  file or whose permissions can't be changed.
 
 Set either with `actual config set`, and clear it by setting it to `""`. These
 events don't go to PostHog or to `api-service.api.prod.actual.ai`, only where

@@ -1348,6 +1348,29 @@ mod tests {
         assert!(OTLP_LOGS.take(1).is_empty());
     }
 
+    /// A file sink that already exists and is readable by other accounts is
+    /// restricted to its owner before the uploader appends to it, and keeps
+    /// what it held.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_flush_restricts_an_existing_file_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        spool(&sample_records());
+        let file = home.path().join("otlp.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 2);
+    }
+
     /// Opted out, or with no output left, the uploader touches nothing.
     #[tokio::test]
     async fn test_flush_without_outputs_leaves_the_spool_alone() {
