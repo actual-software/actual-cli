@@ -4,7 +4,7 @@
 //! notice can print that channel's upgrade command. The CLI never replaces its
 //! own binary: Homebrew and npm keep records of the files they installed.
 //!
-//! No command waits on the network for the notice. After a command finishes,
+//! No command waits on the network for the notice. After a command succeeds,
 //! [`after_command`] prints a notice the local cache already holds, and when
 //! the last lookup is more than a day old it starts the hidden
 //! `__update-check` command as a detached child, which asks the npm registry
@@ -165,7 +165,7 @@ pub fn applies_to(command: &Command) -> bool {
     }
 }
 
-/// Whether this run shows the notice once its command finishes. Decided before
+/// Whether this run shows the notice once its command succeeds. Decided before
 /// the command runs, because running it consumes the parsed arguments.
 pub fn should_run_after(command: &Command) -> bool {
     applies_to(command)
@@ -186,10 +186,10 @@ fn someone_is_watching(stdout_is_terminal: bool, stderr_is_terminal: bool) -> bo
         && !env_is_set(crate::runner::subprocess::SUBPROCESS_MARKER_ENV)
 }
 
-/// After a command [`should_run_after`] picked: print the notice the cache
-/// holds, at most once a day, and start a detached refresh when the last
-/// lookup is more than a day old. Never waits on the network, and never fails
-/// the command.
+/// After a successful command [`should_run_after`] picked: print the notice
+/// the cache holds, at most once a day, and start a detached refresh when the
+/// last lookup is more than a day old. Never waits on the network, and never
+/// fails the command.
 pub fn after_command() {
     let config = crate::config::paths::load().ok();
     let refresh = after_command_with(
