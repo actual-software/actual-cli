@@ -49,12 +49,12 @@ use crate::config::types::{validate_otlp_file, validate_otlp_logs_endpoint, Conf
 use crate::telemetry::opt_out;
 use crate::telemetry::spool::OTLP_LOGS;
 
-/// The event sent when an ADR is detected, here by entering a session's
-/// context for the first time.
+/// The event sent when an ADR is detected: by entering a session's context
+/// for the first time, or by a gate judging any of its rules.
 pub(crate) const ADR_DETECTED: &str = "actual.adr.detected";
 
-/// The event sent when a gate is evaluated, here by a human overriding an
-/// ADR's rules with `check-override`.
+/// The event sent when a gate is evaluated: a gate blocking on an ADR's rules,
+/// or a human overriding them with `check-override`.
 pub(crate) const GATE_EVALUATED: &str = "actual.gate.evaluated";
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
@@ -314,6 +314,41 @@ impl Origin {
         record.attributes.extend([
             text("actual.gate.outcome", Some("overridden")),
             strings("actual.gate.denied_types", denied_gates),
+        ]);
+        record
+    }
+
+    /// The [`ADR_DETECTED`] record for one logical ADR a gate judged rules of,
+    /// with that gate, `planning` or `implementation`, as how it was detected.
+    pub(crate) fn used(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        adr_ref: &str,
+        adr_ids: &[String],
+        gate: &str,
+    ) -> LogRecord {
+        let mut record = self.adr_record(ADR_DETECTED, session_id, agent_id, adr_ref, adr_ids);
+        record
+            .attributes
+            .push(text("actual.detection.method", Some(gate)));
+        record
+    }
+
+    /// The [`GATE_EVALUATED`] record for one logical ADR a gate blocked on:
+    /// the outcome, then the gate, `planning` or `implementation`.
+    pub(crate) fn breached(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        adr_ref: &str,
+        adr_ids: &[String],
+        gate: &str,
+    ) -> LogRecord {
+        let mut record = self.adr_record(GATE_EVALUATED, session_id, agent_id, adr_ref, adr_ids);
+        record.attributes.extend([
+            text("actual.gate.outcome", Some("breached")),
+            text("actual.gate.type", Some(gate)),
         ]);
         record
     }
@@ -977,6 +1012,75 @@ mod tests {
         );
     }
 
+    /// Used and breached records carry the same attributes as a context
+    /// record, in the same order and with the gate's agent, then what each
+    /// says about the gate: how a used ADR was detected, and a breach's
+    /// outcome and gate.
+    #[test]
+    fn test_used_and_breached_carry_the_common_attributes_then_the_gate() {
+        let origin = origin(None);
+        let context = record_json(&origin.context_added(
+            "session-1",
+            Some("agent-1"),
+            "grp-1",
+            &ids(&["adr-1", "adr-2"]),
+        ));
+        // Everything but the per-record ids.
+        let shared = |record: &Value| -> Vec<(String, Value)> {
+            attributes(record)
+                .into_iter()
+                .filter(|(key, _)| key != "log.record.uid" && key != "actual.event.id")
+                .collect()
+        };
+        let mut context = shared(&context);
+        assert_eq!(context.pop().unwrap().0, "actual.detection.method");
+
+        let used = record_json(&origin.used(
+            "session-1",
+            Some("agent-1"),
+            "grp-1",
+            &ids(&["adr-1", "adr-2"]),
+            "planning",
+        ));
+        assert_eq!(used["eventName"], ADR_DETECTED);
+        assert_eq!(used["severityNumber"], 9);
+        let mut used = shared(&used);
+        assert_eq!(
+            used.pop().unwrap(),
+            (
+                "actual.detection.method".to_string(),
+                serde_json::json!({"stringValue": "planning"})
+            )
+        );
+        assert_eq!(used, context);
+
+        let breached = record_json(&origin.breached(
+            "session-1",
+            Some("agent-1"),
+            "grp-1",
+            &ids(&["adr-1", "adr-2"]),
+            "implementation",
+        ));
+        assert_eq!(breached["eventName"], GATE_EVALUATED);
+        assert_eq!(breached["severityNumber"], 9);
+        let mut breached = shared(&breached);
+        assert_eq!(
+            breached.pop().unwrap(),
+            (
+                "actual.gate.type".to_string(),
+                serde_json::json!({"stringValue": "implementation"})
+            )
+        );
+        assert_eq!(
+            breached.pop().unwrap(),
+            (
+                "actual.gate.outcome".to_string(),
+                serde_json::json!({"stringValue": "breached"})
+            )
+        );
+        assert_eq!(breached, context);
+    }
+
     /// Each record gets its own event id, which `log.record.uid` repeats, and
     /// every record from one run shares the run's action id.
     #[test]
@@ -1083,6 +1187,14 @@ mod tests {
         vec![
             origin.context_added("session-1", None, "grp-1", &ids(&["adr-1", "adr-2"])),
             origin.context_added("session-1", Some("agent-2"), "adr-3", &ids(&["adr-3"])),
+            origin.used("session-1", None, "grp-1", &ids(&["adr-1"]), "planning"),
+            origin.breached(
+                "session-1",
+                Some("agent-2"),
+                "adr-3",
+                &ids(&["adr-3"]),
+                "implementation",
+            ),
         ]
     }
 
@@ -1132,7 +1244,7 @@ mod tests {
             (scope.name.as_str(), scope.version.as_str()),
             ("actual-cli", VERSION)
         );
-        assert_eq!(scope_logs.log_records.len(), 2);
+        assert_eq!(scope_logs.log_records.len(), 4);
     }
 
     /// Each record reaches the endpoint whole: the 64-bit times as integers,
@@ -1214,7 +1326,7 @@ mod tests {
         assert!(records(&damaged).is_empty(), "{damaged:?}");
 
         damaged.extend(spooled);
-        assert_eq!(records(&damaged).len(), 2);
+        assert_eq!(records(&damaged).len(), 4);
         assert!(records(&[]).is_empty());
     }
 
@@ -1287,8 +1399,13 @@ mod tests {
         let line: Value = serde_json::from_str(&json_request(&records)).unwrap();
 
         assert_eq!(official_json(&request, &line), line);
-        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
-        assert_eq!(record.event_name, ADR_DETECTED);
+        let records = &request.resource_logs[0].scope_logs[0].log_records;
+        let names: Vec<&str> = records.iter().map(|r| r.event_name.as_str()).collect();
+        assert_eq!(
+            names,
+            [ADR_DETECTED, ADR_DETECTED, ADR_DETECTED, GATE_EVALUATED]
+        );
+        let record = &records[0];
         assert_eq!(record.time_unix_nano, 1_792_446_915_838_119_000);
         assert_eq!(record.trace_id.len(), 16);
     }
@@ -1344,7 +1461,7 @@ mod tests {
         spool(&sample_records());
 
         let taken = OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST);
-        assert_eq!(taken.len(), 2);
+        assert_eq!(taken.len(), 4);
         assert!(taken[0].contains(ADR_DETECTED));
         assert!(OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST).is_empty());
     }
@@ -2062,7 +2179,7 @@ mod tests {
         let _no = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
         flush(&config(None, Some("/tmp/never-written.jsonl"))).await;
 
-        assert_eq!(OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST).len(), 2);
+        assert_eq!(OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST).len(), 4);
     }
 
     /// A batch of damaged lines is dropped without a request, and the

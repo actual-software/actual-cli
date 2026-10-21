@@ -206,7 +206,7 @@ on first run. All fields are optional — missing fields use sensible defaults.
 | `max_per_framework` | integer | — | Max ADRs per framework |
 | `update_check.enabled` | boolean | `true` | Daily update notice and `actual version --check` (see [UPDATE_CHECK.md](UPDATE_CHECK.md)) |
 | `telemetry.enabled` | boolean | `true` | Enable/disable telemetry (see [PRIVACY.md](../PRIVACY.md)) |
-| `telemetry.otlp_logs_endpoint` | string | — | OTLP/HTTP logs URL for ADR context and override events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only (see [PRIVACY.md](../PRIVACY.md)) |
+| `telemetry.otlp_logs_endpoint` | string | — | OTLP/HTTP logs URL for ADR context, use, breach and override events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only (see [PRIVACY.md](../PRIVACY.md)) |
 | `telemetry.otlp_file` | string | — | Absolute path of a local file each ADR event request is appended to (see [PRIVACY.md](../PRIVACY.md)) |
 
 ### Example config
@@ -231,5 +231,5 @@ telemetry:
 | `CURSOR_API_KEY` | Cursor API key (overrides config file) |
 | `ACTUAL_NO_UPDATE_CHECK` | Set to any value to turn off the update check |
 | `ACTUAL_NO_TELEMETRY` | Set to any value to disable telemetry |
-| `ACTUAL_OTLP_LOGS_ENDPOINT` | OTLP logs URL for ADR context and override events (overrides config file) |
-| `ACTUAL_OTLP_FILE` | Local file for ADR context and override events (overrides config file) |
+| `ACTUAL_OTLP_LOGS_ENDPOINT` | OTLP logs URL for ADR context, use, breach and override events (overrides config file) |
+| `ACTUAL_OTLP_FILE` | Local file for ADR context, use, breach and override events (overrides config file) |
