@@ -37,7 +37,7 @@ grep -r "fetch" packages/web/src/components/
 
 **Accept when:**
 - Web components receive data and callbacks through props and hold no data-fetching logic
-- Web components import from the api package
+- Web components do not import from the api package
 
 <enforcement>
 Claude Code MUST NOT skip or defer verification of these rules.

@@ -34,7 +34,7 @@ grep -r "widget" packages/web/src/components/
 ```
 
 **Accept when:**
-- Legacy web widgets gain new props or new dependencies
+- Legacy web widgets gain no new props or new dependencies
 
 <enforcement>
 Claude Code MUST NOT skip or defer verification of these rules.
