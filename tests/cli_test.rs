@@ -2006,7 +2006,10 @@ fn test_rules_ls_and_index_json_show_the_v2_header_across_a_mixed_repo() {
     assert_eq!(v2["root"], "packages/web");
     assert_eq!(v2["status"], "accepted");
     // The frontmatter did not leak into the scope sentence.
-    assert!(!v2["scope"].as_str().unwrap_or("").contains("adr_id"));
+    assert!(!v2["scope"]
+        .as_str()
+        .expect("scope is a string")
+        .contains("adr_id"));
     assert_eq!(by_slug("old-3c4d")["status"], "superseded");
 
     let index = run(&["rules", "index", "--json"]);
