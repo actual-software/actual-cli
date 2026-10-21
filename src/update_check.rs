@@ -168,13 +168,20 @@ pub fn applies_to(command: &Command) -> bool {
 /// Whether this run shows the notice once its command finishes. Decided before
 /// the command runs, because running it consumes the parsed arguments.
 pub fn should_run_after(command: &Command) -> bool {
-    applies_to(command) && someone_is_watching(std::io::stderr().is_terminal())
+    applies_to(command)
+        && someone_is_watching(
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        )
 }
 
-/// A person can read this process's stderr: it is a terminal, this is not a CI
-/// run, and this is not one of the `claude` subprocesses the CLI starts.
-fn someone_is_watching(stderr_is_terminal: bool) -> bool {
-    stderr_is_terminal
+/// A person is reading this run at a terminal: stdout and stderr both go to
+/// one, this is not a CI run, and this is not one of the `claude` subprocesses
+/// the CLI starts. Under a pager, as in `actual rules ls | less`, stdout is a
+/// pipe, and a notice on stderr would land on the screen the pager draws over.
+fn someone_is_watching(stdout_is_terminal: bool, stderr_is_terminal: bool) -> bool {
+    stdout_is_terminal
+        && stderr_is_terminal
         && !env_is_set("CI")
         && !env_is_set(crate::runner::subprocess::SUBPROCESS_MARKER_ENV)
 }
@@ -679,18 +686,23 @@ mod tests {
     }
 
     #[test]
-    fn someone_is_watching_needs_a_terminal_outside_ci_and_subprocesses() {
+    fn someone_is_watching_needs_both_streams_at_a_terminal_outside_ci_and_subprocesses() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _ci = EnvGuard::remove("CI");
         let _sub = EnvGuard::remove(SUBPROCESS_MARKER_ENV);
-        assert!(someone_is_watching(true));
-        assert!(!someone_is_watching(false));
+        assert!(someone_is_watching(true, true));
+        assert!(
+            !someone_is_watching(false, true),
+            "stdout piped to a pager or a file"
+        );
+        assert!(!someone_is_watching(true, false), "stderr piped");
+        assert!(!someone_is_watching(false, false));
         {
             let _ci = EnvGuard::set("CI", "true");
-            assert!(!someone_is_watching(true));
+            assert!(!someone_is_watching(true, true));
         }
         let _sub = EnvGuard::set(SUBPROCESS_MARKER_ENV, "1");
-        assert!(!someone_is_watching(true));
+        assert!(!someone_is_watching(true, true));
     }
 
     #[test]

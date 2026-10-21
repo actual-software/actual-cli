@@ -477,4 +477,68 @@ mod tests {
         // to collect and upload as artifacts / PR comment images.
         // The directory is in .gitignore so it won't be committed.
     }
+
+    // ── Category 7: Update notice ───────────────────────────────────
+
+    /// Run `actual runners` from a shell at a terminal, with its stdout
+    /// redirected to `stdout_file` when one is given, and return the screen
+    /// once the shell reports that `actual` has exited.
+    fn run_runners_at_a_terminal(
+        config_dir: &std::path::Path,
+        stdout_file: Option<&std::path::Path>,
+    ) -> String {
+        let quote = |path: &std::path::Path| {
+            format!("'{}'", shell_single_quote_escape(path.to_str().unwrap()))
+        };
+        let redirect = stdout_file.map_or(String::new(), |file| format!(" > {}", quote(file)));
+        let script = config_dir.join("run.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "unset CI ACTUAL_CLI_SUBPROCESS ACTUAL_NO_UPDATE_CHECK ACTUAL_CONFIG\n\
+                 ACTUAL_CONFIG_DIR={} {} runners{redirect}\n\
+                 echo run-finished\n",
+                quote(config_dir),
+                quote(std::path::Path::new(&actual_binary_path())),
+            ),
+        )
+        .unwrap();
+        let mut session = TuiSession::new(&format!("/bin/sh {}", script.display()))
+            .size(120, 40)
+            .spawn()
+            .expect("Failed to spawn /bin/sh");
+        session
+            .wait_for_text("run-finished")
+            .expect("the script should run to its end");
+        session.get_screen_text()
+    }
+
+    /// With stdout redirected, as into a pager or a file, a run at a terminal
+    /// prints no notice and leaves the day's notice for the next interactive
+    /// run.
+    #[test]
+    fn test_update_notice_waits_for_a_run_with_stdout_at_the_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("update-check.yaml");
+        // Checked a moment ago, so neither run starts a registry lookup.
+        let seeded = format!(
+            "checked_at: {}\nlatest_version: 999.0.0\n",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+        );
+        std::fs::write(&cache, &seeded).unwrap();
+
+        let stdout_file = dir.path().join("stdout.txt");
+        let screen = run_runners_at_a_terminal(dir.path(), Some(&stdout_file));
+        assert!(!screen.contains("is available"), "{screen}");
+        assert!(std::fs::read_to_string(&stdout_file)
+            .unwrap()
+            .contains("claude-cli"));
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
+
+        let screen = run_runners_at_a_terminal(dir.path(), None);
+        assert!(screen.contains("actual 999.0.0 is available"), "{screen}");
+        assert!(std::fs::read_to_string(&cache)
+            .unwrap()
+            .contains("notified_at"));
+    }
 }
