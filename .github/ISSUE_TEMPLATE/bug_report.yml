@@ -6,7 +6,7 @@ body:
     id: what-happened
     attributes:
       label: Problem
-      description: The command you ran, what you expected, and what happened instead. Paste any error output.
+      description: The command you ran, what you expected, and what happened instead. Paste any error output, with tokens and keys removed.
     validations:
       required: true
   - type: input
