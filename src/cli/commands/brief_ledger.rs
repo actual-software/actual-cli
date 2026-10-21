@@ -36,10 +36,15 @@
 //! **Fail open means undercount.** A missing, damaged or other-version file
 //! reads as an empty session, and a dropped change is a decision not counted.
 //!
+//! **Reported ADRs.** The OpenTelemetry events sent once per session keep
+//! their keys here too, since every agent shares this record and compaction
+//! never resets it: the brief's in `reported_adrs`, and the gates' used and
+//! breached events per stage.
+//!
 //! **Pruning.** As with the memory, records untouched for
 //! [`LEDGER_MAX_AGE`] are removed whenever one is written.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -77,7 +82,8 @@ pub struct LedgerKey<'a> {
 }
 
 /// The decisions briefed to a session's agents, the counts last shown to the
-/// user, the folders the agents worked in, and the ADRs reported as briefed.
+/// user, the folders the agents worked in, and the ADRs reported as briefed,
+/// checked against and breached.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BriefLedger {
@@ -95,6 +101,11 @@ pub struct BriefLedger {
     /// Logical ADRs already reported as added to context, keyed by candidate
     /// group else `adr_id`, so each is reported once per session.
     pub reported_adrs: BTreeSet<String>,
+    /// Logical ADRs already reported as checked against, keyed the same way,
+    /// by stage, so each is reported once per session and stage.
+    pub reported_used: BTreeMap<String, BTreeSet<String>>,
+    /// Logical ADRs already reported as breached, by stage, likewise.
+    pub reported_breached: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl BriefLedger {
@@ -210,6 +221,63 @@ pub fn report_adrs<'k>(
     } else {
         Vec::new()
     }
+}
+
+/// Add a gate round's logical ADRs to the record's sets for `stage`, `used`
+/// to those it checked against and `breached` to those it blocked on, best
+/// effort, and return the keys this write added to each. As with
+/// [`report_adrs`], a caller reporting each returned key can undercount but
+/// never report one twice. The lock is taken only when the lock-free read
+/// finds a key the record lacks, so a round with nothing new reads the record
+/// and stops.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn report_checks(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    stage: &str,
+    used: &[&str],
+    breached: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let recorded = load(dir, key);
+    if !has_new(&recorded.reported_used, stage, used)
+        && !has_new(&recorded.reported_breached, stage, breached)
+    {
+        return (Vec::new(), Vec::new());
+    }
+    let mut added = (Vec::new(), Vec::new());
+    let written = update_within(dir, key, LOCK_WAIT, |ledger| {
+        added = (
+            add_new(&mut ledger.reported_used, stage, used),
+            add_new(&mut ledger.reported_breached, stage, breached),
+        );
+    });
+    if written {
+        added
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
+/// Whether `stage`'s set in `reported` lacks any of `keys`.
+fn has_new(reported: &BTreeMap<String, BTreeSet<String>>, stage: &str, keys: &[&str]) -> bool {
+    keys.iter()
+        .any(|key| !reported.get(stage).is_some_and(|set| set.contains(*key)))
+}
+
+/// Add `keys` to `stage`'s set in `reported`, and return those it lacked.
+fn add_new(
+    reported: &mut BTreeMap<String, BTreeSet<String>>,
+    stage: &str,
+    keys: &[&str],
+) -> Vec<String> {
+    if !has_new(reported, stage, keys) {
+        return Vec::new();
+    }
+    let set = reported.entry(stage.to_string()).or_default();
+    keys.iter()
+        .filter(|key| set.insert(key.to_string()))
+        .map(|key| key.to_string())
+        .collect()
 }
 
 /// Note that the session worked on a file in `folder`, and whether a decision
@@ -925,5 +993,123 @@ mod tests {
         let ledger = load(dir.path(), &key("s1"));
         assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
         assert!(ledger.reported_adrs.is_empty());
+    }
+
+    // ── checked and breached ADRs ────────────────────────────────────────
+
+    fn keys(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    /// A key is returned by the write that added it to its stage's set and
+    /// never again. Stages, the two events, sessions and the context event's
+    /// set each count apart.
+    #[test]
+    fn test_a_checked_adr_is_returned_once_per_stage_and_event() {
+        let dir = tempdir().unwrap();
+        let s1 = key("s1");
+        assert_eq!(report_adrs(dir.path(), &s1, ["grp-1"]), ["grp-1"]);
+
+        assert_eq!(
+            report_checks(dir.path(), &s1, "plan", &["grp-1", "adr-9"], &["grp-1"]),
+            (keys(&["grp-1", "adr-9"]), keys(&["grp-1"]))
+        );
+        assert_eq!(
+            report_checks(dir.path(), &s1, "plan", &["grp-1", "adr-9"], &["grp-1"]),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            report_checks(dir.path(), &s1, "plan", &["adr-9"], &["adr-9"]),
+            (vec![], keys(&["adr-9"])),
+            "a breach of an ADR already reported as used"
+        );
+        assert_eq!(
+            report_checks(dir.path(), &s1, "implementation", &["grp-1"], &["grp-1"]),
+            (keys(&["grp-1"]), keys(&["grp-1"]))
+        );
+        assert_eq!(
+            report_checks(dir.path(), &key("s2"), "plan", &["grp-1"], &[]),
+            (keys(&["grp-1"]), vec![])
+        );
+
+        assert_eq!(report_adrs(dir.path(), &s1, ["grp-1", "adr-9"]), ["adr-9"]);
+        let ledger = load(dir.path(), &s1);
+        assert_eq!(
+            ledger.reported_used,
+            BTreeMap::from([
+                (
+                    "implementation".to_string(),
+                    BTreeSet::from(["grp-1".to_string()])
+                ),
+                (
+                    "plan".to_string(),
+                    keys(&["adr-9", "grp-1"]).into_iter().collect()
+                ),
+            ])
+        );
+    }
+
+    /// A round with nothing new needs neither the lock nor a write, so with
+    /// the lock held elsewhere it returns at once. A new key, the control,
+    /// waits out the real [`LOCK_WAIT`] and is dropped, so nothing is sent.
+    #[test]
+    fn test_a_check_with_nothing_new_skips_the_lock() {
+        let dir = tempdir().unwrap();
+        report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], &["grp-1"]);
+        let path = ledger_path(dir.path(), &key("s1"));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let _held = lock(dir.path(), Duration::ZERO).expect("the lock");
+
+        let started = Instant::now();
+        for breached in [&["grp-1"][..], &[]] {
+            assert_eq!(
+                report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], breached),
+                (vec![], vec![])
+            );
+        }
+        assert!(started.elapsed() < LOCK_WAIT, "a no-op waited on the lock");
+
+        assert_eq!(
+            report_checks(dir.path(), &key("s1"), "implementation", &["grp-1"], &[]),
+            (vec![], vec![])
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A check whose write fails returns nothing: the keys were never
+    /// recorded, so a later round reports them instead.
+    #[test]
+    fn test_a_check_whose_write_fails_returns_nothing() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(ledger_path(dir.path(), &key("s1"))).unwrap();
+
+        assert_eq!(
+            report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], &["grp-1"]),
+            (vec![], vec![])
+        );
+    }
+
+    /// A record written before the gates' sets existed keeps what it held,
+    /// and its gate sets read as empty.
+    #[test]
+    fn test_a_record_without_the_gate_sets_still_loads() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            ledger_path(dir.path(), &key("s1")),
+            format!(
+                r#"{{"format_version":{FORMAT_VERSION},"briefed":["Adopt RS256"],"reported_adrs":["grp-1"]}}"#
+            ),
+        )
+        .unwrap();
+
+        let ledger = load(dir.path(), &key("s1"));
+        assert_eq!(ledger.reported_adrs.len(), 1);
+        assert!(ledger.reported_used.is_empty());
+        assert!(ledger.reported_breached.is_empty());
+        assert_eq!(
+            report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], &[]),
+            (keys(&["grp-1"]), vec![])
+        );
+        assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
     }
 }

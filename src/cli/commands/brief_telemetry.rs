@@ -20,13 +20,14 @@
 //! [`report`] returns before it reads an id, writes the ledger or spawns
 //! anything.
 //!
-//! `check-override`'s event groups ADRs with [`logical_adrs`] and sends with
-//! [`dispatch`] too, so both events count an ADR the same way.
+//! `check-override`'s event and the gates' events group ADRs with
+//! [`logical_adrs`] or [`group_headers`] and send with [`dispatch`] too, so
+//! every event counts an ADR the same way.
 
 use std::path::Path;
 
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
-use crate::rules::types::RuleDocument;
+use crate::rules::types::{AdrMeta, RuleDocument};
 use crate::telemetry::otlp;
 
 /// One logical ADR among the documents a brief carried rules from.
@@ -42,11 +43,17 @@ pub(super) struct BriefedAdr {
 pub(super) fn logical_adrs<'a>(
     documents: impl IntoIterator<Item = &'a RuleDocument>,
 ) -> Vec<BriefedAdr> {
+    group_headers(
+        documents
+            .into_iter()
+            .filter_map(|document| document.meta.as_ref()),
+    )
+}
+
+/// Rule files' v2 headers grouped into logical ADRs, in order.
+pub(super) fn group_headers<'a>(headers: impl IntoIterator<Item = &'a AdrMeta>) -> Vec<BriefedAdr> {
     let mut adrs: Vec<BriefedAdr> = Vec::new();
-    for meta in documents
-        .into_iter()
-        .filter_map(|document| document.meta.as_ref())
-    {
+    for meta in headers {
         let Some(adr_id) = meta.adr_id.as_deref().filter(|id| !id.is_empty()) else {
             continue;
         };

@@ -52,6 +52,9 @@ pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 #[serde(default)]
 pub struct HookEnvelope {
     pub session_id: Option<String>,
+    /// The subagent the envelope came from, absent for the main agent. Only
+    /// the gate's telemetry reads it.
+    pub agent_id: Option<String>,
     pub prompt_id: Option<String>,
     pub transcript_path: Option<String>,
     pub tool_input: Option<ToolInput>,

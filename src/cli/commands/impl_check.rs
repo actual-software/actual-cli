@@ -519,6 +519,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
             kind: ArtifactKind::Diff,
             command: "impl-check --claude-hook",
             session_id,
+            agent_id: envelope.agent_id.as_deref(),
             artifact_digest: &diff_digest,
             root: &root,
             rules_dir: &rules_dir,
@@ -1467,6 +1468,98 @@ mod tests {
             Some("impl-check --claude-hook"),
             "impl-check's hook telemetry must not be mislabeled as plan-check's"
         );
+    }
+
+    /// A denied Stop sends its ADR's used and breached events at the
+    /// implementation stage, and the next Stop, denying the same rule again,
+    /// sends nothing.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_hook_with_deny_sends_used_and_breached_once_per_session() {
+        use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
+        use crate::cli::commands::check_telemetry::tests::with_header;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-impl-check-test.jsonl\n",
+        )
+        .unwrap();
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("cross-cutting-token-signing-1c57.md"),
+            with_header("adr-sign-1", Some("grp-sign"), OAUTH_DOC),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { log_signing_key(); }\n",
+        )
+        .unwrap();
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"session_id": "sess-impl-otlp-1", "hook_event_name": "Stop"})
+            .to_string();
+        take_captured();
+
+        exec_hook_with(&args, &raw);
+
+        let records = take_captured();
+        let events: Vec<&str> = records
+            .iter()
+            .map(|record| record["eventName"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            events,
+            [
+                crate::telemetry::otlp::ADR_DETECTED,
+                crate::telemetry::otlp::GATE_EVALUATED
+            ]
+        );
+        for record in &records {
+            assert_eq!(attribute(record, "actual.session.id"), "sess-impl-otlp-1");
+            assert_eq!(attribute(record, "actual.agent.id"), "");
+            assert_eq!(
+                attribute(record, "actual.adr.ids"),
+                serde_json::json!(["adr-sign-1"])
+            );
+        }
+        assert_eq!(
+            attribute(&records[0], "actual.detection.method"),
+            "implementation"
+        );
+        assert_eq!(attribute(&records[1], "actual.gate.outcome"), "breached");
+        assert_eq!(attribute(&records[1], "actual.gate.type"), "implementation");
+
+        exec_hook_with(&args, &raw);
+        let session =
+            governance_session::load("sess-impl-otlp-1", &crate::rules::rules_dir(repo.path()));
+        assert_eq!(session.diff.rounds, 2, "the next Stop was judged too");
+        assert!(take_captured().is_empty(), "and sent nothing");
     }
 
     /// The gap this guards: plan-stage denials used to live in the same

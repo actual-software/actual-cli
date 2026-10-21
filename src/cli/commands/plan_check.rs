@@ -419,6 +419,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             kind: ArtifactKind::Plan,
             command: "plan-check --claude-hook",
             session_id,
+            agent_id: envelope.agent_id.as_deref(),
             artifact_digest: &plan_digest,
             root: &root,
             rules_dir: &rules_dir,
@@ -1311,6 +1312,88 @@ mod tests {
             violation_props.decision,
             Some(crate::api::types::PlanGovernanceDecision::Block)
         );
+    }
+
+    /// A denied plan sends its ADR's used and breached events at the plan
+    /// stage, naming the ADR from the rule file's v2 header and the agent from
+    /// the envelope.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_hook_with_deny_sends_used_and_breached_at_the_plan_stage() {
+        use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
+        use crate::cli::commands::check_telemetry::tests::with_header;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-plan-check-test.jsonl\n",
+        )
+        .unwrap();
+        let root = seed(&[(
+            "cross-cutting-token-signing-1c57.md",
+            &with_header("adr-sign-1", Some("grp-sign"), OAUTH_DOC),
+        )]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({
+            "session_id": "sess-plan-otlp-1",
+            "agent_id": "agent-plan-1",
+            "tool_input": {"plan": "Sign access tokens with RS256"},
+        })
+        .to_string();
+        take_captured();
+
+        exec_hook_with(&args, &raw);
+
+        let records = take_captured();
+        let events: Vec<&str> = records
+            .iter()
+            .map(|record| record["eventName"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            events,
+            [
+                crate::telemetry::otlp::ADR_DETECTED,
+                crate::telemetry::otlp::GATE_EVALUATED
+            ]
+        );
+        for record in &records {
+            assert_eq!(attribute(record, "actual.session.id"), "sess-plan-otlp-1");
+            assert_eq!(attribute(record, "actual.agent.id"), "agent-plan-1");
+            assert_eq!(attribute(record, "actual.adr.ref"), "grp-sign");
+            assert_eq!(
+                attribute(record, "actual.adr.ids"),
+                serde_json::json!(["adr-sign-1"])
+            );
+        }
+        assert_eq!(
+            attribute(&records[0], "actual.detection.method"),
+            "planning"
+        );
+        assert_eq!(attribute(&records[1], "actual.gate.outcome"), "breached");
+        assert_eq!(attribute(&records[1], "actual.gate.type"), "planning");
     }
 
     /// The behavior change this guards: a `requires_decision` verdict must be
