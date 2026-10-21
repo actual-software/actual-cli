@@ -480,11 +480,12 @@ mod tests {
 
     // ── Category 7: Update notice ───────────────────────────────────
 
-    /// Run `actual runners` from a shell at a terminal, with its stdout and
+    /// Run `actual <command>` from a shell at a terminal, with its stdout and
     /// stderr redirected to the files given for them, and return the screen
-    /// once the shell reports that `actual` has exited.
-    fn run_runners_at_a_terminal(
+    /// once the shell reports that `actual` has exited and its exit status.
+    fn run_at_a_terminal(
         config_dir: &std::path::Path,
+        command: &str,
         stdout_file: Option<&std::path::Path>,
         stderr_file: Option<&std::path::Path>,
     ) -> String {
@@ -500,8 +501,8 @@ mod tests {
             &script,
             format!(
                 "unset CI ACTUAL_CLI_SUBPROCESS ACTUAL_NO_UPDATE_CHECK ACTUAL_CONFIG\n\
-                 ACTUAL_CONFIG_DIR={} {} runners{redirect}\n\
-                 echo run-finished\n",
+                 ACTUAL_CONFIG_DIR={} {} {command}{redirect}\n\
+                 echo run-finished with status $?\n",
                 quote(config_dir),
                 quote(std::path::Path::new(&actual_binary_path())),
             ),
@@ -532,7 +533,7 @@ mod tests {
         std::fs::write(&cache, &seeded).unwrap();
 
         let stdout_file = dir.path().join("stdout.txt");
-        let screen = run_runners_at_a_terminal(dir.path(), Some(&stdout_file), None);
+        let screen = run_at_a_terminal(dir.path(), "runners", Some(&stdout_file), None);
         assert!(!screen.contains("is available"), "{screen}");
         assert!(std::fs::read_to_string(&stdout_file)
             .unwrap()
@@ -540,13 +541,49 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
 
         let stderr_file = dir.path().join("stderr.txt");
-        let screen = run_runners_at_a_terminal(dir.path(), None, Some(&stderr_file));
+        let screen = run_at_a_terminal(dir.path(), "runners", None, Some(&stderr_file));
         assert!(screen.contains("claude-cli"), "{screen}");
         let stderr = std::fs::read_to_string(&stderr_file).unwrap();
         assert!(!stderr.contains("is available"), "{stderr}");
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
 
-        let screen = run_runners_at_a_terminal(dir.path(), None, None);
+        let screen = run_at_a_terminal(dir.path(), "runners", None, None);
+        assert!(screen.contains("actual 999.0.0 is available"), "{screen}");
+        assert!(std::fs::read_to_string(&cache)
+            .unwrap()
+            .contains("notified_at"));
+    }
+
+    /// A command that fails prints no notice and leaves the day's notice for
+    /// a command that succeeds.
+    #[test]
+    fn test_update_notice_waits_for_a_command_that_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("update-check.yaml");
+        // Checked a moment ago, so no run starts a registry lookup.
+        let seeded = format!(
+            "checked_at: {}\nlatest_version: 999.0.0\n",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+        );
+        std::fs::write(&cache, &seeded).unwrap();
+
+        // Signed out, `whoami` fails.
+        let screen = run_at_a_terminal(dir.path(), "whoami", None, None);
+        assert!(screen.contains("Not signed in to Actual AI"), "{screen}");
+        assert!(screen.contains("run-finished with status 2"), "{screen}");
+        assert!(!screen.contains("is available"), "{screen}");
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
+
+        // Signed in, the same command succeeds and shows the day's notice.
+        std::fs::write(
+            dir.path().join("credentials.yaml"),
+            "access_token: test-access\nrefresh_token: test-refresh\n\
+             organization_id: test-org\nmember_id: test-member\n",
+        )
+        .unwrap();
+        let screen = run_at_a_terminal(dir.path(), "whoami", None, None);
+        assert!(screen.contains("Signed in to Actual AI"), "{screen}");
+        assert!(screen.contains("run-finished with status 0"), "{screen}");
         assert!(screen.contains("actual 999.0.0 is available"), "{screen}");
         assert!(std::fs::read_to_string(&cache)
             .unwrap()

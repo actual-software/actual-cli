@@ -27,7 +27,7 @@ No command waits for the check. After a command finishes, `actual` prints the no
 
 ```mermaid
 flowchart TD
-    A["A command finishes"] --> B{"Turned off, CI, no terminal,<br/>a hook mode or --json?"}
+    A["A command finishes"] --> B{"Failed, turned off, CI, no terminal,<br/>a hook mode or --json?"}
     B -- yes --> Z["Nothing happens"]
     B -- no --> C{"The cache names a newer version<br/>and no notice was shown today?"}
     C -- yes --> D["Print the notice"]
@@ -39,6 +39,7 @@ flowchart TD
 
 It stays quiet when:
 
+- the command fails: the notice shows only after a successful command;
 - stdout or stderr isn't a terminal, as when output goes to a pager such as `less` or into a file, or `CI` is set;
 - the command runs in a mode a program reads: any `--json` output, the `--claude-hook` and `--claude-session-start` modes the actual skill's hooks use, and `mint-token`;
 - `actual` runs inside a `claude` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
