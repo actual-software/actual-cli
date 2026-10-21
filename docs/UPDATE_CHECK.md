@@ -44,7 +44,7 @@ It stays quiet when:
 - `actual` runs inside a `claude` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
 - the check is turned off, or the config file fails to load.
 
-A quiet run leaves the cache untouched, so it uses up neither the day's notice nor its lookup. A lookup that fails or times out is silent, and the next one waits a day.
+A quiet run leaves the cache untouched, so it uses up neither the day's notice nor its lookup. The exception is `actual version --check`, which records the version it finds: that counts as the day's lookup, and the day's notice stays unspent. A lookup that fails or times out is silent, and the next one waits a day.
 
 ## Turning it off
 
