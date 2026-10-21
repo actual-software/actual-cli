@@ -39,12 +39,12 @@ flowchart TD
 
 It stays quiet when:
 
-- stderr isn't a terminal, or `CI` is set;
+- stdout or stderr isn't a terminal, as when output goes to a pager such as `less` or into a file, or `CI` is set;
 - the command runs in a mode a program reads: any `--json` output, the `--claude-hook` and `--claude-session-start` modes the actual skill's hooks use, and `mint-token`;
 - `actual` runs inside a `claude` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
 - the check is turned off, or the config file fails to load.
 
-A lookup that fails or times out is silent, and the next one waits a day.
+A quiet run leaves the cache untouched, so it uses up neither the day's notice nor its lookup. A lookup that fails or times out is silent, and the next one waits a day.
 
 ## Turning it off
 
