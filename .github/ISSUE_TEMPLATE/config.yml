@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/actual-software/actual-cli/security/policy
+    about: Please don't open a public issue. Report it privately as described in SECURITY.md.
+  - name: Skill, hooks or plugin setup
+    url: https://github.com/actual-software/actual-skill/issues
+    about: Problems with how coding agents call the CLI belong in actual-skill.
