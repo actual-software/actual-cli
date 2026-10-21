@@ -29,6 +29,7 @@ dependencies = [
  "opentelemetry-proto",
  "p256",
  "predicates",
+ "prost",
  "rand 0.8.5",
  "ratatui",
  "regex",

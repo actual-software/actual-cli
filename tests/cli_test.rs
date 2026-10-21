@@ -2397,12 +2397,27 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
     let mut server = mockito::Server::new();
     let mock = server
         .mock("POST", "/v1/logs")
-        .match_header("content-type", "application/json")
-        .match_body(mockito::Matcher::AllOf(vec![
-            mockito::Matcher::Regex("ai\\.actual\\.adr\\.context_added".to_string()),
-            mockito::Matcher::Regex("grp-sign".to_string()),
-            mockito::Matcher::Regex("grp-rotate".to_string()),
-        ]))
+        .match_header("content-type", "application/x-protobuf")
+        .match_request(|request| {
+            use prost::Message;
+            // The official types decode the protobuf body; their JSON shows
+            // what it carries.
+            request
+                .body()
+                .ok()
+                .and_then(|body| {
+                    opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest::decode(
+                        body.as_slice(),
+                    )
+                    .ok()
+                })
+                .and_then(|sent| serde_json::to_string(&sent).ok())
+                .is_some_and(|sent| {
+                    ["ai.actual.adr.context_added", "grp-sign", "grp-rotate"]
+                        .iter()
+                        .all(|text| sent.contains(text))
+                })
+        })
         .with_status(200)
         .expect(1)
         .create();
