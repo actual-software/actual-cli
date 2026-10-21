@@ -110,29 +110,17 @@ the command would answer it. That matters because an ungated measurement would
 be free to trim a set the command returns whole, and would report a precision
 the command never achieves.
 
-**Fixture corpus** — 38 rule files, 16 plans, cap 5, stage 2 on `claude-cli`
+**Fixture corpus** — 42 rule files, 19 plans, cap 5, stage 2 on `claude-cli`
 with `claude-sonnet-4-6`:
 
 | selector | micro P | micro R | micro F1 |
 |---|---|---|---|
-| two-stage | 0.86 | 0.87 | **0.86** |
-| scope index | 0.68 | 0.87 | 0.76 |
-| filename scan | 0.63 | 0.63 | 0.63 |
+| two-stage | 0.86 | 0.88 | **0.87** |
+| scope index | 0.62 | 0.89 | 0.73 |
+| filename scan | 0.58 | 0.63 | 0.60 |
 
 Precision is where the rank pays, and it pays where the design says it should:
-0.86 against the index's 0.68, with recall unchanged at 0.87. Stage 2 cannot
-retrieve a rule stage 1 missed, so it does not move recall; what it does is stop
-returning the ones stage 1 got wrong.
-
-All sixteen cases leave more candidates than the cap — between 6 and 19 — so
-stage 2 ran on every one, and the trigger does not separate these numbers from
-what `rules select` returns.
-
-Two of those sixteen cases degraded to the prefilter mid-run — one runner
-timeout, one runner error — and were scored as prefilter results. The 0.86 is
-therefore a floor rather than a ceiling, and it is also a live demonstration of
-the fallback: a partial measurement across sixteen plans is worth more than no
-measurement because the ninth timed out.
+0.86 against the index's 0.62, with recall level at 0.88 against 0.89.
 
 Two further properties are asserted in `tests/integration_scope_select.rs`
 against a perfectly calibrated fake ranker, which measures the plumbing rather
@@ -194,7 +182,7 @@ five.
   documents there is no fallback and none is wanted: shared wording genuinely
   does not separate them, and only the terms that differ carry rank. A freshly
   synced repository is therefore ranked more crudely than a mature one, and the
-  numbers below were measured on corpora of 38 and 425 files.
+  numbers below were measured on corpora of 42 and 425 files.
 - **The `related` bucket is a judgement call.** A rule that constrains a change
   indirectly can land in either bucket, and where it lands decides whether it
   survives the cap. The verdict is printed for exactly this reason.

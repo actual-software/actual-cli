@@ -17,7 +17,7 @@
 //! The corpus under `tests/fixtures/scope_corpus/` is synthetic. It reproduces
 //! the shapes of the reference corpus — the same dead `cross-cutting-` prefix
 //! on every filename, `<ADR title>: <Aspect>` titles, prose scope sentences,
-//! and `### Verify` blocks naming real paths — across twelve topic clusters
+//! and `### Verify` blocks naming real paths — across sixteen decisions
 //! with deliberate near-neighbours (OAuth beside Next.js auth, Terraform
 //! providers beside Lambda sizing, metrics beside logging), because those
 //! neighbours are where a filename scan fails.
