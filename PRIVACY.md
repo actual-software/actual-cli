@@ -257,14 +257,15 @@ were given.
 default:
 
 - `telemetry.otlp_logs_endpoint` (or the `ACTUAL_OTLP_LOGS_ENDPOINT` env var):
-  an OTLP/HTTP logs URL, used as-is. It must use HTTPS unless it's localhost,
-  and the CLI doesn't follow redirects, so events reach that URL and no other.
-  The standard `OTEL_EXPORTER_OTLP_*` variables aren't read.
+  an OTLP/HTTP logs URL, used as-is. Events are sent to it as binary protobuf
+  (`Content-Type: application/x-protobuf`). It must use HTTPS unless it's
+  localhost, and the CLI doesn't follow redirects, so events reach that URL and
+  no other. The standard `OTEL_EXPORTER_OTLP_*` variables aren't read.
 - `telemetry.otlp_file` (or `ACTUAL_OTLP_FILE`): an absolute path on your
-  machine. Each request is appended to it as one line, in a file readable only
-  by the owner. A file that already exists is restricted to its owner before
-  anything is added, and nothing is written to a path that isn't a regular
-  file or whose permissions can't be changed.
+  machine. Each request is appended to it as one line of OTLP/JSON, in a file
+  readable only by the owner. A file that already exists is restricted to its
+  owner before anything is added, and nothing is written to a path that isn't
+  a regular file or whose permissions can't be changed.
 
 Set either with `actual config set`, and clear it by setting it to `""`. These
 events don't go to PostHog or to `api-service.api.prod.actual.ai`, only where
@@ -350,8 +351,8 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
-| The OTLP logs endpoint you configure (none by default) | ADR context events | HTTPS (enforced; plain HTTP only to localhost) |
-| The local file you configure (none by default) | ADR context events, one request per line | Local file, readable only by the owner |
+| The OTLP logs endpoint you configure (none by default) | ADR context events | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The local file you configure (none by default) | ADR context events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
 non-HTTPS API URLs.
