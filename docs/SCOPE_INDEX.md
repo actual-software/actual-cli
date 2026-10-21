@@ -83,12 +83,12 @@ Reproduce with:
 cargo run -- rules eval --golden tests/fixtures/scope_corpus/golden.json --repo tests/fixtures/scope_corpus --limit 5
 ```
 
-**Fixture corpus** — 38 rule files, 12 topic clusters, 16 plans, cap 5:
+**Fixture corpus** — 42 rule files, 16 decisions, 19 plans, cap 5:
 
 | selector | micro P | micro R | micro F1 |
 |---|---|---|---|
-| scope index | 0.68 | 0.87 | **0.76** |
-| filename scan | 0.63 | 0.63 | 0.63 |
+| scope index | 0.62 | 0.89 | **0.73** |
+| filename scan | 0.58 | 0.63 | 0.60 |
 
 **Reference corpus** — the private 425-file rule set, 10 plans:
 
