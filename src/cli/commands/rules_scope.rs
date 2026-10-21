@@ -284,16 +284,18 @@ fn render_adr_json(
 /// applies the decision cap.
 fn adr_filename_scan(index: &ScopeIndex, query_text: &str, limit: usize) -> Vec<AdrBaselineGroup> {
     let mut groups: Vec<AdrBaselineGroup> = Vec::new();
-    for hit in baseline::select(index, query_text, index.len()) {
-        // By path, not slug, so a duplicated stem cannot resolve to the wrong
-        // file. A hit the index no longer holds is skipped, not a panic.
-        let Some(document) = index
-            .documents
-            .iter()
-            .find(|doc| doc.relative_path == hit.relative_path)
-        else {
-            continue;
-        };
+    // By path, not slug, so a duplicated stem cannot resolve to the wrong
+    // file. A hit the index no longer holds is skipped, not a panic.
+    let hits = baseline::select(index, query_text, index.len())
+        .into_iter()
+        .filter_map(|hit| {
+            let document = index
+                .documents
+                .iter()
+                .find(|doc| doc.relative_path == hit.relative_path)?;
+            Some((document, hit))
+        });
+    for (document, hit) in hits {
         let key = document.decision_key();
         let baseline_hit = JsonBaselineHit {
             slug: hit.slug,
