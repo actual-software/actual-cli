@@ -40,6 +40,7 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const CACHE_FILENAME: &str = "update-check.yaml";
+const LOCK_FILENAME: &str = "update-check.lock";
 const INTERVAL_HOURS: i64 = 24;
 const REFRESH_COMMAND: &str = "__update-check";
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -207,24 +208,48 @@ fn after_command_with(
     let Some(cache_path) = cache_path.filter(|_| may_check(config)) else {
         return false;
     };
+    let Some(claim) = take_claim(cache_path, now) else {
+        return false;
+    };
+    if let Some(latest) = &claim.notice {
+        let _ = writeln!(out, "{}", notice(latest, channel));
+    }
+    claim.refresh
+}
+
+/// What one run takes from the cache once its command finishes.
+struct Claim {
+    /// A newer release to announce.
+    notice: Option<String>,
+    /// Start the day's lookup.
+    refresh: bool,
+}
+
+/// Decide what this run takes, under the cache lock: the notice, unless one
+/// was shown within the day, and the lookup, unless one started within the
+/// day. Both are recorded before the lock is released, so a command finishing
+/// at the same moment reads them and takes neither. The lookup is taken only
+/// once its attempt is saved, so one that fails or never finishes still waits
+/// a day, and nothing starts while the cache can't be written. `None` when
+/// the cache can't be locked.
+fn take_claim(cache_path: &Path, now: DateTime<Utc>) -> Option<Claim> {
+    let _lock = lock_cache(cache_path)?;
     let mut cache = load_cache(cache_path);
     let before = cache.clone();
-    let newer = cache
+    let notice = cache
         .latest_version
         .clone()
-        .filter(|latest| is_newer(latest, CURRENT_VERSION));
-    if let Some(latest) = newer.filter(|_| !within_a_day(cache.notified_at, now)) {
-        let _ = writeln!(out, "{}", notice(&latest, channel));
+        .filter(|latest| is_newer(latest, CURRENT_VERSION))
+        .filter(|_| !within_a_day(cache.notified_at, now));
+    if notice.is_some() {
         cache.notified_at = Some(now);
     }
     let refresh = !within_a_day(cache.checked_at, now);
     if refresh {
         cache.checked_at = Some(now);
     }
-    // The attempt is recorded before the child starts, so a lookup that fails
-    // or never finishes still waits a day, and nothing starts while the cache
-    // can't be written.
-    cache != before && save_cache(cache_path, &cache) && refresh
+    let refresh = cache != before && save_cache(cache_path, &cache) && refresh;
+    Some(Claim { notice, refresh })
 }
 
 /// The notice, after a blank line: the new release, then the command that
@@ -398,11 +423,34 @@ fn save_cache(path: &Path, cache: &UpdateCache) -> bool {
         && crate::config::paths::write_secure(path, yaml.as_bytes()).is_ok()
 }
 
+/// Record a successful lookup, under the cache lock, so a notice stamp or a
+/// daily claim saved at the same moment survives it. Records nothing when the
+/// cache can't be locked.
 fn record_latest(cache_path: &Path, latest: &str, now: DateTime<Utc>) {
+    let Some(_lock) = lock_cache(cache_path) else {
+        return;
+    };
     let mut cache = load_cache(cache_path);
     cache.checked_at = Some(now);
     cache.latest_version = Some(latest.to_string());
     save_cache(cache_path, &cache);
+}
+
+/// Lock the cache against every other process for one read-modify-write,
+/// waiting until no other holds it. The lock is on a sibling file, because
+/// each save replaces the cache file. Dropping the returned file releases it,
+/// as does the process exiting, so a crash leaves nothing held. `None` when
+/// the lock file can't be opened or locked.
+fn lock_cache(cache_path: &Path) -> Option<std::fs::File> {
+    let lock_path = cache_path.with_file_name(LOCK_FILENAME);
+    std::fs::create_dir_all(lock_path.parent()?).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(lock_path).ok()?;
+    file.lock().ok()?;
+    Some(file)
 }
 
 /// True when `at` lies within a day of `now`, on either side: a timestamp far
@@ -847,16 +895,195 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::remove(OPT_OUT_ENV);
         let dir = tempdir().unwrap();
-        let blocker = dir.path().join("file");
-        std::fs::write(&blocker, b"").unwrap();
+        // A directory where the cache file belongs lets the lock be taken and
+        // refuses the save.
+        let path = dir.path().join(CACHE_FILENAME);
+        std::fs::create_dir(&path).unwrap();
 
-        let (_, refresh) = after(
-            &Config::default(),
-            &blocker.join(CACHE_FILENAME),
-            Utc::now(),
-            Channel::Npm,
-        );
+        let (_, refresh) = after(&Config::default(), &path, Utc::now(), Channel::Npm);
         assert!(!refresh, "an unrecorded attempt would repeat on every run");
+    }
+
+    /// Commands that finish together each read the same stale cache. The lock
+    /// lets one of them take the day's lookup and notice, and the rest read
+    /// what it recorded. Each call opens the lock file itself, so these threads
+    /// contend for it exactly as separate processes do: the lock belongs to the
+    /// open file, not to the process.
+    #[test]
+    fn concurrent_commands_take_the_lookup_and_the_notice_once() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::remove(OPT_OUT_ENV);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        seed(
+            &path,
+            &UpdateCache {
+                checked_at: hours_ago(now, 30),
+                latest_version: Some(FUTURE.to_string()),
+                notified_at: hours_ago(now, 30),
+            },
+        );
+
+        let runs = 8;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(runs));
+        let threads: Vec<_> = (0..runs)
+            .map(|_| {
+                let (start, path) = (start.clone(), path.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    after(&Config::default(), &path, now, Channel::Npm)
+                })
+            })
+            .collect();
+        let results: Vec<(String, bool)> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+
+        let refreshes = results.iter().filter(|(_, refresh)| *refresh).count();
+        let notices = results.iter().filter(|(out, _)| !out.is_empty()).count();
+        assert_eq!((refreshes, notices), (1, 1), "{results:?}");
+        let cache = load_cache(&path);
+        assert_eq!(
+            (cache.checked_at, cache.notified_at),
+            (Some(now), Some(now))
+        );
+    }
+
+    /// A lookup's answer and a command's notice stamp, saved at the same
+    /// moment, both survive. Without the lock, each could save over the other
+    /// with what it read before the other's save landed.
+    #[test]
+    fn a_lookup_and_a_notice_saved_together_both_survive() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::remove(OPT_OUT_ENV);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        let newer = "999.1.0";
+        // A race doesn't lose an update every time it runs, so run it often.
+        for _ in 0..10 {
+            seed(
+                &path,
+                &UpdateCache {
+                    checked_at: hours_ago(now, 1),
+                    latest_version: Some(FUTURE.to_string()),
+                    notified_at: hours_ago(now, 30),
+                },
+            );
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let lookup = std::thread::spawn({
+                let (start, path) = (start.clone(), path.clone());
+                move || {
+                    start.wait();
+                    record_latest(&path, newer, now);
+                }
+            });
+            let command = std::thread::spawn({
+                let (start, path) = (start.clone(), path.clone());
+                move || {
+                    start.wait();
+                    after(&Config::default(), &path, now, Channel::Npm)
+                }
+            });
+            lookup.join().unwrap();
+            let (out, _) = command.join().unwrap();
+
+            assert!(!out.is_empty(), "the notice was due");
+            let cache = load_cache(&path);
+            assert_eq!(cache.latest_version.as_deref(), Some(newer), "lookup lost");
+            assert_eq!(cache.notified_at, Some(now), "notice stamp lost");
+        }
+    }
+
+    /// A directory where the lock file belongs defeats the lock, and a run that
+    /// can't lock the cache neither takes from it nor records in it.
+    #[test]
+    fn nothing_is_taken_or_recorded_without_the_lock() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::remove(OPT_OUT_ENV);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        let stale = UpdateCache {
+            checked_at: hours_ago(now, 30),
+            latest_version: Some(FUTURE.to_string()),
+            notified_at: hours_ago(now, 30),
+        };
+        seed(&path, &stale);
+        std::fs::create_dir(dir.path().join(LOCK_FILENAME)).unwrap();
+
+        let taken = after(&Config::default(), &path, now, Channel::Npm);
+        assert_eq!(taken, (String::new(), false));
+        record_latest(&path, "999.1.0", now);
+        assert_eq!(load_cache(&path), stale);
+    }
+
+    /// A writer that records whether the cache lock was held each time the
+    /// notice reached it.
+    struct LockProbe {
+        lock_path: PathBuf,
+        held: bool,
+    }
+
+    impl Write for LockProbe {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let lock = std::fs::File::open(&self.lock_path)?;
+            self.held |= lock.try_lock().is_err();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_notice_prints_after_the_lock_is_released() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::remove(OPT_OUT_ENV);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        seed(
+            &path,
+            &UpdateCache {
+                checked_at: hours_ago(now, 1),
+                latest_version: Some(FUTURE.to_string()),
+                notified_at: None,
+            },
+        );
+        let mut probe = LockProbe {
+            lock_path: dir.path().join(LOCK_FILENAME),
+            held: false,
+        };
+
+        after_command_with(
+            Some(&Config::default()),
+            Some(&path),
+            now,
+            Channel::Npm,
+            &mut probe,
+        );
+        probe.flush().unwrap();
+        assert_eq!(
+            load_cache(&path).notified_at,
+            Some(now),
+            "the notice is due"
+        );
+        assert!(
+            !probe.held,
+            "a stalled terminal would hold up every other command"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        assert!(lock_cache(&dir.path().join(CACHE_FILENAME)).is_some());
+        let lock_file = std::fs::metadata(dir.path().join(LOCK_FILENAME)).unwrap();
+        assert_eq!(lock_file.permissions().mode() & 0o777, 0o600);
     }
 
     /// A configuration that couldn't load (`None`) may be the one turning
