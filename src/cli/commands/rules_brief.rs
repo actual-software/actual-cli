@@ -496,13 +496,7 @@ fn brief_for(
         // Telemetry counts by a different rule: any ADR with a rule the agent
         // was just given, however its decision was trimmed.
         #[cfg(feature = "telemetry")]
-        super::brief_telemetry::report(
-            &dir,
-            &key,
-            who.agent_id,
-            root,
-            rendered.reached.iter().copied(),
-        );
+        super::brief_telemetry::report(&dir, &key, who.agent_id, rendered.reached.iter().copied());
     }
 
     // Only decisions that contributed everything they could are remembered:
@@ -2537,8 +2531,9 @@ mod tests {
         });
     }
 
-    /// The group ids of the records reported since the last call, sorted, with
-    /// the file ids each carries.
+    /// The ADR refs of the records reported since the last call, sorted, with
+    /// the file ids each carries. Every fixture ADR has a group, so its ref is
+    /// the group id.
     #[cfg(feature = "telemetry")]
     fn reported() -> Vec<(String, serde_json::Value)> {
         use super::super::brief_telemetry::tests::{attribute, take_captured};
@@ -2546,11 +2541,11 @@ mod tests {
             .iter()
             .map(|record| {
                 (
-                    attribute(record, "ai.actual.adr.candidate_group_id")
+                    attribute(record, "actual.adr.ref")
                         .as_str()
                         .unwrap()
                         .to_string(),
-                    attribute(record, "ai.actual.adr.ids"),
+                    attribute(record, "actual.adr.ids"),
                 )
             })
             .collect();

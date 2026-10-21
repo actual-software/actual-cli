@@ -1,5 +1,6 @@
-//! ADR telemetry as OpenTelemetry log events over OTLP/HTTP with protobuf
-//! encoding, starting with an ADR entering an agent's context.
+//! ADR telemetry as OpenTelemetry log events in Actual's `actual.*` event
+//! catalog, over OTLP/HTTP with protobuf encoding, starting with an ADR
+//! entering an agent's context.
 //!
 //! # Design
 //!
@@ -7,6 +8,11 @@
 //! An ADR entering context happens at a point in time and has no duration,
 //! which is what the semantic conventions reserve events for, and an event
 //! needs no enclosing span.
+//!
+//! **No identity on the record.** A record names no user, organization,
+//! repository or installation, hashed or otherwise. It carries ids that
+//! correlate events instead: one per event, one per CLI execution, and the
+//! agent session's.
 //!
 //! **Protobuf on the wire, OTLP/JSON on disk.** Records are built and spooled
 //! as OTLP/JSON. The uploader builds each request from the official
@@ -28,6 +34,7 @@
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opentelemetry_proto::tonic::collector::logs::v1 as collector;
@@ -38,12 +45,25 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::config::types::{validate_otlp_file, validate_otlp_logs_endpoint, Config};
-use crate::telemetry::identity::IdentityEnvelope;
 use crate::telemetry::opt_out;
 use crate::telemetry::spool::OTLP_LOGS;
 
-/// The event sent when an ADR first enters a session's context.
-pub(crate) const CONTEXT_ADDED: &str = "ai.actual.adr.context_added";
+/// The event sent when an ADR is detected, here by entering a session's
+/// context for the first time.
+pub(crate) const ADR_DETECTED: &str = "actual.adr.detected";
+
+/// The version of the attributes below, sent as `actual.event.schema_version`.
+const SCHEMA_VERSION: i64 = 1;
+
+/// `deployment.environment.name`: release builds are the ones users run.
+const ENVIRONMENT: &str = if cfg!(debug_assertions) {
+    "development"
+} else {
+    "production"
+};
+
+/// `actual.surface`: the kind of producer this CLI is.
+const SURFACE: &str = "coding-agent";
 
 /// Overrides `telemetry.otlp_logs_endpoint`.
 const ENDPOINT_ENV: &str = "ACTUAL_OTLP_LOGS_ENDPOINT";
@@ -167,10 +187,13 @@ impl KeyValue {
     }
 }
 
+// The variants spell OTLP/JSON's keys: stringValue, intValue, arrayValue.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum AnyValue {
     StringValue(String),
+    IntValue(#[serde(with = "decimal")] i64),
     ArrayValue { values: Vec<AnyValue> },
 }
 
@@ -178,6 +201,7 @@ impl AnyValue {
     fn to_proto(&self) -> common::AnyValue {
         let value = match self {
             Self::StringValue(value) => common::any_value::Value::StringValue(value.clone()),
+            Self::IntValue(value) => common::any_value::Value::IntValue(*value),
             Self::ArrayValue { values } => {
                 common::any_value::Value::ArrayValue(common::ArrayValue {
                     values: values.iter().map(Self::to_proto).collect(),
@@ -188,10 +212,37 @@ impl AnyValue {
     }
 }
 
+/// OTLP/JSON's 64-bit integers, which it writes as decimal strings.
+mod decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 fn text(key: &'static str, value: Option<&str>) -> KeyValue {
     KeyValue {
         key: key.to_string(),
         value: AnyValue::StringValue(value.unwrap_or_default().to_string()),
+    }
+}
+
+fn strings(key: &'static str, values: &[impl AsRef<str>]) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::ArrayValue {
+            values: values
+                .iter()
+                .map(|value| AnyValue::StringValue(value.as_ref().to_string()))
+                .collect(),
+        },
     }
 }
 
@@ -207,23 +258,20 @@ fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// What the records from one run share: who sends them, when, and the trace
-/// they belong to.
+/// What the records from one run share: the CLI execution that sends them,
+/// when, and the trace they belong to.
 pub(crate) struct Origin {
-    install_id: String,
-    identity: IdentityEnvelope,
+    action_id: String,
     time_unix_nano: String,
     trace: Option<TraceContext>,
 }
 
 impl Origin {
-    /// The origin of a run about to emit: the install id, the hashed identity
-    /// envelope (from local state only), the current time, and the trace in
-    /// `TRACEPARENT`, if any.
-    pub(crate) fn resolve(config: &Config, repo_url: &str) -> Self {
+    /// The origin of a run about to emit: this execution's action id, the
+    /// current time, and the trace in `TRACEPARENT`, if any.
+    pub(crate) fn resolve() -> Self {
         Self {
-            install_id: crate::telemetry::plan_governance::distinct_id(),
-            identity: IdentityEnvelope::resolve(config, repo_url),
+            action_id: action_id().to_string(),
             time_unix_nano: unix_nanos(SystemTime::now()),
             trace: std::env::var("TRACEPARENT")
                 .ok()
@@ -231,47 +279,66 @@ impl Origin {
         }
     }
 
-    /// The [`CONTEXT_ADDED`] record for one logical ADR. Every attribute is
-    /// present, an empty string when unknown, so a logged-out record carries
-    /// the same keys as a logged-in one.
+    /// The [`ADR_DETECTED`] record for one logical ADR entering a session's
+    /// context.
     pub(crate) fn context_added(
         &self,
         session_id: &str,
         agent_id: Option<&str>,
-        candidate_group_id: Option<&str>,
+        adr_ref: &str,
         adr_ids: &[String],
     ) -> LogRecord {
-        let uid = crate::telemetry::plan_governance::new_insert_id();
-        let ids = adr_ids
-            .iter()
-            .map(|id| AnyValue::StringValue(id.clone()))
-            .collect();
-        let identity = &self.identity;
+        let mut record = self.adr_record(ADR_DETECTED, session_id, agent_id, adr_ref, adr_ids);
+        record
+            .attributes
+            .push(text("actual.detection.method", Some("context")));
+        record
+    }
+
+    /// A record carrying the attributes every ADR event shares, each present
+    /// on every record and an empty string when unknown: its own event id,
+    /// which `log.record.uid` repeats, the schema version, the action and
+    /// session it belongs to, the subagent, `adr_ref` naming the logical ADR,
+    /// and the `adr_id` of each of its files.
+    fn adr_record(
+        &self,
+        event_name: &str,
+        session_id: &str,
+        agent_id: Option<&str>,
+        adr_ref: &str,
+        adr_ids: &[String],
+    ) -> LogRecord {
+        let event_id = uuid::Uuid::now_v7().to_string();
         LogRecord {
             time_unix_nano: self.time_unix_nano.clone(),
             observed_time_unix_nano: self.time_unix_nano.clone(),
             severity_number: SEVERITY_INFO,
-            event_name: CONTEXT_ADDED.to_string(),
+            event_name: event_name.to_string(),
             attributes: vec![
-                text("log.record.uid", Some(uid.as_str())),
-                text("session.id", Some(session_id)),
-                text("ai.actual.agent.id", agent_id),
-                text("ai.actual.adr.candidate_group_id", candidate_group_id),
+                text("log.record.uid", Some(&event_id)),
+                text("actual.event.id", Some(&event_id)),
                 KeyValue {
-                    key: "ai.actual.adr.ids".to_string(),
-                    value: AnyValue::ArrayValue { values: ids },
+                    key: "actual.event.schema_version".to_string(),
+                    value: AnyValue::IntValue(SCHEMA_VERSION),
                 },
-                text("ai.actual.install.id", Some(self.install_id.as_str())),
-                text("ai.actual.user.id_hash", identity.user_id_hash.as_deref()),
-                text("ai.actual.org.id_hash", identity.org_id_hash.as_deref()),
-                text("ai.actual.repo.id_hash", identity.repo_id_hash.as_deref()),
-                text("ai.actual.org.fallback_id", identity.org_id.as_deref()),
+                text("actual.action.id", Some(&self.action_id)),
+                text("actual.session.id", Some(session_id)),
+                text("actual.agent.id", agent_id),
+                text("actual.adr.ref", Some(adr_ref)),
+                strings("actual.adr.ids", adr_ids),
             ],
             trace_id: self.trace.as_ref().map(|t| t.trace_id.clone()),
             span_id: self.trace.as_ref().map(|t| t.span_id.clone()),
             flags: self.trace.as_ref().map(|t| t.flags),
         }
     }
+}
+
+/// This execution's `actual.action.id`: a UUIDv7 made the first time a record
+/// asks, and shared by every record the process builds after that.
+fn action_id() -> &'static str {
+    static ACTION_ID: OnceLock<String> = OnceLock::new();
+    ACTION_ID.get_or_init(|| uuid::Uuid::now_v7().to_string())
 }
 
 fn unix_nanos(time: SystemTime) -> String {
@@ -353,6 +420,8 @@ fn resource_attributes() -> Vec<KeyValue> {
     vec![
         text("service.name", Some(NAME)),
         text("service.version", Some(VERSION)),
+        text("deployment.environment.name", Some(ENVIRONMENT)),
+        text("actual.surface", Some(SURFACE)),
         text("telemetry.sdk.name", Some(NAME)),
         text("telemetry.sdk.language", Some("rust")),
         text("telemetry.sdk.version", Some(VERSION)),
@@ -581,22 +650,11 @@ mod tests {
         }
     }
 
-    fn origin(identity: IdentityEnvelope, trace: Option<TraceContext>) -> Origin {
+    fn origin(trace: Option<TraceContext>) -> Origin {
         Origin {
-            install_id: "install-1".to_string(),
-            identity,
+            action_id: "action-1".to_string(),
             time_unix_nano: "1792446915838119000".to_string(),
             trace,
-        }
-    }
-
-    fn logged_in() -> IdentityEnvelope {
-        IdentityEnvelope {
-            user_id_hash: Some("a".repeat(64)),
-            org_id_hash: Some("b".repeat(64)),
-            repo_id_hash: Some("c".repeat(64)),
-            org_id: None,
-            datetime_utc: String::new(),
         }
     }
 
@@ -732,14 +790,14 @@ mod tests {
 
     #[test]
     fn test_context_added_is_an_info_event_with_no_body() {
-        let record = record_json(&origin(logged_in(), None).context_added(
+        let record = record_json(&origin(None).context_added(
             "session-1",
             None,
-            Some("grp-1"),
+            "grp-1",
             &ids(&["adr-1", "adr-2"]),
         ));
 
-        assert_eq!(record["eventName"], CONTEXT_ADDED);
+        assert_eq!(record["eventName"], ADR_DETECTED);
         assert_eq!(record["severityNumber"], 9);
         assert_eq!(record["timeUnixNano"], "1792446915838119000");
         assert_eq!(record["observedTimeUnixNano"], record["timeUnixNano"]);
@@ -750,10 +808,10 @@ mod tests {
 
     #[test]
     fn test_context_added_carries_every_attribute_in_order() {
-        let record = record_json(&origin(logged_in(), None).context_added(
+        let record = record_json(&origin(None).context_added(
             "session-1",
             Some("agent-7"),
-            Some("grp-1"),
+            "grp-1",
             &ids(&["adr-1", "adr-2"]),
         ));
         let attributes = attributes(&record);
@@ -763,15 +821,14 @@ mod tests {
             keys,
             [
                 "log.record.uid",
-                "session.id",
-                "ai.actual.agent.id",
-                "ai.actual.adr.candidate_group_id",
-                "ai.actual.adr.ids",
-                "ai.actual.install.id",
-                "ai.actual.user.id_hash",
-                "ai.actual.org.id_hash",
-                "ai.actual.repo.id_hash",
-                "ai.actual.org.fallback_id",
+                "actual.event.id",
+                "actual.event.schema_version",
+                "actual.action.id",
+                "actual.session.id",
+                "actual.agent.id",
+                "actual.adr.ref",
+                "actual.adr.ids",
+                "actual.detection.method",
             ]
         );
         let value = |key: &str| {
@@ -781,91 +838,85 @@ mod tests {
                 .map(|(_, v)| v.clone())
                 .unwrap()
         };
-        assert!(
-            uuid::Uuid::parse_str(value("log.record.uid")["stringValue"].as_str().unwrap()).is_ok()
-        );
-        assert_eq!(value("session.id")["stringValue"], "session-1");
-        assert_eq!(value("ai.actual.agent.id")["stringValue"], "agent-7");
+        let event_id = value("actual.event.id")["stringValue"].clone();
+        let event_id = uuid::Uuid::parse_str(event_id.as_str().unwrap()).unwrap();
+        assert_eq!(event_id.get_version_num(), 7);
+        assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
-            value("ai.actual.adr.candidate_group_id")["stringValue"],
-            "grp-1"
+            value("actual.event.schema_version"),
+            serde_json::json!({"intValue": "1"})
         );
+        assert_eq!(value("actual.action.id")["stringValue"], "action-1");
+        assert_eq!(value("actual.session.id")["stringValue"], "session-1");
+        assert_eq!(value("actual.agent.id")["stringValue"], "agent-7");
+        assert_eq!(value("actual.adr.ref")["stringValue"], "grp-1");
         assert_eq!(
-            value("ai.actual.adr.ids"),
+            value("actual.adr.ids"),
             serde_json::json!({"arrayValue": {"values": [{"stringValue": "adr-1"}, {"stringValue": "adr-2"}]}})
         );
-        assert_eq!(value("ai.actual.install.id")["stringValue"], "install-1");
-        assert_eq!(
-            value("ai.actual.user.id_hash")["stringValue"],
-            "a".repeat(64)
-        );
-        assert_eq!(
-            value("ai.actual.org.id_hash")["stringValue"],
-            "b".repeat(64)
-        );
-        assert_eq!(
-            value("ai.actual.repo.id_hash")["stringValue"],
-            "c".repeat(64)
-        );
-        assert_eq!(value("ai.actual.org.fallback_id")["stringValue"], "");
+        assert_eq!(value("actual.detection.method")["stringValue"], "context");
     }
 
-    /// Logged out, the record has the same keys, with empty strings where a
-    /// logged-in one has hashes.
+    /// A record names no user, organization, repository or installation, and
+    /// the main agent's record carries the agent id empty.
     #[test]
-    fn test_a_logged_out_record_has_the_same_keys_with_empty_values() {
-        let logged_out = IdentityEnvelope {
-            org_id: Some("fallback-org".to_string()),
-            ..Default::default()
-        };
-        let a =
-            record_json(&origin(logged_out, None).context_added("s", None, None, &ids(&["adr-9"])));
-        let b = record_json(&origin(logged_in(), None).context_added(
-            "s",
-            None,
-            None,
-            &ids(&["adr-9"]),
-        ));
+    fn test_a_record_carries_no_identity() {
+        let record = record_json(&origin(None).context_added("s", None, "adr-9", &ids(&["adr-9"])));
+        let attributes = attributes(&record);
 
-        let keys = |record: &Value| -> Vec<String> {
-            attributes(record).into_iter().map(|(key, _)| key).collect()
-        };
-        assert_eq!(keys(&a), keys(&b));
-        let out = attributes(&a);
-        for (key, expected) in [
-            ("ai.actual.agent.id", ""),
-            ("ai.actual.adr.candidate_group_id", ""),
-            ("ai.actual.user.id_hash", ""),
-            ("ai.actual.org.id_hash", ""),
-            ("ai.actual.repo.id_hash", ""),
-            ("ai.actual.org.fallback_id", "fallback-org"),
-        ] {
-            let value = &out.iter().find(|(k, _)| k == key).unwrap().1;
-            assert_eq!(value["stringValue"], expected, "{key}");
+        for (key, _) in &attributes {
+            for identity in ["user", "org", "repo", "install", "hash", "fallback"] {
+                assert!(!key.contains(identity), "{key} names an identity");
+            }
         }
+        let agent = &attributes
+            .iter()
+            .find(|(key, _)| key == "actual.agent.id")
+            .unwrap()
+            .1;
+        assert_eq!(agent["stringValue"], "");
     }
 
+    /// Each record gets its own event id, which `log.record.uid` repeats, and
+    /// every record from one run shares the run's action id.
     #[test]
-    fn test_each_record_gets_its_own_uid() {
-        let origin = origin(logged_in(), None);
-        let uid = |record: &LogRecord| attributes(&record_json(record))[0].1.clone();
-        let a = origin.context_added("s", None, Some("g1"), &ids(&["x"]));
-        let b = origin.context_added("s", None, Some("g1"), &ids(&["x"]));
-        assert_ne!(uid(&a), uid(&b));
+    fn test_each_record_gets_its_own_event_id_and_shares_the_action_id() {
+        let origin = origin(None);
+        let ids_of = |record: &LogRecord| {
+            let attributes = attributes(&record_json(record));
+            let text = |key: &str| {
+                let value = &attributes.iter().find(|(k, _)| k == key).unwrap().1;
+                value["stringValue"].as_str().unwrap().to_string()
+            };
+            (
+                text("log.record.uid"),
+                text("actual.event.id"),
+                text("actual.action.id"),
+            )
+        };
+        let a = ids_of(&origin.context_added("s", None, "g1", &ids(&["x"])));
+        let b = ids_of(&origin.context_added("s", None, "g1", &ids(&["x"])));
+
+        assert_eq!(a.0, a.1);
+        assert_eq!(b.0, b.1);
+        assert_ne!(a.1, b.1);
+        assert_eq!((a.2.as_str(), b.2.as_str()), ("action-1", "action-1"));
     }
 
     #[test]
     fn test_a_trace_context_links_the_record() {
         let trace = TraceContext::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
-        let record =
-            record_json(&origin(logged_in(), trace).context_added("s", None, None, &ids(&["x"])));
+        let record = record_json(&origin(trace).context_added("s", None, "x", &ids(&["x"])));
         assert_eq!(record["traceId"], "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(record["spanId"], "00f067aa0ba902b7");
         assert_eq!(record["flags"], 1);
     }
 
+    /// An origin reads `TRACEPARENT` and takes this execution's action id, a
+    /// UUIDv7 every origin in the process shares. It reads no install id, so
+    /// the file that holds one is never created.
     #[test]
-    fn test_origin_resolve_reads_traceparent_and_the_install_id() {
+    fn test_origin_resolve_reads_traceparent_and_the_action_id() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = clear_env();
         let home = tempdir().unwrap();
@@ -875,14 +926,15 @@ mod tests {
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
         );
 
-        let origin = Origin::resolve(&Config::default(), "");
+        let origin = Origin::resolve();
 
-        assert_eq!(
-            origin.install_id,
-            crate::telemetry::plan_governance::distinct_id()
-        );
+        assert_eq!(origin.action_id, action_id());
+        assert_eq!(Origin::resolve().action_id, origin.action_id);
+        let action = uuid::Uuid::parse_str(&origin.action_id).unwrap();
+        assert_eq!(action.get_version_num(), 7);
         assert_eq!(origin.trace.unwrap().flags, 0);
         assert!(origin.time_unix_nano.parse::<u128>().unwrap() > 0);
+        assert!(!home.path().join("telemetry-id").exists());
     }
 
     #[test]
@@ -927,10 +979,10 @@ mod tests {
 
     fn sample_records() -> Vec<LogRecord> {
         let trace = TraceContext::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
-        let origin = origin(logged_in(), trace);
+        let origin = origin(trace);
         vec![
-            origin.context_added("session-1", None, Some("grp-1"), &ids(&["adr-1", "adr-2"])),
-            origin.context_added("session-1", Some("agent-2"), None, &ids(&["adr-3"])),
+            origin.context_added("session-1", None, "grp-1", &ids(&["adr-1", "adr-2"])),
+            origin.context_added("session-1", Some("agent-2"), "adr-3", &ids(&["adr-3"])),
         ]
     }
 
@@ -967,6 +1019,8 @@ mod tests {
             [
                 ("service.name", "actual-cli"),
                 ("service.version", VERSION),
+                ("deployment.environment.name", ENVIRONMENT),
+                ("actual.surface", "coding-agent"),
                 ("telemetry.sdk.name", "actual-cli"),
                 ("telemetry.sdk.language", "rust"),
                 ("telemetry.sdk.version", VERSION),
@@ -989,7 +1043,7 @@ mod tests {
         let request = decoded(&sample_records());
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
-        assert_eq!(record.event_name, CONTEXT_ADDED);
+        assert_eq!(record.event_name, ADR_DETECTED);
         assert_eq!(record.severity_number, 9);
         assert_eq!(record.time_unix_nano, 1_792_446_915_838_119_000);
         assert_eq!(record.observed_time_unix_nano, record.time_unix_nano);
@@ -1006,11 +1060,19 @@ mod tests {
         );
         assert_eq!(record.flags, 1);
         let keys: Vec<&str> = record.attributes.iter().map(|kv| kv.key.as_str()).collect();
-        assert_eq!(keys[..2], ["log.record.uid", "session.id"]);
-        assert_eq!(keys.len(), 10);
-        assert_eq!(string(record.attributes[1].value.as_ref()), "session-1");
-        assert_eq!(keys[4], "ai.actual.adr.ids");
-        let ids: Vec<&str> = match record.attributes[4]
+        assert_eq!(keys.len(), 9);
+        assert_eq!(keys[2], "actual.event.schema_version");
+        assert_eq!(
+            record.attributes[2]
+                .value
+                .as_ref()
+                .and_then(|value| value.value.as_ref()),
+            Some(&common::any_value::Value::IntValue(1))
+        );
+        assert_eq!(keys[4], "actual.session.id");
+        assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
+        assert_eq!(keys[7], "actual.adr.ids");
+        let ids: Vec<&str> = match record.attributes[7]
             .value
             .as_ref()
             .and_then(|value| value.value.as_ref())
@@ -1018,7 +1080,7 @@ mod tests {
             Some(common::any_value::Value::ArrayValue(ids)) => {
                 ids.values.iter().map(|id| string(Some(id))).collect()
             }
-            other => panic!("ai.actual.adr.ids is not a list: {other:?}"),
+            other => panic!("actual.adr.ids is not a list: {other:?}"),
         };
         assert_eq!(ids, ["adr-1", "adr-2"]);
     }
@@ -1026,7 +1088,7 @@ mod tests {
     /// A record with no trace context goes out with no ids and no flags.
     #[test]
     fn test_a_record_outside_a_trace_has_no_ids() {
-        let records = [origin(logged_in(), None).context_added("s", None, None, &ids(&["x"]))];
+        let records = [origin(None).context_added("s", None, "x", &ids(&["x"]))];
         let request = decoded(&records);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
         assert!(record.trace_id.is_empty());
@@ -1049,7 +1111,9 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
+            whole.replace(r#"{"intValue":"1"}"#, r#"{"intValue":"one"}"#),
         ];
+        assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
 
         damaged.extend(spooled);
@@ -1127,7 +1191,7 @@ mod tests {
 
         assert_eq!(official_json(&request, &line), line);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
-        assert_eq!(record.event_name, CONTEXT_ADDED);
+        assert_eq!(record.event_name, ADR_DETECTED);
         assert_eq!(record.time_unix_nano, 1_792_446_915_838_119_000);
         assert_eq!(record.trace_id.len(), 16);
     }
@@ -1165,7 +1229,7 @@ mod tests {
 
         let taken = OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST);
         assert_eq!(taken.len(), 2);
-        assert!(taken[0].contains(CONTEXT_ADDED));
+        assert!(taken[0].contains(ADR_DETECTED));
         assert!(OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST).is_empty());
     }
 
@@ -1680,9 +1744,12 @@ mod tests {
             .expect(2)
             .create_async()
             .await;
-        let origin = origin(logged_in(), None);
+        let origin = origin(None);
         let records: Vec<LogRecord> = (0..150)
-            .map(|i| origin.context_added("s", None, None, &ids(&[&format!("adr-{i}")])))
+            .map(|i| {
+                let adr = format!("adr-{i}");
+                origin.context_added("s", None, &adr, &ids(&[&adr]))
+            })
             .collect();
         spool(&records);
         let file = home.path().join("otlp.jsonl");
