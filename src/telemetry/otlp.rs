@@ -995,10 +995,10 @@ mod tests {
 
     /// The text of a string value.
     fn string(value: Option<&common::AnyValue>) -> &str {
-        match value.and_then(|value| value.value.as_ref()) {
-            Some(common::any_value::Value::StringValue(text)) => text,
-            other => panic!("not a string: {other:?}"),
-        }
+        let value = value.and_then(|value| value.value.as_ref());
+        #[rustfmt::skip]
+        let Some(common::any_value::Value::StringValue(text)) = value else { panic!("not a string: {value:?}") };
+        text
     }
 
     #[test]
@@ -1072,16 +1072,13 @@ mod tests {
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
         assert_eq!(keys[7], "actual.adr.ids");
-        let ids: Vec<&str> = match record.attributes[7]
+        let ids = record.attributes[7]
             .value
             .as_ref()
-            .and_then(|value| value.value.as_ref())
-        {
-            Some(common::any_value::Value::ArrayValue(ids)) => {
-                ids.values.iter().map(|id| string(Some(id))).collect()
-            }
-            other => panic!("actual.adr.ids is not a list: {other:?}"),
-        };
+            .and_then(|value| value.value.as_ref());
+        #[rustfmt::skip]
+        let Some(common::any_value::Value::ArrayValue(ids)) = ids else { panic!("actual.adr.ids is not a list: {ids:?}") };
+        let ids: Vec<&str> = ids.values.iter().map(|id| string(Some(id))).collect();
         assert_eq!(ids, ["adr-1", "adr-2"]);
     }
 
