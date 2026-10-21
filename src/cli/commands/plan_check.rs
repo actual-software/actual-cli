@@ -605,24 +605,36 @@ fn decide(
     (Decision::Gap, files.len())
 }
 
-/// Each folder the paths count toward, once, with the files that decide it in
-/// name order, smallest folder first.
+/// Each folder the paths count toward, once, with the files that decide it,
+/// smallest folder first. The files the plan names come first, then the rest,
+/// each in name order, so a named file is searched before any that only the
+/// folder's listing brings.
 fn planned_folders(root: &Path, paths: &[String]) -> Vec<(String, Vec<String>)> {
     let mut folders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (folder, files) in paths.iter().filter_map(|path| planned_folder(root, path)) {
+    let mut named = BTreeSet::new();
+    for (folder, files, names_a_file) in paths.iter().filter_map(|path| planned_folder(root, path))
+    {
+        if names_a_file {
+            named.extend(files.iter().cloned());
+        }
         folders.entry(folder).or_default().extend(files);
     }
     let mut folders: Vec<(String, Vec<String>)> = folders
         .into_iter()
-        .map(|(folder, files)| (folder, files.into_iter().collect()))
+        .map(|(folder, files)| {
+            let (mut files, rest): (Vec<String>, Vec<String>) =
+                files.into_iter().partition(|file| named.contains(file));
+            files.extend(rest);
+            (folder, files)
+        })
         .collect();
     folders.sort_by_key(|(_, files)| files.len());
     folders
 }
 
-/// The folder a planned path counts toward and the repository-relative files
-/// that decide whether a decision governs it, or `None` when it counts toward
-/// none.
+/// The folder a planned path counts toward, the repository-relative files
+/// that decide whether a decision governs it, and whether the path names a
+/// file rather than a folder, or `None` when it counts toward none.
 ///
 /// A path names a folder when it is a directory in the checkout or, when it
 /// is not there yet, has no extension, the reading the index gives a query
@@ -634,7 +646,7 @@ fn planned_folders(root: &Path, paths: &[String]) -> Vec<(String, Vec<String>)> 
 /// notes nothing, a glob counts only toward a folder it spells out, and a path
 /// outside the root notes nothing. A folder the plan would create is noted by
 /// the brief when a file is first written there.
-fn planned_folder(root: &Path, path: &str) -> Option<(String, Vec<String>)> {
+fn planned_folder(root: &Path, path: &str) -> Option<(String, Vec<String>, bool)> {
     let relative = rules_brief::relative_to_root(root, path)?;
     let on_disk = root.join(&relative);
     let names_a_folder = if on_disk.exists() {
@@ -645,7 +657,7 @@ fn planned_folder(root: &Path, path: &str) -> Option<(String, Vec<String>)> {
     if !names_a_folder {
         let folder =
             brief_ledger::folder_of(&relative).filter(|folder| root.join(folder).is_dir())?;
-        return Some((folder, vec![relative]));
+        return Some((folder, vec![relative], true));
     }
     let files: Vec<String> = std::fs::read_dir(&on_disk)
         .ok()?
@@ -654,7 +666,7 @@ fn planned_folder(root: &Path, path: &str) -> Option<(String, Vec<String>)> {
         .map(|entry| format!("{relative}/{}", entry.file_name().to_string_lossy()))
         .filter(|file| brief_ledger::folder_of(file).is_some())
         .collect();
-    (!files.is_empty()).then_some((relative, files))
+    (!files.is_empty()).then_some((relative, files, false))
 }
 
 #[cfg(test)]
@@ -2467,6 +2479,56 @@ mod tests {
         );
     }
 
+    /// In a folder past the cap, a governed file the plan names is searched
+    /// first, so it covers its folder though it sorts past the cap. In a folder
+    /// like it that the plan names only outright, the same file still sorts
+    /// past the cap and leaves the folder undecided.
+    #[test]
+    fn test_a_file_the_plan_names_covers_its_folder_past_the_file_cap() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[(
+            "terraform-pins-7e2a.md",
+            "# Pin Providers: Terraform Versions\n\nThese rules are ALWAYS ACTIVE for all \
+             code matching: **/*.tf\n\n### Rules\n\n- **R-T-001** MUST: pin every provider \
+             version.\n",
+        )]);
+        touch(
+            root.path(),
+            &[
+                "infra/prod/apply.sh",
+                "infra/prod/bootstrap.sh",
+                "infra/prod/main.tf",
+                "infra/staging/apply.sh",
+                "infra/staging/bootstrap.sh",
+                "infra/staging/main.tf",
+            ],
+        );
+        let text = "Pin `infra/prod/main.tf`, then run `infra/prod/` and `infra/staging/`.";
+        let bound = FolderBound {
+            file_cap: 2,
+            ..FOLDER_BOUND
+        };
+
+        let pass = pass_within(root.path(), text, bound);
+
+        assert_eq!(pass.covered, vec!["infra/prod".to_string()]);
+        assert!(pass.gaps.is_empty());
+        assert_eq!(
+            pass.undecided,
+            vec![UndecidedFolder {
+                folder: "infra/staging".to_string(),
+                reason: Stop::FileCap,
+                files: 3,
+                searched: 2,
+            }]
+        );
+        assert_eq!(pass.files_searched, 3);
+        plan_within(root.path(), text, bound);
+        assert_eq!(noted(root.path()), (vec!["infra/prod".to_string()], vec![]));
+    }
+
     /// Once the deadline has passed, the pass searches nothing more: every
     /// folder it had not decided is undecided, listed by name, and nothing is
     /// noted.
@@ -2509,8 +2571,9 @@ mod tests {
         assert!(nothing_noted());
     }
 
-    /// Every file a path brings to a folder decides it once, in name order,
-    /// and the folders come smallest first, so a deadline cuts the largest.
+    /// Every file a path brings to a folder decides it once, the ones the plan
+    /// names first and then the rest, each in name order, and the folders come
+    /// smallest first, so a deadline cuts the largest.
     #[test]
     fn test_planned_folders_list_each_file_once_smallest_folder_first() {
         let root = planned_repo();
@@ -2521,7 +2584,8 @@ mod tests {
         let paths = [
             "infra/terraform",
             "services/auth/oauth/token.ts",
-            "infra/terraform/main.tf",
+            "infra/terraform/vars.tf",
+            "infra/terraform/outputs.tf",
         ]
         .map(String::from);
 
@@ -2535,9 +2599,9 @@ mod tests {
                 (
                     "infra/terraform".to_string(),
                     vec![
-                        "infra/terraform/main.tf".to_string(),
                         "infra/terraform/outputs.tf".to_string(),
                         "infra/terraform/vars.tf".to_string(),
+                        "infra/terraform/main.tf".to_string(),
                     ]
                 ),
             ]
