@@ -119,9 +119,9 @@ still point at the real file. Every field is optional.
 include, those are the document's globs, and neither the `### Verify` operands
 nor path-like tokens in the prose scope sentence contribute any. The body's
 generated `Scope: applies to ...` line restates the header, which is why prose
-is not read for globs once a header is present, even when it declares no
-`paths`. The prose still feeds the `scope` terms. A v2 document with no `paths`
-keeps its Verify-derived globs. A v1 document is unchanged.
+is not read for globs once the header declares an include. The prose still
+feeds the `scope` terms. A v2 document with no include `paths` keeps the globs
+derived from its Verify operands and its prose. A v1 document is unchanged.
 
 **Root.** Each declared glob is prefixed with `root/` when the index is built,
 so everything downstream sees repository-relative globs and path matching is
@@ -140,8 +140,8 @@ hard negative decided before any signal is scored, so it holds for the path
 signal, for word matches, and for the brief's text fallback alike. A query that
 names several files keeps the decision for the ones it can still govern.
 
-**Status.** `deleted`, `draft`, `archived-draft`, `deferred` and `rejected` mark
-a decision that does not govern, as do `superseded` and `deprecated`, which no
+**Status.** `deleted`, `draft`, `archived-draft`, `deferred`, `rejected` and
+`suggested` mark a decision that does not govern, as do `superseded` and `deprecated`, which no
 generator emits today. Such a document is left out of the index, so it is never
 selected, ranked, briefed, judged by `plan-check` or `impl-check`, or counted in
 "X of Y ADRs"; `rules index` reports how many were left out. Any other status,
@@ -153,8 +153,10 @@ newer generator meant to be enforced. `deleted`, `draft`, `archived-draft` and
 **A bad header is a warning, not an error.** Malformed YAML, or YAML that is not
 a mapping, is recorded as a `malformed_frontmatter` warning on the document and
 the body is still read. The same kind is reported for a list entry that is not a
-plain value (it is dropped), a glob in `paths` that does not compile (it is
-ignored), a `root` containing `..` (it is ignored), and a `status` this build
+plain value (it is dropped), a glob in `paths` that does not compile (an exclude
+never excludes; an include still counts as declared, so it replaces the derived
+globs, restricts the decision to its root and matches only by its literal
+prefix), a `root` containing `..` (it is ignored), and a `status` this build
 does not know (the document is still treated as active). `status` is matched
 case-insensitively with surrounding whitespace trimmed. An unrecognised `version` is an `unknown_version`
 warning. Two files that share a file stem are each given a `duplicate_slug`
@@ -260,15 +262,17 @@ including those left by other repositories — and rebuilds this one.
 
 ## JSON additions
 
-The v2 work only adds fields; none is renamed or removed, and each is left out
-for a v1 document, so v1 output is byte-for-byte what it was.
+The v2 work only adds fields; none is renamed or removed. Per-document and
+per-rule fields are left out for a v1 document. `rules index --json` prints
+its three counts for every rule set, and its `format_version` changed with the
+cache format.
 
 | Command | Added |
 |---|---|
 | `rules ls --json` | per document: `adr_id`, `candidate_group_id`, `status`, `root` (`root` only when the header declares paths); new warning kinds `malformed_frontmatter`, `unknown_version`, `duplicate_slug` |
 | `rules index --json` | `inactive_documents`, `documents_with_declared_paths`, `documents_with_derived_paths` |
 | `rules select --json` | per selected rule: `adr_id`, `candidate_group_id`, `root` (`root` only when the header declares paths) |
-| `rules select --by-adr --json` | per decision and per document: `adr_id`, `candidate_group_id`, `root` (`root` only when the header declares paths); the decision's `key` is `group:<candidate_group_id>`, else `id:<adr_id>` |
+| `rules select --by-adr --json` | per document: `adr_id`, `candidate_group_id`, `root` (`root` only when the header declares paths); per decision: `candidate_group_id` when the decision is keyed on it; the decision's `key` is `group:<candidate_group_id>`, else `id:<adr_id>` |
 
 Judge schemas and override ids are unchanged: they stay `doc_slug::rule_id`.
 
