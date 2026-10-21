@@ -74,7 +74,9 @@ discounted a further 25%.
 
 Generated rule files may open with a YAML block fenced by `---` lines. The CLI
 reads it alongside the original format; a file without one (every v1 file) is
-indexed exactly as before, and the two can sit in one `.actual/rules/`.
+indexed exactly as before, and the two can sit in one `.actual/rules/`. A
+leading `---` block that contains a heading line is a markdown horizontal rule,
+not a header, and is read as document content.
 
 ```yaml
 ---
@@ -150,7 +152,11 @@ newer generator meant to be enforced. `deleted`, `draft`, `archived-draft` and
 
 **A bad header is a warning, not an error.** Malformed YAML, or YAML that is not
 a mapping, is recorded as a `malformed_frontmatter` warning on the document and
-the body is still read. An unrecognised `version` is an `unknown_version`
+the body is still read. The same kind is reported for a list entry that is not a
+plain value (it is dropped), a glob in `paths` that does not compile (it is
+ignored), a `root` containing `..` (it is ignored), and a `status` this build
+does not know (the document is still treated as active). `status` is matched
+case-insensitively with surrounding whitespace trimmed. An unrecognised `version` is an `unknown_version`
 warning. Two files that share a file stem are each given a `duplicate_slug`
 warning naming the other, with a note when their `adr_id`s differ.
 
@@ -210,9 +216,10 @@ filename scan wastes nearly two.
   by a vendored copy or an editor backup that happened to land there. A
   hand-organised `.actual/rules/auth/` is ignored.
 - **The v2 header is read, not validated against a schema.** Unknown keys are
-  ignored and a field of the wrong type is read as absent. `languages`,
-  the evidence source, `name` and `description` are parsed and carried but do
-  not influence any selection yet.
+  ignored. A number or boolean is read as its text, a single value where a list
+  is expected (`paths: src/**`) is a one-item list, and any other field of the
+  wrong type is read as absent. `languages`, the evidence source, `name` and
+  `description` are parsed and carried but do not influence any selection yet.
 - **A decision split across v1 and v2 files is two decisions.** Files group on
   `candidate_group_id`, else `adr_id`, when they have one and on their title
   prefix otherwise, so a decision
@@ -244,10 +251,11 @@ with it. It is keyed by a SHA-256 over the exact bytes of every rule file, so an
 edit, add, remove or rename invalidates it, and a content change that keeps a
 file's size and timestamp cannot be missed. The stored index also carries a
 format version. A cache written by a build with a different version is
-discarded and rebuilt rather than misread, and the v2 work bumped it. The per-session brief memory and ledger are versioned
-the same way and were bumped too, because their keys changed, so an agent can be
-briefed once more on a decision after an upgrade. Every cache operation is best-effort: an unreadable or unwritable cache
-degrades to a rebuild. `actual rules index --clear` removes every cached index —
+discarded and rebuilt rather than misread, and the v2 work bumped it. The
+per-session brief memory and ledger are versioned the same way and were bumped
+too, because their keys changed, so an agent can be briefed once more on a
+decision after an upgrade. Every cache operation is best-effort: an unreadable
+or unwritable cache degrades to a rebuild. `actual rules index --clear` removes every cached index —
 including those left by other repositories — and rebuilds this one.
 
 ## JSON additions
