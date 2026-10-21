@@ -1,0 +1,18 @@
+name: Bug report
+description: Something in the actual CLI doesn't work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Problem
+      description: The command you ran, what you expected, and what happened instead. Paste any error output.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and platform
+      description: The output of `actual --version`, plus your OS and architecture.
+    validations:
+      required: true
