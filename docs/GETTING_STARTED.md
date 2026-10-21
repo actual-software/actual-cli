@@ -33,6 +33,20 @@ xattr -dr com.apple.quarantine /usr/local/bin/actual
 
 Verify it works: `actual --version`
 
+### Build from source
+
+To build from source you need a C compiler for the tree-sitter native dependencies:
+
+```bash
+# macOS: Xcode command-line tools (usually already installed)
+xcode-select --install
+
+# Debian/Ubuntu
+sudo apt-get install build-essential
+
+cargo install --git https://github.com/actual-software/actual-cli.git
+```
+
 ## Prerequisites
 
 You need an AI runner. Pick one:
