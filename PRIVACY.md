@@ -308,7 +308,7 @@ the same fields logged in or out:
 | `actual.adr.ids` | The `adr_id` of each of the ADR's rule files with at least one rule in the brief that added it; on an event from a gate, with at least one rule the gate judged, or for a breach blocked on; on an override event, with at least one rule the override named | first-party identity-linked |
 | `actual.detection.method` | How the ADR was detected: `context` when a brief added it to an agent's context, or the gate that judged its rules, `planning` for `plan-check` and `implementation` for `impl-check` | anonymous |
 | `actual.gate.outcome` | What the evaluation came to: `breached` when a gate blocked on the ADR's rules, `overridden` when a human overrode them | anonymous |
-| `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | first-party identity-linked |
+| `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | anonymous |
 | `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules earlier in the session, and an empty list when the human overrode before any denial | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
