@@ -116,6 +116,13 @@ fn env_is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
+/// True when a registry request may go out: the configuration loaded, and
+/// [`is_disabled`] finds update checks on. A configuration that couldn't load
+/// may be the one turning them off, so it counts as off.
+fn may_check(config: Option<&Config>) -> bool {
+    config.is_some_and(|config| !is_disabled(config))
+}
+
 /// Whether a command shows the notice when it finishes.
 ///
 /// Hook modes and machine-readable output never do: the actual skill's hooks
@@ -176,9 +183,9 @@ fn someone_is_watching(stderr_is_terminal: bool) -> bool {
 /// lookup is more than a day old. Never waits on the network, and never fails
 /// the command.
 pub fn after_command() {
-    let config = crate::config::paths::load().unwrap_or_default();
+    let config = crate::config::paths::load().ok();
     let refresh = after_command_with(
-        &config,
+        config.as_ref(),
         cache_path().as_deref(),
         Utc::now(),
         Channel::current(),
@@ -187,16 +194,17 @@ pub fn after_command() {
     spawn_refresh_from(refresh.then(std::env::current_exe).and_then(Result::ok));
 }
 
-/// [`after_command`] with its inputs passed in. Returns whether to start a
-/// refresh, which is true only once the attempt is recorded in the cache.
+/// [`after_command`] with its inputs passed in, `config` being `None` when the
+/// configuration couldn't load. Returns whether to start a refresh, which is
+/// true only once the attempt is recorded in the cache.
 fn after_command_with(
-    config: &Config,
+    config: Option<&Config>,
     cache_path: Option<&Path>,
     now: DateTime<Utc>,
     channel: Channel,
     out: &mut impl Write,
 ) -> bool {
-    let Some(cache_path) = cache_path.filter(|_| !is_disabled(config)) else {
+    let Some(cache_path) = cache_path.filter(|_| may_check(config)) else {
         return false;
     };
     let mut cache = load_cache(cache_path);
@@ -252,11 +260,12 @@ fn spawn_refresh_from(exe: Option<PathBuf>) {
 }
 
 /// The hidden `__update-check` command's work: one lookup, recorded in the
-/// cache. Does nothing when update checks are off. A failed lookup records
-/// nothing, which leaves in place the attempt [`after_command`] recorded, so
-/// the next one still waits a day.
-pub(crate) fn refresh(config: &Config, url: &str, cache_path: &Path) {
-    if is_disabled(config) {
+/// cache. Does nothing when update checks are off or the configuration
+/// couldn't load (`None`). A failed lookup records nothing, which leaves in
+/// place the attempt [`after_command`] recorded, so the next one still waits a
+/// day.
+pub(crate) fn refresh(config: Option<&Config>, url: &str, cache_path: &Path) {
+    if !may_check(config) {
         return;
     }
     if let Some(latest) = lookup_latest(url, LOOKUP_TIMEOUT) {
@@ -271,24 +280,31 @@ pub enum Latest {
     NotRequested,
     /// Update checks are turned off.
     Disabled,
+    /// The configuration couldn't load, and it may be what turns update checks
+    /// off, so no request was made.
+    ConfigNotLoaded,
     /// The registry didn't answer in time, or answered without a valid version.
     Unavailable,
     /// The latest published version.
     Found(String),
 }
 
-/// Look up the latest release for `actual version`. Without `check`, or with
-/// update checks off, this makes no request. A successful lookup is also
-/// recorded in the cache, which the daily notice reads.
+/// Look up the latest release for `actual version`. Without `check`, with
+/// update checks off, or with a configuration that couldn't load (`None`), this
+/// makes no request. A successful lookup is also recorded in the cache, which
+/// the daily notice reads.
 pub(crate) fn look_up(
     check: bool,
-    config: &Config,
+    config: Option<&Config>,
     url: &str,
     cache_path: Option<&Path>,
 ) -> Latest {
     if !check {
         return Latest::NotRequested;
     }
+    let Some(config) = config else {
+        return Latest::ConfigNotLoaded;
+    };
     if is_disabled(config) {
         return Latest::Disabled;
     }
@@ -709,7 +725,7 @@ mod tests {
     /// printed and whether it asked for a refresh.
     fn after(config: &Config, path: &Path, now: DateTime<Utc>, channel: Channel) -> (String, bool) {
         let mut out = Vec::new();
-        let refresh = after_command_with(config, Some(path), now, channel, &mut out);
+        let refresh = after_command_with(Some(config), Some(path), now, channel, &mut out);
         (String::from_utf8(out).unwrap(), refresh)
     }
 
@@ -843,6 +859,76 @@ mod tests {
         assert!(!refresh, "an unrecorded attempt would repeat on every run");
     }
 
+    /// A configuration that couldn't load (`None`) may be the one turning
+    /// update checks off, so nothing reaches the registry or the cache.
+    #[test]
+    fn nothing_reaches_the_registry_when_the_config_cannot_load() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::remove(OPT_OUT_ENV);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        let stale = UpdateCache {
+            checked_at: hours_ago(now, 30),
+            latest_version: Some(FUTURE.to_string()),
+            notified_at: hours_ago(now, 30),
+        };
+        seed(&path, &stale);
+        let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 0);
+        let url = latest_url(&server);
+
+        let mut out = Vec::new();
+        assert!(!after_command_with(
+            None,
+            Some(&path),
+            now,
+            Channel::Npm,
+            &mut out
+        ));
+        assert!(
+            out.is_empty(),
+            "the notice is part of what the opt-out stops"
+        );
+        refresh(None, &url, &path);
+        assert_eq!(
+            look_up(true, None, &url, Some(&path)),
+            Latest::ConfigNotLoaded
+        );
+        assert_eq!(
+            look_up(false, None, &url, Some(&path)),
+            Latest::NotRequested
+        );
+        mock.assert();
+        assert_eq!(load_cache(&path), stale);
+    }
+
+    /// `update_check.enabled: false` beside an invalid value: the whole file
+    /// fails to load, the opt-out with it.
+    const BROKEN_CONFIG: &str = "update_check:\n  enabled: false\nbatch_size: lots\n";
+
+    #[test]
+    fn after_command_takes_nothing_when_the_config_cannot_load() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+        let _env = EnvGuard::remove(OPT_OUT_ENV);
+        std::fs::write(dir.path().join("config.yaml"), BROKEN_CONFIG).unwrap();
+        let now = Utc::now();
+        // A notice is due and a lookup isn't, so a run that ignored the
+        // failure would stamp the notice without starting a child.
+        let cache = UpdateCache {
+            checked_at: hours_ago(now, 1),
+            latest_version: Some(FUTURE.to_string()),
+            notified_at: hours_ago(now, 30),
+        };
+        let path = dir.path().join(CACHE_FILENAME);
+        seed(&path, &cache);
+
+        after_command();
+        assert_eq!(load_cache(&path), cache);
+    }
+
     #[test]
     fn after_command_reads_the_real_config_and_respects_the_opt_out() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -857,8 +943,13 @@ mod tests {
     #[test]
     fn after_command_needs_a_cache_path() {
         let mut out = Vec::new();
-        let refresh =
-            after_command_with(&Config::default(), None, Utc::now(), Channel::Npm, &mut out);
+        let refresh = after_command_with(
+            Some(&Config::default()),
+            None,
+            Utc::now(),
+            Channel::Npm,
+            &mut out,
+        );
         assert!(!refresh);
         assert!(out.is_empty());
     }
@@ -999,7 +1090,7 @@ mod tests {
         let path = dir.path().join(CACHE_FILENAME);
         let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 1);
 
-        refresh(&Config::default(), &latest_url(&server), &path);
+        refresh(Some(&Config::default()), &latest_url(&server), &path);
         mock.assert();
         let cache = load_cache(&path);
         assert_eq!(cache.latest_version.as_deref(), Some("0.9.0"));
@@ -1019,7 +1110,7 @@ mod tests {
         };
         seed(&path, &claimed);
 
-        refresh(&Config::default(), &closed_url(), &path);
+        refresh(Some(&Config::default()), &closed_url(), &path);
         assert_eq!(load_cache(&path), claimed);
     }
 
@@ -1031,7 +1122,7 @@ mod tests {
         let path = dir.path().join(CACHE_FILENAME);
         let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 0);
 
-        refresh(&Config::default(), &latest_url(&server), &path);
+        refresh(Some(&Config::default()), &latest_url(&server), &path);
         mock.assert();
         assert!(!path.exists());
     }
@@ -1046,11 +1137,11 @@ mod tests {
         let url = latest_url(&server);
 
         assert_eq!(
-            look_up(false, &Config::default(), &url, Some(&path)),
+            look_up(false, Some(&Config::default()), &url, Some(&path)),
             Latest::NotRequested
         );
         assert_eq!(
-            look_up(true, &config_with(Some(false)), &url, Some(&path)),
+            look_up(true, Some(&config_with(Some(false))), &url, Some(&path)),
             Latest::Disabled
         );
         assert!(
@@ -1059,18 +1150,18 @@ mod tests {
         );
 
         assert_eq!(
-            look_up(true, &Config::default(), &url, Some(&path)),
+            look_up(true, Some(&Config::default()), &url, Some(&path)),
             Latest::Found("0.9.0".to_string())
         );
         assert_eq!(load_cache(&path).latest_version.as_deref(), Some("0.9.0"));
         assert_eq!(
-            look_up(true, &Config::default(), &url, None),
+            look_up(true, Some(&Config::default()), &url, None),
             Latest::Found("0.9.0".to_string())
         );
         mock.assert();
 
         assert_eq!(
-            look_up(true, &Config::default(), &closed_url(), Some(&path)),
+            look_up(true, Some(&Config::default()), &closed_url(), Some(&path)),
             Latest::Unavailable
         );
     }

@@ -11,27 +11,34 @@ use crate::error::ActualError;
 use crate::update_check::{self, Channel, Latest, CURRENT_VERSION, RELEASE_URL};
 
 pub fn exec(args: &VersionArgs) -> Result<(), ActualError> {
-    let config = crate::config::paths::load().unwrap_or_default();
-    let cache = update_check::cache_path();
-    let latest = update_check::look_up(
-        args.check,
-        &config,
-        update_check::REGISTRY_URL,
-        cache.as_deref(),
-    );
-    println!("{}", render(Channel::current(), &latest, args.json));
+    println!("{}", report(args, update_check::REGISTRY_URL));
     Ok(())
+}
+
+/// What `actual version` prints, asking `url` for the latest release with
+/// `--check`. A configuration that couldn't load makes no request, and the
+/// report still carries the local facts.
+fn report(args: &VersionArgs, url: &str) -> String {
+    let config = crate::config::paths::load().ok();
+    let cache = update_check::cache_path();
+    let latest = update_check::look_up(args.check, config.as_ref(), url, cache.as_deref());
+    render(Channel::current(), &latest, args.json)
 }
 
 /// Run the hidden `__update-check` command: one lookup, recorded in the
 /// update-check cache. Never fails: the command that started it has already
 /// exited.
 pub fn exec_refresh() -> Result<(), ActualError> {
-    let config = crate::config::paths::load().unwrap_or_default();
-    if let Some(path) = update_check::cache_path() {
-        update_check::refresh(&config, update_check::REGISTRY_URL, &path);
-    }
+    refresh_from(update_check::REGISTRY_URL);
     Ok(())
+}
+
+/// [`exec_refresh`]'s lookup, against `url`.
+fn refresh_from(url: &str) {
+    let config = crate::config::paths::load().ok();
+    if let Some(path) = update_check::cache_path() {
+        update_check::refresh(config.as_ref(), url, &path);
+    }
 }
 
 /// The `--json` object, documented in docs/UPDATE_CHECK.md. The actual skill's
@@ -60,7 +67,9 @@ fn render(channel: Channel, latest: &Latest, json: bool) -> String {
 fn render_json(channel: Channel, latest: &Latest) -> String {
     let latest_version = match latest {
         Latest::Found(version) => Some(version.as_str()),
-        Latest::NotRequested | Latest::Disabled | Latest::Unavailable => None,
+        Latest::NotRequested | Latest::Disabled | Latest::ConfigNotLoaded | Latest::Unavailable => {
+            None
+        }
     };
     let report = Report {
         current_version: CURRENT_VERSION,
@@ -82,6 +91,9 @@ fn render_text(channel: Channel, latest: &Latest) -> String {
     let latest_line = match latest {
         Latest::NotRequested => None,
         Latest::Disabled => Some("not checked (update checks are turned off)".to_string()),
+        Latest::ConfigNotLoaded => {
+            Some("not checked (the config file couldn't be loaded)".to_string())
+        }
         Latest::Unavailable => Some("unknown (the npm registry didn't answer)".to_string()),
         Latest::Found(version) if update_check::is_newer(version, CURRENT_VERSION) => {
             Some(format!("{version} (update available)"))
@@ -156,7 +168,11 @@ mod tests {
 
     #[test]
     fn json_leaves_the_latest_unknown_when_disabled_or_unanswered() {
-        for latest in [Latest::Disabled, Latest::Unavailable] {
+        for latest in [
+            Latest::Disabled,
+            Latest::ConfigNotLoaded,
+            Latest::Unavailable,
+        ] {
             let value: serde_json::Value =
                 serde_json::from_str(&render(Channel::Npm, &latest, true)).unwrap();
             assert!(value["latest_version"].is_null(), "{latest:?}");
@@ -192,6 +208,10 @@ mod tests {
             (
                 Latest::Disabled,
                 "not checked (update checks are turned off)".to_string(),
+            ),
+            (
+                Latest::ConfigNotLoaded,
+                "not checked (the config file couldn't be loaded)".to_string(),
             ),
             (
                 Latest::Unavailable,
@@ -254,5 +274,104 @@ mod tests {
         let _off = EnvGuard::set(update_check::OPT_OUT_ENV, "1");
         assert!(exec_refresh().is_ok());
         assert!(!dir.path().join("update-check.yaml").exists());
+    }
+
+    /// `update_check.enabled: false` beside an invalid value: the whole file
+    /// fails to load, the opt-out with it.
+    const BROKEN_CONFIG: &str = "update_check:\n  enabled: false\nbatch_size: lots\n";
+
+    /// A registry that must be asked exactly `hits` times, and its URL.
+    fn registry(hits: usize) -> (mockito::ServerGuard, mockito::Mock, String) {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/latest")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"version":"0.9.0"}"#)
+            .expect(hits)
+            .create();
+        let url = format!("{}/latest", server.url());
+        (server, mock, url)
+    }
+
+    fn report_json(check: bool, url: &str) -> serde_json::Value {
+        serde_json::from_str(&report(&VersionArgs { check, json: true }, url)).unwrap()
+    }
+
+    #[test]
+    fn report_makes_no_request_when_the_config_cannot_load() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+        let _env = EnvGuard::remove(update_check::OPT_OUT_ENV);
+        std::fs::write(dir.path().join("config.yaml"), BROKEN_CONFIG).unwrap();
+        let (_server, mock, url) = registry(0);
+
+        let local_facts = serde_json::json!({
+            "current_version": CURRENT_VERSION,
+            "latest_version": null,
+            "update_available": null,
+            "channel": "other",
+            "upgrade_command": null,
+            "release_url": RELEASE_URL,
+        });
+        assert_eq!(report_json(true, &url), local_facts);
+        assert_eq!(report_json(false, &url), local_facts);
+        let text = report(
+            &VersionArgs {
+                check: true,
+                json: false,
+            },
+            &url,
+        );
+        assert!(
+            text.contains("not checked (the config file couldn't be loaded)"),
+            "{text}"
+        );
+        mock.assert();
+        assert!(!dir.path().join("update-check.yaml").exists());
+    }
+
+    #[test]
+    fn report_asks_the_registry_when_the_config_loads() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+        let _env = EnvGuard::remove(update_check::OPT_OUT_ENV);
+        let (_server, mock, url) = registry(1);
+
+        assert_eq!(report_json(true, &url)["latest_version"], "0.9.0");
+        mock.assert();
+    }
+
+    #[test]
+    fn exec_refresh_makes_no_request_when_the_config_cannot_load() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+        let _env = EnvGuard::remove(update_check::OPT_OUT_ENV);
+        std::fs::write(dir.path().join("config.yaml"), BROKEN_CONFIG).unwrap();
+        let (_server, mock, url) = registry(0);
+
+        refresh_from(&url);
+        mock.assert();
+        assert!(!dir.path().join("update-check.yaml").exists());
+    }
+
+    #[test]
+    fn exec_refresh_records_the_latest_version_when_the_config_loads() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+        let _env = EnvGuard::remove(update_check::OPT_OUT_ENV);
+        let (_server, mock, url) = registry(1);
+
+        refresh_from(&url);
+        mock.assert();
+        let cache = std::fs::read_to_string(dir.path().join("update-check.yaml")).unwrap();
+        assert!(cache.contains("0.9.0"), "{cache}");
     }
 }
