@@ -480,17 +480,21 @@ mod tests {
 
     // ── Category 7: Update notice ───────────────────────────────────
 
-    /// Run `actual runners` from a shell at a terminal, with its stdout
-    /// redirected to `stdout_file` when one is given, and return the screen
+    /// Run `actual runners` from a shell at a terminal, with its stdout and
+    /// stderr redirected to the files given for them, and return the screen
     /// once the shell reports that `actual` has exited.
     fn run_runners_at_a_terminal(
         config_dir: &std::path::Path,
         stdout_file: Option<&std::path::Path>,
+        stderr_file: Option<&std::path::Path>,
     ) -> String {
         let quote = |path: &std::path::Path| {
             format!("'{}'", shell_single_quote_escape(path.to_str().unwrap()))
         };
-        let redirect = stdout_file.map_or(String::new(), |file| format!(" > {}", quote(file)));
+        let to = |fd: &str, file: Option<&std::path::Path>| {
+            file.map_or(String::new(), |file| format!(" {fd}> {}", quote(file)))
+        };
+        let redirect = to("", stdout_file) + &to("2", stderr_file);
         let script = config_dir.join("run.sh");
         std::fs::write(
             &script,
@@ -513,14 +517,14 @@ mod tests {
         session.get_screen_text()
     }
 
-    /// With stdout redirected, as into a pager or a file, a run at a terminal
-    /// prints no notice and leaves the day's notice for the next interactive
-    /// run.
+    /// With stdout or stderr redirected, as into a pager or a file, a run at a
+    /// terminal prints no notice and leaves the day's notice for the next
+    /// interactive run.
     #[test]
-    fn test_update_notice_waits_for_a_run_with_stdout_at_the_terminal() {
+    fn test_update_notice_waits_for_a_run_with_both_streams_at_the_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("update-check.yaml");
-        // Checked a moment ago, so neither run starts a registry lookup.
+        // Checked a moment ago, so no run starts a registry lookup.
         let seeded = format!(
             "checked_at: {}\nlatest_version: 999.0.0\n",
             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
@@ -528,14 +532,21 @@ mod tests {
         std::fs::write(&cache, &seeded).unwrap();
 
         let stdout_file = dir.path().join("stdout.txt");
-        let screen = run_runners_at_a_terminal(dir.path(), Some(&stdout_file));
+        let screen = run_runners_at_a_terminal(dir.path(), Some(&stdout_file), None);
         assert!(!screen.contains("is available"), "{screen}");
         assert!(std::fs::read_to_string(&stdout_file)
             .unwrap()
             .contains("claude-cli"));
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
 
-        let screen = run_runners_at_a_terminal(dir.path(), None);
+        let stderr_file = dir.path().join("stderr.txt");
+        let screen = run_runners_at_a_terminal(dir.path(), None, Some(&stderr_file));
+        assert!(screen.contains("claude-cli"), "{screen}");
+        let stderr = std::fs::read_to_string(&stderr_file).unwrap();
+        assert!(!stderr.contains("is available"), "{stderr}");
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), seeded);
+
+        let screen = run_runners_at_a_terminal(dir.path(), None, None);
         assert!(screen.contains("actual 999.0.0 is available"), "{screen}");
         assert!(std::fs::read_to_string(&cache)
             .unwrap()
