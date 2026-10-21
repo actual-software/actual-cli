@@ -2782,9 +2782,9 @@ pub(crate) mod tests {
             conflicting_judge(bin.path()).to_str().unwrap(),
         );
 
-        let Outcome::Verdicts { verdicts, .. } = run_plan_gate(root.path()) else {
-            panic!("an active ADR must reach the judge");
-        };
+        let outcome = run_plan_gate(root.path());
+        #[rustfmt::skip]
+        let Outcome::Verdicts { verdicts, .. } = outcome else { panic!("an active ADR must reach the judge") };
         let conflicts: Vec<&CheckedRule> = verdicts
             .iter()
             .filter(|v| v.verdict == Verdict::Conflicting)
