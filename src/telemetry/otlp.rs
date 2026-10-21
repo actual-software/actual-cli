@@ -1,4 +1,4 @@
-//! ADR telemetry as OpenTelemetry log events over OTLP/HTTP with JSON
+//! ADR telemetry as OpenTelemetry log events over OTLP/HTTP with protobuf
 //! encoding, starting with an ADR entering an agent's context.
 //!
 //! # Design
@@ -8,11 +8,14 @@
 //! which is what the semantic conventions reserve events for, and an event
 //! needs no enclosing span.
 //!
-//! **Hand-built OTLP/JSON.** OTLP is a documented HTTP and JSON protocol, so
-//! the request is built with serde and sent on the existing HTTP client. The
-//! OpenTelemetry SDK would add a background exporter to a process that lives
-//! for milliseconds. A test decodes the request into the official generated
-//! types to hold the encoding to the protocol.
+//! **Protobuf on the wire, OTLP/JSON on disk.** Records are built and spooled
+//! as OTLP/JSON. The uploader builds each request from the official
+//! `opentelemetry-proto` messages and POSTs it as binary protobuf on the
+//! existing HTTP client, while the file sink keeps the same request as a line
+//! of OTLP/JSON a person can read. The OpenTelemetry SDK would add a
+//! background exporter to a process that lives for milliseconds. A test
+//! decodes what the endpoint receives with the official types and checks it
+//! against the file's line.
 //!
 //! **Off until configured.** Nothing is built unless an endpoint or a local
 //! file is set, and only this CLI's own settings are read, never
@@ -27,7 +30,12 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use opentelemetry_proto::tonic::collector::logs::v1 as collector;
+use opentelemetry_proto::tonic::common::v1 as common;
+use opentelemetry_proto::tonic::logs::v1 as logs;
+use opentelemetry_proto::tonic::resource::v1 as resource;
+use prost::Message;
+use serde::{Deserialize, Serialize};
 
 use crate::config::types::{validate_otlp_file, validate_otlp_logs_endpoint, Config};
 use crate::telemetry::identity::IdentityEnvelope;
@@ -105,14 +113,16 @@ fn setting(env: &str, configured: Option<&str>) -> Option<String> {
 }
 
 /// One `LogRecord` in OTLP/JSON: lowerCamelCase keys, 64-bit integers as
-/// decimal strings, ids as hex. An absent field reads as its default.
-#[derive(Debug, Serialize)]
+/// decimal strings, ids as hex. An absent field reads as its default. This is
+/// the form the spool and the file sink hold; the endpoint gets
+/// [`LogRecord::to_proto`].
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LogRecord {
     time_unix_nano: String,
     observed_time_unix_nano: String,
     severity_number: i32,
-    event_name: &'static str,
+    event_name: String,
     attributes: Vec<KeyValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_id: Option<String>,
@@ -122,24 +132,79 @@ pub(crate) struct LogRecord {
     flags: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+impl LogRecord {
+    /// The official message for this record, or `None` when a spooled copy
+    /// was damaged: a time that isn't a count of nanoseconds, or an id that
+    /// isn't hex.
+    fn to_proto(&self) -> Option<logs::LogRecord> {
+        Some(logs::LogRecord {
+            time_unix_nano: self.time_unix_nano.parse().ok()?,
+            observed_time_unix_nano: self.observed_time_unix_nano.parse().ok()?,
+            severity_number: self.severity_number,
+            event_name: self.event_name.clone(),
+            attributes: self.attributes.iter().map(KeyValue::to_proto).collect(),
+            trace_id: hex_bytes(self.trace_id.as_deref().unwrap_or_default())?,
+            span_id: hex_bytes(self.span_id.as_deref().unwrap_or_default())?,
+            flags: self.flags.unwrap_or_default(),
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct KeyValue {
-    key: &'static str,
+    key: String,
     value: AnyValue,
 }
 
-#[derive(Debug, Serialize)]
+impl KeyValue {
+    fn to_proto(&self) -> common::KeyValue {
+        common::KeyValue {
+            key: self.key.clone(),
+            value: Some(self.value.to_proto()),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum AnyValue {
     StringValue(String),
     ArrayValue { values: Vec<AnyValue> },
 }
 
+impl AnyValue {
+    fn to_proto(&self) -> common::AnyValue {
+        let value = match self {
+            Self::StringValue(value) => common::any_value::Value::StringValue(value.clone()),
+            Self::ArrayValue { values } => {
+                common::any_value::Value::ArrayValue(common::ArrayValue {
+                    values: values.iter().map(Self::to_proto).collect(),
+                })
+            }
+        };
+        common::AnyValue { value: Some(value) }
+    }
+}
+
 fn text(key: &'static str, value: Option<&str>) -> KeyValue {
     KeyValue {
-        key,
+        key: key.to_string(),
         value: AnyValue::StringValue(value.unwrap_or_default().to_string()),
     }
+}
+
+/// The bytes `hex` spells, or `None` when it isn't whole hex digit pairs.
+fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    let digit = |byte: u8| char::from(byte).to_digit(16);
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| match *pair {
+            [high, low] => Some((digit(high)? * 16 + digit(low)?) as u8),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What the records from one run share: who sends them, when, and the trace
@@ -186,14 +251,14 @@ impl Origin {
             time_unix_nano: self.time_unix_nano.clone(),
             observed_time_unix_nano: self.time_unix_nano.clone(),
             severity_number: SEVERITY_INFO,
-            event_name: CONTEXT_ADDED,
+            event_name: CONTEXT_ADDED.to_string(),
             attributes: vec![
                 text("log.record.uid", Some(uid.as_str())),
                 text("session.id", Some(session_id)),
                 text("ai.actual.agent.id", agent_id),
                 text("ai.actual.adr.candidate_group_id", candidate_group_id),
                 KeyValue {
-                    key: "ai.actual.adr.ids",
+                    key: "ai.actual.adr.ids".to_string(),
                     value: AnyValue::ArrayValue { values: ids },
                 },
                 text("ai.actual.install.id", Some(self.install_id.as_str())),
@@ -272,78 +337,78 @@ pub(crate) fn spool(records: &[LogRecord]) {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportLogsServiceRequest {
-    resource_logs: [ResourceLogs; 1],
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResourceLogs {
-    resource: Resource,
-    scope_logs: [ScopeLogs; 1],
-}
-
-#[derive(Serialize)]
-struct Resource {
-    attributes: Vec<KeyValue>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScopeLogs {
-    scope: InstrumentationScope,
-    log_records: Vec<serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct InstrumentationScope {
-    name: &'static str,
-    version: &'static str,
-}
-
-/// The `ExportLogsServiceRequest` body for spooled record `lines`. A line that
-/// is not a JSON object is dropped, and with no record left there is no body,
-/// since a sender should not send an empty envelope.
-pub(crate) fn request_body(lines: &[String]) -> Option<String> {
-    let records: Vec<serde_json::Value> = lines
+/// The records spooled `lines` hold. A line is dropped when it isn't a
+/// record, or when its time or ids won't encode.
+fn records(lines: &[String]) -> Vec<LogRecord> {
+    lines
         .iter()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(serde_json::Value::is_object)
-        .collect();
-    if records.is_empty() {
-        return None;
-    }
-    let request = ExportLogsServiceRequest {
-        resource_logs: [ResourceLogs {
-            resource: Resource {
-                attributes: vec![
-                    text("service.name", Some(NAME)),
-                    text("service.version", Some(VERSION)),
-                    text("telemetry.sdk.name", Some(NAME)),
-                    text("telemetry.sdk.language", Some("rust")),
-                    text("telemetry.sdk.version", Some(VERSION)),
-                ],
-            },
-            scope_logs: [ScopeLogs {
-                scope: InstrumentationScope {
-                    name: NAME,
-                    version: VERSION,
-                },
-                log_records: records,
+        .filter_map(|line| serde_json::from_str::<LogRecord>(line).ok())
+        .filter(|record| record.to_proto().is_some())
+        .collect()
+}
+
+/// What every request says about its sender: this CLI, as the service and as
+/// the SDK.
+fn resource_attributes() -> Vec<KeyValue> {
+    vec![
+        text("service.name", Some(NAME)),
+        text("service.version", Some(VERSION)),
+        text("telemetry.sdk.name", Some(NAME)),
+        text("telemetry.sdk.language", Some("rust")),
+        text("telemetry.sdk.version", Some(VERSION)),
+    ]
+}
+
+/// `records` as one `ExportLogsServiceRequest` in OTLP/JSON, the line the
+/// file sink appends.
+fn json_request(records: &[LogRecord]) -> String {
+    serde_json::json!({
+        "resourceLogs": [{
+            "resource": {"attributes": resource_attributes()},
+            "scopeLogs": [{
+                "scope": {"name": NAME, "version": VERSION},
+                "logRecords": records,
             }],
         }],
-    };
-    serde_json::to_string(&request).ok()
+    })
+    .to_string()
+}
+
+/// `records` as one `ExportLogsServiceRequest` built from the official
+/// messages, in the binary protobuf encoding the endpoint receives.
+fn protobuf_request(records: &[LogRecord]) -> Vec<u8> {
+    collector::ExportLogsServiceRequest {
+        resource_logs: vec![logs::ResourceLogs {
+            resource: Some(resource::Resource {
+                attributes: resource_attributes()
+                    .iter()
+                    .map(KeyValue::to_proto)
+                    .collect(),
+                ..Default::default()
+            }),
+            scope_logs: vec![logs::ScopeLogs {
+                scope: Some(common::InstrumentationScope {
+                    name: NAME.to_string(),
+                    version: VERSION.to_string(),
+                    ..Default::default()
+                }),
+                log_records: records.iter().filter_map(LogRecord::to_proto).collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec()
 }
 
 /// Send what the OTLP spool holds, a request at a time, then return.
 ///
 /// Each request's records are taken out of the spool before it is sent, so
-/// they are gone whatever the outcome. The body is appended to the file sink
-/// when one is set and POSTed when an endpoint is. An opted-out run, or one
-/// with no usable output, leaves the spool alone.
+/// they are gone whatever the outcome. The request is appended to the file
+/// sink as OTLP/JSON when one is set and POSTed as protobuf when an endpoint
+/// is. A batch with no record left in it sends nothing, since a sender should
+/// not send an empty envelope. An opted-out run, or one with no usable
+/// output, leaves the spool alone.
 pub(crate) async fn flush(config: &Config) {
     let Some(outputs) = Outputs::resolve(config) else {
         return;
@@ -354,13 +419,16 @@ pub(crate) async fn flush(config: &Config) {
         if lines.is_empty() {
             return;
         }
-        let Some(body) = request_body(&lines) else {
+        let records = records(&lines);
+        if records.is_empty() {
             continue;
-        };
+        }
         if let Some(file) = &outputs.file {
-            let _ = crate::config::paths::append_secure(file, format!("{body}\n").as_bytes());
+            let line = format!("{}\n", json_request(&records));
+            let _ = crate::config::paths::append_secure(file, line.as_bytes());
         }
         if let (Some(client), Some(endpoint)) = (&client, &outputs.endpoint) {
+            let body = protobuf_request(&records);
             let sent = post(client, endpoint, body, SEND_BUDGET, tokio::time::sleep).await;
             tracing::debug!("otlp logs: {} records: {sent:?}", lines.len());
         }
@@ -404,7 +472,7 @@ pub(crate) enum Sent {
 pub(crate) async fn post<S, F>(
     client: &reqwest::Client,
     endpoint: &str,
-    body: String,
+    body: Vec<u8>,
     budget: Duration,
     mut sleep: S,
 ) -> Sent
@@ -418,7 +486,7 @@ where
         let started = Instant::now();
         let response = client
             .post(endpoint)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
             .timeout(budget.saturating_sub(spent))
             .body(body.clone())
             .send()
@@ -866,59 +934,136 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn test_request_body_wraps_records_in_the_resource_and_scope() {
-        let body: Value =
-            serde_json::from_str(&request_body(&lines(&sample_records())).unwrap()).unwrap();
+    /// The protobuf request for `records`, decoded by the official types the
+    /// way a receiver decodes it.
+    fn decoded(records: &[LogRecord]) -> collector::ExportLogsServiceRequest {
+        collector::ExportLogsServiceRequest::decode(protobuf_request(records).as_slice())
+            .expect("the official types decode the request")
+    }
 
-        let resource_logs = &body["resourceLogs"][0];
-        let resource: Vec<(String, Value)> = resource_logs["resource"]["attributes"]
-            .as_array()
+    /// The text of a string value.
+    fn string(value: Option<&common::AnyValue>) -> &str {
+        match value.and_then(|value| value.value.as_ref()) {
+            Some(common::any_value::Value::StringValue(text)) => text,
+            other => panic!("not a string: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_the_request_wraps_records_in_the_resource_and_scope() {
+        let request = decoded(&sample_records());
+
+        let resource_logs = &request.resource_logs[0];
+        let resource: Vec<(&str, &str)> = resource_logs
+            .resource
+            .as_ref()
             .unwrap()
+            .attributes
             .iter()
-            .map(|kv| {
-                (
-                    kv["key"].as_str().unwrap().to_string(),
-                    kv["value"]["stringValue"].clone(),
-                )
-            })
+            .map(|kv| (kv.key.as_str(), string(kv.value.as_ref())))
             .collect();
         assert_eq!(
             resource,
             [
-                ("service.name".to_string(), Value::from("actual-cli")),
-                ("service.version".to_string(), Value::from(VERSION)),
-                ("telemetry.sdk.name".to_string(), Value::from("actual-cli")),
-                ("telemetry.sdk.language".to_string(), Value::from("rust")),
-                ("telemetry.sdk.version".to_string(), Value::from(VERSION)),
+                ("service.name", "actual-cli"),
+                ("service.version", VERSION),
+                ("telemetry.sdk.name", "actual-cli"),
+                ("telemetry.sdk.language", "rust"),
+                ("telemetry.sdk.version", VERSION),
             ]
         );
-        let scope_logs = &resource_logs["scopeLogs"][0];
+        let scope_logs = &resource_logs.scope_logs[0];
+        let scope = scope_logs.scope.as_ref().unwrap();
         assert_eq!(
-            scope_logs["scope"],
-            serde_json::json!({"name": "actual-cli", "version": VERSION})
+            (scope.name.as_str(), scope.version.as_str()),
+            ("actual-cli", VERSION)
         );
-        assert_eq!(scope_logs["logRecords"].as_array().unwrap().len(), 2);
+        assert_eq!(scope_logs.log_records.len(), 2);
     }
 
-    /// A damaged spool line is dropped, and a request with nothing left in it
-    /// is never built.
+    /// Each record reaches the endpoint whole: the 64-bit times as integers,
+    /// the trace and span ids as their 16 and 8 bytes, and every attribute,
+    /// the ADR id list included.
     #[test]
-    fn test_request_body_drops_bad_lines_and_never_builds_an_empty_one() {
-        let mut spooled = lines(&sample_records());
-        spooled.push("not json".to_string());
-        spooled.push("[1, 2]".to_string());
-        let body: Value = serde_json::from_str(&request_body(&spooled).unwrap()).unwrap();
-        assert_eq!(
-            body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
+    fn test_the_request_carries_each_record_as_the_official_message() {
+        let request = decoded(&sample_records());
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
-        assert_eq!(request_body(&[]), None);
-        assert_eq!(request_body(&["not json".to_string()]), None);
+        assert_eq!(record.event_name, CONTEXT_ADDED);
+        assert_eq!(record.severity_number, 9);
+        assert_eq!(record.time_unix_nano, 1_792_446_915_838_119_000);
+        assert_eq!(record.observed_time_unix_nano, record.time_unix_nano);
+        assert_eq!(
+            record.trace_id,
+            [
+                0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e,
+                0x47, 0x36
+            ]
+        );
+        assert_eq!(
+            record.span_id,
+            [0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7]
+        );
+        assert_eq!(record.flags, 1);
+        let keys: Vec<&str> = record.attributes.iter().map(|kv| kv.key.as_str()).collect();
+        assert_eq!(keys[..2], ["log.record.uid", "session.id"]);
+        assert_eq!(keys.len(), 10);
+        assert_eq!(string(record.attributes[1].value.as_ref()), "session-1");
+        assert_eq!(keys[4], "ai.actual.adr.ids");
+        let ids: Vec<&str> = match record.attributes[4]
+            .value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+        {
+            Some(common::any_value::Value::ArrayValue(ids)) => {
+                ids.values.iter().map(|id| string(Some(id))).collect()
+            }
+            other => panic!("ai.actual.adr.ids is not a list: {other:?}"),
+        };
+        assert_eq!(ids, ["adr-1", "adr-2"]);
+    }
+
+    /// A record with no trace context goes out with no ids and no flags.
+    #[test]
+    fn test_a_record_outside_a_trace_has_no_ids() {
+        let records = [origin(logged_in(), None).context_added("s", None, None, &ids(&["x"]))];
+        let request = decoded(&records);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert!(record.trace_id.is_empty());
+        assert!(record.span_id.is_empty());
+        assert_eq!(record.flags, 0);
+    }
+
+    /// A damaged spool line is dropped: one that isn't a record, and one whose
+    /// time or ids won't encode. A batch of nothing else is empty.
+    #[test]
+    fn test_records_drops_damaged_lines() {
+        let spooled = lines(&sample_records());
+        let whole = &spooled[0];
+        let mut damaged = vec![
+            "not json".to_string(),
+            "[1, 2]".to_string(),
+            whole.replace("\"1792446915838119000\"", "\"soon\""),
+            whole.replace(
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "4bf92f3577b34da6a3ce929d0e0e473",
+            ),
+            whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
+        ];
+        assert!(records(&damaged).is_empty(), "{damaged:?}");
+
+        damaged.extend(spooled);
+        assert_eq!(records(&damaged).len(), 2);
+        assert!(records(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_hex_bytes() {
+        assert_eq!(hex_bytes(""), Some(Vec::new()));
+        assert_eq!(hex_bytes("00ff7A"), Some(vec![0x00, 0xff, 0x7a]));
+        for malformed in ["abc", "0g", "+f", "é"] {
+            assert_eq!(hex_bytes(malformed), None, "{malformed:?}");
+        }
     }
 
     /// `official` with each field the CLI omitted removed, when it holds its
@@ -963,45 +1108,48 @@ mod tests {
         .contains(value)
     }
 
-    /// Decode `body` with the official generated types and re-encode it, with
-    /// the defaults the CLI leaves out removed again.
-    fn official_round_trip(body: &str) -> Value {
-        let decoded: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest =
-            serde_json::from_str(body).expect("the official types decode the request");
-        let official = serde_json::to_value(&decoded).unwrap();
-        without_omitted_defaults(&official, &serde_json::from_str(body).unwrap())
+    /// `request` in the official types' own OTLP/JSON encoding, less the
+    /// defaults the file sink's `line` leaves out, so the two can be compared.
+    fn official_json(request: &collector::ExportLogsServiceRequest, line: &Value) -> Value {
+        without_omitted_defaults(&serde_json::to_value(request).unwrap(), line)
     }
 
-    /// The request decodes into opentelemetry-proto's `ExportLogsServiceRequest`
-    /// and re-encodes to the same JSON. A receiver ignores a key it does not
-    /// know, so decoding alone could not catch a misspelled one; the
+    /// The protobuf request decodes, with the official types, into the request
+    /// the file sink's line holds: their own OTLP/JSON encoding of what they
+    /// decoded is that line. A receiver ignores a JSON key it does not know,
+    /// so decoding the line alone could not catch a misspelled one; this
     /// comparison can.
     #[test]
     fn test_the_request_round_trips_through_the_official_types() {
-        let body = request_body(&lines(&sample_records())).unwrap();
-        let sent: Value = serde_json::from_str(&body).unwrap();
+        let records = sample_records();
+        let request = decoded(&records);
+        let line: Value = serde_json::from_str(&json_request(&records)).unwrap();
 
-        assert_eq!(official_round_trip(&body), sent);
-        let decoded: opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest =
-            serde_json::from_str(&body).unwrap();
-        let record = &decoded.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(official_json(&request, &line), line);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
         assert_eq!(record.event_name, CONTEXT_ADDED);
         assert_eq!(record.time_unix_nano, 1_792_446_915_838_119_000);
         assert_eq!(record.trace_id.len(), 16);
     }
 
-    /// The negative control: one renamed key, and the comparison fails.
+    /// The negative control: one renamed key in the line, and the comparison
+    /// fails.
     #[test]
     fn test_the_round_trip_catches_a_renamed_key() {
-        let body = request_body(&lines(&sample_records())).unwrap();
+        let records = sample_records();
+        let request = decoded(&records);
+        let line = json_request(&records);
         for (key, renamed) in [
             ("\"eventName\"", "\"event_name\""),
             ("\"timeUnixNano\"", "\"timeUnixNanos\""),
             ("\"logRecords\"", "\"logRecord\""),
         ] {
-            let mangled = body.replacen(key, renamed, 1);
-            let sent: Value = serde_json::from_str(&mangled).unwrap();
-            assert_ne!(official_round_trip(&mangled), sent, "{key} -> {renamed}");
+            let mangled: Value = serde_json::from_str(&line.replacen(key, renamed, 1)).unwrap();
+            assert_ne!(
+                official_json(&request, &mangled),
+                mangled,
+                "{key} -> {renamed}"
+            );
         }
     }
 
@@ -1045,13 +1193,16 @@ mod tests {
         post_recording_with(&loopback_client(), endpoint, budget).await
     }
 
+    /// What the sending tests POST. `post` sends whatever bytes it is given.
+    const BODY: &[u8] = b"\x0a\x00";
+
     async fn post_recording_with(
         client: &reqwest::Client,
         endpoint: &str,
         budget: Duration,
     ) -> (Sent, Vec<Duration>) {
         let mut waits = Vec::new();
-        let sent = post(client, endpoint, "{}".to_string(), budget, |wait| {
+        let sent = post(client, endpoint, BODY.to_vec(), budget, |wait| {
             waits.push(wait);
             std::future::ready(())
         })
@@ -1060,13 +1211,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_post_sends_json_with_the_cli_user_agent() {
+    async fn test_post_sends_protobuf_with_the_cli_user_agent() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/v1/logs")
-            .match_header("content-type", "application/json")
+            .match_header("content-type", "application/x-protobuf")
             .match_header("user-agent", crate::api::client::USER_AGENT_VALUE)
-            .match_body("{}")
+            .match_body(BODY.to_vec())
             .with_status(200)
             .expect(1)
             .create_async()
@@ -1500,17 +1651,31 @@ mod tests {
 
     // ── the uploader ────────────────────────────────────────────────────
 
-    /// 150 spooled records go out as two requests, 100 and 50, each also
-    /// appended to the file sink as one line, and the spool ends empty.
+    /// 150 spooled records go out as two protobuf requests, 100 and 50, each
+    /// also appended to the file sink as one line, and the spool ends empty.
+    /// The bytes the endpoint received decode, with the official types, into
+    /// the request on the matching line.
     #[tokio::test]
     async fn test_flush_sends_in_requests_of_100_and_writes_the_file() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/v1/logs")
+            .match_header("content-type", "application/x-protobuf")
+            .match_request({
+                let received = received.clone();
+                move |request| {
+                    received
+                        .lock()
+                        .unwrap()
+                        .push(request.body().unwrap().clone());
+                    true
+                }
+            })
             .with_status(200)
             .expect(2)
             .create_async()
@@ -1530,17 +1695,25 @@ mod tests {
 
         mock.assert_async().await;
         let written = std::fs::read_to_string(&file).unwrap();
-        let counts: Vec<usize> = written
+        let lines: Vec<Value> = written
             .lines()
-            .map(|line| {
-                let body: Value = serde_json::from_str(line).unwrap();
-                body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
-                    .as_array()
-                    .unwrap()
-                    .len()
-            })
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let requests: Vec<collector::ExportLogsServiceRequest> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| collector::ExportLogsServiceRequest::decode(body.as_slice()).unwrap())
+            .collect();
+        let counts: Vec<usize> = requests
+            .iter()
+            .map(|request| request.resource_logs[0].scope_logs[0].log_records.len())
             .collect();
         assert_eq!(counts, [100, 50]);
+        assert_eq!(lines.len(), requests.len());
+        for (request, line) in requests.iter().zip(&lines) {
+            assert_eq!(&official_json(request, line), line);
+        }
         assert!(OTLP_LOGS.take(1).is_empty());
         #[cfg(unix)]
         {
