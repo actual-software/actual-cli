@@ -1,176 +1,51 @@
-<h1 align="center">Actual.ai CLI</h1>
-
 <p align="center">
   <a href="https://actual.ai/cli">
-    <img src="assets/logo.png" alt="Actual.ai" width="160">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-white-text.png">
+      <img src="assets/logo-black-text.png" alt="Actual AI" width="240">
+    </picture>
   </a>
 </p>
 
+<h1 align="center">Architectural context for coding agents</h1>
+
 <p align="center"><strong>Architecture questions, answered from your ADRs.</strong></p>
 
-<p align="center">Use it through the <a href="https://github.com/actual-software/actual-skill">Actual.ai Skill</a>, which wraps the Actual.ai CLI for your coding agent.</p>
-
 <p align="center">
+  <a href="https://www.npmjs.com/package/@actualai/actual"><img src="https://img.shields.io/npm/v/@actualai/actual?style=flat" alt="npm"></a>
   <a href="https://github.com/actual-software/actual-cli/actions/workflows/build-and-test.yml"><img src="https://github.com/actual-software/actual-cli/actions/workflows/build-and-test.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/actual-software/actual-cli/blob/main/LICENSE"><img src="https://img.shields.io/github/license/actual-software/actual-cli" alt="License"></a>
+  <a href="https://github.com/actual-software/actual-cli/blob/main/LICENSE"><img src="https://img.shields.io/github/license/actual-software/actual-cli?style=flat" alt="License"></a>
   <a href="https://github.com/actual-software/actual-cli/stargazers"><img src="https://img.shields.io/github/stars/actual-software/actual-cli?style=flat" alt="Stars"></a>
-  <a href="https://github.com/actual-software/actual-cli/issues"><img src="https://img.shields.io/github/issues/actual-software/actual-cli" alt="Issues"></a>
 </p>
 
-## Quickstart
+The Actual.ai CLI answers architecture questions from your team's Architectural Decision Records (ADRs) and cites the decisions behind each answer. It also puts those decisions in your coding agent's context and checks the agent's plans and changes against them.
 
-### Install Actual.ai Skill — Claude Code CLI
+## Installation
 
-Start with the [Actual.ai Skill](https://github.com/actual-software/actual-skill). The skill wraps the Actual.ai CLI so your coding agent can use it, and installs the CLI for you on first run. Run each step as its own copy/paste.
+Most teams install the [Actual.ai Skill](https://github.com/actual-software/actual-skill), which runs the CLI for their coding agent and installs it on first use. To run the CLI yourself or in CI:
 
-Step 1 — add the actual-skill repo as a marketplace:
-
-```
-/plugin marketplace add actual-software/actual-skill
-```
-
-Step 2 — install the plugin:
-
-```
-/plugin install actual-cli@actual-cli-skills
-```
-
-Step 3 — reload plugins so Claude Code CLI loads the newly installed plugin:
-
-```
-/reload-plugins
-```
-
-Step 4 — run the skill in your coding agent:
-
-```
-/actual
-```
-
-The first time you run it, the skill asks for your permission to install the Actual.ai CLI for you. For example:
-
-```
-/actual
-
-The `actual` CLI is not installed. Should I install it with:
-
-    npm install -g @actualai/actual
-
-Then I'll verify it with `actual --version`.
-```
-
-<details>
-<summary><strong>Manual install Actual.ai CLI — npm / npx</strong></summary>
-
-The skill installs the CLI for you, so you only need a manual install for scripts and CI or to run the CLI outside an agent.
-
-Step 1 — install the CLI globally:
-
-```
+```bash
 npm install -g @actualai/actual
 ```
 
-Or skip the install and run any command with `npx @actualai/actual <command>`.
+It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installation) covers Homebrew, prebuilt binaries and building from source.
 
-Step 2 — sign in with browser OAuth:
+## Examples
 
-```
-actual login
-```
-
-Step 3 — ask your first architecture question:
-
-```
-actual advisor "Should new services talk over gRPC or REST?"
-```
-
-</details>
-
-<details>
-<summary><strong>Install Actual.ai CLI — Homebrew</strong></summary>
+From inside a git repository:
 
 ```bash
-brew install actual-software/actual/actual
-```
-
-</details>
-
-<details>
-<summary><strong>Install Actual.ai CLI — Manual download / Build from source</strong></summary>
-
-Each release in the [releases repository](https://github.com/actual-software/actual-releases/releases) (binaries are published separately from source) has one archive per platform: `actual-darwin-arm64.tar.gz`, `actual-darwin-x64.tar.gz`, `actual-linux-arm64.tar.gz`, and `actual-linux-x64.tar.gz`. Each holds a single `actual` binary. Download the one for your platform, extract it, move the binary onto your `PATH`, and run it. On Apple Silicon:
-
-```bash
-curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/actual-darwin-arm64.tar.gz
-tar -xzf actual-darwin-arm64.tar.gz
-sudo mv ./actual /usr/local/bin/actual
-
-# macOS, if you downloaded the archive in a browser: remove quarantine before running
-xattr -dr com.apple.quarantine /usr/local/bin/actual
-
-actual --version
-```
-
-`actual self-update` upgrades a binary installed this way after checking the new release's signature, but only in a directory you can write without `sudo`. To use it, put `actual` somewhere you own, such as `~/.local/bin`, instead of `/usr/local/bin`. See [docs/SELF_UPDATE.md](docs/SELF_UPDATE.md).
-
-To build from source you need a C compiler for the tree-sitter native dependencies:
-
-```bash
-# macOS: Xcode command-line tools (usually already installed)
-xcode-select --install
-
-# Debian/Ubuntu
-sudo apt-get install build-essential
-
-cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
-```
-
-</details>
-
-<details>
-<summary><strong>Check a downloaded release</strong></summary>
-
-From v0.12.0, the release workflow publishes `SHA256SUMS`, which lists every archive, on both the [source release page](https://github.com/actual-software/actual-cli/releases) and the [releases mirror](https://github.com/actual-software/actual-releases/releases). A signer adds `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list, by hand after publication. A new release can remain unsigned until that step finishes; if the signature is missing, try again later. Releases through v0.11.0 carry neither file. For a signed release, check the signature first:
-
-```bash
-curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
-curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS.minisig
-curl -fsSL -o actual-release.pub https://raw.githubusercontent.com/actual-software/actual-cli/main/release-keys/primary.pub
-minisign -Vm SHA256SUMS -p actual-release.pub
-shasum -a 256 --check --ignore-missing SHA256SUMS
-```
-
-`minisign` then prints the signed trusted comment, which should name the tag of the release you downloaded, because a signature from an older release still verifies. If it reports a different key id, check against the spare key in [Release signing](docs/RELEASE_SIGNING.md).
-
-</details>
-
-## Use Actual.ai Skill + CLI
-
-Once the [Actual.ai Skill](https://github.com/actual-software/actual-skill) is installed, ask your agent in plain language. The skill manages the CLI and picks the right command for each request. For example:
-
-- "Set up Actual for this repository."
-- "Preview the ADR guidance Actual would add here."
-- "Ask the Actual advisor how we should handle database access in a new service."
-- "Sign me in to Actual AI."
-- "Diagnose why Actual is failing."
-
-In Codex, you can also call the skill directly by starting the prompt with `$actual`.
-
-<details>
-<summary><strong>Use Actual.ai CLI directly — Terminal examples</strong></summary>
-
-These are the commands the skill manages for you. To run them yourself, sign in and run them from inside any git repository. For example:
-
-```bash
+actual login                  # sign in through your browser
 actual advisor "How should we handle database access in a new service?"
-actual adr-bot --dry-run      # preview the ADR guidance Actual would write
-actual adr-bot                # write it to CLAUDE.md
-actual plan-check --plan-file plan.md
+actual adr-bot                # write ADR guidance tailored to this repo into CLAUDE.md
 actual impl-check             # check your working tree against .actual/rules/
-actual whoami                 # show the signed-in account and organization
 ```
 
-</details>
+## Documentation
+
+- [Actual.ai Skill and CLI in depth](docs/HOW_IT_WORKS.md): what they do and the commands behind each capability.
+- [Getting Started](docs/GETTING_STARTED.md): installation, runners, flags and configuration.
+- [Command reference](https://actual.ai/cli/docs) on actual.ai, also as [Markdown](https://actual.ai/cli/docs.md) for your agent.
 
 ## Privacy & Telemetry
 
