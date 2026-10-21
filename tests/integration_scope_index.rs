@@ -345,23 +345,23 @@ fn test_declared_paths_win_over_a_decoy_verify_path() {
 #[test]
 fn test_a_decision_converted_to_v2_keeps_its_documents_together() {
     let index = build_index(&corpus_root());
-    // Four OAuth documents, one decision, one adr_id.
+    const OAUTH_ADR_ID: &str = "1243b051-95a3-50a8-be4f-9f652693c20c";
+    const OAUTH_GROUP_ID: &str = "990bb253-6cba-5551-a3ea-4b58289b03f8";
+    // Four OAuth documents, one decision: selected by adr_id, not by slug.
     let oauth: Vec<_> = index
         .documents
         .iter()
-        .filter(|d| d.slug.contains("token-"))
-        .filter(|d| d.adr_id.is_some())
+        .filter(|d| d.adr_id.as_deref() == Some(OAUTH_ADR_ID))
         .collect();
-    assert_eq!(oauth.len(), 3, "token-signing, -verification, -expiration");
-    let ids: std::collections::BTreeSet<_> =
-        oauth.iter().filter_map(|d| d.adr_id.clone()).collect();
-    assert_eq!(ids.len(), 1);
-    let keys: std::collections::BTreeSet<String> = oauth.iter().map(|d| d.decision_key()).collect();
-    assert_eq!(keys.len(), 1);
     assert_eq!(
-        keys.into_iter().next().unwrap(),
-        ids.into_iter().next().unwrap()
+        oauth.len(),
+        4,
+        "token-signing, -verification, -expiration, access-tokens-carry-standard-claims"
     );
+    let keys: std::collections::BTreeSet<String> = oauth.iter().map(|d| d.decision_key()).collect();
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    // The group id takes precedence over the adr_id; the key format is not pinned.
+    assert!(keys.into_iter().next().unwrap().ends_with(OAUTH_GROUP_ID));
 }
 
 #[test]
