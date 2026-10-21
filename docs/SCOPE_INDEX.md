@@ -110,7 +110,8 @@ still point at the real file. Every field is optional.
 | `metadata.actual.adr_id` | The decision key (see `--by-adr`), and `adr_id` in JSON output. |
 | `version` | Only to warn when it is not `2`; the fields it knows are still read. |
 | `metadata.scope.languages` | Stored in the index. Not used for ranking or selection yet. |
-| `name`, `description`, `metadata.actual.candidate_group_id`, `metadata.actual.evidence.source` | Parsed into the document; no command uses them yet. |
+| `metadata.actual.candidate_group_id` | The decision key when present: files sharing it are one decision (see `--by-adr`), and it is printed as `candidate_group_id` in JSON output. |
+| `name`, `description`, `metadata.actual.evidence.source` | Parsed into the document; no command uses them yet. |
 
 **Declared paths replace derived globs.** When the header declares at least one
 include, those are the document's globs, and neither the `### Verify` operands
@@ -122,12 +123,15 @@ keeps its Verify-derived globs. A v1 document is unchanged.
 
 **Root.** Each declared glob is prefixed with `root/` when the index is built,
 so everything downstream sees repository-relative globs and path matching is
-unchanged. A file outside a document's root is never governed by it, whatever
-the words say: a decision rooted at `packages/web` is selected for
+unchanged. When the header declares include paths, a file outside the document's
+root is never governed by it, whatever the words say: a decision rooted at `packages/web` is selected for
 `packages/web/src/x.ts` and not for `packages/api/src/x.ts`. A path that is an
 ancestor of the root (`packages`) is still in range, because a plan naming it
 may touch the root. A leading `/` on a path anchors it at the root and is
-dropped before prefixing.
+dropped before prefixing. A document that declares no usable paths does not
+restrict by root: a decision rooted at `packages/web` with no `paths` still
+governs `shared/lib/x.ts` through its derived globs, and its `root` is left out
+of the JSON output.
 
 **Excludes.** A file matching a `!` glob never gets that decision. This is a
 hard negative decided before any signal is scored, so it holds for the path
@@ -207,10 +211,11 @@ filename scan wastes nearly two.
   hand-organised `.actual/rules/auth/` is ignored.
 - **The v2 header is read, not validated against a schema.** Unknown keys are
   ignored and a field of the wrong type is read as absent. `languages`,
-  `candidate_group_id`, the evidence source, `name` and `description` are
-  parsed and carried but do not influence any selection yet.
+  the evidence source, `name` and `description` are parsed and carried but do
+  not influence any selection yet.
 - **A decision split across v1 and v2 files is two decisions.** Files group on
-  `adr_id` when they have one and on their title prefix otherwise, so a decision
+  `candidate_group_id`, else `adr_id`, when they have one and on their title
+  prefix otherwise, so a decision
   whose siblings are only partly converted counts twice in "X of Y ADRs". The
   generator writes a whole decision at a time, so this arises only in a
   hand-mixed rule set.
@@ -238,9 +243,8 @@ repository, where a derived artifact beside committed source would get committed
 with it. It is keyed by a SHA-256 over the exact bytes of every rule file, so any
 edit, add, remove or rename invalidates it, and a content change that keeps a
 file's size and timestamp cannot be missed. The stored index also carries a
-format version (8 at the time of writing). A cache written by a build with a
-different version is discarded and rebuilt rather than misread: the v2 work
-bumped it from 6 to 8. The per-session brief memory and ledger are versioned
+format version. A cache written by a build with a different version is
+discarded and rebuilt rather than misread, and the v2 work bumped it. The per-session brief memory and ledger are versioned
 the same way and were bumped too, because their keys changed, so an agent can be
 briefed once more on a decision after an upgrade. Every cache operation is best-effort: an unreadable or unwritable cache
 degrades to a rebuild. `actual rules index --clear` removes every cached index —
@@ -253,11 +257,10 @@ for a v1 document, so v1 output is byte-for-byte what it was.
 
 | Command | Added |
 |---|---|
-| `rules ls --json` | per document: `adr_id`, `status`, `root`; new warning kinds `malformed_frontmatter`, `unknown_version`, `duplicate_slug` |
+| `rules ls --json` | per document: `adr_id`, `candidate_group_id`, `status`, `root` (`root` only when the header declares paths); new warning kinds `malformed_frontmatter`, `unknown_version`, `duplicate_slug` |
 | `rules index --json` | `inactive_documents`, `documents_with_declared_paths`, `documents_with_derived_paths` |
-| `rules select --json` | per selected rule: `adr_id`, `root` |
-| `rules select --by-adr --json` | per decision and per document: `adr_id`, `root`; the decision's `key` is the `adr_id` for v2 documents |
-| `session summary --json` | `adr_ids`, aligned with `decisions`, when any counted decision has one |
+| `rules select --json` | per selected rule: `adr_id`, `candidate_group_id`, `root` (`root` only when the header declares paths) |
+| `rules select --by-adr --json` | per decision and per document: `adr_id`, `candidate_group_id`, `root` (`root` only when the header declares paths); the decision's `key` is `group:<candidate_group_id>`, else `id:<adr_id>` |
 
 Judge schemas and override ids are unchanged: they stay `doc_slug::rule_id`.
 
@@ -500,9 +503,8 @@ meeting a document whose title prefix or filename happens to equal it). A
 decision keyed on a group id also carries a `candidate_group_id` field, as do
 its documents; both are omitted otherwise, so v1 output is unchanged. The same
 key is what the brief's once-per-session state and `session summary` record, so
-`session summary --json` adds an `adr_ids` array, aligned with `decisions`, when
-any counted decision has one. A
-rule set only partly regenerated splits a decision: a policy missing its group
+`session summary --json` lists these keys, such as `id:adr-1`, in `decisions`.
+A rule set only partly regenerated splits a decision: a policy missing its group
 id is keyed on its own `adr_id`, and regenerating the remaining files is the
 fix. The brief's heading stays the decision's title.
 
