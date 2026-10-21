@@ -4006,8 +4006,8 @@ pub(crate) mod tests {
 
     /// With an OTLP output configured, an override also sends one
     /// `actual.gate.evaluated` record per ADR it names, with the outcome
-    /// `overridden` and the gate that had denied it. A file without a v2 header sends nothing, and the
-    /// reason is never sent.
+    /// `overridden` and the gate that had denied it. A file without a v2
+    /// header sends nothing, and the reason is never sent.
     #[cfg(feature = "telemetry")]
     #[test]
     fn test_exec_override_impl_sends_an_otlp_event_per_overridden_adr() {
