@@ -297,7 +297,7 @@ or out:
 | `actual.adr.ids` | The `adr_id` of each of the ADR's rule files with at least one rule in the brief that added it, or, on an override event, with at least one rule the override named | first-party identity-linked |
 | `actual.detection.method` | Context events only. How the ADR was detected: `context` | anonymous |
 | `actual.gate.outcome` | Override events only. What the evaluation came to: `overridden` | anonymous |
-| `actual.gate.denied_types` | Override events only. Which gates, `planning` and `implementation`, had denied any of the overridden rules earlier in the session, and an empty list when the human overrode before any denial | first-party identity-linked |
+| `actual.gate.denied_types` | Override events only. Which gates, `planning` and `implementation`, had denied any of the overridden rules earlier in the session, and an empty list when the human overrode before any denial | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also
