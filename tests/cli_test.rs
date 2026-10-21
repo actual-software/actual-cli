@@ -2413,7 +2413,7 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
                 })
                 .and_then(|sent| serde_json::to_string(&sent).ok())
                 .is_some_and(|sent| {
-                    ["ai.actual.adr.context_added", "grp-sign", "grp-rotate"]
+                    ["actual.adr.detected", "grp-sign", "grp-rotate"]
                         .iter()
                         .all(|text| sent.contains(text))
                 })
@@ -2458,7 +2458,7 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
     assert_eq!(records.len(), 2);
     assert!(records
         .iter()
-        .all(|r| r["eventName"] == "ai.actual.adr.context_added"));
+        .all(|r| r["eventName"] == "actual.adr.detected"));
 
     let (reply, _) = otlp_brief_hook(config_dir.path(), repo.path(), &config_yaml, Some("sub-1"));
     assert!(

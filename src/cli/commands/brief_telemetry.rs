@@ -1,15 +1,15 @@
 //! The OpenTelemetry event `rules brief --claude-hook` sends when an ADR
-//! first enters a session's context: one [`otlp::CONTEXT_ADDED`] record per
+//! first enters a session's context: one [`otlp::ADR_DETECTED`] record per
 //! logical ADR.
 //!
 //! # Design
 //!
 //! **A logical ADR, keyed the way Actual's platform keys it.** Each rule file
 //! is one policy with its own `adr_id`, and the files of one decision share a
-//! `candidate_group_id`. The key is the group, else the file's own `adr_id`,
-//! and a record lists the `adr_id` of every file behind it that the brief
-//! carried a rule from. A file without a v2 header has neither id, so it sends
-//! nothing.
+//! `candidate_group_id`. The key is the group, else the file's own `adr_id`.
+//! A record names the ADR by that key in `actual.adr.ref` and lists the
+//! `adr_id` of every file behind it that the brief carried a rule from. A file
+//! without a v2 header has neither id, so it sends nothing.
 //!
 //! **Once per session.** Keys go into the session's brief ledger, the record
 //! that subagents share and compaction never resets, and a record is built
@@ -31,7 +31,6 @@ use crate::telemetry::otlp;
 struct BriefedAdr {
     /// The candidate group, else the one file's `adr_id`.
     key: String,
-    candidate_group_id: Option<String>,
     /// The `adr_id` of each of its files, in brief order.
     adr_ids: Vec<String>,
 }
@@ -58,7 +57,6 @@ fn logical_adrs<'a>(documents: impl IntoIterator<Item = &'a RuleDocument>) -> Ve
         } else {
             adrs.push(BriefedAdr {
                 key: key.to_string(),
-                candidate_group_id: group.map(str::to_string),
                 adr_ids: vec![adr_id.to_string()],
             });
         }
@@ -72,7 +70,6 @@ pub(super) fn report<'a>(
     ledger_dir: &Path,
     key: &LedgerKey<'_>,
     agent_id: Option<&str>,
-    root: &Path,
     documents: impl IntoIterator<Item = &'a RuleDocument>,
 ) {
     let config = crate::config::paths::load().unwrap_or_default();
@@ -87,19 +84,11 @@ pub(super) fn report<'a>(
     if added.is_empty() {
         return;
     }
-    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
-    let origin = otlp::Origin::resolve(&config, &repo_url);
+    let origin = otlp::Origin::resolve();
     let records = adrs
         .iter()
         .filter(|adr| added.contains(&adr.key))
-        .map(|adr| {
-            origin.context_added(
-                key.session_id,
-                agent_id,
-                adr.candidate_group_id.as_deref(),
-                &adr.adr_ids,
-            )
-        })
+        .map(|adr| origin.context_added(key.session_id, agent_id, &adr.key, &adr.adr_ids))
         .collect();
     dispatch(records);
 }
@@ -143,7 +132,7 @@ pub(super) mod tests {
         })
     }
 
-    /// A record's string attribute, or its `ai.actual.adr.ids` as a list.
+    /// A record's string attribute, or a list attribute as a list.
     pub(in crate::cli::commands) fn attribute(
         record: &serde_json::Value,
         key: &str,
@@ -176,10 +165,9 @@ pub(super) mod tests {
         document
     }
 
-    fn adr(key: &str, group: Option<&str>, adr_ids: &[&str]) -> BriefedAdr {
+    fn adr(key: &str, adr_ids: &[&str]) -> BriefedAdr {
         BriefedAdr {
             key: key.to_string(),
-            candidate_group_id: group.map(str::to_string),
             adr_ids: adr_ids.iter().map(|id| id.to_string()).collect(),
         }
     }
@@ -203,9 +191,9 @@ pub(super) mod tests {
         assert_eq!(
             logical_adrs(&documents),
             [
-                adr("grp-1", Some("grp-1"), &["adr-1", "adr-2"]),
-                adr("adr-9", None, &["adr-9"]),
-                adr("adr-4", None, &["adr-4"]),
+                adr("grp-1", &["adr-1", "adr-2"]),
+                adr("adr-9", &["adr-9"]),
+                adr("adr-4", &["adr-4"]),
             ]
         );
     }
@@ -249,48 +237,39 @@ pub(super) mod tests {
                 document(Some("adr-9"), None),
             ];
 
-            report(
-                &ledger,
-                &ledger_key("s1"),
-                Some("agent-1"),
-                home,
-                &documents,
-            );
+            report(&ledger, &ledger_key("s1"), Some("agent-1"), &documents);
             let records = take_captured();
             assert_eq!(records.len(), 2);
-            assert_eq!(attribute(&records[0], "session.id"), "s1");
-            assert_eq!(attribute(&records[0], "ai.actual.agent.id"), "agent-1");
+            assert!(records.iter().all(|r| r["eventName"] == otlp::ADR_DETECTED));
+            assert_eq!(attribute(&records[0], "actual.session.id"), "s1");
+            assert_eq!(attribute(&records[0], "actual.agent.id"), "agent-1");
+            assert_eq!(attribute(&records[0], "actual.detection.method"), "context");
+            assert_eq!(attribute(&records[0], "actual.adr.ref"), "grp-1");
             assert_eq!(
-                attribute(&records[0], "ai.actual.adr.candidate_group_id"),
-                "grp-1"
-            );
-            assert_eq!(
-                attribute(&records[0], "ai.actual.adr.ids"),
+                attribute(&records[0], "actual.adr.ids"),
                 serde_json::json!(["adr-1", "adr-2"])
             );
+            assert_eq!(attribute(&records[1], "actual.adr.ref"), "adr-9");
             assert_eq!(
-                attribute(&records[1], "ai.actual.adr.candidate_group_id"),
-                ""
-            );
-            assert_eq!(
-                attribute(&records[1], "ai.actual.adr.ids"),
+                attribute(&records[1], "actual.adr.ids"),
                 serde_json::json!(["adr-9"])
             );
+            assert!(
+                !home.join("telemetry-id").exists(),
+                "a record reads no install id"
+            );
 
-            report(&ledger, &ledger_key("s1"), None, home, &documents[..1]);
+            report(&ledger, &ledger_key("s1"), None, &documents[..1]);
             assert!(take_captured().is_empty(), "grp-1 was already sent");
 
             let later = [
                 document(Some("adr-9"), None),
                 document(Some("adr-5"), Some("grp-5")),
             ];
-            report(&ledger, &ledger_key("s1"), None, home, &later);
+            report(&ledger, &ledger_key("s1"), None, &later);
             let records = take_captured();
             assert_eq!(records.len(), 1);
-            assert_eq!(
-                attribute(&records[0], "ai.actual.adr.candidate_group_id"),
-                "grp-5"
-            );
+            assert_eq!(attribute(&records[0], "actual.adr.ref"), "grp-5");
         });
     }
 
@@ -304,7 +283,6 @@ pub(super) mod tests {
                 &ledger,
                 &ledger_key("s1"),
                 None,
-                home,
                 &[document(Some("adr-1"), None)],
             );
 
@@ -325,7 +303,6 @@ pub(super) mod tests {
                 &ledger,
                 &ledger_key("s1"),
                 None,
-                home,
                 &[document(Some("adr-1"), None)],
             );
             assert!(take_captured().is_empty());
@@ -339,7 +316,6 @@ pub(super) mod tests {
                 &ledger,
                 &ledger_key("s1"),
                 None,
-                home,
                 &[document(Some("adr-1"), None)],
             );
             assert!(take_captured().is_empty());
@@ -356,7 +332,7 @@ pub(super) mod tests {
             let ledger = home.join("brief-ledger");
             let v1 = RuleDocument::empty(Path::new("/repo/.actual/rules/v1.md"));
 
-            report(&ledger, &ledger_key("s1"), None, home, [&v1]);
+            report(&ledger, &ledger_key("s1"), None, [&v1]);
 
             assert!(take_captured().is_empty());
             assert!(!ledger.exists());
