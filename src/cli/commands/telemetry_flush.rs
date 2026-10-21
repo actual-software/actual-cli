@@ -115,15 +115,19 @@ mod tests {
         let sink = home.path().join("otlp.jsonl");
         let config_yaml = format!("telemetry:\n  otlp_file: {}\n", sink.display());
         std::fs::write(home.path().join("config.yaml"), config_yaml).unwrap();
-        let record = crate::telemetry::otlp::Origin::resolve(&Default::default(), "")
-            .context_added("s1", None, Some("grp-1"), &["adr-1".to_string()]);
+        let record = crate::telemetry::otlp::Origin::resolve().context_added(
+            "s1",
+            None,
+            "grp-1",
+            &["adr-1".to_string()],
+        );
         crate::telemetry::otlp::spool(&[record]);
 
         assert!(exec().is_ok());
 
         let written = std::fs::read_to_string(&sink).unwrap();
         assert_eq!(written.lines().count(), 1, "{written}");
-        assert!(written.contains("ai.actual.adr.context_added"));
+        assert!(written.contains(crate::telemetry::otlp::ADR_DETECTED));
         assert!(!home.path().join("otlp-logs-spool.jsonl").exists());
     }
 
