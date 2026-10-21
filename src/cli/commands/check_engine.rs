@@ -12,6 +12,7 @@
 //! text comes from (`PLAN` / `--plan-file` / stdin), the `--claude-hook`
 //! envelope parsing and revision-loop orchestration, and `repo_root`.
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
@@ -27,6 +28,7 @@ use crate::cli::ui::term_size;
 use crate::error::ActualError;
 use crate::rules::check::{self, CheckedRule, RuleForJudging, Verdict};
 use crate::rules::scope::{self, select, Query, Selection, Stage2};
+use crate::rules::types::AdrMeta;
 
 /// Safety cap on how many individual rules are judged in one call. The
 /// prefilter already caps *documents*; a single selected document can still
@@ -125,6 +127,9 @@ pub(super) enum Outcome {
         /// was judged. Every caller must disclose this when present, never
         /// report a partial answer as a complete one.
         partial: Option<(usize, usize)>,
+        /// The v2 header of each selected document that has one, by slug:
+        /// what names the ADR behind a verdict's rule.
+        headers: BTreeMap<String, AdrMeta>,
     },
 }
 
@@ -242,6 +247,7 @@ pub(super) fn run_pipeline(
                 verdicts: Vec::new(),
                 runner_label: None,
                 partial: None,
+                headers: gathered.headers,
             }
         } else {
             Outcome::NothingApplies
@@ -290,6 +296,7 @@ pub(super) fn run_pipeline(
             partial: gathered
                 .truncated
                 .then_some((gathered.rules.len(), gathered.considered)),
+            headers: gathered.headers,
         }),
         Err(e) => Ok(Outcome::CheckFailed {
             documents_selected: selection.selected.len(),
@@ -321,6 +328,9 @@ struct GatheredRules {
     /// selection: it is the caller's signal that `rules` being empty means
     /// "nothing new," not "nothing applies."
     excluded: usize,
+    /// The v2 header of each document read, by slug. A document without one
+    /// is absent.
+    headers: BTreeMap<String, AdrMeta>,
 }
 
 /// Read the individual rules out of every selected document, in selection
@@ -368,6 +378,7 @@ fn gather_rules(
 ) -> GatheredRules {
     let mut candidates = Vec::new();
     let mut excluded = 0usize;
+    let mut headers = BTreeMap::new();
     for selected in &selection.selected {
         let path = root.join(&selected.relative_path);
         let Ok(bytes) = std::fs::read(&path) else {
@@ -400,6 +411,9 @@ fn gather_rules(
                 rule.statement,
             ));
         }
+        if let Some(meta) = doc.meta {
+            headers.insert(selected.slug.clone(), meta);
+        }
     }
     let considered = candidates.len();
     let truncated = considered > MAX_RULES_JUDGED;
@@ -411,6 +425,7 @@ fn gather_rules(
         considered,
         truncated,
         excluded,
+        headers,
     }
 }
 
@@ -586,6 +601,7 @@ pub(super) fn render_panel(
             verdicts,
             runner_label,
             partial,
+            ..
         } => {
             panel = panel.kv("Documents selected", &selection.selected.len().to_string());
             if let Some(label) = runner_label {
@@ -709,6 +725,7 @@ pub(super) fn check_json(outcome: &Outcome, kind: check::ArtifactKind) -> CheckJ
             verdicts,
             runner_label,
             partial,
+            ..
         } => {
             let status = if verdicts.iter().any(|v| v.verdict.blocks()) {
                 "conflicting"
@@ -1333,13 +1350,15 @@ pub(super) fn emit(json: String) {
 /// the values they put here — which artifact kind they judge, the label their
 /// telemetry carries, and where the artifact text came from — never in what
 /// happens once a verdict exists.
-// `command`, `root` and `started_at` only feed telemetry.
+// `command`, `agent_id`, `root` and `started_at` only feed telemetry.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) struct HookRun<'a> {
     pub kind: check::ArtifactKind,
     /// The telemetry command label, e.g. `"plan-check --claude-hook"`.
     pub command: &'static str,
     pub session_id: Option<&'a str>,
+    /// The subagent whose plan or diff this is, absent for the main agent.
+    pub agent_id: Option<&'a str>,
     /// [`governance_session::content_digest`] of the judged artifact text.
     pub artifact_digest: &'a str,
     pub root: &'a Path,
@@ -1388,11 +1407,21 @@ pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, ou
             verdicts,
             runner_label,
             partial,
+            headers,
             ..
-        } => finish_verdicts(run, session, verdicts, runner_label.is_some(), partial),
+        } => finish_verdicts(
+            run,
+            session,
+            verdicts,
+            runner_label.is_some(),
+            partial,
+            &headers,
+        ),
     }
 }
 
+// `headers` only feeds telemetry.
+#[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
 fn finish_verdicts(
     run: &HookRun<'_>,
     session: &mut GovernanceSession,
@@ -1402,6 +1431,7 @@ fn finish_verdicts(
     // already excluded" shortcut in `run_pipeline`).
     judge_ran: bool,
     partial: Option<(usize, usize)>,
+    headers: &BTreeMap<String, AdrMeta>,
 ) {
     let kind = run.kind;
     let session_id = run.session_id;
@@ -1434,6 +1464,8 @@ fn finish_verdicts(
         .iter()
         .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
         .collect();
+    #[cfg(feature = "telemetry")]
+    super::check_telemetry::report(run, headers, &verdicts, &blocking);
 
     if !blocking.is_empty() {
         if session_id.is_some() {
@@ -1837,6 +1869,42 @@ pub(crate) mod tests {
         let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
         assert!(ids.contains(&"R-A-001"));
         assert!(ids.contains(&"R-A-002"));
+    }
+
+    /// Each selected document's v2 header rides along by slug, so a verdict's
+    /// rule can name its ADR. A document without one adds nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_gather_rules_keeps_each_v2_header_by_slug() {
+        use super::super::check_telemetry::tests::with_header;
+
+        let root = seed(&[
+            (
+                "token-signing.md",
+                &with_header("adr-sign-1", Some("grp-sign"), OAUTH_DOC),
+            ),
+            ("token-signing-legacy.md", OAUTH_DOC),
+            ("cross-cutting-terraform-c340.md", TERRAFORM_DOC),
+        ]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Sign access tokens for OAuth".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+        assert_eq!(selection.selected.len(), 2);
+
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
+            "test-digest",
+        );
+
+        assert_eq!(gathered.rules.len(), 4);
+        assert_eq!(gathered.headers.len(), 1);
+        let header = &gathered.headers["token-signing"];
+        assert_eq!(header.adr_id.as_deref(), Some("adr-sign-1"));
+        assert_eq!(header.candidate_group_id.as_deref(), Some("grp-sign"));
     }
 
     #[test]
@@ -2385,6 +2453,7 @@ pub(crate) mod tests {
             verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: None,
+            headers: BTreeMap::new(),
         };
         let panel = render_panel(
             &outcome,
@@ -2415,6 +2484,7 @@ pub(crate) mod tests {
             verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: Some((60, 85)),
+            headers: BTreeMap::new(),
         };
         let panel = render_panel(
             &outcome,
@@ -2449,6 +2519,7 @@ pub(crate) mod tests {
             ],
             runner_label: None,
             partial: None,
+            headers: BTreeMap::new(),
         };
         let panel = render_panel(
             &outcome,
@@ -2478,6 +2549,7 @@ pub(crate) mod tests {
             verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
             runner_label: None,
             partial: None,
+            headers: BTreeMap::new(),
         };
         let json = render_json(&conforming, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2489,6 +2561,7 @@ pub(crate) mod tests {
             verdicts: vec![checked("R-A-002", Verdict::Conflicting, "x", "y")],
             runner_label: None,
             partial: None,
+            headers: BTreeMap::new(),
         };
         let json = render_json(&conflicting, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2499,6 +2572,7 @@ pub(crate) mod tests {
             verdicts: vec![checked("R-A-003", Verdict::RequiresDecision, "x", "y")],
             runner_label: None,
             partial: None,
+            headers: BTreeMap::new(),
         };
         let json = render_json(&requires_decision, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2509,6 +2583,7 @@ pub(crate) mod tests {
             verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
             runner_label: None,
             partial: Some((60, 85)),
+            headers: BTreeMap::new(),
         };
         let json = render_json(&partial, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2627,6 +2702,7 @@ pub(crate) mod tests {
             )],
             runner_label: None,
             partial: None,
+            headers: BTreeMap::new(),
         };
         let panel = render_panel(
             &outcome,
@@ -3447,6 +3523,7 @@ pub(crate) mod tests {
             verdicts,
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: None,
+            headers: BTreeMap::new(),
         }
     }
 
@@ -3460,6 +3537,7 @@ pub(crate) mod tests {
             kind,
             command: "test --claude-hook",
             session_id,
+            agent_id: None,
             artifact_digest: "digest-1",
             root: rules_dir,
             rules_dir,
