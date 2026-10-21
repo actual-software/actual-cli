@@ -89,6 +89,33 @@ fn test_version_check_makes_no_request_when_turned_off() {
         ));
 }
 
+/// A config file that fails to load may be the one turning update checks off.
+/// `version --json` still answers with the local facts beside it.
+#[test]
+fn test_version_json_keeps_its_local_facts_when_the_config_cannot_load() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.yaml"),
+        "update_check:\n  enabled: false\nbatch_size: lots\n",
+    )
+    .unwrap();
+    let output = cmd()
+        .args(["version", "--json"])
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("ACTUAL_NO_UPDATE_CHECK")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["current_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["channel"], "other");
+    assert!(value["latest_version"].is_null());
+    assert!(!dir.path().join("update-check.yaml").exists());
+}
+
 /// With stderr piped, as under an agent's tool call or a script, a command
 /// neither prints the notice nor starts a lookup, even with a newer version
 /// cached and the last lookup days old.

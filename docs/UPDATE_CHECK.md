@@ -42,7 +42,7 @@ It stays quiet when:
 - stderr isn't a terminal, or `CI` is set;
 - the command runs in a mode a program reads: any `--json` output, the `--claude-hook` and `--claude-session-start` modes the actual skill's hooks use, and `mint-token`;
 - `actual` runs inside a `claude` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
-- the check is turned off.
+- the check is turned off, or the config file fails to load.
 
 A lookup that fails or times out is silent, and the next one waits a day.
 
@@ -54,6 +54,8 @@ Either of these stops every request to the registry, including the one `actual v
 export ACTUAL_NO_UPDATE_CHECK=1                # any non-empty value
 actual config set update_check.enabled false
 ```
+
+A config file that fails to load counts as off as well, because it may be the file turning the check off: one invalid value rejects the whole file, `update_check.enabled: false` included. Until it loads again, nothing reaches the registry and `actual version --check` reports the latest as not checked. `actual config show` names the problem.
 
 ## `actual version`
 
@@ -75,7 +77,7 @@ actual config set update_check.enabled false
 | Field | Value |
 |---|---|
 | `current_version` | The running version. |
-| `latest_version` | The latest published version. `null` without `--check`, with the check turned off, or when the registry didn't answer. |
+| `latest_version` | The latest published version. `null` without `--check`, with the check turned off or a config file that fails to load, or when the registry didn't answer. |
 | `update_available` | Whether `latest_version` is newer than `current_version`. `null` whenever `latest_version` is. |
 | `channel` | `homebrew`, `npm` or `other`. |
 | `upgrade_command` | The upgrade command for `channel`, or `null` for `other`. |
