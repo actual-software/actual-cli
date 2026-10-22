@@ -566,12 +566,19 @@ fn spawn_uploader_from(exe: std::io::Result<std::path::PathBuf>) {
     let Ok(exe) = exe else {
         return;
     };
-    let _ = std::process::Command::new(exe)
+    let mut child = std::process::Command::new(exe);
+    child
         .arg("__telemetry-flush")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    // Its own process group, as the update check's child has. Codex kills a
+    // command's process group once the command returns, and a command that leads
+    // its terminal's session hangs that group up when it exits. Either way the
+    // uploader would die partway through a send.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut child, 0);
+    let _ = child.spawn();
 }
 
 /// Dispatch one scope event: persist it best-effort, then kick off delivery.
@@ -1236,6 +1243,39 @@ mod tests {
         spawn_uploader_from(Ok(std::path::PathBuf::from(
             "/nonexistent/actual-cli-uploader-bogus",
         )));
+    }
+
+    /// A process that leads its own group has a group id equal to its pid. An
+    /// uploader left in this test's group would not, and would die with that
+    /// group when an agent kills it or a session-leading parent hangs it up.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_spawn_uploader_from_starts_the_child_in_its_own_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let out = dir.path().join("ids");
+        let script = dir.path().join("fake-actual");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$$ $(ps -o pgid= -p $$)\" > '{0}.tmp' && mv '{0}.tmp' '{0}'\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        spawn_uploader_from(Ok(script));
+
+        let started = std::time::Instant::now();
+        while !out.exists() && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let ids = std::fs::read_to_string(&out).expect("the uploader should have run");
+        let ids: Vec<&str> = ids.split_whitespace().collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_eq!(ids[0], ids[1], "pid and process group id should match");
     }
 
     /// Both outcomes of a best-effort spool append are observed without panicking
