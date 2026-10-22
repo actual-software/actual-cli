@@ -267,6 +267,14 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
                 )
             })
             .collect();
+        let action = super::check_telemetry::Action {
+            kind: ArtifactKind::Plan,
+            hook: false,
+            session_id: None,
+            agent_id: None,
+            started,
+        };
+        super::check_telemetry::report(&action, decision, Vec::new());
         send_governance_events(
             "plan-check",
             &root,
@@ -276,14 +284,6 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
             &violations,
             None,
         );
-        let action = super::check_telemetry::Action {
-            kind: ArtifactKind::Plan,
-            hook: false,
-            session_id: None,
-            agent_id: None,
-            started,
-        };
-        super::check_telemetry::report(&action, decision, Vec::new());
     }
 
     result
@@ -939,13 +939,15 @@ mod tests {
     }
 
     /// A direct run sends the two action events as well, with no session or
-    /// agent, the start stamped before its 300 ms judge ran. A conforming plan
-    /// comes to `allow`.
+    /// agent, the start stamped before its 300 ms judge ran and the end before
+    /// the plan-governance events. A conforming plan comes to `allow`.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_direct_sends_the_run_s_action_events() {
         use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
-        use crate::cli::commands::check_telemetry::tests::duration_ms;
+        use crate::cli::commands::check_telemetry::tests::{
+            assert_completed_before_governance, duration_ms,
+        };
         use crate::telemetry::otlp;
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -982,7 +984,7 @@ mod tests {
         args.no_rank = true;
         take_captured();
 
-        assert!(exec(&args).is_ok());
+        let governance = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
 
         let records = take_captured();
         let events: Vec<&str> = records
@@ -997,6 +999,7 @@ mod tests {
             assert_eq!(attribute(record, "actual.action.mode"), "direct");
         }
         assert_eq!(attribute(&records[1], "actual.action.outcome"), "allow");
+        assert_completed_before_governance(&records[1], &governance);
         let nanos = |record: &serde_json::Value| -> u128 {
             record["timeUnixNano"].as_str().unwrap().parse().unwrap()
         };
@@ -1403,12 +1406,15 @@ mod tests {
     /// stage, naming the ADR from the rule file's v2 header and the agent from
     /// the envelope, between the round's action events. The started event is
     /// stamped before the judge runs: this judge takes 300 ms, and the start
-    /// is at least that far ahead of the completion.
+    /// is at least that far ahead of the completion, which comes before the
+    /// plan-governance events.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_hook_with_deny_sends_used_and_breached_at_the_plan_stage() {
         use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
-        use crate::cli::commands::check_telemetry::tests::{duration_ms, with_header};
+        use crate::cli::commands::check_telemetry::tests::{
+            assert_completed_before_governance, duration_ms, with_header,
+        };
         use crate::telemetry::otlp;
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1453,7 +1459,7 @@ mod tests {
         .to_string();
         take_captured();
 
-        exec_hook_with(&args, &raw);
+        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
 
         let records = take_captured();
         let events: Vec<&str> = records
@@ -1469,6 +1475,7 @@ mod tests {
                 otlp::ACTION_COMPLETED
             ]
         );
+        assert_completed_before_governance(&records[3], &governance);
         for record in &records {
             assert_eq!(attribute(record, "actual.session.id"), "sess-plan-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "agent-plan-1");

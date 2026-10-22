@@ -195,6 +195,14 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
                 )
             })
             .collect();
+        let action = super::check_telemetry::Action {
+            kind: ArtifactKind::Diff,
+            hook: false,
+            session_id: None,
+            agent_id: None,
+            started,
+        };
+        super::check_telemetry::report(&action, decision, Vec::new());
         send_governance_events(
             "impl-check",
             &root,
@@ -204,14 +212,6 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
             &violations,
             None,
         );
-        let action = super::check_telemetry::Action {
-            kind: ArtifactKind::Diff,
-            hook: false,
-            session_id: None,
-            agent_id: None,
-            started,
-        };
-        super::check_telemetry::report(&action, decision, Vec::new());
     }
 
     result
@@ -1078,13 +1078,16 @@ mod tests {
     }
 
     /// A direct run sends the two action events as well, with no session or
-    /// agent, the start stamped before its 300 ms judge ran. A diff with a
-    /// conflicting rule comes to `block`.
+    /// agent, the start stamped before its 300 ms judge ran and the end before
+    /// the plan-governance events. A diff with a conflicting rule comes to
+    /// `block`.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_direct_sends_the_run_s_action_events() {
         use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
-        use crate::cli::commands::check_telemetry::tests::duration_ms;
+        use crate::cli::commands::check_telemetry::tests::{
+            assert_completed_before_governance, duration_ms,
+        };
         use crate::telemetry::otlp;
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1128,7 +1131,7 @@ mod tests {
         args.no_rank = true;
         take_captured();
 
-        assert!(exec(&args).is_err());
+        let governance = with_captured_plan_governance_events(|| assert!(exec(&args).is_err()));
 
         let records = take_captured();
         let events: Vec<&str> = records
@@ -1143,6 +1146,7 @@ mod tests {
             assert_eq!(attribute(record, "actual.action.mode"), "direct");
         }
         assert_eq!(attribute(&records[1], "actual.action.outcome"), "block");
+        assert_completed_before_governance(&records[1], &governance);
         let nanos = |record: &serde_json::Value| -> u128 {
             record["timeUnixNano"].as_str().unwrap().parse().unwrap()
         };
@@ -1565,12 +1569,15 @@ mod tests {
     /// A denied Stop sends its ADR's used and breached events at the
     /// implementation stage, between the round's action events, and the next
     /// Stop, denying the same rule again, sends its action events alone. Each
-    /// round's start is stamped before its 300 ms judge runs.
+    /// round's start is stamped before its 300 ms judge runs, and its end
+    /// before the plan-governance events.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_hook_with_deny_sends_used_and_breached_once_per_session() {
         use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
-        use crate::cli::commands::check_telemetry::tests::{duration_ms, with_header};
+        use crate::cli::commands::check_telemetry::tests::{
+            assert_completed_before_governance, duration_ms, with_header,
+        };
         use crate::telemetry::otlp;
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1644,7 +1651,7 @@ mod tests {
         };
         take_captured();
 
-        exec_hook_with(&args, &raw);
+        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
 
         let records = take_captured();
         assert_eq!(
@@ -1657,6 +1664,7 @@ mod tests {
             ]
         );
         action(&records[0], &records[3]);
+        assert_completed_before_governance(&records[3], &governance);
         for record in &records[1..3] {
             assert_eq!(attribute(record, "actual.session.id"), "sess-impl-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "");
@@ -1672,7 +1680,7 @@ mod tests {
         assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
         assert_eq!(attribute(&records[2], "actual.gate.type"), "implementation");
 
-        exec_hook_with(&args, &raw);
+        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
         let session =
             governance_session::load("sess-impl-otlp-1", &crate::rules::rules_dir(repo.path()));
         assert_eq!(session.diff.rounds, 2, "the next Stop was judged too");
@@ -1683,6 +1691,7 @@ mod tests {
             "and sent no ADR event again"
         );
         action(&records[0], &records[1]);
+        assert_completed_before_governance(&records[1], &governance);
     }
 
     /// The gap this guards: plan-stage denials used to live in the same
