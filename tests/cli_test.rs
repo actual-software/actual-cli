@@ -1537,6 +1537,60 @@ fn test_rules_select_scope_event_is_delivered_when_endpoint_is_up() {
     assert!(drained, "the spool must drain once the event is delivered");
 }
 
+/// The uploader outlives the command that started it. The endpoint holds its
+/// reply for a second, so the reply can only reach a process that is still
+/// running after `rules select` has exited, and only that process drains the
+/// spool.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_rules_select_uploader_outlives_the_command() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_a_rule();
+
+    let replied_at = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let stamp = std::sync::Arc::clone(&replied_at);
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/plan-governance/record")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_chunked_body(move |w| {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            *stamp.lock().unwrap() = Some(std::time::Instant::now());
+            std::io::Write::write_all(w, br#"{"recorded":1,"failed":0}"#)
+        })
+        .expect(1)
+        .create();
+
+    run_rules_select(config_dir.path(), repo.path(), &server.url());
+    let exited_at = std::time::Instant::now();
+
+    let spool = scope_spool(config_dir.path());
+    let mut drained = false;
+    for _ in 0..100 {
+        if std::fs::read_to_string(&spool)
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            drained = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    mock.assert();
+    assert!(drained, "the uploader must deliver and drain the spool");
+    let replied_at = replied_at
+        .lock()
+        .unwrap()
+        .expect("the endpoint should have replied");
+    assert!(
+        replied_at > exited_at,
+        "the reply should land after the command exited"
+    );
+}
+
 /// Opted out: no event is written to the spool, and nothing is sent.
 #[cfg(feature = "telemetry")]
 #[test]
