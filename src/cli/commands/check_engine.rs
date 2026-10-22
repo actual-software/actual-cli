@@ -1352,7 +1352,7 @@ pub(super) fn emit(json: String) {
 /// the values they put here — which artifact kind they judge, the label their
 /// telemetry carries, and where the artifact text came from — never in what
 /// happens once a verdict exists.
-// `command`, `agent_id`, `root` and `started_at` only feed telemetry.
+// `command`, `agent_id`, `root` and `started` only feed telemetry.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) struct HookRun<'a> {
     pub kind: check::ArtifactKind,
@@ -1367,7 +1367,7 @@ pub(super) struct HookRun<'a> {
     pub rules_dir: &'a Path,
     pub max_rounds: u32,
     #[cfg(feature = "telemetry")]
-    pub started_at: std::time::Instant,
+    pub started: super::check_telemetry::Started,
 }
 
 /// Turn the pipeline's [`Outcome`] into the hook's one line of output and the
@@ -1467,7 +1467,7 @@ fn finish_verdicts(
         .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
         .collect();
     #[cfg(feature = "telemetry")]
-    super::check_telemetry::report(run, headers, &verdicts, &blocking);
+    let records = super::check_telemetry::adr_records(run, headers, &verdicts, &blocking);
 
     if !blocking.is_empty() {
         if session_id.is_some() {
@@ -1524,11 +1524,17 @@ fn finish_verdicts(
                 send_hook_governance_events(
                     run.command,
                     run.root,
-                    run.started_at,
+                    run.started.instant,
                     crate::api::types::PlanGovernanceDecision::Warn,
                     &verdicts,
                     false,
                     (session.loop_state(kind).rounds, run.max_rounds),
+                );
+                #[cfg(feature = "telemetry")]
+                super::check_telemetry::report_round(
+                    run,
+                    crate::api::types::PlanGovernanceDecision::Warn,
+                    records,
                 );
                 return;
             }
@@ -1547,11 +1553,17 @@ fn finish_verdicts(
         send_hook_governance_events(
             run.command,
             run.root,
-            run.started_at,
+            run.started.instant,
             crate::api::types::PlanGovernanceDecision::Block,
             &verdicts,
             true,
             (session.loop_state(kind).rounds, run.max_rounds),
+        );
+        #[cfg(feature = "telemetry")]
+        super::check_telemetry::report_round(
+            run,
+            crate::api::types::PlanGovernanceDecision::Block,
+            records,
         );
         return;
     }
@@ -1614,12 +1626,13 @@ fn finish_verdicts(
         send_hook_governance_events(
             run.command,
             run.root,
-            run.started_at,
+            run.started.instant,
             decision,
             &verdicts,
             false,
             (session.loop_state(kind).rounds, run.max_rounds),
         );
+        super::check_telemetry::report_round(run, decision, records);
     }
 }
 
@@ -3545,7 +3558,7 @@ pub(crate) mod tests {
             rules_dir,
             max_rounds,
             #[cfg(feature = "telemetry")]
-            started_at: std::time::Instant::now(),
+            started: super::super::check_telemetry::Started::now(),
         }
     }
 
