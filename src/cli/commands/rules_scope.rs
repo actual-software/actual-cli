@@ -551,7 +551,7 @@ fn emit_scope_telemetry(
 /// send. `stdin`/`stdout`/`stderr` are detached to null so the child cannot touch
 /// the user's terminal.
 #[cfg(all(feature = "telemetry", not(test)))]
-fn spawn_uploader() {
+pub(super) fn spawn_uploader() {
     spawn_uploader_from(std::env::current_exe());
 }
 

@@ -24,12 +24,9 @@ use crate::telemetry::reporter::SERVICE_KEY;
 const DISTINCT_ID_FILE: &str = "telemetry-id";
 
 /// A short, dedicated send timeout — deliberately much shorter than
-/// `ActualApiClient::new`'s default 30s. `plan-check --claude-hook` shares a
-/// hard 120s `PreToolUse` budget with the judge call, already measured at
-/// 58-82s on its own; a 30s worst-case telemetry send on top of that risks
-/// blowing the hook's budget. This bounds plan-governance telemetry's own
-/// worst case to a few seconds instead, in service of AK-678's "telemetry
-/// failure never fails or slows a plan check" acceptance criterion.
+/// `ActualApiClient::new`'s default 30s. Only the detached `__telemetry-flush`
+/// uploader sends, so no command waits on it; it keeps an uploader facing a dead
+/// endpoint short-lived, and a batch it doesn't deliver stays in the spool.
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -288,8 +285,8 @@ pub(crate) enum Delivery {
 
 /// Attempt to deliver a batch and report the outcome. The single place the
 /// governance/scope transport lives — same short timeouts, service key and
-/// opt-out gate for every caller (fire-and-forget sends and the durable spool
-/// alike), so no path can drift onto a different contract.
+/// opt-out gate for every batch the spool's uploader sends, so no path can drift
+/// onto a different contract.
 pub(crate) async fn deliver_events(
     events: Vec<PlanGovernanceEvent>,
     config: &Config,
@@ -322,16 +319,6 @@ pub(crate) async fn deliver_events(
             Delivery::Failed
         }
     }
-}
-
-/// Send a batch of plan-governance events, fire-and-forget.
-///
-/// Honors both runtime opt-outs (env var, config) identically to the sync
-/// counters. Never returns an error to the caller — a slow or failing send
-/// is logged at debug level and discarded, so it can never fail or slow a
-/// plan-check run. No-op on an empty batch.
-pub async fn send_events(events: Vec<PlanGovernanceEvent>, config: &Config, api_url: &str) {
-    let _ = deliver_events(events, config, api_url).await;
 }
 
 #[cfg(test)]
@@ -645,33 +632,34 @@ mod tests {
         assert_eq!(props.decision, Some(PlanGovernanceDecision::Warn));
     }
 
-    // --- send_events ---
+    // --- deliver_events ---
 
     #[tokio::test]
-    async fn test_send_events_noop_on_empty_batch() {
+    async fn test_deliver_events_skips_an_empty_batch() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         // No mock server set up; an empty batch must never attempt a send.
-        send_events(vec![], &Config::default(), "http://127.0.0.1:1").await;
+        let delivery = deliver_events(vec![], &Config::default(), "http://127.0.0.1:1").await;
+        assert_eq!(delivery, Delivery::Skipped);
     }
 
     #[tokio::test]
-    async fn test_send_events_opt_out_via_env_var_skips_network() {
+    async fn test_deliver_events_opt_out_via_env_var_skips_network() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
         let ctx = context();
-        // Unreachable address: if this were attempted, the call would hang
-        // or error out slowly rather than returning immediately.
-        send_events(
+        // Unreachable address: an attempted send would come back Failed.
+        let delivery = deliver_events(
             vec![ctx.started_event()],
             &Config::default(),
             "http://127.0.0.1:1",
         )
         .await;
+        assert_eq!(delivery, Delivery::Skipped);
     }
 
     #[tokio::test]
-    async fn test_send_events_opt_out_via_config_skips_network() {
+    async fn test_deliver_events_opt_out_via_config_skips_network() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let ctx = context();
@@ -681,11 +669,13 @@ mod tests {
             }),
             ..Default::default()
         };
-        send_events(vec![ctx.started_event()], &config, "http://127.0.0.1:1").await;
+        let delivery =
+            deliver_events(vec![ctx.started_event()], &config, "http://127.0.0.1:1").await;
+        assert_eq!(delivery, Delivery::Skipped);
     }
 
     #[tokio::test]
-    async fn test_send_events_posts_batch_on_success() {
+    async fn test_deliver_events_posts_batch_on_success() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
@@ -700,43 +690,46 @@ mod tests {
             .await;
 
         let ctx = context();
-        send_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+        let delivery =
+            deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
         mock.assert_async().await;
+        assert_eq!(delivery, Delivery::Delivered);
     }
 
     #[tokio::test]
-    async fn test_send_events_network_failure_does_not_panic() {
+    async fn test_deliver_events_network_failure_is_failed() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let ctx = context();
-        // Unreachable address — must swallow the error, never panic or
-        // propagate it to the caller.
-        send_events(
+        // Unreachable address — reported as Failed, never a panic or an error.
+        let delivery = deliver_events(
             vec![ctx.started_event()],
             &Config::default(),
             "http://127.0.0.1:1",
         )
         .await;
+        assert_eq!(delivery, Delivery::Failed);
     }
 
     #[tokio::test]
-    async fn test_send_events_client_construction_failure_does_not_panic() {
+    async fn test_deliver_events_client_construction_failure_is_failed() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let ctx = context();
         // A non-HTTPS, non-loopback URL makes `ActualApiClient::new_with_timeout`
         // return `Err`, exercising the early return on client construction
         // failure rather than the network path.
-        send_events(
+        let delivery = deliver_events(
             vec![ctx.started_event()],
             &Config::default(),
             "http://example.com",
         )
         .await;
+        assert_eq!(delivery, Delivery::Failed);
     }
 
     #[tokio::test]
-    async fn test_send_events_server_side_failures_does_not_panic() {
+    async fn test_deliver_events_server_side_failures_is_failed() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
@@ -750,7 +743,9 @@ mod tests {
             .await;
 
         let ctx = context();
-        send_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+        let delivery =
+            deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
         mock.assert_async().await;
+        assert_eq!(delivery, Delivery::Failed);
     }
 }

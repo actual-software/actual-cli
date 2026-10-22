@@ -219,9 +219,10 @@ user, and is reused verbatim only if the same event is re-sent from the local
 spool (below), so a retry collapses into one server-side rather than
 double-counting.
 
-The `rules select` scope-selection event is delivered through a small durable
-outbox rather than a single in-process send: because that command is
-short-lived, the event is first written to a local spool file
+Every plan-governance event, from `plan-check`, `impl-check`, `check-override`
+and `rules select` alike, is delivered through a small durable outbox rather
+than an in-process send, so no command waits on the network: the event is
+first written to a local spool file
 (`~/.actualai/actual/scope-telemetry-spool.jsonl`, created readable only by the
 owner) and then delivered by a separate best-effort uploader, with the entry
 removed once the proxy confirms it. The spool holds **only** the same
