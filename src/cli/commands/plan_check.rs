@@ -190,7 +190,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .flatten();
 
     #[cfg(feature = "telemetry")]
-    let started_at = std::time::Instant::now();
+    let started = super::check_telemetry::Started::now();
 
     let outcome = run_pipeline(
         &plan_text,
@@ -270,12 +270,20 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         send_governance_events(
             "plan-check",
             &root,
-            started_at,
+            started.instant,
             decision,
             exit_code,
             &violations,
             None,
         );
+        let action = super::check_telemetry::Action {
+            kind: ArtifactKind::Plan,
+            hook: false,
+            session_id: None,
+            agent_id: None,
+            started,
+        };
+        super::check_telemetry::report(&action, decision, Vec::new());
     }
 
     result
@@ -391,7 +399,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     }
 
     #[cfg(feature = "telemetry")]
-    let started_at = std::time::Instant::now();
+    let started = super::check_telemetry::Started::now();
 
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
     // hook's one model call stays reserved for the judge. See the module doc.
@@ -425,7 +433,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
             #[cfg(feature = "telemetry")]
-            started_at,
+            started,
         },
         &mut session,
         outcome,
@@ -750,6 +758,16 @@ mod tests {
         script
     }
 
+    /// [`fake_claude`] with a judge that takes 300 ms to answer, so a test can
+    /// tell a time read before the judge ran from one read after it.
+    #[cfg(all(unix, feature = "telemetry"))]
+    fn slow_fake_claude(dir: &Path, structured_output: &serde_json::Value) -> PathBuf {
+        let script = fake_claude(dir, structured_output);
+        let body = std::fs::read_to_string(&script).unwrap();
+        std::fs::write(&script, body.replacen("fi\n", "fi\nsleep 0.3\n", 1)).unwrap();
+        script
+    }
+
     /// `structured_output` shaped for the check schema: an array of
     /// `{doc_slug, rule_id, verdict, span, reason}` entries.
     fn check_output(entries: serde_json::Value) -> serde_json::Value {
@@ -918,6 +936,73 @@ mod tests {
             assert_eq!(props.exit_code, Some(0));
             assert_eq!(props.command.as_deref(), Some("plan-check"));
         }
+    }
+
+    /// A direct run sends the two action events as well, with no session or
+    /// agent, the start stamped before its 300 ms judge ran. A conforming plan
+    /// comes to `allow`.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_direct_sends_the_run_s_action_events() {
+        use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
+        use crate::cli::commands::check_telemetry::tests::duration_ms;
+        use crate::telemetry::otlp;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-plan-check-test.jsonl\n",
+        )
+        .unwrap();
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            slow_fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+        let mut args = base_args();
+        args.plan = vec!["Sign access tokens with RS256".to_string()];
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+        take_captured();
+
+        assert!(exec(&args).is_ok());
+
+        let records = take_captured();
+        let events: Vec<&str> = records
+            .iter()
+            .map(|record| record["eventName"].as_str().unwrap())
+            .collect();
+        assert_eq!(events, [otlp::ACTION_STARTED, otlp::ACTION_COMPLETED]);
+        for record in &records {
+            assert_eq!(attribute(record, "actual.session.id"), "");
+            assert_eq!(attribute(record, "actual.agent.id"), "");
+            assert_eq!(attribute(record, "actual.action.type"), "plan-check");
+            assert_eq!(attribute(record, "actual.action.mode"), "direct");
+        }
+        assert_eq!(attribute(&records[1], "actual.action.outcome"), "allow");
+        let nanos = |record: &serde_json::Value| -> u128 {
+            record["timeUnixNano"].as_str().unwrap().parse().unwrap()
+        };
+        let apart_ms = (nanos(&records[1]) - nanos(&records[0])) / 1_000_000;
+        assert!(apart_ms >= 300, "started {apart_ms} ms before completing");
+        assert!(duration_ms(&records[1]) >= 300);
     }
 
     /// The bug a review flagged: direct mode's telemetry block used to
@@ -1316,12 +1401,15 @@ mod tests {
 
     /// A denied plan sends its ADR's used and breached events at the plan
     /// stage, naming the ADR from the rule file's v2 header and the agent from
-    /// the envelope.
+    /// the envelope, between the round's action events. The started event is
+    /// stamped before the judge runs: this judge takes 300 ms, and the start
+    /// is at least that far ahead of the completion.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_hook_with_deny_sends_used_and_breached_at_the_plan_stage() {
         use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
-        use crate::cli::commands::check_telemetry::tests::with_header;
+        use crate::cli::commands::check_telemetry::tests::{duration_ms, with_header};
+        use crate::telemetry::otlp;
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
@@ -1351,7 +1439,7 @@ mod tests {
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), &response).to_str().unwrap(),
+            slow_fake_claude(bin.path(), &response).to_str().unwrap(),
         );
 
         let mut args = base_args();
@@ -1375,13 +1463,21 @@ mod tests {
         assert_eq!(
             events,
             [
-                crate::telemetry::otlp::ADR_DETECTED,
-                crate::telemetry::otlp::GATE_EVALUATED
+                otlp::ACTION_STARTED,
+                otlp::ADR_DETECTED,
+                otlp::GATE_EVALUATED,
+                otlp::ACTION_COMPLETED
             ]
         );
         for record in &records {
             assert_eq!(attribute(record, "actual.session.id"), "sess-plan-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "agent-plan-1");
+            assert_eq!(
+                attribute(record, "actual.action.id"),
+                attribute(&records[0], "actual.action.id")
+            );
+        }
+        for record in &records[1..3] {
             assert_eq!(attribute(record, "actual.adr.ref"), "grp-sign");
             assert_eq!(
                 attribute(record, "actual.adr.ids"),
@@ -1389,11 +1485,24 @@ mod tests {
             );
         }
         assert_eq!(
-            attribute(&records[0], "actual.detection.method"),
+            attribute(&records[1], "actual.detection.method"),
             "planning"
         );
-        assert_eq!(attribute(&records[1], "actual.gate.outcome"), "breached");
-        assert_eq!(attribute(&records[1], "actual.gate.type"), "planning");
+        assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
+        assert_eq!(attribute(&records[2], "actual.gate.type"), "planning");
+        let (started, completed) = (&records[0], &records[3]);
+        for record in [started, completed] {
+            assert_eq!(attribute(record, "actual.action.type"), "plan-check");
+            assert_eq!(attribute(record, "actual.action.mode"), "hook");
+        }
+        assert_eq!(attribute(completed, "actual.action.outcome"), "block");
+        let nanos = |record: &serde_json::Value| -> u128 {
+            record["timeUnixNano"].as_str().unwrap().parse().unwrap()
+        };
+        let apart_ms = (nanos(completed) - nanos(started)) / 1_000_000;
+        assert!(apart_ms >= 300, "started {apart_ms} ms before completing");
+        let took = duration_ms(completed);
+        assert!(took.abs_diff(apart_ms) < 100, "{took} vs {apart_ms}");
     }
 
     /// The behavior change this guards: a `requires_decision` verdict must be

@@ -1,10 +1,21 @@
-//! The OpenTelemetry events `plan-check --claude-hook` and `impl-check
-//! --claude-hook` send once the judge has answered: one [`otlp::ADR_DETECTED`]
-//! record per logical ADR the round judged a rule of, with the gate as how it
-//! was detected, and one [`otlp::GATE_EVALUATED`] record per logical ADR it
-//! blocked on, with the outcome `breached` and the gate.
+//! The OpenTelemetry events `plan-check` and `impl-check` send once the judge
+//! has answered. Every run that reaches a verdict sends an
+//! [`otlp::ACTION_STARTED`] record, stamped when the check started, and an
+//! [`otlp::ACTION_COMPLETED`] record with its outcome and duration. A hook
+//! round also sends, between those two, one [`otlp::ADR_DETECTED`] record per
+//! logical ADR it judged a rule of, with the gate as how it was detected, and
+//! one [`otlp::GATE_EVALUATED`] record per logical ADR it blocked on, with the
+//! outcome `breached` and the gate.
 //!
 //! # Design
+//!
+//! **Started is stamped at the start and sent at the end.** A run reads the
+//! time just before the pipeline that calls the judge, and builds both action
+//! records once it has a verdict, so the started record carries the real start
+//! and a run still costs one spool write and one uploader start. The action
+//! events go wherever the plan-governance `check_started` and `check_completed`
+//! events go, and with the same outcome, so a run that never reaches a verdict
+//! sends neither.
 //!
 //! **Used means checked against.** A round uses an ADR when the judge returns
 //! a verdict for any of its rules, whatever the verdict, so a blocking verdict
@@ -22,45 +33,127 @@
 //! that write added. A missed lock or a failed write therefore undercounts,
 //! and nothing is sent twice.
 //!
-//! **No session, nothing sent.** Direct mode, and a hook envelope without a
-//! session id, have nothing to count once against or to join on.
+//! **No session, no ADR events.** Direct mode, and a hook envelope without a
+//! session id, have nothing to count an ADR once against. Their action events
+//! still go, with the session id empty.
 //!
 //! **What the hook pays.** The judge's prompt, output and call count are
-//! unchanged. With telemetry opted out or no output set, [`report`] returns
-//! once it has read the config. A round with nothing new reads the ledger
-//! once, without its lock; only a new key costs the locked write, the spool
-//! append and the detached uploader's start.
+//! unchanged. With telemetry opted out or no output set, a round reads the
+//! config and builds nothing. With an output set, every round appends its
+//! records to the spool and starts the detached uploader. A round with no new
+//! ADR reads the ledger once, without its lock; only a new key costs the
+//! locked write.
 
 use std::collections::BTreeMap;
+use std::time::{Instant, SystemTime};
 
 use super::brief_ledger::{self, LedgerKey};
 use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::HookRun;
+use crate::api::types::PlanGovernanceDecision;
 use crate::rules::check::{ArtifactKind, CheckedRule};
 use crate::rules::types::AdrMeta;
 use crate::telemetry::otlp;
 
-/// Report the logical ADRs a hook round judged, and those it blocked on, that
-/// are new to this session at this stage. `headers` names each judged rule's
-/// ADR. Best-effort and silent, like the hook's other telemetry.
+/// When a check started: the time its started event carries and the instant
+/// its duration counts from, read together.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Started {
+    pub time: SystemTime,
+    pub instant: Instant,
+}
+
+impl Started {
+    pub(super) fn now() -> Self {
+        Self {
+            time: SystemTime::now(),
+            instant: Instant::now(),
+        }
+    }
+}
+
+/// One plan-check or impl-check run, as its action events describe it.
+pub(super) struct Action<'a> {
+    pub kind: ArtifactKind,
+    /// Whether Claude Code ran it as a hook.
+    pub hook: bool,
+    pub session_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub started: Started,
+}
+
+/// Report a run that came to `decision`: its started record, then `records`,
+/// then its completed record, in one dispatch. Best-effort and silent, like
+/// the hook's other telemetry.
 pub(super) fn report(
+    action: &Action<'_>,
+    decision: PlanGovernanceDecision,
+    records: Vec<otlp::LogRecord>,
+) {
+    let config = crate::config::paths::load().unwrap_or_default();
+    if otlp::Outputs::resolve(&config).is_none() {
+        return;
+    }
+    let origin = otlp::Origin::resolve();
+    let session_id = action.session_id.unwrap_or_default();
+    let action_type = action_type(action.kind);
+    let mode = if action.hook { "hook" } else { "direct" };
+    let mut all = vec![origin.action_started(
+        action.started.time,
+        session_id,
+        action.agent_id,
+        action_type,
+        mode,
+    )];
+    all.extend(records);
+    all.push(origin.action_completed(
+        session_id,
+        action.agent_id,
+        action_type,
+        mode,
+        outcome(decision),
+        action.started.instant.elapsed(),
+    ));
+    brief_telemetry::dispatch(all);
+}
+
+/// [`report`] for a hook round, with the round's ADR records.
+pub(super) fn report_round(
+    run: &HookRun<'_>,
+    decision: PlanGovernanceDecision,
+    records: Vec<otlp::LogRecord>,
+) {
+    let action = Action {
+        kind: run.kind,
+        hook: true,
+        session_id: run.session_id,
+        agent_id: run.agent_id,
+        started: run.started,
+    };
+    report(&action, decision, records);
+}
+
+/// The records for the logical ADRs a hook round judged, and those it blocked
+/// on, that are new to this session at this stage. `headers` names each
+/// judged rule's ADR.
+pub(super) fn adr_records(
     run: &HookRun<'_>,
     headers: &BTreeMap<String, AdrMeta>,
     verdicts: &[CheckedRule],
     blocking: &[&CheckedRule],
-) {
+) -> Vec<otlp::LogRecord> {
     let Some(session_id) = run.session_id.filter(|id| !id.is_empty()) else {
-        return;
+        return Vec::new();
     };
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
-        return;
+        return Vec::new();
     };
     if otlp::Outputs::resolve(&config).is_none() {
-        return;
+        return Vec::new();
     }
     let used = adrs_of(headers, verdicts.iter());
     if used.is_empty() {
-        return;
+        return Vec::new();
     }
     let breached = adrs_of(headers, blocking.iter().copied());
     let rules_dir = super::rules_brief::resolve(run.rules_dir);
@@ -73,7 +166,7 @@ pub(super) fn report(
         .map(|dir| brief_ledger::report_checks(&dir, &key, stage, &keys(&used), &keys(&breached)))
         .unwrap_or_default();
     if new_used.is_empty() && new_breached.is_empty() {
-        return;
+        return Vec::new();
     }
     let origin = otlp::Origin::resolve();
     let gate = gate(run.kind);
@@ -87,7 +180,7 @@ pub(super) fn report(
     {
         records.push(origin.breached(session_id, run.agent_id, &adr.key, &adr.adr_ids, gate));
     }
-    brief_telemetry::dispatch(records);
+    records
 }
 
 /// The logical ADRs whose rules `judged` holds verdicts for, in verdict order.
@@ -116,6 +209,23 @@ fn gate(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Plan => "planning",
         ArtifactKind::Diff => "implementation",
+    }
+}
+
+/// The command that judges `kind`, as the action events name it.
+fn action_type(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Plan => "plan-check",
+        ArtifactKind::Diff => "impl-check",
+    }
+}
+
+/// What a check came to, in the plan-governance events' words.
+fn outcome(decision: PlanGovernanceDecision) -> &'static str {
+    match decision {
+        PlanGovernanceDecision::Allow => "allow",
+        PlanGovernanceDecision::Warn => "warn",
+        PlanGovernanceDecision::Block => "block",
     }
 }
 
@@ -198,8 +308,9 @@ pub(super) mod tests {
         body(home.path());
     }
 
-    /// Report a round that judged `verdicts` at `kind`'s stage in `session`,
-    /// blocking on the ones the hooks deny on, as `finish_verdicts` does.
+    /// Dispatch the ADR records of a round that judged `verdicts` at `kind`'s
+    /// stage in `session`, blocking on the ones the hooks deny on, as
+    /// `finish_verdicts` does.
     fn round(home: &Path, kind: ArtifactKind, session: Option<&str>, verdicts: &[CheckedRule]) {
         let rules_dir = home.join("rules");
         let run = HookRun {
@@ -211,13 +322,13 @@ pub(super) mod tests {
             root: home,
             rules_dir: &rules_dir,
             max_rounds: 3,
-            started_at: std::time::Instant::now(),
+            started: Started::now(),
         };
         let blocking: Vec<&CheckedRule> = verdicts
             .iter()
             .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
             .collect();
-        report(&run, &headers(), verdicts, &blocking);
+        brief_telemetry::dispatch(adr_records(&run, &headers(), verdicts, &blocking));
     }
 
     /// The records reported since the last call as (event, gate, ADR ref, ADR
@@ -534,5 +645,183 @@ pub(super) mod tests {
             report_one_blocking_round_under(crate::testutil::LOADABLE_TELEMETRY_ON),
             (2, true)
         );
+    }
+
+    /// The milliseconds a completed record says its check took.
+    pub(in crate::cli::commands) fn duration_ms(record: &serde_json::Value) -> u128 {
+        let attributes = record["attributes"].as_array().unwrap();
+        let duration = attributes
+            .iter()
+            .find(|kv| kv["key"] == "actual.action.duration_ms")
+            .unwrap();
+        duration["value"]["intValue"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// A run that started 250 ms ago at `time`, as a plan-check hook round in
+    /// session `s1` for `agent-1`.
+    fn hook_action(time: SystemTime) -> Action<'static> {
+        Action {
+            kind: ArtifactKind::Plan,
+            hook: true,
+            session_id: Some("s1"),
+            agent_id: Some("agent-1"),
+            started: Started {
+                time,
+                instant: Instant::now() - std::time::Duration::from_millis(250),
+            },
+        }
+    }
+
+    /// A run reports its started record, stamped when the check started, then
+    /// the records it was given, then its completed record with the outcome and
+    /// how long the check took. All of them share the run's action id.
+    #[test]
+    fn test_a_run_reports_started_then_its_records_then_completed() {
+        with_config(WITH_FILE, |home| {
+            let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_792_446_915);
+            let used = otlp::Origin::resolve().used(
+                "s1",
+                Some("agent-1"),
+                "grp-sign",
+                &["adr-sign-1".to_string()],
+                "planning",
+            );
+
+            report(
+                &hook_action(time),
+                PlanGovernanceDecision::Block,
+                vec![used],
+            );
+
+            let records = take_captured();
+            let events: Vec<&str> = records
+                .iter()
+                .map(|record| record["eventName"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                events,
+                [
+                    otlp::ACTION_STARTED,
+                    otlp::ADR_DETECTED,
+                    otlp::ACTION_COMPLETED
+                ]
+            );
+            let (started, completed) = (&records[0], &records[2]);
+            assert_eq!(started["timeUnixNano"], "1792446915000000000");
+            for record in [started, completed] {
+                assert_eq!(attribute(record, "actual.session.id"), "s1");
+                assert_eq!(attribute(record, "actual.agent.id"), "agent-1");
+                assert_eq!(attribute(record, "actual.action.type"), "plan-check");
+                assert_eq!(attribute(record, "actual.action.mode"), "hook");
+                assert_eq!(
+                    attribute(record, "actual.action.id"),
+                    attribute(&records[1], "actual.action.id")
+                );
+            }
+            assert_eq!(attribute(completed, "actual.action.outcome"), "block");
+            let took = duration_ms(completed);
+            assert!((250..60_000).contains(&took), "{took}");
+            assert!(!home.join("telemetry-id").exists());
+        });
+    }
+
+    /// Each decision reaches the completed record in the plan-governance
+    /// events' words, and a direct run sends its session and agent empty.
+    #[test]
+    fn test_a_direct_run_reports_each_outcome_with_no_session() {
+        with_config(WITH_FILE, |_| {
+            for (decision, outcome) in [
+                (PlanGovernanceDecision::Allow, "allow"),
+                (PlanGovernanceDecision::Warn, "warn"),
+                (PlanGovernanceDecision::Block, "block"),
+            ] {
+                let action = Action {
+                    kind: ArtifactKind::Diff,
+                    hook: false,
+                    session_id: None,
+                    agent_id: None,
+                    started: Started::now(),
+                };
+
+                report(&action, decision, Vec::new());
+
+                let records = take_captured();
+                assert_eq!(records.len(), 2, "{outcome}");
+                for record in &records {
+                    assert_eq!(attribute(record, "actual.session.id"), "");
+                    assert_eq!(attribute(record, "actual.agent.id"), "");
+                    assert_eq!(attribute(record, "actual.action.type"), "impl-check");
+                    assert_eq!(attribute(record, "actual.action.mode"), "direct");
+                }
+                assert_eq!(attribute(&records[1], "actual.action.outcome"), outcome);
+            }
+        });
+    }
+
+    /// A hook round reports the run its `HookRun` describes: its kind, its
+    /// session and agent, and when it started.
+    #[test]
+    fn test_a_round_reports_the_run_it_describes() {
+        with_config(WITH_FILE, |home| {
+            let rules_dir = home.join("rules");
+            let run = HookRun {
+                kind: ArtifactKind::Diff,
+                command: "impl-check --claude-hook",
+                session_id: Some("s2"),
+                agent_id: None,
+                artifact_digest: "digest-1",
+                root: home,
+                rules_dir: &rules_dir,
+                max_rounds: 3,
+                started: Started {
+                    time: std::time::UNIX_EPOCH + std::time::Duration::from_secs(7),
+                    instant: Instant::now(),
+                },
+            };
+
+            report_round(&run, PlanGovernanceDecision::Allow, Vec::new());
+
+            let records = take_captured();
+            assert_eq!(records[0]["timeUnixNano"], "7000000000");
+            assert_eq!(attribute(&records[0], "actual.session.id"), "s2");
+            assert_eq!(attribute(&records[1], "actual.agent.id"), "");
+            assert_eq!(attribute(&records[1], "actual.action.type"), "impl-check");
+            assert_eq!(attribute(&records[1], "actual.action.mode"), "hook");
+            assert_eq!(attribute(&records[1], "actual.action.outcome"), "allow");
+        });
+    }
+
+    /// No output set, or opted out by config or env: a run builds no action
+    /// record either.
+    #[test]
+    fn test_a_run_unconfigured_or_opted_out_reports_nothing() {
+        let opted_out = format!("{WITH_FILE}  enabled: false\n");
+        for config in ["", opted_out.as_str()] {
+            with_config(config, |home| {
+                report(
+                    &hook_action(SystemTime::now()),
+                    PlanGovernanceDecision::Allow,
+                    Vec::new(),
+                );
+
+                assert!(take_captured().is_empty());
+                assert!(!home.join("telemetry-id").exists());
+            });
+        }
+        with_config(WITH_FILE, |_| {
+            let _no = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+
+            report(
+                &hook_action(SystemTime::now()),
+                PlanGovernanceDecision::Allow,
+                Vec::new(),
+            );
+
+            assert!(take_captured().is_empty());
+        });
     }
 }
