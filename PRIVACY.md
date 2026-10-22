@@ -401,8 +401,8 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
-| The OTLP logs endpoint you configure (none by default) | ADR context, use, breach and override events | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
-| The local file you configure (none by default) | ADR context, use, breach and override events, one OTLP/JSON request per line | Local file, readable only by the owner |
+| The OTLP logs endpoint you configure (none by default) | ADR context, use, breach and override events, and check events | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
 non-HTTPS API URLs.
