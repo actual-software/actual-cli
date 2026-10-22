@@ -29,8 +29,9 @@
 //!
 //! **The hook spools, a detached uploader sends.** The hook appends records to
 //! [`OTLP_LOGS`] and spawns `__telemetry-flush`, whose [`flush`] takes them
-//! out a request at a time, writes each request to the file sink, and POSTs
-//! it. Nothing here prints: every outcome is logged at debug and dropped.
+//! out a request at a time for up to [`SEND_BUDGET`], writes each request to
+//! the file sink, and POSTs it. Nothing here prints: every outcome is logged
+//! at debug and dropped.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -74,9 +75,9 @@ const FILE_ENV: &str = "ACTUAL_OTLP_FILE";
 /// Records per request.
 pub(crate) const MAX_RECORDS_PER_REQUEST: usize = 100;
 
-/// How long one request may take, retries included: the OTLP exporter's
-/// default export timeout.
-pub(crate) const SEND_BUDGET: Duration = Duration::from_secs(10);
+/// How long one upload may take in all, every request and retry included.
+/// The batches it hasn't reached by then stay in the spool for the next one.
+pub(crate) const SEND_BUDGET: Duration = Duration::from_secs(5);
 
 /// The first retry's nominal wait, doubled for each retry after it.
 const BACKOFF_BASE: Duration = Duration::from_millis(500);
@@ -470,20 +471,31 @@ fn protobuf_request(records: &[LogRecord]) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// Send what the OTLP spool holds, a request at a time, then return.
+/// Send what the OTLP spool holds, a request at a time, for up to
+/// [`SEND_BUDGET`] in all, then return.
 ///
 /// Each request's records are taken out of the spool before it is sent, so
-/// they are gone whatever the outcome. The request is appended to the file
-/// sink as OTLP/JSON when one is set and POSTed as protobuf when an endpoint
-/// is. A batch with no record left in it sends nothing, since a sender should
-/// not send an empty envelope. An opted-out run, or one with no usable
-/// output, leaves the spool alone.
+/// they are gone whatever the outcome. A request gets what is left of the
+/// budget. The upload ends when the budget runs out or a request is dropped,
+/// since a dropped request means the time left can't hold another try, and
+/// the records it didn't reach stay in the spool for the next one. The
+/// request is appended to the file sink as OTLP/JSON when one is set and
+/// POSTed as protobuf when an endpoint is. A batch with no record left in it
+/// sends nothing, since a sender should not send an empty envelope. An
+/// opted-out run, or one with no usable output, leaves the spool alone.
 pub(crate) async fn flush(config: &Config) {
+    flush_within(config, SEND_BUDGET).await;
+}
+
+/// [`flush`] with `budget` in place of [`SEND_BUDGET`], so a test can scale
+/// it down.
+async fn flush_within(config: &Config, budget: Duration) {
+    let deadline = Instant::now() + budget;
     let Some(outputs) = Outputs::resolve(config) else {
         return;
     };
     let client = outputs.endpoint.as_deref().and_then(client_for);
-    loop {
+    while Instant::now() < deadline {
         let lines = OTLP_LOGS.take(MAX_RECORDS_PER_REQUEST);
         if lines.is_empty() {
             return;
@@ -498,8 +510,12 @@ pub(crate) async fn flush(config: &Config) {
         }
         if let (Some(client), Some(endpoint)) = (&client, &outputs.endpoint) {
             let body = protobuf_request(&records);
-            let sent = post(client, endpoint, body, SEND_BUDGET, tokio::time::sleep).await;
+            let left = deadline.saturating_duration_since(Instant::now());
+            let sent = post(client, endpoint, body, left, tokio::time::sleep).await;
             tracing::debug!("otlp logs: {} records: {sent:?}", lines.len());
+            if sent == Sent::Dropped {
+                return;
+            }
         }
     }
 }
@@ -1407,9 +1423,9 @@ mod tests {
             .to_string()
     }
 
-    /// A 503 whose `Retry-After` is an HTTP-date five seconds out waits until
+    /// A 503 whose `Retry-After` is an HTTP-date three seconds out waits until
     /// that moment, then retries. The date drops the fraction of a second, so
-    /// the wait is a little under five seconds.
+    /// the wait is a little under three seconds.
     #[tokio::test]
     async fn test_an_http_date_retry_after_sets_the_wait() {
         let mut server = mockito::Server::new_async().await;
@@ -1418,7 +1434,7 @@ mod tests {
             .with_status(503)
             .with_header(
                 "retry-after",
-                &http_date(SystemTime::now() + Duration::from_secs(5)),
+                &http_date(SystemTime::now() + Duration::from_secs(3)),
             )
             .expect(1)
             .create_async()
@@ -1435,7 +1451,7 @@ mod tests {
         assert_eq!(sent, Sent::Accepted);
         assert_eq!(waits.len(), 1, "{waits:?}");
         assert!(
-            waits[0] > Duration::from_secs(3) && waits[0] <= Duration::from_secs(5),
+            waits[0] > Duration::from_secs(1) && waits[0] <= Duration::from_secs(3),
             "{waits:?}"
         );
         throttled.assert_async().await;
@@ -1575,7 +1591,7 @@ mod tests {
 
     /// An endpoint that accepts the connection and never answers is given up
     /// on when the budget ends. Scaled down from [`SEND_BUDGET`] so the test
-    /// does not sit through ten seconds.
+    /// does not sit through five seconds.
     #[tokio::test]
     async fn test_an_endpoint_that_never_answers_is_dropped_at_the_budget() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1593,10 +1609,10 @@ mod tests {
         drop(listener);
     }
 
-    /// Ten seconds: the OTLP exporter's default export timeout.
+    /// Five seconds for a whole upload, in requests of up to 100 records.
     #[test]
-    fn test_the_budget_is_the_exporter_default() {
-        assert_eq!(SEND_BUDGET, Duration::from_secs(10));
+    fn test_the_budget_is_five_seconds_an_upload() {
+        assert_eq!(SEND_BUDGET, Duration::from_secs(5));
         assert_eq!(MAX_RECORDS_PER_REQUEST, 100);
     }
 
@@ -1785,6 +1801,110 @@ mod tests {
             let mode = std::fs::metadata(&file).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    /// The budget covers the whole upload, not each request. A full spool is
+    /// three batches, here against an endpoint that answers the first request
+    /// in half a second and every later one in 1.2 seconds, with the budget
+    /// scaled down to one second. The first batch lands, the second gets the
+    /// half second left and is cut off when the budget ends, and the upload
+    /// returns then, with the third batch still spooled for the next one.
+    #[tokio::test]
+    async fn test_one_budget_covers_every_request_of_an_upload() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let answered = AtomicUsize::new(0);
+        let mut server = mockito::Server::new_async().await;
+        let _slow = server
+            .mock("POST", "/v1/logs")
+            .with_status(200)
+            .with_body_from_request(move |_| {
+                let first = answered.fetch_add(1, Ordering::SeqCst) == 0;
+                std::thread::sleep(Duration::from_millis(if first { 500 } else { 1200 }));
+                Vec::new()
+            })
+            .create_async()
+            .await;
+        let origin = origin(None);
+        let records: Vec<LogRecord> = (0..crate::telemetry::spool::MAX_SPOOL_EVENTS)
+            .map(|i| {
+                let adr = format!("adr-{i}");
+                origin.context_added("s", None, &adr, &ids(&[&adr]))
+            })
+            .collect();
+        spool(&records);
+        let budget = Duration::from_secs(1);
+
+        let started = Instant::now();
+        flush_within(
+            &config(Some(&format!("{}/v1/logs", server.url())), None),
+            budget,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(elapsed >= budget, "{elapsed:?}");
+        assert!(elapsed < budget + Duration::from_millis(250), "{elapsed:?}");
+        assert_eq!(
+            OTLP_LOGS.take(usize::MAX),
+            lines(&records[2 * MAX_RECORDS_PER_REQUEST..])
+        );
+    }
+
+    /// An endpoint that refuses every connection: the first batch retries
+    /// until the budget left can't hold another try, and the upload ends
+    /// there, so the two batches after it stay spooled rather than being
+    /// taken and dropped in the time that is left.
+    #[tokio::test]
+    async fn test_an_upload_ends_at_the_first_dropped_request() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let origin = origin(None);
+        let records: Vec<LogRecord> = (0..crate::telemetry::spool::MAX_SPOOL_EVENTS)
+            .map(|i| {
+                let adr = format!("adr-{i}");
+                origin.context_added("s", None, &adr, &ids(&[&adr]))
+            })
+            .collect();
+        spool(&records);
+
+        flush_within(
+            &config(Some(&format!("http://127.0.0.1:{port}/v1/logs")), None),
+            Duration::from_millis(600),
+        )
+        .await;
+
+        assert_eq!(
+            OTLP_LOGS.take(usize::MAX),
+            lines(&records[MAX_RECORDS_PER_REQUEST..])
+        );
+    }
+
+    /// Once the budget has run out, no batch is taken, even for a file sink
+    /// alone.
+    #[tokio::test]
+    async fn test_an_upload_with_no_time_left_takes_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let records = sample_records();
+        spool(&records);
+        let file = home.path().join("otlp.jsonl");
+
+        flush_within(&config(None, Some(file.to_str().unwrap())), Duration::ZERO).await;
+
+        assert!(!file.exists());
+        assert_eq!(OTLP_LOGS.take(usize::MAX), lines(&records));
     }
 
     /// With a file and no endpoint, the file is written and nothing is sent.
