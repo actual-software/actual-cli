@@ -782,45 +782,45 @@ fn identity_envelope(
     crate::telemetry::identity::IdentityEnvelope::resolve(cfg, repo_url)
 }
 
-/// Send a batch of already-built plan-governance events, fire-and-forget.
+/// Hand a batch of already-built plan-governance events to the detached
+/// uploader, the path `rules select` already takes: spool every event, start
+/// `__telemetry-flush`, and return without waiting for it.
 ///
-/// Never blocks the caller past its own short internal timeout (see
-/// `telemetry::plan_governance::SEND_TIMEOUT`) and never propagates an
-/// error — a failed or disabled send is silently absorbed, per AK-678's
-/// "telemetry failure never fails or slows a plan check" acceptance
-/// criterion.
+/// The command itself makes no network call, so a check returns its verdict
+/// however slow or unreachable the endpoint is. An event the uploader can't
+/// deliver stays in the spool for the next run's uploader, and a failed or
+/// disabled send never fails or slows the check.
 ///
-/// `PlanCheckArgs` has no `--api-url` flag (there was never a need for one
-/// in production — see the module's other API calls, which all use the
-/// configured/default URL), which means this module's own unit tests have
-/// no way to redirect this call to a mock server the way e.g. `sync`'s
-/// tests redirect via `SyncArgs::api_url`. The `#[cfg(test)]` twin below
-/// captures events into a thread-local instead of ever touching the network,
+/// The `#[cfg(test)]` twin below captures events into a thread-local instead,
 /// so every existing (and future) `exec_hook_with`/`exec_direct`/
-/// `exec_override_impl` test stays hermetic while still letting tests that
-/// care assert on exactly what would have been sent — see
-/// `tests::take_captured_plan_governance_events`.
+/// `exec_override_impl` test stays hermetic, writing no spool and starting no
+/// uploader, while still letting tests that care assert on exactly what would
+/// have been sent — see `tests::take_captured_plan_governance_events`.
 #[cfg(all(feature = "telemetry", not(test)))]
 fn dispatch_governance_events(events: Vec<crate::api::types::PlanGovernanceEvent>) {
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    let api_url = cfg
-        .api_url
-        .clone()
-        .unwrap_or_else(|| crate::api::client::DEFAULT_API_URL.to_string());
-
-    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        rt.block_on(crate::telemetry::plan_governance::send_events(
-            events, &cfg, &api_url,
-        ));
-    }
+    spool_governance_events(&events, super::rules_scope::spawn_uploader);
 }
 
 #[cfg(all(feature = "telemetry", test))]
 fn dispatch_governance_events(events: Vec<crate::api::types::PlanGovernanceEvent>) {
     tests::CAPTURED_PLAN_GOVERNANCE_EVENTS.with(|cell| cell.borrow_mut().extend(events));
+}
+
+/// Spool `events`, then call `spawn_uploader`. Split from
+/// [`dispatch_governance_events`] so the hand-off runs under test with a
+/// stand-in for the uploader. An event the spool turns away is dropped, and
+/// the drop is logged at debug.
+#[cfg(feature = "telemetry")]
+fn spool_governance_events(
+    events: &[crate::api::types::PlanGovernanceEvent],
+    spawn_uploader: impl FnOnce(),
+) {
+    for event in events {
+        if let Err(e) = crate::telemetry::spool::append(event) {
+            tracing::debug!("plan-governance telemetry: event not spooled, dropped: {e}");
+        }
+    }
+    spawn_uploader();
 }
 
 /// Build repo-identity hashes, assemble a started+completed(+violation)
@@ -832,7 +832,7 @@ fn dispatch_governance_events(events: Vec<crate::api::types::PlanGovernanceEvent
 /// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
 /// `distinct_id()` — an opted-out user must not have a persistent telemetry
 /// id written to disk (or git subprocesses spawned) just because a check
-/// ran; `send_events`'s own opt-out check is too late for that, since by
+/// ran; the uploader's own opt-out check is too late for that, since by
 /// then the id file already exists. See `PRIVACY.md`'s "three independent
 /// ways to disable telemetry."
 #[cfg(feature = "telemetry")]
@@ -945,13 +945,7 @@ fn send_override_events(root: &Path, keys: &[String], reason: &str) {
         })
         .collect();
 
-    // One `--rule` flag per event, uncapped by the CLI itself, so a large
-    // enough override call can exceed the proxy's 100-event batch cap (see
-    // `plan_governance::MAX_EVENTS_PER_BATCH`) -- chunk rather than let one
-    // oversized batch get rejected whole.
-    for chunk in events.chunks(crate::telemetry::plan_governance::MAX_EVENTS_PER_BATCH) {
-        dispatch_governance_events(chunk.to_vec());
-    }
+    dispatch_governance_events(events);
 }
 
 /// `--claude-hook`-mode wrapper around [`send_governance_events`]: every
@@ -3862,14 +3856,72 @@ pub(crate) mod tests {
         }
     }
 
+    /// The hand-off spools every event before it starts the uploader, and sends
+    /// nothing itself: the endpoint the config names gets no request.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_spool_governance_events_spools_every_event_before_the_uploader_starts() {
+        use crate::api::types::{PlanGovernanceDecision, PlanGovernanceEvent};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let mut server = mockito::Server::new();
+        let endpoint = server
+            .mock("POST", "/plan-governance/record")
+            .expect(0)
+            .create();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            format!("api_url: \"{}\"\n", server.url()),
+        )
+        .unwrap();
+
+        let ctx = crate::telemetry::plan_governance::EventContext::new("plan-check --claude-hook");
+        let events = vec![
+            ctx.started_event(),
+            ctx.completed_event(PlanGovernanceDecision::Allow, 12.0, 0),
+        ];
+        let mut spooled_at_spawn = None;
+        spool_governance_events(&events, || {
+            spooled_at_spawn = Some(crate::telemetry::spool::load_all());
+        });
+
+        let ids = |list: &[PlanGovernanceEvent]| -> Vec<String> {
+            list.iter().map(|e| e.insert_id.clone()).collect()
+        };
+        let spooled = spooled_at_spawn.expect("the uploader should have been started");
+        assert_eq!(ids(&spooled), ids(&events));
+        endpoint.assert();
+    }
+
+    /// A spool that can't take its lock drops the events without failing the
+    /// check, and the uploader still starts for whatever earlier runs queued.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_spool_governance_events_drops_what_the_spool_turns_away() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        // A directory where the lock file belongs, so the lock can never be opened.
+        std::fs::create_dir(home.path().join("scope-telemetry-spool.lock")).unwrap();
+
+        let ctx = crate::telemetry::plan_governance::EventContext::new("check-override");
+        let mut started = 0;
+        spool_governance_events(&[ctx.started_event()], || started += 1);
+
+        assert_eq!(started, 1);
+        assert!(crate::telemetry::spool::load_all().is_empty());
+    }
+
     /// The proxy rejects a batch over 100 events whole (see
     /// `plan_governance::MAX_EVENTS_PER_BATCH`), and `check-override`
     /// emits one event per `--rule` flag with no cap of its own -- so an
-    /// override naming more than 100 rules at once must still get every
-    /// event through by chunking, not lose the tail to an oversized batch.
+    /// override naming more than 100 rules at once must hand off every
+    /// event, which the uploader then sends in chunks of at most 100.
     #[cfg(feature = "telemetry")]
     #[test]
-    fn test_exec_override_impl_chunks_batches_over_the_event_cap() {
+    fn test_exec_override_impl_hands_off_every_event_past_the_batch_cap() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
@@ -3900,7 +3952,7 @@ pub(crate) mod tests {
         assert_eq!(
             events.len(),
             RULE_COUNT,
-            "every override event must survive chunking, not just the first 100"
+            "every override event must be handed off, not just the first 100"
         );
         let rule_ids: std::collections::HashSet<_> = events
             .iter()

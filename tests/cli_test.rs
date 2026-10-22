@@ -672,12 +672,12 @@ fn test_plan_check_direct_mode_errors_when_stdin_exceeds_the_size_limit() {
 //
 // `dispatch_governance_events` (in `cli::commands::check_engine`) is `cfg(all(feature = "telemetry",
 // not(test)))`: the `--lib` build compiles its capturing twin instead, so no
-// unit test can execute the function that actually loads config, builds a
-// runtime and calls `send_events`. Only the compiled binary carries it, and
-// every other `plan-check` case in this file stops at `NothingApplies`
-// before an event is built. These two seed a rules directory and a fake
-// judge so the pipeline reaches a verdict, and route `api_url` to loopback
-// so the dispatcher runs without a network.
+// unit test can execute the function that actually spools the events and
+// starts the uploader. Only the compiled binary carries it, and every other
+// `plan-check` case in this file stops at `NothingApplies` before an event is
+// built. These seed a rules directory and a fake judge so the pipeline
+// reaches a verdict, and route `api_url` to loopback so the uploader runs
+// without a network.
 
 /// A repository whose `.actual/rules` holds one document the plan applies
 /// to, an isolated config directory whose `config.yaml` points telemetry at
@@ -753,10 +753,36 @@ impl GovernedPlanCheck {
             .timeout(std::time::Duration::from_secs(60));
         command
     }
+
+    /// Swap in a judge that finds R-A-001 violated, so the run denies the plan
+    /// and `--claude-hook` prints that verdict rather than an empty allow.
+    fn judge_finds_r_a_001_violated(&self) {
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        std::fs::write(
+            &self.fake_claude,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// Wait up to ten seconds for the uploader a command started to deliver to
+/// `mock`, since it sends after the command has returned.
+#[cfg(unix)]
+fn wait_for_the_uploader(mock: &mockito::Mock) {
+    for _ in 0..100 {
+        if mock.matched() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// The dispatcher's whole job: the started and completed events for this
-/// run reach `POST /plan-governance/record` at the configured `api_url`.
+/// run reach `POST /plan-governance/record` at the configured `api_url`,
+/// sent by the uploader the run starts.
 #[cfg(unix)]
 #[test]
 fn test_plan_check_verdict_sends_governance_events_to_the_configured_api() {
@@ -788,6 +814,7 @@ fn test_plan_check_verdict_sends_governance_events_to_the_configured_api() {
             "Conforming: no selected rule was violated.",
         ));
 
+    wait_for_the_uploader(&recorded);
     recorded.assert();
 }
 
@@ -809,6 +836,123 @@ fn test_plan_check_verdict_survives_a_refused_telemetry_endpoint() {
         ));
 
     assert!(fixture.config_dir.path().join("telemetry-id").is_file());
+}
+
+/// An endpoint that takes every connection and never answers, keeping the
+/// bytes each connection sent. A sender waits on it until its own timeout
+/// gives up.
+#[cfg(all(unix, feature = "telemetry"))]
+struct SilentEndpoint {
+    url: String,
+    received: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+#[cfg(all(unix, feature = "telemetry"))]
+impl SilentEndpoint {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&received);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let log = std::sync::Arc::clone(&log);
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let slot = {
+                        let mut log = log.lock().unwrap();
+                        log.push(Vec::new());
+                        log.len() - 1
+                    };
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => log.lock().unwrap()[slot].extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                });
+            }
+        });
+        Self { url, received }
+    }
+
+    /// What each connection has sent so far, in the order they arrived.
+    fn requests(&self) -> Vec<String> {
+        self.received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect()
+    }
+}
+
+/// The hook against an endpoint that never answers, which used to hold it for
+/// the whole send timeout. It still denies the plan, and it sends nothing
+/// itself: the endpoint's one request is the uploader's, because it carries the
+/// event an earlier run left in the spool, and the hook's own events wait in
+/// the spool behind it.
+#[cfg(all(unix, feature = "telemetry"))]
+#[test]
+fn test_plan_check_hook_leaves_its_events_to_the_uploader_when_the_endpoint_never_answers() {
+    const QUEUED_ID: &str = "queued-by-an-earlier-run";
+    let endpoint = SilentEndpoint::start();
+    let fixture = GovernedPlanCheck::new(&endpoint.url);
+    fixture.judge_finds_r_a_001_violated();
+    let spool = scope_spool(fixture.config_dir.path());
+    std::fs::write(
+        &spool,
+        format!(
+            "{{\"event\":\"plan_governance_scope_select\",\"distinct_id\":\"{QUEUED_ID}\",\"insert_id\":\"{QUEUED_ID}\"}}\n"
+        ),
+    )
+    .unwrap();
+
+    fixture
+        .cmd()
+        .arg("--claude-hook")
+        .write_stdin(
+            r#"{"session_id":"sess-cli-spool-1","tool_input":{"plan":"Sign access tokens with HS256"}}"#,
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""permissionDecision":"deny""#));
+
+    let mut requests = endpoint.requests();
+    for _ in 0..100 {
+        if requests
+            .iter()
+            .any(|r| r.contains("plan_governance_check_completed"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        requests = endpoint.requests();
+    }
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    assert!(
+        requests[0].contains(QUEUED_ID),
+        "the hook sent its own events rather than leaving them to the uploader: {}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("plan_governance_check_completed"),
+        "{}",
+        requests[0]
+    );
+
+    let queued = std::fs::read_to_string(&spool).unwrap();
+    for event in [
+        "plan_governance_check_started",
+        "plan_governance_check_completed",
+        "plan_governance_rule_violation",
+    ] {
+        assert!(
+            queued.contains(event),
+            "{event} is not in the spool: {queued}"
+        );
+    }
 }
 
 /// `rules select` publishes one `plan_governance_scope_select` event to the
@@ -1314,6 +1458,7 @@ fn test_impl_check_verdict_sends_governance_events_to_the_configured_api() {
             "Conforming: no selected rule was violated.",
         ));
 
+    wait_for_the_uploader(&recorded);
     recorded.assert();
 }
 
