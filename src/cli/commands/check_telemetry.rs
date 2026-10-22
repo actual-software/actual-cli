@@ -12,10 +12,11 @@
 //! **Started is stamped at the start and sent at the end.** A run reads the
 //! time just before the pipeline that calls the judge, and builds both action
 //! records once it has a verdict, so the started record carries the real start
-//! and a run still costs one spool write and one uploader start. The action
+//! and the two share one spool write and one uploader start. The action
 //! events go wherever the plan-governance `check_started` and `check_completed`
 //! events go, and with the same outcome, so a run that never reaches a verdict
-//! sends neither.
+//! sends neither. Every caller reports them before it hands those to the
+//! spool, so the completed record times the check alone.
 //!
 //! **Used means checked against.** A round uses an ADR when the judge returns
 //! a verdict for any of its rules, whatever the verdict, so a blocking verdict
@@ -604,6 +605,30 @@ pub(super) mod tests {
             assert!(!home.join("brief-ledger").exists());
             assert!(!home.join("telemetry-id").exists());
         });
+    }
+
+    /// Assert that `completed`, a check's completed record, was stamped no
+    /// later than the plan-governance `check_completed` event among `events`,
+    /// so the run read its end before it built and sent that event.
+    pub(in crate::cli::commands) fn assert_completed_before_governance(
+        completed: &serde_json::Value,
+        events: &[crate::api::types::PlanGovernanceEvent],
+    ) {
+        let governance = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a check_completed event");
+        let sent = chrono::DateTime::parse_from_rfc3339(governance.timestamp.as_deref().unwrap())
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let stamped: i64 = completed["timeUnixNano"].as_str().unwrap().parse().unwrap();
+        assert!(
+            stamped <= sent,
+            "completed at {stamped}, after check_completed at {sent}"
+        );
     }
 
     /// The milliseconds a completed record says its check took.
