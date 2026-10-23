@@ -891,8 +891,8 @@ impl SilentEndpoint {
 /// The hook against an endpoint that never answers, which used to hold it for
 /// the whole send timeout. It still denies the plan, and it sends nothing
 /// itself: the endpoint's one request is the uploader's, because it carries the
-/// event an earlier run left in the spool, and the hook's own events wait in
-/// the spool behind it.
+/// override event an earlier run left in the spool, and the hook's own events
+/// wait in the spool behind it.
 #[cfg(all(unix, feature = "telemetry"))]
 #[test]
 fn test_plan_check_hook_leaves_its_events_to_the_uploader_when_the_endpoint_never_answers() {
@@ -901,10 +901,12 @@ fn test_plan_check_hook_leaves_its_events_to_the_uploader_when_the_endpoint_neve
     let fixture = GovernedPlanCheck::new(&endpoint.url);
     fixture.judge_finds_r_a_001_violated();
     let spool = scope_spool(fixture.config_dir.path());
+    // An override event shares the checks' stream, so it goes out in the same
+    // request as the hook's events; a queued scope event would get its own.
     std::fs::write(
         &spool,
         format!(
-            "{{\"event\":\"plan_governance_scope_select\",\"distinct_id\":\"{QUEUED_ID}\",\"insert_id\":\"{QUEUED_ID}\"}}\n"
+            "{{\"event\":\"plan_governance_rule_override\",\"distinct_id\":\"{QUEUED_ID}\",\"insert_id\":\"{QUEUED_ID}\"}}\n"
         ),
     )
     .unwrap();
