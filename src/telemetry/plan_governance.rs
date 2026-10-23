@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::api::client::ActualApiClient;
 use crate::api::types::{
     PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
-    PlanGovernanceEventProperties, PlanGovernanceEventRequest,
+    PlanGovernanceEventProperties, PlanGovernanceEventRequest, PlanGovernanceReply,
 };
 use crate::config::types::Config;
 use crate::rules::check::Verdict;
@@ -26,7 +26,7 @@ const DISTINCT_ID_FILE: &str = "telemetry-id";
 /// A short, dedicated send timeout — deliberately much shorter than
 /// `ActualApiClient::new`'s default 30s. Only the detached `__telemetry-flush`
 /// uploader sends, so no command waits on it; it keeps an uploader facing a dead
-/// endpoint short-lived, and a batch it doesn't deliver stays in the spool.
+/// endpoint short-lived, and a batch that times out stays in the spool.
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -265,26 +265,39 @@ pub fn reason_summary(
     (category, len, hash)
 }
 
-/// The outcome of one delivery attempt, for callers that must know whether a
-/// batch was accepted — chiefly the scope-telemetry spool, which removes events
-/// from its durable queue only once they are confirmed delivered.
+/// The outcome of one delivery attempt, for callers that must know what became
+/// of a batch — chiefly the scope-telemetry spool, which removes an event once
+/// it is recorded or once the proxy refuses it on its own, and keeps it through
+/// an outage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Delivery {
     /// Every event in the batch was recorded server-side.
     Delivered,
     /// Nothing was attempted — the batch was empty or telemetry is opted out.
     Skipped,
-    /// The send was attempted but did not fully succeed (transport error,
-    /// client build failure, or a server-side partial/total rejection). The
-    /// caller should keep the batch for a later retry; the proxy deduplicates on
-    /// `insert_id`, so retrying an event that did land is harmless.
+    /// The proxy refused the batch: a 4xx other than 408 or 429, or a 2xx
+    /// reporting failed events. Sending the same batch again would be refused
+    /// again.
+    Refused,
+    /// The batch got no answer to act on: a transport error (connect failure,
+    /// timeout), a client that could not be built, a 5xx, a 408 or 429, or a
+    /// reply that could not be read. The caller should keep the batch for a
+    /// later retry; the proxy deduplicates on `insert_id`, so retrying an event
+    /// that did land is harmless.
     Failed,
+}
+
+/// Whether a non-2xx status refuses the batch itself. A 408 or 429 asks for a
+/// later try and a 5xx is the endpoint failing, so those are outages.
+fn is_refusal(status: u16) -> bool {
+    matches!(status, 400..=499) && !matches!(status, 408 | 429)
 }
 
 /// Attempt to deliver a batch and report the outcome. The single place the
 /// governance/scope transport lives — same short timeouts, service key and
 /// opt-out gate for every batch the spool's uploader sends, so no path can drift
-/// onto a different contract.
+/// onto a different contract. A refusal is reported apart from an outage (see
+/// [`Delivery`]).
 pub(crate) async fn deliver_events(
     events: Vec<PlanGovernanceEvent>,
     config: &Config,
@@ -303,13 +316,21 @@ pub(crate) async fn deliver_events(
         .post_plan_governance_events(&request, SERVICE_KEY)
         .await
     {
-        Ok(resp) if resp.failed == 0 => Delivery::Delivered,
-        Ok(resp) => {
+        Ok(PlanGovernanceReply::Tally(resp)) if resp.failed == 0 => Delivery::Delivered,
+        Ok(PlanGovernanceReply::Tally(resp)) => {
             tracing::debug!(
                 "plan-governance telemetry: {} of {} events failed server-side",
                 resp.failed,
                 resp.recorded + resp.failed
             );
+            Delivery::Refused
+        }
+        Ok(PlanGovernanceReply::Status(status)) if is_refusal(status) => {
+            tracing::debug!("plan-governance telemetry: batch refused with HTTP {status}");
+            Delivery::Refused
+        }
+        Ok(PlanGovernanceReply::Status(status)) => {
+            tracing::debug!("plan-governance telemetry: HTTP {status}");
             Delivery::Failed
         }
         Err(e) => {
@@ -726,8 +747,9 @@ mod tests {
         assert_eq!(delivery, Delivery::Failed);
     }
 
+    /// A 2xx that reports failed events is a refusal, not an outage.
     #[tokio::test]
-    async fn test_deliver_events_server_side_failures_is_failed() {
+    async fn test_deliver_events_server_side_failures_is_refused() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
@@ -737,6 +759,73 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"recorded": 0, "failed": 1, "errors": ["rejected"]}"#)
+            .create_async()
+            .await;
+
+        let ctx = context();
+        let delivery =
+            deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+        mock.assert_async().await;
+        assert_eq!(delivery, Delivery::Refused);
+    }
+
+    /// Every 4xx but 408 and 429 refuses the batch.
+    #[tokio::test]
+    async fn test_deliver_events_a_4xx_is_refused() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        for status in [400, 401, 404, 413, 422] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/plan-governance/record")
+                .with_status(status)
+                .create_async()
+                .await;
+
+            let ctx = context();
+            let delivery =
+                deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+            mock.assert_async().await;
+            assert_eq!(delivery, Delivery::Refused, "HTTP {status}");
+        }
+    }
+
+    /// A 408 or 429 asks for a later try and a 5xx is the endpoint failing, so
+    /// each is an outage: the batch is kept for the next flush.
+    #[tokio::test]
+    async fn test_deliver_events_408_429_and_5xx_are_failed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        for status in [408, 429, 500, 502, 503, 504] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/plan-governance/record")
+                .with_status(status)
+                .create_async()
+                .await;
+
+            let ctx = context();
+            let delivery =
+                deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+            mock.assert_async().await;
+            assert_eq!(delivery, Delivery::Failed, "HTTP {status}");
+        }
+    }
+
+    /// A 2xx whose body can't be read says nothing about which events landed,
+    /// so it is an outage rather than a refusal.
+    #[tokio::test]
+    async fn test_deliver_events_an_unreadable_2xx_is_failed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(200)
+            .with_body("<html>not a tally</html>")
             .create_async()
             .await;
 

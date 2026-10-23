@@ -392,6 +392,16 @@ pub struct PlanGovernanceEventResponse {
     pub errors: Vec<String>,
 }
 
+/// What `POST /plan-governance/record` answered, split by status so the
+/// spool's uploader can tell a refused batch from an outage.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanGovernanceReply {
+    /// A 2xx, with the proxy's tally of the batch.
+    Tally(PlanGovernanceEventResponse),
+    /// Any other status. Its body is not read.
+    Status(u16),
+}
+
 // --- Advisor query types (POST /v1/advisor/query, GET /v1/advisor/query/:id) ---
 
 /// The client surface initiating an advisor query. The CLI always sends `cli`.

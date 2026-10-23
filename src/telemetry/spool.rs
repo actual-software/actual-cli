@@ -14,14 +14,14 @@
 //! Delivery is then best-effort and idempotent: [`flush`] sends what the spool
 //! holds, with scope events and the checks' events as separate streams, in
 //! chunks no larger than the proxy's per-batch cap ([`MAX_EVENTS_PER_BATCH`]),
-//! so a backlog past that size still drains. It removes an event only once the
-//! proxy confirms it recorded (the proxy deduplicates on `insert_id`, so a retry
-//! of an event that did land is harmless). The command process never waits for
-//! this — it spawns a separate uploader process (see
-//! `cli::commands::telemetry_flush`) and returns — and any event left
-//! undelivered stays durably queued for the next run's flush. The spool is
-//! bounded to [`MAX_SPOOL_EVENTS`] so a long outage cannot grow it without
-//! limit; the oldest events are dropped first.
+//! so a backlog past that size still drains. It removes an event once the proxy
+//! confirms it recorded (the proxy deduplicates on `insert_id`, so a retry of an
+//! event that did land is harmless), or once the proxy refuses it sent on its
+//! own. The command process never waits for this — it spawns a separate
+//! uploader process (see `cli::commands::telemetry_flush`) and returns — and an
+//! event an outage kept from the proxy stays durably queued for the next run's
+//! flush. The spool is bounded to [`MAX_SPOOL_EVENTS`] so a long outage cannot
+//! grow it without limit; the oldest events are dropped first.
 //!
 //! Several of these processes can touch the spool at once (each spawns its
 //! own uploader), so every mutation — an append, its cap-trim, and the uploader's
@@ -37,7 +37,7 @@
 //! therefore holds for an event the spool actually accepts; an event the lock
 //! turns away is a best-effort loss, not a guaranteed-persisted one.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::api::types::{PlanGovernanceEvent, PlanGovernanceEventName};
@@ -222,8 +222,9 @@ fn line_insert_id(line: &str) -> Option<String> {
         .map(|e| e.insert_id)
 }
 
-/// Under the spool lock, drop exactly the lines whose `insert_id` the proxy
-/// confirmed and keep every other line.
+/// Under the spool lock, drop exactly the lines whose `insert_id` is in
+/// `delivered` and keep every other line. [`flush`] passes the events the proxy
+/// recorded and the ones it refused on their own.
 ///
 /// The remaining set is computed from the *raw* file, not from re-parsed events,
 /// so two classes of line survive that a parse-then-rewrite would silently
@@ -269,26 +270,35 @@ fn remove_delivered(delivered: &HashSet<String>) {
     };
 }
 
-/// Send what the spool holds and drop the events the proxy confirms it recorded,
-/// leaving the rest queued for a later attempt.
+/// Send what the spool holds and drop the events the proxy recorded or refused
+/// on their own, leaving the rest queued for a later attempt.
 ///
 /// Scope events and the checks' events (started, completed, violation and
-/// override) go out as two streams, each oldest-first, and a chunk that fails
-/// ends only its own stream's pass. A batch the proxy refuses, such as one
-/// carrying a value its schema rejects, then holds back only the stream it came
-/// from.
+/// override) go out as two streams, each oldest-first, and an outage (see
+/// [`Delivery::Failed`]) ends only its own stream's pass.
+///
+/// A chunk the proxy refuses, such as one carrying a value its schema rejects,
+/// is resent one event at a time, ahead of the chunks behind it. Each event
+/// delivered on its own is removed and each event refused on its own is
+/// dropped, so a refused event costs only itself rather than leading every
+/// later flush. A chunk of one is already on its own, so it is dropped without
+/// a resend. An outage during the single sends ends the stream's pass and keeps
+/// what is left.
 ///
 /// Each stream is sent in chunks no larger than [`MAX_EVENTS_PER_BATCH`]: the
-/// proxy rejects an oversized batch *whole*, so without chunking a spool that
-/// ever passed the cap could never drain. Each chunk is confirmed independently
-/// and only the `insert_id`s of delivered chunks are removed (from the raw file,
-/// under the lock — see [`remove_delivered`]), so a mid-run failure or a
-/// concurrent append leaves the rest safely queued; the proxy deduplicates on
-/// `insert_id`, so re-sending a delivered event is harmless.
+/// proxy rejects an oversized batch *whole*, so a backlog past that size goes
+/// out in several requests rather than being refused as one. Each chunk is
+/// confirmed independently and only the `insert_id`s of events delivered, or
+/// refused on their own, are removed (from the raw file, under the lock — see
+/// [`remove_delivered`]), so a mid-run failure or a concurrent append leaves
+/// the rest safely queued; the proxy deduplicates on `insert_id`, so re-sending
+/// a delivered event is harmless.
 ///
-/// Returns [`Delivery::Delivered`] when every chunk landed, [`Delivery::Skipped`]
-/// when telemetry is opted out (nothing sent, nothing removed), and
-/// [`Delivery::Failed`] when a chunk failed and events remain queued.
+/// Returns [`Delivery::Delivered`] when every event landed, [`Delivery::Skipped`]
+/// when telemetry is opted out (nothing sent, nothing removed),
+/// [`Delivery::Failed`] when an outage left events queued, and
+/// [`Delivery::Refused`] when the proxy refused events and nothing else is
+/// left.
 pub(crate) async fn flush(config: &Config, api_url: &str) -> Delivery {
     let events = load_all();
     if events.is_empty() {
@@ -298,31 +308,48 @@ pub(crate) async fn flush(config: &Config, api_url: &str) -> Delivery {
         .into_iter()
         .partition(|e| e.event == PlanGovernanceEventName::PlanGovernanceScopeSelect);
 
-    let mut delivered_ids: HashSet<String> = HashSet::new();
+    let mut to_remove: HashSet<String> = HashSet::new();
     let mut outcome = Delivery::Delivered;
     'streams: for stream in [scope, checks] {
-        for chunk in stream.chunks(MAX_EVENTS_PER_BATCH) {
-            let ids = chunk.iter().map(|e| e.insert_id.clone());
-            match deliver_events(chunk.to_vec(), config, api_url).await {
-                Delivery::Delivered => delivered_ids.extend(ids),
+        let mut batches: VecDeque<Vec<PlanGovernanceEvent>> = stream
+            .chunks(MAX_EVENTS_PER_BATCH)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+        while let Some(batch) = batches.pop_front() {
+            match deliver_events(batch.clone(), config, api_url).await {
+                Delivery::Delivered => to_remove.extend(batch.into_iter().map(|e| e.insert_id)),
                 // A non-empty chunk is only ever Skipped when telemetry is opted out,
                 // which applies to the whole run: stop and remove nothing.
                 Delivery::Skipped => {
                     outcome = Delivery::Skipped;
                     break 'streams;
                 }
-                // Endpoint down or a server-side rejection: end this stream's pass
-                // and keep the rest of it queued for a later flush.
+                // An outage: end this stream's pass and keep the rest of it
+                // queued for a later flush.
                 Delivery::Failed => {
                     outcome = Delivery::Failed;
                     break;
+                }
+                // Resend a refused chunk one event at a time, in order, before
+                // the chunks behind it.
+                Delivery::Refused if batch.len() > 1 => {
+                    for event in batch.into_iter().rev() {
+                        batches.push_front(vec![event]);
+                    }
+                }
+                // Refused on its own: drop it so it stops leading later flushes.
+                Delivery::Refused => {
+                    to_remove.extend(batch.into_iter().map(|e| e.insert_id));
+                    if outcome == Delivery::Delivered {
+                        outcome = Delivery::Refused;
+                    }
                 }
             }
         }
     }
 
-    if !delivered_ids.is_empty() {
-        remove_delivered(&delivered_ids);
+    if !to_remove.is_empty() {
+        remove_delivered(&to_remove);
     }
     outcome
 }
@@ -704,14 +731,15 @@ mod tests {
         );
     }
 
-    /// A partial failure mid-backlog: the cap's worth of events is chunked into
-    /// 100 + 100 + 56, the endpoint accepts the first two batches and rejects the
-    /// third. The confirmed 200 must drain while the unsent 56 stay queued (in
-    /// order, by insert_id) for a safe retry, and the outcome is `Failed` — an
-    /// HTTP/schema rejection is never treated as delivery, and a partial response
-    /// never clears the whole spool.
+    /// An outage mid-backlog: the cap's worth of events is chunked into
+    /// 100 + 100 + 56, the endpoint accepts the first two batches and answers the
+    /// third with a 500. The confirmed 200 must drain while the unsent 56 stay
+    /// queued (in order, by insert_id) for a safe retry, and the outcome is
+    /// `Failed` — an outage is never treated as delivery or as a refusal, and
+    /// it never clears the whole spool.
     #[tokio::test]
     async fn test_flush_retains_unsent_chunks_after_a_partial_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -720,24 +748,29 @@ mod tests {
         let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
         // Record the size of every batch the endpoint is asked to record, and
-        // fail the third batch server-side (recorded=0, failed=n) while accepting
-        // the first two. `flush` stops on the first failure, so exactly three
-        // requests are made.
+        // answer the third with a 500 while accepting the first two. `flush`
+        // stops on the outage, so exactly three requests are made.
         let batch_sizes = Arc::new(Mutex::new(Vec::<usize>::new()));
         let sink = batch_sizes.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/plan-governance/record")
-            .with_status(200)
+            .with_status_code_from_request(move |_| {
+                // The third request (index 2) fails; earlier ones land.
+                let index = requests.fetch_add(1, Ordering::SeqCst);
+                if index >= 2 {
+                    500
+                } else {
+                    200
+                }
+            })
             .with_body_from_request(move |req| {
                 let body: serde_json::Value =
                     serde_json::from_slice(req.body().unwrap().as_slice()).unwrap();
                 let n = body["events"].as_array().map(|a| a.len()).unwrap_or(0);
-                let mut seen = sink.lock().unwrap();
-                seen.push(n);
-                // The third batch (index 2) is rejected whole; earlier ones land.
-                let failed = if seen.len() >= 3 { n } else { 0 };
-                format!(r#"{{"recorded":{},"failed":{failed}}}"#, n - failed).into_bytes()
+                sink.lock().unwrap().push(n);
+                format!(r#"{{"recorded":{n},"failed":0}}"#).into_bytes()
             })
             .expect(3)
             .create_async()
@@ -755,7 +788,7 @@ mod tests {
         assert_eq!(
             outcome,
             Delivery::Failed,
-            "a rejected chunk must surface as Failed, never as delivered"
+            "a chunk lost to an outage must surface as Failed, never as delivered"
         );
         mock.assert_async().await;
 
@@ -765,14 +798,14 @@ mod tests {
         assert_eq!(sizes, vec![100, 100, 56]);
         assert!(sizes.iter().all(|&n| n <= MAX_EVENTS_PER_BATCH));
 
-        // The two confirmed batches drained; the rejected 56 stay queued, in
-        // order, for a safe retry — the partial response never cleared them.
+        // The two confirmed batches drained; the 56 the outage kept stay queued,
+        // in order, for a safe retry.
         let remaining: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
         let expected: Vec<String> = (200..256).map(|i| format!("id-{i:03}")).collect();
         assert_eq!(remaining, expected, "only the unsent chunk must remain");
     }
 
-    // --- A refused batch holds back only its own stream ---
+    // --- A refused event costs only itself ---
 
     /// An event from the checks' stream (`plan-check`, `impl-check` and
     /// `check-override`), which shares the spool with the scope events.
@@ -815,7 +848,7 @@ mod tests {
 
     /// The proxy refuses the scope event at the head of the spool. The check
     /// and override events queued behind it are still delivered and removed,
-    /// and the scope event stays queued for a later flush.
+    /// and the scope event, refused on its own, is dropped without a resend.
     #[tokio::test]
     async fn test_flush_a_refused_scope_batch_does_not_hold_back_check_events() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -839,15 +872,19 @@ mod tests {
         .unwrap();
 
         let cfg = cfg_for(&server.url());
-        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Failed);
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Refused);
 
         let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
-        assert_eq!(queued, vec!["scope-1".to_string()]);
+        assert!(
+            queued.is_empty(),
+            "the refused scope event must be dropped: {queued:?}"
+        );
         mock.assert_async().await;
     }
 
     /// The mirror case: the proxy refuses the check event at the head of the
-    /// spool, and the scope event queued behind it is still delivered.
+    /// spool, the scope event queued behind it is still delivered, and the
+    /// check event is dropped.
     #[tokio::test]
     async fn test_flush_a_refused_check_batch_does_not_hold_back_scope_events() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -866,11 +903,313 @@ mod tests {
         append(&sample_event("run-1", "scope-1")).unwrap();
 
         let cfg = cfg_for(&server.url());
-        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Failed);
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Refused);
 
         let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
-        assert_eq!(queued, vec!["check-1".to_string()]);
+        assert!(
+            queued.is_empty(),
+            "the refused check event must be dropped: {queued:?}"
+        );
         mock.assert_async().await;
+    }
+
+    /// The `insert_id`s of the events in one request to the proxy, in order.
+    fn insert_ids_of(req: &mockito::Request) -> Vec<String> {
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body().unwrap().as_slice()).unwrap();
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["insert_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// `ids` as owned strings, for comparing with what a mock recorded.
+    fn owned(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    /// One check event the proxy refuses, with other check events queued
+    /// behind it. The refused chunk is resent one event at a time: the others
+    /// are delivered and removed, the refused one is dropped, and the next
+    /// flush sends only what was queued after it.
+    #[tokio::test]
+    async fn test_flush_resends_a_refused_chunk_one_event_at_a_time() {
+        use std::sync::{Arc, Mutex};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        // Answers 400 to any batch carrying `poison` and records every request.
+        let requests = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let sink = requests.clone();
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status_code_from_request(move |req| {
+                let ids = insert_ids_of(req);
+                let refused = ids.iter().any(|id| id == "poison");
+                sink.lock().unwrap().push(ids);
+                if refused {
+                    400
+                } else {
+                    200
+                }
+            })
+            .with_body_from_request(|req| {
+                let n = insert_ids_of(req).len();
+                format!(r#"{{"recorded":{n},"failed":0}}"#).into_bytes()
+            })
+            .create_async()
+            .await;
+
+        for id in ["poison", "check-1", "check-2"] {
+            append(&check_event(
+                PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+                id,
+            ))
+            .unwrap();
+        }
+
+        let cfg = cfg_for(&server.url());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Refused);
+        assert!(
+            load_all().is_empty(),
+            "every event was delivered or dropped"
+        );
+
+        // A check event queued later goes out on its own: the refused one no
+        // longer leads the stream.
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceRuleOverride,
+            "override-1",
+        ))
+        .unwrap();
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Delivered);
+        assert!(load_all().is_empty());
+
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![
+                owned(&["poison", "check-1", "check-2"]),
+                owned(&["poison"]),
+                owned(&["check-1"]),
+                owned(&["check-2"]),
+                owned(&["override-1"]),
+            ]
+        );
+    }
+
+    /// A refused chunk is resent ahead of the chunks behind it, and the stream
+    /// carries on past it: a backlog of one chunk and one event more, led by a
+    /// refused event, costs the chunk, its events one at a time, then the
+    /// second chunk.
+    #[tokio::test]
+    async fn test_flush_resends_a_refused_chunk_before_the_next_chunk() {
+        use std::sync::{Arc, Mutex};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let requests = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let sink = requests.clone();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status_code_from_request(move |req| {
+                let ids = insert_ids_of(req);
+                let refused = ids.iter().any(|id| id == "id-000");
+                sink.lock().unwrap().push(ids);
+                if refused {
+                    400
+                } else {
+                    200
+                }
+            })
+            .with_body_from_request(|req| {
+                let n = insert_ids_of(req).len();
+                format!(r#"{{"recorded":{n},"failed":0}}"#).into_bytes()
+            })
+            // The first chunk, its 100 events alone, then the second chunk.
+            .expect(MAX_EVENTS_PER_BATCH + 2)
+            .create_async()
+            .await;
+
+        for i in 0..=MAX_EVENTS_PER_BATCH {
+            append(&check_event(
+                PlanGovernanceEventName::PlanGovernanceRuleViolation,
+                &format!("id-{i:03}"),
+            ))
+            .unwrap();
+        }
+
+        let cfg = cfg_for(&server.url());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Refused);
+        mock.assert_async().await;
+        assert!(load_all().is_empty());
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].len(), MAX_EVENTS_PER_BATCH);
+        let singles: Vec<String> = requests[1..=MAX_EVENTS_PER_BATCH].concat();
+        assert_eq!(
+            singles, requests[0],
+            "each event of the chunk, alone, in order"
+        );
+        assert_eq!(
+            requests[MAX_EVENTS_PER_BATCH + 1],
+            owned(&[format!("id-{MAX_EVENTS_PER_BATCH:03}").as_str()])
+        );
+    }
+
+    /// A 2xx reply that reports failed events is a refusal too: the chunk is
+    /// resent one event at a time, and only the event the proxy fails on its
+    /// own is dropped.
+    #[tokio::test]
+    async fn test_flush_treats_a_2xx_reporting_failed_events_as_a_refusal() {
+        use std::sync::{Arc, Mutex};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        // Answers 200 to every batch and reports `poison` as failed.
+        let requests = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let sink = requests.clone();
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(200)
+            .with_body_from_request(move |req| {
+                let ids = insert_ids_of(req);
+                let failed = ids.iter().filter(|id| *id == "poison").count();
+                let recorded = ids.len() - failed;
+                sink.lock().unwrap().push(ids);
+                format!(r#"{{"recorded":{recorded},"failed":{failed}}}"#).into_bytes()
+            })
+            .create_async()
+            .await;
+
+        for id in ["check-1", "poison"] {
+            append(&check_event(
+                PlanGovernanceEventName::PlanGovernanceRuleViolation,
+                id,
+            ))
+            .unwrap();
+        }
+
+        let cfg = cfg_for(&server.url());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Refused);
+        assert!(load_all().is_empty());
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![
+                owned(&["check-1", "poison"]),
+                owned(&["check-1"]),
+                owned(&["poison"]),
+            ]
+        );
+    }
+
+    /// An outage drops nothing: a 408, a 429, a 5xx or a refused connection
+    /// ends each stream's pass after its first request, with no resend and
+    /// every event still queued.
+    #[tokio::test]
+    async fn test_flush_keeps_every_event_through_an_outage() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        append(&sample_event("run-1", "scope-1")).unwrap();
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+            "check-1",
+        ))
+        .unwrap();
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceRuleOverride,
+            "override-1",
+        ))
+        .unwrap();
+        let everything = owned(&["scope-1", "check-1", "override-1"]);
+
+        for status in [408, 429, 500, 503] {
+            let mut server = mockito::Server::new_async().await;
+            // One request per stream.
+            let mock = server
+                .mock("POST", "/plan-governance/record")
+                .with_status(status)
+                .expect(2)
+                .create_async()
+                .await;
+
+            let cfg = cfg_for(&server.url());
+            assert_eq!(
+                flush(&cfg, &server.url()).await,
+                Delivery::Failed,
+                "HTTP {status}"
+            );
+            mock.assert_async().await;
+            let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+            assert_eq!(queued, everything, "HTTP {status}");
+        }
+
+        let unreachable = "http://127.0.0.1:1";
+        assert_eq!(
+            flush(&cfg_for(unreachable), unreachable).await,
+            Delivery::Failed
+        );
+        let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+        assert_eq!(queued, everything);
+    }
+
+    /// An outage partway through the single sends ends that stream's pass and
+    /// keeps the events it did not reach, and an outage in either stream makes
+    /// the flush `Failed` even when the proxy also refused an event.
+    #[tokio::test]
+    async fn test_flush_an_outage_during_the_single_sends_keeps_the_rest() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        // Refuses any batch carrying `poison` and answers every other with a
+        // 503: the scope stream fails first, then the checks stream's chunk is
+        // refused, `poison` is dropped on its own and `check-1` hits the outage.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status_code_from_request(|req| {
+                if insert_ids_of(req).iter().any(|id| id == "poison") {
+                    400
+                } else {
+                    503
+                }
+            })
+            .expect(4)
+            .create_async()
+            .await;
+
+        append(&sample_event("run-1", "scope-1")).unwrap();
+        for id in ["poison", "check-1", "check-2"] {
+            append(&check_event(
+                PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+                id,
+            ))
+            .unwrap();
+        }
+
+        let cfg = cfg_for(&server.url());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Failed);
+        mock.assert_async().await;
+        let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+        assert_eq!(queued, owned(&["scope-1", "check-1", "check-2"]));
     }
 
     // --- Finding 4: a line this build cannot parse must survive a flush ---
