@@ -1,10 +1,14 @@
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+
 use crate::api::DEFAULT_API_URL;
+use crate::auth::store::{self, StoredCredentials};
 use crate::branding::banner::print_banner;
 use crate::cli::args::StatusArgs;
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::commands::sync::resolve_cwd;
+use crate::cli::commands::whoami::expired_note;
 use crate::cli::ui::header::{render_header_bar, AuthDisplay};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
@@ -80,6 +84,12 @@ fn run_status(
         format_config_section(cfg, config_path, config_exists, args.verbose, width)
     );
 
+    // Actual AI sign-in panel (the header bar shows the Claude Code login)
+    println!(
+        "{}",
+        format_sign_in_section(store::load(), Utc::now(), width)
+    );
+
     // Output files panel (format-aware)
     println!("{}", format_output_files_section(cwd, output_format, width));
 
@@ -131,6 +141,35 @@ fn format_config_section(
         panel = panel.kv("Runner", &runner);
     }
 
+    panel.render(width)
+}
+
+/// The Actual AI sign-in as the local credentials file records it. Like
+/// `whoami`, this makes no network call.
+fn format_sign_in_section(
+    creds: Result<Option<StoredCredentials>, ActualError>,
+    now: DateTime<Utc>,
+    width: usize,
+) -> String {
+    let panel = Panel::titled("Actual AI");
+    let panel = match creds {
+        Ok(Some(creds)) => {
+            let who = creds
+                .email
+                .as_deref()
+                .or(creds.subject.as_deref())
+                .unwrap_or(&creds.member_id);
+            let panel = panel
+                .kv("Account", who)
+                .kv("Organization", &creds.organization_id);
+            match expired_note(&creds, now) {
+                Some(note) => panel.kv("Access token", &note),
+                None => panel,
+            }
+        }
+        Ok(None) => panel.kv_annotated("Account", "not signed in", "(run actual login)"),
+        Err(e) => panel.kv("Account", &format!("unknown: {e}")),
+    };
     panel.render(width)
 }
 
@@ -685,6 +724,90 @@ mod tests {
             "should contain bottom-left corner box character"
         );
         assert!(p.contains('│'), "should contain vertical border character");
+    }
+
+    // ─── format_sign_in_section ─────────────────────────────────────
+
+    fn signed_in() -> StoredCredentials {
+        StoredCredentials {
+            access_token: "secret-access".to_string(),
+            refresh_token: "secret-refresh".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at: None,
+            scope: None,
+            organization_id: "org-1".to_string(),
+            member_id: "member-1".to_string(),
+            email: Some("dev@example.com".to_string()),
+            subject: Some("user-1".to_string()),
+            auth_url: Some("http://localhost:4000".to_string()),
+        }
+    }
+
+    fn sign_in_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_format_sign_in_section_signed_in() {
+        let p = plain(&format_sign_in_section(
+            Ok(Some(signed_in())),
+            sign_in_now(),
+            80,
+        ));
+        assert!(p.contains("Actual AI"), "{p}");
+        assert!(p.contains("Account: dev@example.com"), "{p}");
+        assert!(p.contains("Organization: org-1"), "{p}");
+        assert!(
+            !p.contains("Access token"),
+            "a valid token gets no line: {p}"
+        );
+        assert!(!p.contains("secret"), "never prints token material: {p}");
+    }
+
+    #[test]
+    fn test_format_sign_in_section_account_falls_back_to_subject_then_member() {
+        let mut creds = signed_in();
+        creds.email = None;
+        let p = plain(&format_sign_in_section(
+            Ok(Some(creds.clone())),
+            sign_in_now(),
+            80,
+        ));
+        assert!(p.contains("Account: user-1"), "{p}");
+
+        creds.subject = None;
+        let p = plain(&format_sign_in_section(Ok(Some(creds)), sign_in_now(), 80));
+        assert!(p.contains("Account: member-1"), "{p}");
+    }
+
+    #[test]
+    fn test_format_sign_in_section_shows_an_expired_access_token() {
+        let mut creds = signed_in();
+        creds.expires_at = Some(sign_in_now() - chrono::Duration::hours(2));
+        let p = plain(&format_sign_in_section(Ok(Some(creds)), sign_in_now(), 80));
+        assert!(
+            p.contains("Access token: expired 2026-10-23 10:00 UTC"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn test_format_sign_in_section_signed_out() {
+        let p = plain(&format_sign_in_section(Ok(None), sign_in_now(), 80));
+        assert!(p.contains("Account: not signed in"), "{p}");
+        assert!(p.contains("(run actual login)"), "{p}");
+    }
+
+    #[test]
+    fn test_format_sign_in_section_unreadable_credentials() {
+        let err = ActualError::ConfigError("Failed to parse credentials".to_string());
+        let p = plain(&format_sign_in_section(Err(err), sign_in_now(), 80));
+        assert!(
+            p.contains("Account: unknown: Config error: Failed to parse credentials"),
+            "{p}"
+        );
     }
 
     // ─── format_output_files_section ────────────────────────────────

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `whoami` shows when the access token expired, once it has, instead of only "Signed in"
+- `status` has an Actual AI panel with the signed-in account and organization, read from the local credentials file with no network call
+
 ### Fixed
 - The error box wraps a long message and its `Fix:` line instead of cutting them off at the terminal edge, so the server's reason for a failed sign-in is on screen. A message with line breaks stays inside the box, and a runner's stderr appears once, under "Subprocess output"
 - A failed sign-in, token mint, token issuance or API request reports the status line plus the OAuth `error` and `error_description` (or the API's error code and message), not up to 2 KB of the response body, which for an error page was HTML
