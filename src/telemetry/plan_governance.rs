@@ -276,8 +276,8 @@ pub(crate) enum Delivery {
     /// Nothing was attempted — the batch was empty or telemetry is opted out.
     Skipped,
     /// The proxy refused the batch: a 4xx other than 408 or 429, or a 2xx
-    /// reporting failed events. Sending the same batch again would be refused
-    /// again.
+    /// reporting failed events. A 4xx would be refused again, but a 2xx's
+    /// failed events might land on a later try. Both count as refused.
     Refused,
     /// The batch got no answer to act on: a transport error (connect failure,
     /// timeout), a client that could not be built, a 5xx, a 408 or 429, or a
