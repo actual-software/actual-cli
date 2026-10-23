@@ -1,27 +1,29 @@
-//! A durable, process-lifetime-safe outbox for scope-selection telemetry
+//! A durable, process-lifetime-safe outbox for plan-governance telemetry
 //! (APR-004).
 //!
-//! `rules select` is a short-lived command, and a detached OS thread that has
-//! not finished its send is not guaranteed to outlive the process — so a plain
-//! background send can be terminated before delivery, silently dropping the
-//! event. Instead, an opted-in event is first written here, to an owner that
+//! The commands that emit these events (`rules select`, `plan-check`,
+//! `impl-check` and `check-override`) are short-lived, and a detached OS thread
+//! that has not finished its send is not guaranteed to outlive the process — so
+//! a plain background send can be terminated before delivery, silently dropping
+//! the event. Instead, an opted-in event is first written here, to an owner that
 //! survives process exit: a small append-only JSONL spool under the config dir,
 //! created owner-readable only (`0600`), holding exactly the same
 //! `PlanGovernanceEvent` payload that would go on the wire — counts, enums, ids
 //! and hashes, never plan or rule text (see `PRIVACY.md`).
 //!
 //! Delivery is then best-effort and idempotent: [`flush`] sends what the spool
-//! holds — in chunks no larger than the proxy's per-batch cap
-//! ([`MAX_EVENTS_PER_BATCH`]), so a backlog past that size still drains — and
-//! removes an event only once the proxy confirms it recorded (the proxy
-//! deduplicates on `insert_id`, so a retry of an event that did land is
-//! harmless). The command process never waits for this — it spawns a separate
-//! uploader process (see `cli::commands::telemetry_flush`) and returns — and any
-//! event left undelivered stays durably queued for the next run's flush. The
-//! spool is bounded to [`MAX_SPOOL_EVENTS`] so a long outage cannot grow it
-//! without limit; the oldest events are dropped first.
+//! holds, with scope events and the checks' events as separate streams, in
+//! chunks no larger than the proxy's per-batch cap ([`MAX_EVENTS_PER_BATCH`]),
+//! so a backlog past that size still drains. It removes an event only once the
+//! proxy confirms it recorded (the proxy deduplicates on `insert_id`, so a retry
+//! of an event that did land is harmless). The command process never waits for
+//! this — it spawns a separate uploader process (see
+//! `cli::commands::telemetry_flush`) and returns — and any event left
+//! undelivered stays durably queued for the next run's flush. The spool is
+//! bounded to [`MAX_SPOOL_EVENTS`] so a long outage cannot grow it without
+//! limit; the oldest events are dropped first.
 //!
-//! Several `rules select` processes can touch the spool at once (each spawns its
+//! Several of these processes can touch the spool at once (each spawns its
 //! own uploader), so every mutation — an append, its cap-trim, and the uploader's
 //! post-delivery removal — runs under an exclusive advisory lock ([`SpoolLock`])
 //! so no accepted event is clobbered or dropped in the window between a read and
@@ -42,8 +44,9 @@ use crate::api::types::{PlanGovernanceEvent, PlanGovernanceEventName};
 use crate::config::types::Config;
 use crate::telemetry::plan_governance::{deliver_events, Delivery, MAX_EVENTS_PER_BATCH};
 
-/// Filename under the config dir holding the pending scope events, one JSON
-/// object per line. Sibling to the `telemetry-id` install file.
+/// Filename under the config dir holding the pending events, scope and check
+/// alike, one JSON object per line. Sibling to the `telemetry-id` install file.
+/// The name dates from when it held only scope events; `PRIVACY.md` names it.
 const SPOOL_FILE: &str = "scope-telemetry-spool.jsonl";
 
 /// Upper bound on retained events. A reachable endpoint keeps the spool near
@@ -1028,8 +1031,8 @@ mod tests {
     /// passes. Every producer and every uploader takes the lock through its own
     /// freshly-opened file descriptor, so they contend under `flock` exactly as
     /// separate OS processes do (the lock is keyed on the open file description,
-    /// not the process) — which is the real deployment, where each `rules select`
-    /// spawns its own uploader.
+    /// not the process) — which is the real deployment, where each command that
+    /// spools an event spawns its own uploader.
     ///
     /// The invariant asserted is conservation: every accepted insert id is either
     /// delivered or still queued, never lost in the window between a flush's

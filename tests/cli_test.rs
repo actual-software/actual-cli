@@ -819,10 +819,11 @@ fn test_plan_check_verdict_sends_governance_events_to_the_configured_api() {
 }
 
 /// AK-678's acceptance criterion, at the one layer that runs the real
-/// dispatcher: nothing listens on loopback port 1, so the send fails on
-/// connect, and the run still prints its verdict and exits on the verdict
-/// alone. The telemetry id file proves the send path was entered rather
-/// than skipped by an opt-out.
+/// dispatcher: nothing listens on loopback port 1, so the uploader the run
+/// starts fails on connect, and the run, which opens no connection itself,
+/// still prints its verdict and exits on the verdict alone. The telemetry id
+/// file proves the telemetry path was entered rather than skipped by an
+/// opt-out.
 #[cfg(unix)]
 #[test]
 fn test_plan_check_verdict_survives_a_refused_telemetry_endpoint() {
@@ -1465,8 +1466,9 @@ fn test_impl_check_verdict_sends_governance_events_to_the_configured_api() {
 }
 
 /// AK-678's acceptance criterion, `impl-check`'s side: nothing listens on
-/// loopback port 1, so the send fails on connect, and the run still prints
-/// its verdict and exits on the verdict alone.
+/// loopback port 1, so the uploader the run starts fails on connect, and the
+/// run, which opens no connection itself, still prints its verdict and exits
+/// on the verdict alone.
 #[cfg(unix)]
 #[test]
 fn test_impl_check_verdict_survives_a_refused_telemetry_endpoint() {

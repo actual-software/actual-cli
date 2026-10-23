@@ -861,11 +861,12 @@ pub(super) fn send_governance_events(
     if let Some((round_index, round_total)) = rounds {
         ctx = ctx.with_rounds(round_index, round_total);
     }
-    // `duration_ms` uses the precise monotonic elapsed time; both events'
-    // `timestamp` fields are stamped at send time rather than backdating the
-    // started event to when the check actually began -- for this stream's
-    // aggregate-counting use, ordering/dedup is what `timestamp` is for, and
-    // `duration_ms` is already the authoritative latency figure.
+    // `duration_ms` uses the precise monotonic elapsed time. Both events'
+    // `timestamp` fields are stamped as the run hands them to the spool (the
+    // uploader sends them later as they are), not backdated to when the check
+    // actually began -- for this stream's aggregate-counting use, ordering/dedup
+    // is what `timestamp` is for, and `duration_ms` is already the authoritative
+    // latency figure.
     let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
     let mut events = vec![

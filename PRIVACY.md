@@ -105,7 +105,7 @@ only describes verdicts that were actually reached.
 
 | Event | Sent when |
 |-------|-----------|
-| `plan_governance_check_started` | Built alongside `plan_governance_check_completed` and sent in the same batch, once a run has reached a verdict -- not emitted separately at the actual start of the check |
+| `plan_governance_check_started` | Built and queued together with `plan_governance_check_completed` once a run has reached a verdict (the uploader may send the two in different requests) -- not emitted separately at the actual start of the check |
 | `plan_governance_check_completed` | A `plan-check` or `impl-check` run reaches a verdict |
 | `plan_governance_rule_violation` | One rule did not conform (once per violating rule) |
 | `plan_governance_rule_override` | `check-override` clears a rule (once per cleared rule) |
