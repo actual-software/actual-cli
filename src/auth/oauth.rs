@@ -405,6 +405,9 @@ async fn login_with(
 /// Refresh an access token via the `refresh_token` grant (rotation: the server
 /// returns a new refresh token and revokes the old one). Identity fields
 /// (org/member/email/subject) and the auth URL are preserved from `creds`.
+///
+/// A missing refresh token, or one the server rejects, comes back as
+/// [`ActualError::NotLoggedIn`]; every other failure keeps its own error.
 pub async fn refresh(creds: &StoredCredentials) -> Result<StoredCredentials, ActualError> {
     let base_url = creds.auth_url.clone().ok_or_else(|| {
         ActualError::ConfigError(
@@ -439,8 +442,17 @@ async fn refresh_tokens(
         .send()
         .await
         .map_err(|e| ActualError::ApiError(format!("Token refresh request failed: {e}")))?;
-    if !response.status().is_success() {
-        return Err(auth_error("Token refresh failed", response).await);
+    let status = response.status();
+    if !status.is_success() {
+        let body = OAuthErrorBody::read(response).await;
+        // Only a rejected refresh token ends the session. An outage or a bad
+        // request is reported as itself, since signing in again won't fix it.
+        let rejected =
+            matches!(status.as_u16(), 400 | 401) && body.error.as_deref() == Some("invalid_grant");
+        if rejected {
+            return Err(ActualError::NotLoggedIn);
+        }
+        return Err(response_error("Token refresh failed", status, &body));
     }
     response
         .json::<TokenResponse>()
@@ -1203,19 +1215,66 @@ mod tests {
         assert_eq!(url, DEFAULT_AUTH_URL);
     }
 
-    #[tokio::test]
-    async fn test_refresh_error_status() {
+    /// Answer a refresh grant with `status` and `body`, and return what
+    /// `refresh` makes of it.
+    async fn refresh_answered_with(status: usize, body: &str) -> ActualError {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/api/oauth/token")
-            .with_status(400)
-            .with_body(r#"{"error":"invalid_grant"}"#)
+            .match_body(mockito::Matcher::UrlEncoded(
+                "grant_type".into(),
+                "refresh_token".into(),
+            ))
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(body)
             .create_async()
             .await;
         let creds = creds_with_auth(Some(server.url()), "stale");
         let err = refresh(&creds).await.unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_grant")));
         mock.assert_async().await;
+        err
+    }
+
+    #[tokio::test]
+    async fn test_refresh_rejected_token_is_not_logged_in() {
+        for status in [400, 401] {
+            let err = refresh_answered_with(status, r#"{"error":"invalid_grant"}"#).await;
+            assert!(
+                matches!(err, ActualError::NotLoggedIn),
+                "HTTP {status}: got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refresh_server_error_names_the_refresh_step() {
+        let err = refresh_answered_with(
+            500,
+            r#"{"error":"server_error","error_description":"Failed to process token request"}"#,
+        )
+        .await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m == "Token refresh failed \
+                (HTTP 500 Internal Server Error): server_error: Failed to process token request"),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_other_rejections_are_not_a_sign_out() {
+        // An unknown client is not a dead refresh token, and invalid_grant
+        // counts only on the 400 or 401 a token endpoint answers it with.
+        let err = refresh_answered_with(401, r#"{"error":"invalid_client"}"#).await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_client")),
+            "got: {err:?}"
+        );
+        let err = refresh_answered_with(403, r#"{"error":"invalid_grant"}"#).await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("HTTP 403")),
+            "got: {err:?}"
+        );
     }
 
     #[tokio::test]

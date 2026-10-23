@@ -54,17 +54,15 @@ fn resolve_api_url(flag: Option<&str>) -> String {
 }
 
 /// If the stored access token is expired (or about to be), refresh it with the
-/// rotation primitive and re-persist. Mirrors `commands::advisor::ensure_fresh`;
-/// a refresh failure surfaces as `NotLoggedIn` so the user re-runs
-/// `actual login`.
+/// rotation primitive and re-persist. Mirrors `commands::advisor::ensure_fresh`:
+/// a refresh token the server rejects surfaces as `NotLoggedIn`, and any other
+/// refresh failure keeps its own error.
 async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
     if creds.refresh_token.is_empty() {
         return Ok(creds);
     }
     if creds.expires_within(Utc::now(), ChronoDuration::seconds(60)) {
-        let refreshed = oauth::refresh(&creds)
-            .await
-            .map_err(|_| ActualError::NotLoggedIn)?;
+        let refreshed = oauth::refresh(&creds).await?;
         store::save(&refreshed)?;
         return Ok(refreshed);
     }
@@ -386,6 +384,29 @@ mod tests {
         creds.expires_at = Some(Utc::now() - ChronoDuration::hours(1));
         let out = ensure_fresh(creds).await.unwrap();
         assert_eq!(out.access_token, "refreshed");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_server_outage_is_not_signed_out() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"server_error"}"#)
+            .create_async()
+            .await;
+
+        let mut creds = sample_creds();
+        creds.auth_url = Some(server.url());
+        creds.expires_at = Some(Utc::now() - ChronoDuration::hours(1));
+        let err = ensure_fresh(creds).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "Token refresh failed (HTTP 500 Internal Server Error): server_error"),
+            "got: {err:?}"
+        );
         mock.assert_async().await;
     }
 
