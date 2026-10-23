@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-23
+
 ### Added
+- Once-a-day update notice: after a successful command run at a terminal (stdout and stderr both), the CLI prints the upgrade command for the channel that installed the binary (Homebrew, npm, or a link to the latest release elsewhere). No command waits on the network; a detached background lookup refreshes a cached answer. Hook modes, `--json` output, CI and redirected output never show it, and a failed command does not spend the day's notice. `ACTUAL_NO_UPDATE_CHECK=1` or `update_check.enabled: false` stops every registry request, and a config that fails to load counts as off. See `docs/UPDATE_CHECK.md`
+- `actual version` reports the version, install channel and upgrade command offline; `--check` adds one bounded registry lookup and `--json` prints the object documented in `docs/UPDATE_CHECK.md`
 - ADR file header v2: rule files may open with a YAML frontmatter block, as the ADR generator now writes. The CLI uses `metadata.scope.{root,paths}` and `metadata.actual.{adr_id,status}`; `candidate_group_id` also groups files into decisions; `languages` and the other fields are parsed and carried but do not affect selection yet. **Requires CLI 0.9.0 or later**; an earlier CLI folds the block into the scope sentence and scopes the decision wrongly, and CLI 0.8.0 also ignores `status`, so it still enforces `draft`, `rejected` and the other retired decisions. Files without a header work exactly as before, and both formats can share a directory
 - Declared `paths` replace the globs derived from `### Verify` and prose; `!` paths are excludes, and paths are relative to `root`. When a header declares include paths, a file outside the decision's root is never governed by it, and neither is a file matching its exclude, in selection, the brief, `plan-check` and `impl-check`
 - Decisions with a retired status (`deleted`, `draft`, `archived-draft`, `deferred`, `rejected`, `suggested`, `superseded`, `deprecated`) are not indexed, so they are never selected, briefed, judged or counted; a missing or unknown status is active. `rules index` reports how many were left out
@@ -17,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rules brief --help` names the capability marker `adr-header-v2`, which the Actual Skill probes to learn that the CLI reads the v2 header
 
 ### Changed
+- The `plan-check` folder pass is bounded: each folder is decided once, smallest first, searching the files the plan names first and then the rest in name order, at most 500 files per folder and nothing after 3 seconds. A folder either limit stops short of a governed file is undecided, and the session record notes it as neither covered nor a gap. `plan-check --json` reports the pass as `folders`
 - The scope index cache format version is bumped and the brief memory and ledger move to version 2, so existing caches rebuild on first use and a session may be briefed once more on a decision after upgrading
 - The reported decision key for a file with a v2 header is `group:<candidate_group_id>` when it has one, else `id:<adr_id>` (`rules select --by-adr` `key`); the brief heading is still the decision title
 
