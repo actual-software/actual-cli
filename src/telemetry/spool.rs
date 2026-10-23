@@ -1066,11 +1066,12 @@ mod tests {
         );
     }
 
-    /// A 2xx reply that reports failed events is a refusal too: the chunk is
-    /// resent one event at a time, and only the event the proxy fails on its
-    /// own is dropped.
+    /// A 2xx reply that reports failed events is an outage: the proxy failed to
+    /// forward them, so a later try may land them. Each stream keeps its whole
+    /// chunk, the events the proxy recorded included, with no resend, and the
+    /// next flush delivers them.
     #[tokio::test]
-    async fn test_flush_treats_a_2xx_reporting_failed_events_as_a_refusal() {
+    async fn test_flush_keeps_a_chunk_whose_2xx_reports_failed_events() {
         use std::sync::{Arc, Mutex};
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1078,7 +1079,7 @@ mod tests {
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
-        // Answers 200 to every batch and reports `poison` as failed.
+        // Answers 200 to every batch and reports the `-failed` events as failed.
         let requests = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
         let sink = requests.clone();
         let mut server = mockito::Server::new_async().await;
@@ -1087,7 +1088,7 @@ mod tests {
             .with_status(200)
             .with_body_from_request(move |req| {
                 let ids = insert_ids_of(req);
-                let failed = ids.iter().filter(|id| *id == "poison").count();
+                let failed = ids.iter().filter(|id| id.ends_with("-failed")).count();
                 let recorded = ids.len() - failed;
                 sink.lock().unwrap().push(ids);
                 format!(r#"{{"recorded":{recorded},"failed":{failed}}}"#).into_bytes()
@@ -1095,7 +1096,9 @@ mod tests {
             .create_async()
             .await;
 
-        for id in ["check-1", "poison"] {
+        append(&sample_event("run-1", "scope-1")).unwrap();
+        append(&sample_event("run-2", "scope-failed")).unwrap();
+        for id in ["check-1", "check-failed"] {
             append(&check_event(
                 PlanGovernanceEventName::PlanGovernanceRuleViolation,
                 id,
@@ -1104,16 +1107,32 @@ mod tests {
         }
 
         let cfg = cfg_for(&server.url());
-        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Refused);
-        assert!(load_all().is_empty());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Failed);
+        let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+        assert_eq!(
+            queued,
+            owned(&["scope-1", "scope-failed", "check-1", "check-failed"])
+        );
         assert_eq!(
             *requests.lock().unwrap(),
             vec![
-                owned(&["check-1", "poison"]),
-                owned(&["check-1"]),
-                owned(&["poison"]),
+                owned(&["scope-1", "scope-failed"]),
+                owned(&["check-1", "check-failed"]),
             ]
         );
+
+        let mut healthy = mockito::Server::new_async().await;
+        let mock = healthy
+            .mock("POST", "/plan-governance/record")
+            .with_status(200)
+            .with_body(r#"{"recorded":2,"failed":0}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let cfg = cfg_for(&healthy.url());
+        assert_eq!(flush(&cfg, &healthy.url()).await, Delivery::Delivered);
+        mock.assert_async().await;
+        assert!(load_all().is_empty());
     }
 
     /// An outage drops nothing: a 408, a 429, a 5xx or a refused connection
