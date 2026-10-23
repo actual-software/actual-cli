@@ -365,16 +365,14 @@ fn org_mismatch_message(
 }
 
 /// If the stored access token is expired (or about to be), refresh it with the
-/// rotation primitive and re-persist. A refresh failure surfaces as
-/// `NotLoggedIn` — the user must re-run `actual login`.
+/// rotation primitive and re-persist. A refresh token the server rejects
+/// surfaces as `NotLoggedIn`; any other refresh failure keeps its own error.
 async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
     if creds.refresh_token.is_empty() {
         return Ok(creds);
     }
     if creds.expires_within(Utc::now(), ChronoDuration::seconds(60)) {
-        let refreshed = oauth::refresh(&creds)
-            .await
-            .map_err(|_| ActualError::NotLoggedIn)?;
+        let refreshed = oauth::refresh(&creds).await?;
         store::save(&refreshed)?;
         return Ok(refreshed);
     }
@@ -1233,13 +1231,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ensure_fresh_refresh_failure_is_not_logged_in() {
-        // Expired + unreachable auth server → refresh errors → NotLoggedIn.
+    async fn test_ensure_fresh_unreachable_auth_server_is_not_signed_out() {
+        // Expired + unreachable auth server: the refresh never got an answer,
+        // so the error names the refresh step rather than claiming a sign-out.
         let mut c = test_creds();
         c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
         c.auth_url = Some("http://127.0.0.1:1".to_string());
         let err = ensure_fresh(c).await.unwrap_err();
-        assert!(matches!(err, ActualError::NotLoggedIn));
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.starts_with("Token refresh request failed")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_rejected_refresh_token_is_not_logged_in() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_grant"}"#)
+            .create_async()
+            .await;
+
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        c.auth_url = Some(server.url());
+        let err = ensure_fresh(c).await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
     }
 
     // --- explicit repo scoping ---
