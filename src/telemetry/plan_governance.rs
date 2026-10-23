@@ -275,15 +275,16 @@ pub(crate) enum Delivery {
     Delivered,
     /// Nothing was attempted — the batch was empty or telemetry is opted out.
     Skipped,
-    /// The proxy refused the batch: a 4xx other than 408 or 429, or a 2xx
-    /// reporting failed events. A 4xx would be refused again, but a 2xx's
-    /// failed events might land on a later try. Both count as refused.
+    /// The proxy refused the batch with a 4xx other than 408 or 429, and would
+    /// refuse it again.
     Refused,
-    /// The batch got no answer to act on: a transport error (connect failure,
-    /// timeout), a client that could not be built, a 5xx, a 408 or 429, or a
-    /// reply that could not be read. The caller should keep the batch for a
-    /// later retry; the proxy deduplicates on `insert_id`, so retrying an event
-    /// that did land is harmless.
+    /// An outage, so a later try may land the batch: a transport error (connect
+    /// failure, timeout), a client that could not be built, a 5xx, a 408 or
+    /// 429, a reply that could not be read, or a 2xx reporting failed events,
+    /// which the proxy counts only when forwarding an event to PostHog fails.
+    /// The caller should keep the batch for a later retry; the proxy
+    /// deduplicates on `insert_id`, so retrying an event that did land is
+    /// harmless.
     Failed,
 }
 
@@ -323,7 +324,7 @@ pub(crate) async fn deliver_events(
                 resp.failed,
                 resp.recorded + resp.failed
             );
-            Delivery::Refused
+            Delivery::Failed
         }
         Ok(PlanGovernanceReply::Status(status)) if is_refusal(status) => {
             tracing::debug!("plan-governance telemetry: batch refused with HTTP {status}");
@@ -747,9 +748,10 @@ mod tests {
         assert_eq!(delivery, Delivery::Failed);
     }
 
-    /// A 2xx that reports failed events is a refusal, not an outage.
+    /// A 2xx that reports failed events is an outage, not a refusal: the proxy
+    /// failed to forward them, and a later try may land them.
     #[tokio::test]
-    async fn test_deliver_events_server_side_failures_is_refused() {
+    async fn test_deliver_events_server_side_failures_is_failed() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
@@ -758,7 +760,7 @@ mod tests {
             .mock("POST", "/plan-governance/record")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"recorded": 0, "failed": 1, "errors": ["rejected"]}"#)
+            .with_body(r#"{"recorded": 0, "failed": 1, "errors": ["timeout"]}"#)
             .create_async()
             .await;
 
@@ -766,7 +768,7 @@ mod tests {
         let delivery =
             deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
         mock.assert_async().await;
-        assert_eq!(delivery, Delivery::Refused);
+        assert_eq!(delivery, Delivery::Failed);
     }
 
     /// Every 4xx but 408 and 429 refuses the batch.
