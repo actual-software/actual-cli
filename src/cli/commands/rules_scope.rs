@@ -540,16 +540,17 @@ fn emit_scope_telemetry(
 }
 
 /// Spawn the detached uploader child process that drains the telemetry spool
-/// (APR-004).
+/// (APR-004). `rules select` calls it once its scope event is spooled, and
+/// `plan-check`, `impl-check` and `check-override` once theirs are.
 ///
 /// A detached OS thread is not guaranteed to outlive `main`, so a background
 /// *thread* could be terminated before its send finished, silently dropping the
 /// event. A child *process* is reparented on the parent's exit rather than killed
-/// with it, so it is a delivery owner that survives this short-lived command. The
-/// parent does not wait for it — `spawn` returns immediately and the handle is
-/// dropped — so the selection result and the command's exit never depend on the
-/// send. `stdin`/`stdout`/`stderr` are detached to null so the child cannot touch
-/// the user's terminal.
+/// with it, so it is a delivery owner that survives the short-lived command that
+/// spooled the event. The parent does not wait for it — `spawn` returns
+/// immediately and the handle is dropped — so the command's result and its exit
+/// never depend on the send. `stdin`/`stdout`/`stderr` are detached to null so
+/// the child cannot touch the user's terminal.
 #[cfg(all(feature = "telemetry", not(test)))]
 pub(super) fn spawn_uploader() {
     spawn_uploader_from(std::env::current_exe());

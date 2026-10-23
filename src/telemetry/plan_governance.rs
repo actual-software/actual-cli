@@ -32,13 +32,11 @@ const SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The proxy's `PlanGovernanceEventRequest` schema caps a single batch at
 /// `z.array(PlanGovernanceEvent).min(1).max(100)` — see
-/// `ActualApiClient::post_plan_governance_events`'s doc comment. A normal
-/// `plan-check`/`--claude-hook` run never gets close (started + completed +
-/// at most `MAX_RULES_JUDGED` violations, well under 100), but
-/// `check-override` emits one event per `--rule` flag with no cap of
-/// its own, so its caller must chunk into batches of at most this many
-/// events rather than sending one oversized batch the proxy would reject
-/// whole.
+/// `ActualApiClient::post_plan_governance_events`'s doc comment. Commands hand
+/// their events to the spool unchunked, and `spool::flush` sends them in
+/// batches of at most this many: a backlog can pass the cap, and so can one
+/// `check-override`, which emits an event per `--rule` flag with no cap of its
+/// own, and the proxy rejects an oversized batch whole.
 pub const MAX_EVENTS_PER_BATCH: usize = 100;
 
 /// Get or create this installation's opaque, per-install telemetry

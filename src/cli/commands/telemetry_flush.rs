@@ -1,12 +1,12 @@
 //! The internal `__telemetry-flush` uploader subcommand (APR-004).
 //!
-//! `rules select` writes its scope event to a durable local spool and then
-//! spawns this command as a **detached child process**, so scope-telemetry
-//! delivery has an owner that outlives the short-lived parent command. Because a
-//! child process is reparented on the parent's exit rather than terminated with
-//! it, delivery is no longer at the mercy of whether a detached thread happens to
-//! outlive `main` — the parent returns immediately while this process drains the
-//! spool through the proxy and exits.
+//! `rules select`, `plan-check`, `impl-check` and `check-override` write their
+//! events to a durable local spool and then spawn this command as a **detached
+//! child process**, so delivery has an owner that outlives the short-lived
+//! parent command. Because a child process is reparented on the parent's exit
+//! rather than terminated with it, delivery is no longer at the mercy of whether
+//! a detached thread happens to outlive `main` — the parent returns immediately
+//! while this process drains the spool through the proxy and exits.
 //!
 //! Hidden from `--help`: it is an internal delivery mechanism, never a
 //! user-facing command. It is deliberately incurious about its outcome — a slow,
@@ -46,7 +46,7 @@ mod tests {
     use tempfile::tempdir;
 
     /// The flush command drains a spooled event through the proxy and exits Ok.
-    /// It owns delivery for the parent `rules select` process, so it must both
+    /// It owns delivery for the command that spawned it, so it must both
     /// deliver and never surface an error.
     #[test]
     fn test_exec_drains_the_spool_and_returns_ok() {
