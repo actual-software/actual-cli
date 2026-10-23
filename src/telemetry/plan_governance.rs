@@ -275,23 +275,26 @@ pub(crate) enum Delivery {
     Delivered,
     /// Nothing was attempted — the batch was empty or telemetry is opted out.
     Skipped,
-    /// The proxy refused the batch with a 4xx other than 408 or 429, and would
-    /// refuse it again.
+    /// The proxy refused the batch with a 400 or 422, rejecting what it
+    /// carries, and would refuse it again.
     Refused,
     /// An outage, so a later try may land the batch: a transport error (connect
-    /// failure, timeout), a client that could not be built, a 5xx, a 408 or
-    /// 429, a reply that could not be read, or a 2xx reporting failed events,
-    /// which the proxy counts only when forwarding an event to PostHog fails.
+    /// failure, timeout), a client that could not be built, any non-2xx status
+    /// but a 400 or 422 (a 401, 403, 404 or 413 included), a reply that could
+    /// not be read, or a 2xx reporting failed events, which the proxy counts
+    /// only when forwarding an event to PostHog fails.
     /// The caller should keep the batch for a later retry; the proxy
     /// deduplicates on `insert_id`, so retrying an event that did land is
     /// harmless.
     Failed,
 }
 
-/// Whether a non-2xx status refuses the batch itself. A 408 or 429 asks for a
-/// later try and a 5xx is the endpoint failing, so those are outages.
+/// Whether a non-2xx status refuses the batch's events. Only a 400 or 422
+/// rejects what the request carries. A 401 or 403 is the service key, a 404
+/// the route and a 413 the request's size, a 408 or 429 asks for a later try
+/// and a 5xx is the endpoint failing, so every other status is an outage.
 fn is_refusal(status: u16) -> bool {
-    matches!(status, 400..=499) && !matches!(status, 408 | 429)
+    matches!(status, 400 | 422)
 }
 
 /// Attempt to deliver a batch and report the outcome. The single place the
@@ -771,13 +774,13 @@ mod tests {
         assert_eq!(delivery, Delivery::Failed);
     }
 
-    /// Every 4xx but 408 and 429 refuses the batch.
+    /// A 400 or 422 rejects what the batch carries, so it refuses the batch.
     #[tokio::test]
-    async fn test_deliver_events_a_4xx_is_refused() {
+    async fn test_deliver_events_a_400_or_422_is_refused() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
-        for status in [400, 401, 404, 413, 422] {
+        for status in [400, 422] {
             let mut server = mockito::Server::new_async().await;
             let mock = server
                 .mock("POST", "/plan-governance/record")
@@ -790,6 +793,30 @@ mod tests {
                 deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
             mock.assert_async().await;
             assert_eq!(delivery, Delivery::Refused, "HTTP {status}");
+        }
+    }
+
+    /// Any other 4xx says nothing against an event: a 401 or 403 is the service
+    /// key, a 404 the route and a 413 the request's size. Each is an outage, so
+    /// the batch is kept for the next flush. (408 and 429 are pinned below.)
+    #[tokio::test]
+    async fn test_deliver_events_any_other_4xx_is_failed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        for status in [401, 403, 404, 405, 409, 410, 413, 415] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/plan-governance/record")
+                .with_status(status)
+                .create_async()
+                .await;
+
+            let ctx = context();
+            let delivery =
+                deliver_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+            mock.assert_async().await;
+            assert_eq!(delivery, Delivery::Failed, "HTTP {status}");
         }
     }
 
