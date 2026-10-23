@@ -223,8 +223,8 @@ fn line_insert_id(line: &str) -> Option<String> {
 }
 
 /// Under the spool lock, drop exactly the lines whose `insert_id` is in
-/// `delivered` and keep every other line. [`flush`] passes the events the proxy
-/// recorded and the ones it refused on their own.
+/// `delivered` and keep every other line. [`flush`] passes the events of each
+/// chunk the proxy recorded in full and the ones it refused on their own.
 ///
 /// The remaining set is computed from the *raw* file, not from re-parsed events,
 /// so two classes of line survive that a parse-then-rewrite would silently
@@ -270,8 +270,8 @@ fn remove_delivered(delivered: &HashSet<String>) {
     };
 }
 
-/// Send what the spool holds and drop the events the proxy recorded or refused
-/// on their own, leaving the rest queued for a later attempt.
+/// Send what the spool holds and drop each chunk the proxy recorded in full and
+/// each event it refused on its own, leaving the rest queued for a later try.
 ///
 /// Scope events and the checks' events (started, completed, violation and
 /// override) go out as two streams, each oldest-first, and an outage (see
