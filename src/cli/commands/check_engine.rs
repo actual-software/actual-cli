@@ -787,9 +787,10 @@ fn identity_envelope(
 /// `__telemetry-flush`, and return without waiting for it.
 ///
 /// The command itself makes no network call, so a check returns its verdict
-/// however slow or unreachable the endpoint is. An event the uploader can't
-/// deliver stays in the spool for the next run's uploader, and a failed or
-/// disabled send never fails or slows the check.
+/// however slow or unreachable the endpoint is. An event an outage keeps from
+/// the proxy stays in the spool for the next run's uploader, one the proxy
+/// refuses on its own is dropped, and a failed or disabled send never fails or
+/// slows the check.
 ///
 /// The `#[cfg(test)]` twin below captures events into a thread-local instead,
 /// so every existing (and future) `exec_hook_with`/`exec_direct`/

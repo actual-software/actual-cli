@@ -10,7 +10,8 @@
 //!
 //! Hidden from `--help`: it is an internal delivery mechanism, never a
 //! user-facing command. It is deliberately incurious about its outcome — a slow,
-//! failed, or opted-out send simply leaves events queued for the next run (see
+//! failed, or opted-out send simply leaves events queued for the next run, and
+//! an event the proxy refuses on its own is dropped (see
 //! [`crate::telemetry::spool::flush`]).
 
 use crate::error::ActualError;
