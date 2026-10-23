@@ -439,9 +439,10 @@ pub enum Command {
 
     /// Internal: drain the scope-telemetry spool once, then exit.
     ///
-    /// Spawned as a detached child process by `rules select` so telemetry
-    /// delivery has an owner that survives the parent command (APR-004). Hidden
-    /// from `--help`; not a user-facing command.
+    /// Spawned as a detached child process by `rules select`, `plan-check`,
+    /// `impl-check` and `check-override` so telemetry delivery has an owner
+    /// that survives the parent command (APR-004). Hidden from `--help`; not a
+    /// user-facing command.
     #[command(name = "__telemetry-flush", hide = true)]
     TelemetryFlush,
 
