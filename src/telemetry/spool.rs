@@ -277,13 +277,15 @@ fn remove_delivered(delivered: &HashSet<String>) {
 /// override) go out as two streams, each oldest-first, and an outage (see
 /// [`Delivery::Failed`]) ends only its own stream's pass.
 ///
-/// A chunk the proxy refuses, such as one carrying a value its schema rejects,
-/// is resent one event at a time, ahead of the chunks behind it. Each event
-/// delivered on its own is removed and each event refused on its own is
-/// dropped, so a refused event costs only itself rather than leading every
-/// later flush. A chunk of one is already on its own, so it is dropped without
-/// a resend. An outage during the single sends ends the stream's pass and keeps
-/// what is left.
+/// A chunk the proxy refuses with a 400 or 422, such as one carrying a value
+/// its schema rejects, is resent one event at a time, ahead of the chunks
+/// behind it. Each event delivered on its own is removed and each event
+/// refused on its own is dropped, so a refused event costs only itself rather
+/// than leading every later flush. A chunk of one is already on its own, so it
+/// is dropped without a resend. An outage during the single sends ends the
+/// stream's pass and keeps what is left. A 401, 403, 404 or 413 is an outage
+/// rather than a refusal, since it is about the service key, the route or the
+/// request's size rather than any event, so the chunk stays queued whole.
 ///
 /// Each stream is sent in chunks no larger than [`MAX_EVENTS_PER_BATCH`]: the
 /// proxy rejects an oversized batch *whole*, so a backlog past that size goes
@@ -1186,6 +1188,65 @@ mod tests {
         );
         let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
         assert_eq!(queued, everything);
+    }
+
+    /// A 401, 403, 404 or 413 is about the service key, the route or the
+    /// request's size, not an event, so a key rotation or a bad deploy must not
+    /// empty the spool. Each stream's multi-event chunk goes out once and stays
+    /// queued whole, with no event sent on its own.
+    #[tokio::test]
+    async fn test_flush_keeps_every_event_on_a_401_403_404_or_413() {
+        use std::sync::{Arc, Mutex};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        append(&sample_event("run-1", "scope-1")).unwrap();
+        append(&sample_event("run-2", "scope-2")).unwrap();
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+            "check-1",
+        ))
+        .unwrap();
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceRuleOverride,
+            "override-1",
+        ))
+        .unwrap();
+        let everything = owned(&["scope-1", "scope-2", "check-1", "override-1"]);
+
+        for status in [401, 403, 404, 413] {
+            let requests = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+            let sink = requests.clone();
+            let mut server = mockito::Server::new_async().await;
+            let _mock = server
+                .mock("POST", "/plan-governance/record")
+                .with_status_code_from_request(move |req| {
+                    sink.lock().unwrap().push(insert_ids_of(req));
+                    status
+                })
+                .create_async()
+                .await;
+
+            let cfg = cfg_for(&server.url());
+            assert_eq!(
+                flush(&cfg, &server.url()).await,
+                Delivery::Failed,
+                "HTTP {status}"
+            );
+            let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+            assert_eq!(queued, everything, "HTTP {status}");
+            assert_eq!(
+                *requests.lock().unwrap(),
+                vec![
+                    owned(&["scope-1", "scope-2"]),
+                    owned(&["check-1", "override-1"]),
+                ],
+                "HTTP {status}"
+            );
+        }
     }
 
     /// An outage partway through the single sends ends that stream's pass and

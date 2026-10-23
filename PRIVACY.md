@@ -225,9 +225,10 @@ than an in-process send, so no command waits on the network: the event is
 first written to a local spool file
 (`~/.actualai/actual/scope-telemetry-spool.jsonl`, created readable only by the
 owner) and then delivered by a separate best-effort uploader, with the entry
-removed once the proxy confirms it, or once the proxy refuses it sent on its
-own. An entry stays queued for a later run while the endpoint can't be
-reached, and when the proxy reports that it failed to forward any event in the
+removed once the proxy confirms it, or once the proxy rejects it as invalid
+sent on its own. An entry stays queued for a later run while the endpoint
+can't be reached, when the request fails on its credentials, its route or its
+size, and when the proxy reports that it failed to forward any event in the
 same request. The spool holds **only** the same
 already privacy-filtered event payload that would go on the wire -- counts, enums,
 hashed ids, `distinct_id`, `insert_id` -- never plan text, rule text, file
