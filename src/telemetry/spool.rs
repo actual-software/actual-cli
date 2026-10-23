@@ -38,7 +38,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::api::types::PlanGovernanceEvent;
+use crate::api::types::{PlanGovernanceEvent, PlanGovernanceEventName};
 use crate::config::types::Config;
 use crate::telemetry::plan_governance::{deliver_events, Delivery, MAX_EVENTS_PER_BATCH};
 
@@ -269,7 +269,13 @@ fn remove_delivered(delivered: &HashSet<String>) {
 /// Send what the spool holds and drop the events the proxy confirms it recorded,
 /// leaving the rest queued for a later attempt.
 ///
-/// The backlog is sent in chunks no larger than [`MAX_EVENTS_PER_BATCH`]: the
+/// Scope events and the checks' events (started, completed, violation and
+/// override) go out as two streams, each oldest-first, and a chunk that fails
+/// ends only its own stream's pass. A batch the proxy refuses, such as one
+/// carrying a value its schema rejects, then holds back only the stream it came
+/// from.
+///
+/// Each stream is sent in chunks no larger than [`MAX_EVENTS_PER_BATCH`]: the
 /// proxy rejects an oversized batch *whole*, so without chunking a spool that
 /// ever passed the cap could never drain. Each chunk is confirmed independently
 /// and only the `insert_id`s of delivered chunks are removed (from the raw file,
@@ -285,24 +291,29 @@ pub(crate) async fn flush(config: &Config, api_url: &str) -> Delivery {
     if events.is_empty() {
         return Delivery::Skipped;
     }
+    let (scope, checks): (Vec<_>, Vec<_>) = events
+        .into_iter()
+        .partition(|e| e.event == PlanGovernanceEventName::PlanGovernanceScopeSelect);
 
     let mut delivered_ids: HashSet<String> = HashSet::new();
     let mut outcome = Delivery::Delivered;
-    for chunk in events.chunks(MAX_EVENTS_PER_BATCH) {
-        let ids = chunk.iter().map(|e| e.insert_id.clone());
-        match deliver_events(chunk.to_vec(), config, api_url).await {
-            Delivery::Delivered => delivered_ids.extend(ids),
-            // A non-empty chunk is only ever Skipped when telemetry is opted out,
-            // which applies to the whole run: stop and remove nothing.
-            Delivery::Skipped => {
-                outcome = Delivery::Skipped;
-                break;
-            }
-            // Endpoint down or a server-side rejection: stop and keep the rest
-            // queued for a later flush.
-            Delivery::Failed => {
-                outcome = Delivery::Failed;
-                break;
+    'streams: for stream in [scope, checks] {
+        for chunk in stream.chunks(MAX_EVENTS_PER_BATCH) {
+            let ids = chunk.iter().map(|e| e.insert_id.clone());
+            match deliver_events(chunk.to_vec(), config, api_url).await {
+                Delivery::Delivered => delivered_ids.extend(ids),
+                // A non-empty chunk is only ever Skipped when telemetry is opted out,
+                // which applies to the whole run: stop and remove nothing.
+                Delivery::Skipped => {
+                    outcome = Delivery::Skipped;
+                    break 'streams;
+                }
+                // Endpoint down or a server-side rejection: end this stream's pass
+                // and keep the rest of it queued for a later flush.
+                Delivery::Failed => {
+                    outcome = Delivery::Failed;
+                    break;
+                }
             }
         }
     }
@@ -756,6 +767,107 @@ mod tests {
         let remaining: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
         let expected: Vec<String> = (200..256).map(|i| format!("id-{i:03}")).collect();
         assert_eq!(remaining, expected, "only the unsent chunk must remain");
+    }
+
+    // --- A refused batch holds back only its own stream ---
+
+    /// An event from the checks' stream (`plan-check`, `impl-check` and
+    /// `check-override`), which shares the spool with the scope events.
+    fn check_event(event: PlanGovernanceEventName, insert_id: &str) -> PlanGovernanceEvent {
+        PlanGovernanceEvent {
+            event,
+            distinct_id: "install-abc".to_string(),
+            properties: None,
+            timestamp: None,
+            insert_id: insert_id.to_string(),
+        }
+    }
+
+    /// A proxy that answers 400 to any batch carrying `refused` and accepts
+    /// every other batch whole, expecting one request per stream.
+    async fn proxy_refusing(
+        server: &mut mockito::ServerGuard,
+        refused: &'static str,
+    ) -> mockito::Mock {
+        server
+            .mock("POST", "/plan-governance/record")
+            .with_status_code_from_request(move |req| {
+                let body = String::from_utf8_lossy(req.body().unwrap()).into_owned();
+                if body.contains(refused) {
+                    400
+                } else {
+                    200
+                }
+            })
+            .with_body_from_request(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body().unwrap().as_slice()).unwrap();
+                let n = body["events"].as_array().map(|a| a.len()).unwrap_or(0);
+                format!(r#"{{"recorded":{n},"failed":0}}"#).into_bytes()
+            })
+            .expect(2)
+            .create_async()
+            .await
+    }
+
+    /// The proxy refuses the scope event at the head of the spool. The check
+    /// and override events queued behind it are still delivered and removed,
+    /// and the scope event stays queued for a later flush.
+    #[tokio::test]
+    async fn test_flush_a_refused_scope_batch_does_not_hold_back_check_events() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = proxy_refusing(&mut server, "plan_governance_scope_select").await;
+
+        append(&sample_event("run-1", "scope-1")).unwrap();
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+            "check-1",
+        ))
+        .unwrap();
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceRuleOverride,
+            "override-1",
+        ))
+        .unwrap();
+
+        let cfg = cfg_for(&server.url());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Failed);
+
+        let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+        assert_eq!(queued, vec!["scope-1".to_string()]);
+        mock.assert_async().await;
+    }
+
+    /// The mirror case: the proxy refuses the check event at the head of the
+    /// spool, and the scope event queued behind it is still delivered.
+    #[tokio::test]
+    async fn test_flush_a_refused_check_batch_does_not_hold_back_scope_events() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = proxy_refusing(&mut server, "plan_governance_check_completed").await;
+
+        append(&check_event(
+            PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+            "check-1",
+        ))
+        .unwrap();
+        append(&sample_event("run-1", "scope-1")).unwrap();
+
+        let cfg = cfg_for(&server.url());
+        assert_eq!(flush(&cfg, &server.url()).await, Delivery::Failed);
+
+        let queued: Vec<String> = load_all().into_iter().map(|e| e.insert_id).collect();
+        assert_eq!(queued, vec!["check-1".to_string()]);
+        mock.assert_async().await;
     }
 
     // --- Finding 4: a line this build cannot parse must survive a flush ---
