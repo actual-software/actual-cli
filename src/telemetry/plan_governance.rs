@@ -267,8 +267,8 @@ pub fn reason_summary(
 
 /// The outcome of one delivery attempt, for callers that must know what became
 /// of a batch — chiefly the scope-telemetry spool, which removes an event once
-/// it is recorded or once the proxy refuses it on its own, and keeps it through
-/// an outage.
+/// the proxy records its whole batch or refuses it on its own, and keeps it
+/// through an outage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Delivery {
     /// Every event in the batch was recorded server-side.
