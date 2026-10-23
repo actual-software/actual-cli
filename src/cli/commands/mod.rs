@@ -157,35 +157,43 @@ pub fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            let width = term_size::terminal_width();
-
-            let error_line = format!("{} {}", theme::error_prefix().for_stderr(), e);
-            let mut panel = Panel::titled("Error").line("").line(&error_line);
-
-            // Gap 1: show subprocess stderr so the user sees Claude Code diagnostics
-            // (quota errors, rate limits, auth failures, etc.) rather than just the
-            // exit-code summary.
-            if let ActualError::RunnerFailed { stderr, .. } = &e {
-                if !stderr.is_empty() {
-                    let clean = console::strip_ansi_codes(stderr);
-                    panel = panel.line("").line("Subprocess output:");
-                    for line in clean.lines() {
-                        panel = panel.line(&format!("  {line}"));
-                    }
-                }
-            }
-
-            if let Some(hint_text) = e.hint() {
-                let hint_styled = theme::hint(hint_text).for_stderr();
-                panel = panel.line("").line(&format!("Fix: {hint_styled}"));
-            }
-
-            panel = panel.line("");
-
-            eprintln!("{}", panel.render(width));
+            eprintln!("{}", render_error(&e, term_size::terminal_width()));
             e.exit_code()
         }
     }
+}
+
+/// Render the error panel for `e` at `width` columns. The message and the hint
+/// wrap instead of truncating, since the end of a message is often its reason.
+fn render_error(e: &ActualError, width: usize) -> String {
+    // `RunnerFailed` also carries its stderr in `Display`; the stderr gets its
+    // own section below, so the message line leaves it out.
+    let (message, stderr) = match e {
+        ActualError::RunnerFailed { message, stderr } => {
+            (format!("Runner failed: {message}"), stderr.as_str())
+        }
+        _ => (e.to_string(), ""),
+    };
+    let error_line = format!("{} {message}", theme::error_prefix().for_stderr());
+    let mut panel = Panel::titled("Error").line("").wrapped(&error_line);
+
+    // Gap 1: show subprocess stderr so the user sees Claude Code diagnostics
+    // (quota errors, rate limits, auth failures, etc.) rather than just the
+    // exit-code summary.
+    if !stderr.is_empty() {
+        let clean = console::strip_ansi_codes(stderr);
+        panel = panel.line("").line("Subprocess output:");
+        for line in clean.lines() {
+            panel = panel.line(&format!("  {line}"));
+        }
+    }
+
+    if let Some(hint_text) = e.hint() {
+        let hint_styled = theme::hint(hint_text).for_stderr();
+        panel = panel.line("").wrapped(&format!("Fix: {hint_styled}"));
+    }
+
+    panel.line("").render(width)
 }
 
 #[cfg(test)]
@@ -250,6 +258,112 @@ mod tests {
             message: "Credit balance is too low".to_string(),
         }));
         assert_eq!(code, 3);
+    }
+
+    // ── render_error tests ──
+
+    /// The rendered panel's lines, ANSI stripped.
+    fn panel_lines(e: &ActualError, width: usize) -> Vec<String> {
+        let rendered = render_error(e, width);
+        let plain = console::strip_ansi_codes(&rendered);
+        plain.lines().map(str::to_string).collect()
+    }
+
+    /// The panel's content with borders and padding removed and every line
+    /// joined with a space, so a wrapped sentence reads back whole.
+    fn panel_text(e: &ActualError, width: usize) -> String {
+        let lines = panel_lines(e, width);
+        let content: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("│ "))
+            .map(|l| l.trim_end_matches('│').trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+        content.join(" ")
+    }
+
+    #[test]
+    fn test_render_error_wraps_the_message_instead_of_truncating() {
+        let err = ActualError::ApiError(
+            "Token exchange failed (HTTP 500 Internal Server Error): server_error: \
+             Failed to process token request"
+                .to_string(),
+        );
+        let lines = panel_lines(&err, 60);
+
+        for line in &lines {
+            assert_eq!(
+                line.chars().count(),
+                60,
+                "line should be 60 chars: '{line}'"
+            );
+            assert!(!line.contains('…'), "nothing is truncated: '{line}'");
+        }
+        assert!(
+            panel_text(&err, 60).contains("server_error: Failed to process token request"),
+            "the server's reason reaches the screen: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn test_render_error_wraps_the_hint() {
+        let err = ActualError::RunnerFailed {
+            message: "Claude Code exited with code 1".to_string(),
+            stderr: String::new(),
+        };
+        let text = panel_text(&err, 60);
+        assert!(
+            text.contains(
+                "Fix: Check the error details above. For subprocess runners, \
+                 re-run with --verbose for more output."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_render_error_shows_runner_stderr_once() {
+        let err = ActualError::RunnerFailed {
+            message: "Claude Code exited with code 1".to_string(),
+            stderr: "You have exceeded your API quota.\nPlease check your billing.".to_string(),
+        };
+        let text = panel_text(&err, 80);
+
+        assert!(text.starts_with("Error: Runner failed: Claude Code exited with code 1"));
+        assert_eq!(text.matches("You have exceeded your API quota.").count(), 1);
+        assert!(text.contains("Subprocess output: You have exceeded your API quota."));
+        assert!(!text.contains("stderr:"), "{text}");
+    }
+
+    #[test]
+    fn test_render_error_runner_failed_without_stderr_has_no_output_section() {
+        let err = ActualError::RunnerFailed {
+            message: "Claude Code exited with code 1".to_string(),
+            stderr: String::new(),
+        };
+        let text = panel_text(&err, 80);
+
+        assert!(!text.contains("Subprocess output"), "{text}");
+        assert!(!text.contains("stderr:"), "{text}");
+    }
+
+    #[test]
+    fn test_render_error_multiline_hint_stays_inside_the_box() {
+        let lines = panel_lines(&ActualError::SemgrepNotFound, 60);
+
+        for line in &lines {
+            assert_eq!(
+                line.chars().count(),
+                60,
+                "line should be 60 chars: '{line}'"
+            );
+        }
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("│ Fix: pip install semgrep ")));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("│   or: brew install semgrep ")));
     }
 
     // ── find_output_files tests ──

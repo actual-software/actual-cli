@@ -61,9 +61,8 @@ fn is_sec1_ec_pem(private_key_pem: &[u8]) -> bool {
 
 /// The rejection for a SEC1 EC private key: name the encoding in the message,
 /// and put the exact conversion command on the hint, because that command is
-/// the entire remedy and the error panel truncates the message but renders the
-/// hint whole. Both halves are kept inside the panel's width at the default
-/// 80 columns; see [`ActualError::Sec1KeyUnsupported`].
+/// the entire remedy. Both halves fit on one line of the error panel at the
+/// default 80 columns; see [`ActualError::Sec1KeyUnsupported`].
 ///
 /// Converting re-encodes the same key pair, so the registered public key — and
 /// therefore `--kid` — is untouched.
@@ -919,18 +918,17 @@ mod tests {
             "hint must give the exact conversion command: {hint}"
         );
 
-        // The remedy only helps if the user can read it. The error panel
-        // truncates every row to the terminal width, so both halves must fit
-        // inside a default 80-column panel: 4 columns of border and padding,
-        // then the "Error: " / "Fix: " prefix the panel adds.
+        // A command is easiest to copy from a single line, so both halves fit
+        // inside a default 80-column panel without wrapping: 4 columns of
+        // border and padding, then the "Error: " / "Fix: " prefix the panel adds.
         const PANEL_INNER: usize = 80 - 4;
         assert!(
             message.len() + "Error: ".len() <= PANEL_INNER,
-            "message would be truncated in the error panel: {message}"
+            "message would wrap in the error panel: {message}"
         );
         assert!(
             hint.len() + "Fix: ".len() <= PANEL_INNER,
-            "hint would be truncated in the error panel: {hint}"
+            "hint would wrap in the error panel: {hint}"
         );
     }
 
