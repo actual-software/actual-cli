@@ -30,10 +30,15 @@ use super::theme;
 /// plain unframed text (content lines without borders).
 const MIN_PANEL_WIDTH: usize = 40;
 
+/// The SGR sequence `console` closes every styled span with.
+const ANSI_RESET: &str = "\x1b[0m";
+
 /// A row inside a [`Panel`].
 enum PanelRow {
     /// Full-width content line.
     Line(String),
+    /// Content that wraps onto as many lines as it needs.
+    Wrapped(String),
     /// Key-value pair with optional right-aligned annotation.
     KeyValue {
         key: String,
@@ -76,6 +81,13 @@ impl Panel {
     /// Add a full-width content line.
     pub fn line(mut self, text: &str) -> Self {
         self.rows.push(PanelRow::Line(text.to_string()));
+        self
+    }
+
+    /// Add content that wraps onto as many lines as it needs, where
+    /// [`Panel::line`] would truncate it.
+    pub fn wrapped(mut self, text: &str) -> Self {
+        self.rows.push(PanelRow::Wrapped(text.to_string()));
         self
     }
 
@@ -144,6 +156,18 @@ impl Panel {
                         Self::padding(inner, Self::visual_width(text).min(inner)),
                         theme::border("│"),
                     );
+                }
+                PanelRow::Wrapped(text) => {
+                    for line in Self::wrap(text, inner) {
+                        let _ = writeln!(
+                            out,
+                            "{} {}{} {}",
+                            theme::border("│"),
+                            line,
+                            Self::padding(inner, Self::visual_width(&line)),
+                            theme::border("│"),
+                        );
+                    }
                 }
                 PanelRow::KeyValue {
                     key,
@@ -316,6 +340,76 @@ impl Panel {
         }
     }
 
+    /// Break `text` into lines no wider than `width`: at spaces where it can,
+    /// mid-word when a word is wider than a line, and at every newline.
+    fn wrap(text: &str, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        for paragraph in text.split('\n') {
+            let mut line = String::new();
+            for (i, word) in paragraph.split(' ').enumerate() {
+                let used = Self::visual_width(&line);
+                if i > 0 && used + 1 + Self::visual_width(word) <= width {
+                    line.push(' ');
+                    line.push_str(word);
+                } else {
+                    if i > 0 {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    line = Self::break_word(word, width, &mut lines);
+                }
+            }
+            lines.push(line);
+        }
+        Self::carry_styles(&mut lines);
+        lines
+    }
+
+    /// Split `word` into chunks of at most `width` columns, pushing each full
+    /// chunk onto `lines` and returning the last one.
+    fn break_word(word: &str, width: usize, lines: &mut Vec<String>) -> String {
+        let mut chunk = String::new();
+        let mut used = 0;
+        for (piece, is_ansi) in console::AnsiCodeIterator::new(word) {
+            if is_ansi {
+                chunk.push_str(piece);
+                continue;
+            }
+            for ch in piece.chars() {
+                let ch_width = Self::visual_width(ch.encode_utf8(&mut [0; 4]));
+                if used > 0 && used + ch_width > width {
+                    lines.push(std::mem::take(&mut chunk));
+                    used = 0;
+                }
+                chunk.push(ch);
+                used += ch_width;
+            }
+        }
+        chunk
+    }
+
+    /// End every line that leaves a style open with a reset, and reopen that
+    /// style at the start of the next line, so a styled span that wraps keeps
+    /// its style without bleeding into the border.
+    fn carry_styles(lines: &mut [String]) {
+        let mut open = String::new();
+        for line in lines.iter_mut() {
+            let mut active = open.clone();
+            let codes = console::AnsiCodeIterator::new(line).filter(|&(_, is_ansi)| is_ansi);
+            for (code, _) in codes {
+                if code == ANSI_RESET {
+                    active.clear();
+                } else {
+                    active.push_str(code);
+                }
+            }
+            line.insert_str(0, &open);
+            if !active.is_empty() {
+                line.push_str(ANSI_RESET);
+            }
+            open = active;
+        }
+    }
+
     /// Right-pad to fill the remaining inner width.
     fn padding(inner: usize, used: usize) -> String {
         let remaining = inner.saturating_sub(used);
@@ -337,7 +431,7 @@ impl Panel {
 
         for row in &self.rows {
             match row {
-                PanelRow::Line(text) => {
+                PanelRow::Line(text) | PanelRow::Wrapped(text) => {
                     let _ = writeln!(out, "{text}");
                 }
                 PanelRow::KeyValue {
@@ -867,5 +961,179 @@ mod tests {
         assert!(p.contains("Status: ok"), "should contain Status kv");
         assert!(p.contains("(3.2s)"), "should contain annotation");
         assert!(p.contains("Done in 3.2s"), "should contain footer");
+    }
+
+    // ── 14. Wrapped rows ──
+
+    /// The content rows of a rendered panel, borders and padding stripped.
+    fn wrapped_content(p: &str) -> Vec<&str> {
+        p.lines()
+            .filter(|l| l.starts_with("│ "))
+            .map(|l| l.trim_start_matches("│ ").trim_end_matches('│').trim_end())
+            .collect()
+    }
+
+    #[test]
+    fn wrapped_text_breaks_at_spaces_and_keeps_every_word() {
+        let text = "Token exchange failed (HTTP 500 Internal Server Error): \
+                    server_error: Failed to process token request";
+        let p = plain(&Panel::new().wrapped(text).render(50));
+
+        for line in p.lines() {
+            assert_eq!(
+                line.chars().count(),
+                50,
+                "line should be 50 chars: '{line}'"
+            );
+            assert!(
+                !line.contains('…'),
+                "wrapped text is never truncated: '{line}'"
+            );
+        }
+        let content = wrapped_content(&p);
+        assert!(content.len() > 1, "text should take several lines: {p}");
+        assert_eq!(content.join(" "), text);
+    }
+
+    #[test]
+    fn wrapped_word_longer_than_a_line_breaks_mid_word() {
+        let word = "A".repeat(100);
+        let p = plain(&Panel::new().wrapped(&word).render(40));
+
+        // 36 columns inside the borders: 36 + 36 + 28.
+        assert_eq!(
+            wrapped_content(&p),
+            ["A".repeat(36), "A".repeat(36), "A".repeat(28)]
+        );
+        for line in p.lines() {
+            assert_eq!(
+                line.chars().count(),
+                40,
+                "line should be 40 chars: '{line}'"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_text_breaks_at_newlines_inside_the_box() {
+        let p = plain(&Panel::new().wrapped("first\nsecond").render(40));
+        let lines: Vec<&str> = p.lines().collect();
+
+        assert_eq!(lines.len(), 4, "top, two content lines, bottom: {p}");
+        assert_eq!(wrapped_content(&p), ["first", "second"]);
+        for line in &lines[1..3] {
+            assert!(
+                line.ends_with('│'),
+                "newline should not break the border: '{line}'"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_text_that_fits_is_one_line_and_keeps_its_indent() {
+        let p = plain(&Panel::new().wrapped("  indented text").render(40));
+        let lines: Vec<&str> = p.lines().collect();
+
+        assert_eq!(lines.len(), 3, "top, one content line, bottom: {p}");
+        assert!(lines[1].starts_with("│   indented text "), "'{}'", lines[1]);
+    }
+
+    #[test]
+    fn wrapped_styled_text_keeps_its_style_and_the_box_aligned() {
+        let styled = console::style("one two three four five six seven eight nine ten eleven")
+            .cyan()
+            .force_styling(true)
+            .to_string();
+        assert!(
+            styled.ends_with(ANSI_RESET),
+            "console closes spans with ANSI_RESET"
+        );
+        let rendered = Panel::new().wrapped(&styled).render(40);
+        let p = plain(&rendered);
+
+        assert_eq!(wrapped_content(&p).len(), 2, "{p}");
+        for line in p.lines() {
+            assert_eq!(
+                line.chars().count(),
+                40,
+                "line should be 40 chars: '{line}'"
+            );
+        }
+        for line in rendered.lines().filter(|l| l.contains("│ ")) {
+            assert!(
+                line.contains("\x1b[36m"),
+                "each wrapped line is cyan: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_closes_and_reopens_a_style_across_a_break() {
+        let cyan = "\x1b[36m";
+        let lines = Panel::wrap(&format!("Fix: {cyan}one two three{ANSI_RESET}"), 12);
+
+        assert_eq!(
+            lines,
+            [
+                format!("Fix: {cyan}one two{ANSI_RESET}"),
+                format!("{cyan}three{ANSI_RESET}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_carries_a_style_through_a_word_broken_mid_word() {
+        let cyan = "\x1b[36m";
+        let lines = Panel::wrap(&format!("{cyan}abcdefgh{ANSI_RESET}"), 3);
+
+        assert_eq!(
+            lines,
+            [
+                format!("{cyan}abc{ANSI_RESET}"),
+                format!("{cyan}def{ANSI_RESET}"),
+                format!("{cyan}gh{ANSI_RESET}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_measures_wide_characters_by_their_columns() {
+        // Each of these takes two columns, so five columns hold two of them.
+        assert_eq!(
+            Panel::wrap("日本語テキスト", 5),
+            ["日本", "語テ", "キス", "ト"]
+        );
+    }
+
+    #[test]
+    fn wrap_keeps_an_empty_row() {
+        assert_eq!(Panel::wrap("", 10), [""]);
+    }
+
+    #[test]
+    fn plain_text_wrapped_row_prints_unwrapped() {
+        let text = "a line long enough that the terminal wraps it on its own";
+        let rendered = Panel::titled("Error").wrapped(text).render(30);
+
+        assert!(!rendered.contains('│'), "plain mode should not have │");
+        assert!(rendered.contains(text), "plain mode prints the whole text");
+    }
+
+    #[test]
+    fn line_still_truncates_where_wrapped_does_not() {
+        let text = "B".repeat(60);
+        let p = plain(&Panel::new().line(&text).wrapped(&text).render(40));
+        let content: Vec<&str> = p.lines().filter(|l| l.starts_with("│ ")).collect();
+
+        assert_eq!(
+            content.len(),
+            3,
+            "one truncated line, two wrapped lines: {p}"
+        );
+        assert!(content[0].contains('…'), "line() truncates: {p}");
+        assert!(
+            !content[1].contains('…') && !content[2].contains('…'),
+            "wrapped() does not: {p}"
+        );
     }
 }

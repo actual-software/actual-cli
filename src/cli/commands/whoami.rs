@@ -3,6 +3,8 @@
 //! Reads the locally cached credentials (resolved at `login` time); makes no
 //! network call. Errors with [`ActualError::NotLoggedIn`] when signed out.
 
+use chrono::{DateTime, Utc};
+
 use crate::auth::store::{self, StoredCredentials};
 use crate::cli::ui::theme;
 use crate::error::ActualError;
@@ -34,6 +36,19 @@ fn print_identity(creds: &StoredCredentials) {
     if let Some(scope) = &creds.scope {
         println!("  {:<14} {}", "Scopes:", scope);
     }
+    if let Some(expired) = expired_note(creds, Utc::now()) {
+        println!("  {:<14} {}", "Access token:", theme::warning(expired));
+    }
+}
+
+/// `"expired <when>"` once the access token's expiry has passed at `now`, or
+/// `None` while it is valid or the session records no expiry.
+pub(crate) fn expired_note(creds: &StoredCredentials, now: DateTime<Utc>) -> Option<String> {
+    let expires_at = creds.expires_at.filter(|_| creds.is_expired(now))?;
+    Some(format!(
+        "expired {}",
+        expires_at.format("%Y-%m-%d %H:%M UTC")
+    ))
 }
 
 #[cfg(test)]
@@ -95,5 +110,32 @@ mod tests {
         c.email = None;
         c.subject = Some("sub-123".to_string());
         print_identity(&c);
+    }
+
+    #[test]
+    fn test_print_identity_with_expired_access_token() {
+        let mut c = creds();
+        c.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+        print_identity(&c);
+    }
+
+    #[test]
+    fn test_expired_note_only_once_the_expiry_has_passed() {
+        let now = DateTime::parse_from_rfc3339("2026-10-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut c = creds();
+
+        c.expires_at = Some(now - chrono::Duration::minutes(90));
+        assert_eq!(
+            expired_note(&c, now).as_deref(),
+            Some("expired 2026-10-23 10:30 UTC")
+        );
+
+        c.expires_at = Some(now + chrono::Duration::minutes(5));
+        assert_eq!(expired_note(&c, now), None);
+
+        c.expires_at = None;
+        assert_eq!(expired_note(&c, now), None);
     }
 }

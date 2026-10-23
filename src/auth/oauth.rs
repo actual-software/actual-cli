@@ -200,13 +200,49 @@ pub(crate) fn build_http_client(base_url: &str) -> Result<reqwest::Client, Actua
         .map_err(|e| ActualError::ApiError(format!("Failed to build HTTP client: {e}")))
 }
 
-/// Map an unsuccessful auth-server response to an [`ActualError`], redacting
-/// nothing sensitive (these bodies are OAuth error JSON, not secrets).
-async fn auth_error(context: &str, response: reqwest::Response) -> ActualError {
+/// The `{ error, error_description }` JSON an OAuth endpoint answers a failed
+/// request with (RFC 6749 §5.2).
+#[derive(Debug, Default, Deserialize)]
+struct OAuthErrorBody {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+impl OAuthErrorBody {
+    /// Read a failed response's body. A body that isn't OAuth error JSON, such
+    /// as an HTML error page, reads as empty.
+    async fn read(response: reqwest::Response) -> Self {
+        let body = response.text().await.unwrap_or_default();
+        serde_json::from_str(&body).unwrap_or_default()
+    }
+}
+
+/// Map an unsuccessful auth-server response to an [`ActualError`] that names
+/// `context`, the status line, and the OAuth error and its description when
+/// the body carries them. Any other body is left out of the message.
+pub(crate) async fn auth_error(context: &str, response: reqwest::Response) -> ActualError {
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let truncated: String = body.chars().take(2048).collect();
-    ActualError::ApiError(format!("{context} (HTTP {status}): {truncated}"))
+    let body = OAuthErrorBody::read(response).await;
+    response_error(context, status, &body)
+}
+
+/// `"{context} (HTTP {status}): {error}: {error_description}"`, dropping
+/// whichever OAuth field is absent or empty.
+fn response_error(
+    context: &str,
+    status: reqwest::StatusCode,
+    body: &OAuthErrorBody,
+) -> ActualError {
+    let mut message = format!("{context} (HTTP {status})");
+    for part in [&body.error, &body.error_description].into_iter().flatten() {
+        if !part.is_empty() {
+            message.push_str(": ");
+            message.push_str(part);
+        }
+    }
+    ActualError::ApiError(message)
 }
 
 /// Exchange an authorization code for tokens (PKCE back-channel).
@@ -369,6 +405,9 @@ async fn login_with(
 /// Refresh an access token via the `refresh_token` grant (rotation: the server
 /// returns a new refresh token and revokes the old one). Identity fields
 /// (org/member/email/subject) and the auth URL are preserved from `creds`.
+///
+/// A missing refresh token, or one the server rejects, comes back as
+/// [`ActualError::NotLoggedIn`]; every other failure keeps its own error.
 pub async fn refresh(creds: &StoredCredentials) -> Result<StoredCredentials, ActualError> {
     let base_url = creds.auth_url.clone().ok_or_else(|| {
         ActualError::ConfigError(
@@ -403,8 +442,17 @@ async fn refresh_tokens(
         .send()
         .await
         .map_err(|e| ActualError::ApiError(format!("Token refresh request failed: {e}")))?;
-    if !response.status().is_success() {
-        return Err(auth_error("Token refresh failed", response).await);
+    let status = response.status();
+    if !status.is_success() {
+        let body = OAuthErrorBody::read(response).await;
+        // Only a rejected refresh token ends the session. An outage or a bad
+        // request is reported as itself, since signing in again won't fix it.
+        let rejected =
+            matches!(status.as_u16(), 400 | 401) && body.error.as_deref() == Some("invalid_grant");
+        if rejected {
+            return Err(ActualError::NotLoggedIn);
+        }
+        return Err(response_error("Token refresh failed", status, &body));
     }
     response
         .json::<TokenResponse>()
@@ -506,13 +554,6 @@ enum DevicePollOutcome {
     Expired,
 }
 
-/// OAuth error body the token endpoint returns for a not-yet-complete or
-/// failed device grant (RFC 8628 §3.5 reuses the OAuth `error` field).
-#[derive(Debug, Deserialize)]
-struct DeviceTokenErrorBody {
-    error: String,
-}
-
 /// Request a device + user code to start the browserless flow (RFC 8628 §3.1).
 async fn request_device_code(
     http: &reqwest::Client,
@@ -569,21 +610,13 @@ async fn poll_device_token(
     }
     // Non-2xx: the RFC 8628 §3.5 status codes arrive as a JSON `error`. Anything
     // we don't recognize (or a body without an `error`) is a hard failure.
-    let body = response.text().await.unwrap_or_default();
-    let code = serde_json::from_str::<DeviceTokenErrorBody>(&body)
-        .map(|b| b.error)
-        .unwrap_or_default();
-    match code.as_str() {
-        "authorization_pending" => Ok(DevicePollOutcome::Pending),
-        "slow_down" => Ok(DevicePollOutcome::SlowDown),
-        "access_denied" => Ok(DevicePollOutcome::Denied),
-        "expired_token" => Ok(DevicePollOutcome::Expired),
-        _ => {
-            let truncated: String = body.chars().take(2048).collect();
-            Err(ActualError::ApiError(format!(
-                "Device token poll failed (HTTP {status}): {truncated}"
-            )))
-        }
+    let body = OAuthErrorBody::read(response).await;
+    match body.error.as_deref() {
+        Some("authorization_pending") => Ok(DevicePollOutcome::Pending),
+        Some("slow_down") => Ok(DevicePollOutcome::SlowDown),
+        Some("access_denied") => Ok(DevicePollOutcome::Denied),
+        Some("expired_token") => Ok(DevicePollOutcome::Expired),
+        _ => Err(response_error("Device token poll failed", status, &body)),
     }
 }
 
@@ -875,6 +908,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_exchange_code_server_error_names_the_reason() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error":"server_error","error_description":"Failed to process token request"}"#,
+            )
+            .create_async()
+            .await;
+
+        let http = build_http_client(&server.url()).unwrap();
+        let err = exchange_code(
+            &http,
+            &server.url(),
+            "actual-cli",
+            "made-up",
+            "v",
+            "http://127.0.0.1:1/callback",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m == "Token exchange failed \
+                (HTTP 500 Internal Server Error): server_error: Failed to process token request"),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn test_response_error_leaves_out_missing_and_empty_fields() {
+        // Display adds the "API request failed: " that ApiError carries.
+        let message = |body: &OAuthErrorBody| {
+            response_error("Step failed", reqwest::StatusCode::BAD_REQUEST, body).to_string()
+        };
+        let error_only = OAuthErrorBody {
+            error: Some("invalid_request".to_string()),
+            error_description: Some(String::new()),
+        };
+        let description_only = OAuthErrorBody {
+            error: None,
+            error_description: Some("code is missing".to_string()),
+        };
+
+        assert_eq!(
+            message(&error_only),
+            "API request failed: Step failed (HTTP 400 Bad Request): invalid_request"
+        );
+        assert_eq!(
+            message(&description_only),
+            "API request failed: Step failed (HTTP 400 Bad Request): code is missing"
+        );
+        assert_eq!(
+            message(&OAuthErrorBody::default()),
+            "API request failed: Step failed (HTTP 400 Bad Request)"
+        );
+    }
+
+    #[tokio::test]
     async fn test_fetch_identity_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -1121,19 +1215,66 @@ mod tests {
         assert_eq!(url, DEFAULT_AUTH_URL);
     }
 
-    #[tokio::test]
-    async fn test_refresh_error_status() {
+    /// Answer a refresh grant with `status` and `body`, and return what
+    /// `refresh` makes of it.
+    async fn refresh_answered_with(status: usize, body: &str) -> ActualError {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/api/oauth/token")
-            .with_status(400)
-            .with_body(r#"{"error":"invalid_grant"}"#)
+            .match_body(mockito::Matcher::UrlEncoded(
+                "grant_type".into(),
+                "refresh_token".into(),
+            ))
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(body)
             .create_async()
             .await;
         let creds = creds_with_auth(Some(server.url()), "stale");
         let err = refresh(&creds).await.unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_grant")));
         mock.assert_async().await;
+        err
+    }
+
+    #[tokio::test]
+    async fn test_refresh_rejected_token_is_not_logged_in() {
+        for status in [400, 401] {
+            let err = refresh_answered_with(status, r#"{"error":"invalid_grant"}"#).await;
+            assert!(
+                matches!(err, ActualError::NotLoggedIn),
+                "HTTP {status}: got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refresh_server_error_names_the_refresh_step() {
+        let err = refresh_answered_with(
+            500,
+            r#"{"error":"server_error","error_description":"Failed to process token request"}"#,
+        )
+        .await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m == "Token refresh failed \
+                (HTTP 500 Internal Server Error): server_error: Failed to process token request"),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_other_rejections_are_not_a_sign_out() {
+        // An unknown client is not a dead refresh token, and invalid_grant
+        // counts only on the 400 or 401 a token endpoint answers it with.
+        let err = refresh_answered_with(401, r#"{"error":"invalid_client"}"#).await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_client")),
+            "got: {err:?}"
+        );
+        let err = refresh_answered_with(403, r#"{"error":"invalid_grant"}"#).await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("HTTP 403")),
+            "got: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1303,6 +1444,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_device_code_error_page_reports_only_the_status() {
+        // A server with no device grant answers with its HTML 404 page.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(404)
+            .with_header("content-type", "text/html")
+            .with_body(
+                "<!DOCTYPE html><html><head><title>404: This page could not be found.\
+                 </title></head><body><h1>404</h1></body></html>",
+            )
+            .create_async()
+            .await;
+        let http = build_http_client(&server.url()).unwrap();
+        let err = request_device_code(&http, &server.url(), "actual-cli", "adr:query")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "Device authorization failed (HTTP 404 Not Found)"),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn test_request_device_code_bad_json() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -1402,8 +1569,9 @@ mod tests {
     async fn test_poll_device_token_non_json_body_is_hard_failure() {
         let err = poll_once_with(500, "upstream boom").await.unwrap_err();
         assert!(
-            matches!(err, ActualError::ApiError(ref m) if m.contains("boom")),
-            "got: {err:?}"
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "Device token poll failed (HTTP 500 Internal Server Error)"),
+            "the body stays out of the message: {err:?}"
         );
     }
 

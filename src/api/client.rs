@@ -357,10 +357,15 @@ impl ActualApiClient {
                 )),
             }
         } else {
-            let body_bytes = response.bytes().await.unwrap_or_default();
-            let truncated = &body_bytes[..body_bytes.len().min(4096)];
-            let body = String::from_utf8_lossy(truncated);
-            ActualError::ApiError(format!("HTTP {status}: {body}"))
+            // A 5xx body that isn't the API's JSON error is usually a proxy's
+            // error page, which says nothing the status line doesn't.
+            match response.json::<ApiErrorResponse>().await {
+                Ok(body) => ActualError::ApiError(format!(
+                    "HTTP {status}: {}: {}",
+                    body.error.code, body.error.message
+                )),
+                Err(_) => ActualError::ApiError(format!("HTTP {status}")),
+            }
         }
     }
 
@@ -710,6 +715,57 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_server_error_page_reports_only_the_status() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(502)
+            .with_header("content-type", "text/html")
+            .with_body("<html><head><title>502 Server Error</title></head><body></body></html>")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let err = client
+            .post_match(&sample_match_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref msg) if msg == "HTTP 502 Bad Gateway"),
+            "got {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_server_error_json_reports_code_and_message() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error": {"code": "INTERNAL", "message": "matcher crashed", "details": null}}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let err = client
+            .post_match(&sample_match_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref msg)
+                if msg == "HTTP 500 Internal Server Error: INTERNAL: matcher crashed"),
+            "got {err:?}"
         );
         mock.assert_async().await;
     }

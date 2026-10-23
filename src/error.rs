@@ -135,13 +135,11 @@ pub enum ActualError {
     /// A private key was supplied in SEC1 form (`BEGIN EC PRIVATE KEY`), which
     /// the assertion signer cannot load — it reads PKCS#1 and PKCS#8 only.
     ///
-    /// The split between `message` and `hint` is load-bearing rather than
-    /// stylistic. The error panel truncates every row to the terminal width, so
-    /// a conversion command baked into `Display` is the first thing the user
-    /// loses — and the conversion command is the whole remedy. Carrying it on
-    /// the "Fix:" line the way [`Self::OrgMismatch`] does keeps it visible.
-    /// A plain `ConfigError` would also point the user at `config.yaml`, which
-    /// is the wrong place to look for a key passed by flag or environment.
+    /// The conversion command is the whole remedy, so it rides on the "Fix:"
+    /// line the way [`Self::OrgMismatch`]'s remediation does, rather than in
+    /// `Display`. A plain `ConfigError` would also point the user at
+    /// `config.yaml`, which is the wrong place to look for a key passed by
+    /// flag or environment.
     #[error("{message}")]
     Sec1KeyUnsupported { message: String, hint: String },
 
@@ -253,7 +251,7 @@ impl ActualError {
                 "Pass a connected repository name to --repo, or omit --repo to query the whole organization",
             )),
             // Carried on the variant rather than matched to a static string,
-            // for the panel-truncation reason documented on it.
+            // for the reason documented on it.
             Self::Sec1KeyUnsupported { hint, .. } => Some(Cow::Owned(hint.clone())),
             _ => None,
         }
@@ -981,8 +979,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("SEC1"), "got: {msg}");
         assert!(msg.contains("PKCS#8"), "got: {msg}");
-        // The conversion command rides on the Fix/hint line, not Display —
-        // Display is what the error panel truncates.
+        // The conversion command rides on the Fix/hint line, not Display.
         let hint = err
             .hint()
             .expect("expected a Fix hint for Sec1KeyUnsupported");
