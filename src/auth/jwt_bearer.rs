@@ -330,37 +330,6 @@ impl std::fmt::Debug for MintedToken {
     }
 }
 
-/// Map an unsuccessful token-endpoint response to a clean [`ActualError`]. The
-/// body is OAuth error JSON (`{ error, error_description }`), not a secret; we
-/// surface `error: description` when present, otherwise a truncated body. No
-/// stack traces, no assertion or key material.
-async fn mint_error(response: reqwest::Response) -> ActualError {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if let Ok(parsed) = serde_json::from_str::<OAuthError>(&body) {
-        if let Some(error) = parsed.error {
-            let detail = parsed
-                .error_description
-                .filter(|d| !d.is_empty())
-                .map(|d| format!(": {d}"))
-                .unwrap_or_default();
-            return ActualError::ApiError(format!(
-                "Token mint failed (HTTP {status}): {error}{detail}"
-            ));
-        }
-    }
-    let truncated: String = body.chars().take(2048).collect();
-    ActualError::ApiError(format!("Token mint failed (HTTP {status}): {truncated}"))
-}
-
-#[derive(Debug, Deserialize)]
-struct OAuthError {
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    error_description: Option<String>,
-}
-
 /// Exchange a signed assertion for an access token at
 /// `${base_url}/api/oauth/token`. `scope`, when non-empty, is sent as the
 /// space-delimited `scope` param (a subset the server clamps to the principal's
@@ -394,7 +363,7 @@ pub async fn mint_token(
         .map_err(|e| ActualError::ApiError(format!("Token mint request failed: {e}")))?;
 
     if !response.status().is_success() {
-        return Err(mint_error(response).await);
+        return Err(crate::auth::oauth::auth_error("Token mint failed", response).await);
     }
 
     let token = response
@@ -1064,10 +1033,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mint_token_surfaces_error_body_without_oauth_error_field() {
-        // A failure body that is not OAuth error JSON (here JSON with no `error`
-        // field) falls through to the truncated-body fallback — still a clean
-        // ApiError carrying the status, no panic and no secret material.
+    async fn mint_token_reports_the_status_for_json_without_an_oauth_error() {
+        // JSON with no `error` field is not OAuth error JSON, so only the status
+        // line reaches the message.
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", "/api/oauth/token")
@@ -1081,29 +1049,23 @@ mod tests {
         let err = mint_token(&http, &server.url(), "some.assertion", None)
             .await
             .unwrap_err();
-        match err {
-            ActualError::ApiError(msg) => {
-                assert!(msg.contains("503"), "surfaces the status: {msg}");
-                assert!(
-                    msg.contains("upstream unavailable"),
-                    "surfaces the body: {msg}"
-                );
-            }
-            other => panic!("expected ApiError, got {other:?}"),
-        }
+        assert!(
+            matches!(err, ActualError::ApiError(ref msg)
+                if msg == "Token mint failed (HTTP 503 Service Unavailable)"),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
-    async fn mint_token_surfaces_non_json_error_body() {
-        // A non-JSON failure body makes the OAuth-error parse fail, so the outer
-        // guard is skipped and the truncated-text fallback runs — still a clean
-        // ApiError carrying the status.
+    async fn mint_token_leaves_a_non_json_error_body_out() {
+        // An error page from a proxy is markup, not a reason, so the message
+        // stops at the status line.
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", "/api/oauth/token")
             .with_status(502)
-            .with_header("content-type", "text/plain")
-            .with_body("upstream is down")
+            .with_header("content-type", "text/html")
+            .with_body("<html><body><h1>502 Bad Gateway</h1></body></html>")
             .create_async()
             .await;
 
@@ -1111,12 +1073,10 @@ mod tests {
         let err = mint_token(&http, &server.url(), "some.assertion", None)
             .await
             .unwrap_err();
-        match err {
-            ActualError::ApiError(msg) => {
-                assert!(msg.contains("502"), "surfaces the status: {msg}");
-                assert!(msg.contains("upstream is down"), "surfaces the body: {msg}");
-            }
-            other => panic!("expected ApiError, got {other:?}"),
-        }
+        assert!(
+            matches!(err, ActualError::ApiError(ref msg)
+                if msg == "Token mint failed (HTTP 502 Bad Gateway)"),
+            "got {err:?}"
+        );
     }
 }

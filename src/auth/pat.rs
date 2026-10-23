@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::auth::oauth::build_http_client;
+use crate::auth::oauth::{auth_error, build_http_client};
 use crate::error::ActualError;
 
 /// Opaque-token prefix. Chosen so secret-scanning can spot a leaked PAT, and
@@ -93,17 +93,6 @@ impl std::fmt::Debug for IssuedToken {
     }
 }
 
-/// Map an unsuccessful issuance response to an [`ActualError`]. The body is an
-/// error payload (not a secret); it is truncated and surfaced for diagnosis.
-async fn issuance_error(response: reqwest::Response) -> ActualError {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let truncated: String = body.chars().take(2048).collect();
-    ActualError::ApiError(format!(
-        "Token issuance failed (HTTP {status}): {truncated}"
-    ))
-}
-
 /// Mint a PAT named `name` with `scopes`, authenticating with `access_token`
 /// (the user's `actual login` session bearer) against `base_url`.
 ///
@@ -134,7 +123,7 @@ pub async fn issue(
         .map_err(|e| ActualError::ApiError(format!("Token issuance request failed: {e}")))?;
 
     if !response.status().is_success() {
-        return Err(issuance_error(response).await);
+        return Err(auth_error("Token issuance failed", response).await);
     }
 
     let body: IssueTokenResponse = response

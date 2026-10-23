@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A failed sign-in, token mint, token issuance or API request reports the status line plus the OAuth `error` and `error_description` (or the API's error code and message), not up to 2 KB of the response body, which for an error page was HTML
+
 ## [0.9.0] - 2026-10-23
 
 ### Added
