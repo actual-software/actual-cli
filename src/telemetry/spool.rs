@@ -81,8 +81,8 @@ fn lock_path() -> Option<PathBuf> {
 /// append's cap-trim rename and against [`flush`]'s post-delivery removal — the
 /// two windows in which a concurrent writer could otherwise clobber a queued
 /// event or delete one that landed mid-flush. The network send itself is
-/// deliberately *not* held under the lock, so a slow uploader never blocks a
-/// `rules select` from appending.
+/// deliberately *not* held under the lock, so a slow uploader never blocks any
+/// command from appending.
 struct SpoolLock {
     // Held only for its lock; the OS releases the advisory lock when the fd is
     // closed on drop, so the field is never read directly.
