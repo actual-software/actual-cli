@@ -29,6 +29,9 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct HookEnvelope {
     pub session_id: Option<String>,
+    /// The subagent the envelope came from, absent for the main agent. Only
+    /// the gate's telemetry reads it.
+    pub agent_id: Option<String>,
     /// Which hook event delivered the envelope. `UserPromptSubmit` marks the
     /// start of a turn; anything else, or nothing, runs the check.
     pub hook_event_name: Option<String>,
@@ -49,6 +52,16 @@ mod tests {
     fn test_envelope_reads_session_id() {
         let env: HookEnvelope = serde_json::from_str(r#"{"session_id":"abc-123"}"#).unwrap();
         assert_eq!(env.session_id.as_deref(), Some("abc-123"));
+    }
+
+    /// A subagent's envelope names it, and the main agent's names none.
+    #[test]
+    fn test_envelope_reads_agent_id() {
+        let env: HookEnvelope =
+            serde_json::from_str(r#"{"session_id":"abc-123","agent_id":"sub-1"}"#).unwrap();
+        assert_eq!(env.agent_id.as_deref(), Some("sub-1"));
+        let env: HookEnvelope = serde_json::from_str(r#"{"session_id":"abc-123"}"#).unwrap();
+        assert_eq!(env.agent_id, None);
     }
 
     #[test]

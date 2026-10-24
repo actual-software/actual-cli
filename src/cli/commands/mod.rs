@@ -15,6 +15,8 @@ pub(crate) mod brief_memory;
 mod brief_telemetry;
 pub mod cache;
 pub(crate) mod check_engine;
+#[cfg(feature = "telemetry")]
+mod check_telemetry;
 pub mod config;
 pub mod create_token;
 pub(crate) mod governance_session;
