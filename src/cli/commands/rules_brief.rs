@@ -474,7 +474,7 @@ fn brief_for(
         })
         .collect();
 
-    let Some((brief, shown)) =
+    let Some(rendered) =
         render_brief_shown(&relative, &briefed, args.rules_per_decision, args.max_chars)
     else {
         return Err(NoBrief::NothingToShow);
@@ -488,10 +488,15 @@ fn brief_for(
             session_id: who.session_id,
             rules_dir: &key_dir,
         };
-        let added = shown
+        let added = rendered
+            .shown
             .iter()
             .map(|&position| decisions[position].key.as_str());
         brief_ledger::record(&dir, &key, added);
+        // Telemetry counts by a different rule: any ADR with a rule the agent
+        // was just given, however its decision was trimmed.
+        #[cfg(feature = "telemetry")]
+        super::brief_telemetry::report(&dir, &key, who.agent_id, rendered.reached.iter().copied());
     }
 
     // Only decisions that contributed everything they could are remembered:
@@ -499,12 +504,12 @@ fn brief_for(
     // no later read can lift. A decision `--max-chars` left out or trimmed
     // stays eligible, because a read with less competition can fit it whole.
     if let Some((dir, key, mut state)) = memory {
-        for position in shown {
+        for position in rendered.shown {
             state.record(&decisions[position].key);
         }
         brief_memory::store(&dir, &key, &state);
     }
-    Ok(brief)
+    Ok(rendered.brief)
 }
 
 /// Note the folder `relative` sits in, in the session's record: covered when
@@ -2456,5 +2461,267 @@ mod tests {
         // The impure half answers for whatever this harness attached, without
         // reading it.
         let _ = stdin_is_piped();
+    }
+
+    // ── the context-added event ──────────────────────────────────────────
+
+    /// A v2 rule file: `adr_id` and `candidate_group_id` in its header, and a
+    /// `Verify` block naming `services/auth/oauth/`.
+    #[cfg(feature = "telemetry")]
+    fn v2_rule(adr_id: &str, group: &str, title: &str) -> String {
+        format!(
+            "---\nversion: 2\nname: {adr_id}\ndescription: \"{title}\"\nmetadata:\n  actual:\n    adr_id: {adr_id}\n    status: accepted\n    candidate_group_id: {group}\n---\n# {title}\n\nThese rules are ALWAYS ACTIVE for OAuth token handling in `services/auth/oauth/`.\n\n### Rules\n\n- **R-{adr_id}-001** MUST: follow {adr_id}.\n\n### Verify\n\n```bash\ngrep -r \"jwt\" services/auth/oauth/ --include=\"*.ts\"\n```\n"
+        )
+    }
+
+    /// Two decisions governing `services/auth/oauth/`: one of two policy
+    /// files sharing a group, and one of a single file.
+    #[cfg(feature = "telemetry")]
+    fn v2_repo() -> TempDir {
+        let root = tempdir().unwrap();
+        let dir = crate::rules::rules_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, adr_id, group, title) in [
+            (
+                "oauth-signing-a1.md",
+                "adr-sign-1",
+                "grp-sign",
+                "Sign With Asymmetric Keys: Token Signing",
+            ),
+            (
+                "oauth-signing-a2.md",
+                "adr-sign-2",
+                "grp-sign",
+                "Sign With Asymmetric Keys: Key Storage",
+            ),
+            (
+                "oauth-rotation-b1.md",
+                "adr-rotate-1",
+                "grp-rotate",
+                "Rotate Signing Keys: Rotation",
+            ),
+        ] {
+            std::fs::write(dir.join(file), v2_rule(adr_id, group, title)).unwrap();
+        }
+        root
+    }
+
+    /// Run `body` with a scratch config dir whose config turns on the OTLP
+    /// file sink, and nothing captured yet.
+    #[cfg(feature = "telemetry")]
+    fn with_otlp_configured(body: impl FnOnce()) {
+        with_scratch_config(|| {
+            let _env: Vec<crate::testutil::EnvGuard> = [
+                "ACTUAL_NO_TELEMETRY",
+                "ACTUAL_OTLP_LOGS_ENDPOINT",
+                "ACTUAL_OTLP_FILE",
+                "TRACEPARENT",
+            ]
+            .into_iter()
+            .map(crate::testutil::EnvGuard::remove)
+            .collect();
+            let dir = crate::config::paths::config_dir().unwrap();
+            std::fs::write(
+                dir.join("config.yaml"),
+                "telemetry:\n  otlp_file: /tmp/actual-otlp-brief-test.jsonl\n",
+            )
+            .unwrap();
+            super::super::brief_telemetry::tests::take_captured();
+            body();
+        });
+    }
+
+    /// The ADR refs of the records reported since the last call, sorted, with
+    /// the file ids each carries. Every fixture ADR has a group, so its ref is
+    /// the group id.
+    #[cfg(feature = "telemetry")]
+    fn reported() -> Vec<(String, serde_json::Value)> {
+        use super::super::brief_telemetry::tests::{attribute, take_captured};
+        let mut reported: Vec<(String, serde_json::Value)> = take_captured()
+            .iter()
+            .map(|record| {
+                (
+                    attribute(record, "actual.adr.ref")
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                    attribute(record, "actual.adr.ids"),
+                )
+            })
+            .collect();
+        reported.sort_by(|a, b| a.0.cmp(&b.0));
+        reported
+    }
+
+    /// One brief adding two ADRs reports both, with their group and file ids.
+    /// Afterwards nothing re-reports them: not a repeat read, not a subagent
+    /// briefed on them afresh, not the main agent briefed again after its
+    /// context compacted. Another session reports them again.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_brief_reports_each_adr_once_per_session() {
+        with_otlp_configured(|| {
+            let root = v2_repo();
+            let a = args(root.path());
+            let file = governed(root.path());
+            let both = vec![
+                (
+                    "grp-rotate".to_string(),
+                    serde_json::json!(["adr-rotate-1"]),
+                ),
+                (
+                    "grp-sign".to_string(),
+                    serde_json::json!(["adr-sign-1", "adr-sign-2"]),
+                ),
+            ];
+
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &file), &a).is_some());
+            assert_eq!(reported(), both);
+
+            assert_eq!(
+                hook_reply(&session_envelope(root.path(), "s1", None, &file), &a),
+                None
+            );
+            assert!(hook_reply(
+                &session_envelope(root.path(), "s1", Some("sub-1"), &file),
+                &a
+            )
+            .is_some());
+            session_start(&session_start_envelope(root.path(), "s1", "compact"), &a);
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &file), &a).is_some());
+            assert_eq!(reported(), []);
+
+            assert!(hook_reply(&session_envelope(root.path(), "s2", None, &file), &a).is_some());
+            assert_eq!(reported(), both);
+        });
+    }
+
+    /// A brief that adds one ADR the session already reported and one it has
+    /// not reports only the new one.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_later_brief_reports_only_the_adr_new_to_the_session() {
+        with_otlp_configured(|| {
+            let root = v2_repo();
+            let file = governed(root.path());
+            let mut one = args(root.path());
+            one.limit = 1;
+
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &file), &one).is_some());
+            let first = reported();
+            let subagent = session_envelope(root.path(), "s1", Some("sub-1"), &file);
+            assert!(hook_reply(&subagent, &args(root.path())).is_some());
+            let second = reported();
+
+            assert_eq!(first.len(), 1, "{first:?}");
+            assert_eq!(second.len(), 1, "{second:?}");
+            assert_ne!(first[0].0, second[0].0);
+        });
+    }
+
+    /// A brief with no session, a manual run among them, reports nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_brief_without_a_session_reports_nothing() {
+        with_otlp_configured(|| {
+            let root = v2_repo();
+            let file = governed(root.path());
+
+            assert!(hook_reply(
+                &envelope(root.path(), "PostToolUse", "Read", &file),
+                &args(root.path())
+            )
+            .is_some());
+            assert!(brief_for(root.path(), &file, &args(root.path()), None).is_ok());
+
+            assert_eq!(reported(), []);
+        });
+    }
+
+    /// v1 rule files carry no id, so a brief of them reports nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_brief_of_v1_rule_files_reports_nothing() {
+        with_otlp_configured(|| {
+            let root = repo();
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+
+            assert!(hook_reply(&read, &args(root.path())).is_some());
+
+            assert_eq!(reported(), []);
+        });
+    }
+
+    /// [`v2_repo`] without the rotation decision: one decision, two files of
+    /// one group, a rule each.
+    #[cfg(feature = "telemetry")]
+    fn signing_repo() -> TempDir {
+        let root = v2_repo();
+        std::fs::remove_file(crate::rules::rules_dir(root.path()).join("oauth-rotation-b1.md"))
+            .unwrap();
+        root
+    }
+
+    /// The `adr_id` of the one signing file whose rule `reply` carries.
+    #[cfg(feature = "telemetry")]
+    fn the_signing_file_in(reply: &str) -> String {
+        let carried: Vec<&str> = ["adr-sign-1", "adr-sign-2"]
+            .into_iter()
+            .filter(|adr_id| reply.contains(&format!("R-{adr_id}-001")))
+            .collect();
+        assert_eq!(carried.len(), 1, "{reply}");
+        carried[0].to_string()
+    }
+
+    /// A decision `--max-chars` cut after one rule reports its ADR, listing
+    /// only the file whose rule reached the agent. The cut decision stays
+    /// eligible, so a later read briefs it whole, and that read reports
+    /// nothing: the ADR was counted when its first rule entered context.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_decision_the_character_cap_cut_is_reported_once_when_cut() {
+        with_otlp_configured(|| {
+            let root = signing_repo();
+            let file = governed(root.path());
+            let whole = brief_for(root.path(), &file, &args(root.path()), None).unwrap();
+            let mut cut = args(root.path());
+            cut.max_chars = whole.chars().count() - 1;
+            let read = session_envelope(root.path(), "s1", None, &file);
+
+            let first = hook_reply(&read, &cut).expect("a shortened brief");
+            assert!(first.contains("(1 of 2 rules shown)"), "{first}");
+            let reached = the_signing_file_in(&first);
+            assert_eq!(
+                reported(),
+                [("grp-sign".to_string(), serde_json::json!([reached]))]
+            );
+
+            let again = hook_reply(&read, &args(root.path())).expect("the whole decision");
+            assert!(again.contains("R-adr-sign-1-001"), "{again}");
+            assert!(again.contains("R-adr-sign-2-001"), "{again}");
+            assert_eq!(reported(), []);
+        });
+    }
+
+    /// A file none of whose rules made `--rules-per-decision` is not listed.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_file_the_per_decision_cap_cut_is_not_listed() {
+        with_otlp_configured(|| {
+            let root = signing_repo();
+            let mut one = args(root.path());
+            one.rules_per_decision = 1;
+            let read = session_envelope(root.path(), "s1", None, &governed(root.path()));
+
+            let reply = hook_reply(&read, &one).expect("a brief");
+
+            assert_eq!(
+                reported(),
+                [(
+                    "grp-sign".to_string(),
+                    serde_json::json!([the_signing_file_in(&reply)])
+                )]
+            );
+        });
     }
 }

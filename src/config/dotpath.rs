@@ -1,7 +1,10 @@
 use std::str::FromStr;
 
 use crate::cli::commands::models::known_model_names;
-use crate::config::types::{validate_rules_min_score, Config, TelemetryConfig};
+use crate::config::types::{
+    validate_otlp_file, validate_otlp_logs_endpoint, validate_rules_min_score, Config,
+    TelemetryConfig,
+};
 use crate::error::ActualError;
 use crate::generation::OutputFormat;
 
@@ -75,6 +78,8 @@ define_config_keys! {
     (IncludeCategories,     "include_categories"),
     (ExcludeCategories,     "exclude_categories"),
     (TelemetryEnabled,      "telemetry.enabled"),
+    (TelemetryOtlpLogsEndpoint, "telemetry.otlp_logs_endpoint"),
+    (TelemetryOtlpFile,     "telemetry.otlp_file"),
     (OutputFormatKey,       "output_format"),
     (Runner,                "runner"),
     (AnthropicApiKey,       "anthropic_api_key"),
@@ -138,6 +143,16 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .as_ref()
             .and_then(|t| t.enabled)
             .map(|v| v.to_string())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::TelemetryOtlpLogsEndpoint => config
+            .telemetry
+            .as_ref()
+            .and_then(|t| t.otlp_logs_endpoint.clone())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::TelemetryOtlpFile => config
+            .telemetry
+            .as_ref()
+            .and_then(|t| t.otlp_file.clone())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::OutputFormatKey => config
             .output_format
@@ -305,9 +320,18 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<Option<String
                 None => {
                     config.telemetry = Some(TelemetryConfig {
                         enabled: Some(enabled),
+                        ..Default::default()
                     });
                 }
             }
+        }
+        ConfigKey::TelemetryOtlpLogsEndpoint => {
+            let endpoint = otlp_setting(path, value, validate_otlp_logs_endpoint)?;
+            telemetry_section(config).otlp_logs_endpoint = endpoint;
+        }
+        ConfigKey::TelemetryOtlpFile => {
+            let file = otlp_setting(path, value, validate_otlp_file)?;
+            telemetry_section(config).otlp_file = file;
         }
         ConfigKey::OutputFormatKey => {
             let fmt = match value {
@@ -380,6 +404,27 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<Option<String
         }
     }
     Ok(None)
+}
+
+/// An OTLP setting's new value: `None` for an empty string, which clears it
+/// (`config` has no unset), else the value once `validate` accepts it.
+fn otlp_setting(
+    path: &str,
+    value: &str,
+    validate: fn(&str) -> Result<(), String>,
+) -> Result<Option<String>, ActualError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate(value)
+        .map_err(|e| ActualError::ConfigError(format!("invalid value for {path}: {e}")))?;
+    Ok(Some(value.to_string()))
+}
+
+fn telemetry_section(config: &mut Config) -> &mut TelemetryConfig {
+    config
+        .telemetry
+        .get_or_insert_with(TelemetryConfig::default)
 }
 
 #[cfg(test)]
@@ -674,6 +719,7 @@ mod tests {
         let config = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -709,6 +755,7 @@ mod tests {
         let mut config = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -749,10 +796,79 @@ mod tests {
         assert!(msg.contains("not set"), "got: {msg}");
     }
 
+    /// An OTLP endpoint follows the API URL's transport rule: HTTPS anywhere,
+    /// plain HTTP only to loopback.
+    #[test]
+    fn test_set_otlp_logs_endpoint_follows_the_api_url_rule() {
+        for accepted in [
+            "https://collector.example.com/v1/logs",
+            "http://localhost:4318/v1/logs",
+            "http://127.0.0.1:4318/v1/logs",
+            "http://[::1]:4318/v1/logs",
+        ] {
+            let mut config = Config::default();
+            set(&mut config, "telemetry.otlp_logs_endpoint", accepted).unwrap();
+            assert_eq!(
+                get(&config, "telemetry.otlp_logs_endpoint").unwrap(),
+                accepted
+            );
+        }
+        for rejected in [
+            "http://collector.example.com/v1/logs",
+            "http://localhost.example.com:4318/v1/logs",
+            "collector.example.com/v1/logs",
+        ] {
+            let mut config = Config::default();
+            let err = set(&mut config, "telemetry.otlp_logs_endpoint", rejected).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid value"),
+                "{rejected}: {err}"
+            );
+            assert!(config.telemetry.is_none(), "{rejected} must not be stored");
+        }
+    }
+
+    #[test]
+    fn test_set_otlp_file_needs_an_absolute_path() {
+        let mut config = Config::default();
+        let err = set(&mut config, "telemetry.otlp_file", "otlp.jsonl").unwrap_err();
+        assert!(err.to_string().contains("absolute path"), "{err}");
+        assert!(config.telemetry.is_none());
+    }
+
+    /// `config` has no unset, so an empty value clears an OTLP setting and
+    /// leaves the rest of the telemetry section alone.
+    #[test]
+    fn test_an_empty_value_clears_an_otlp_setting() {
+        let mut config = Config::default();
+        set(&mut config, "telemetry.enabled", "true").unwrap();
+        set(
+            &mut config,
+            "telemetry.otlp_logs_endpoint",
+            "https://c.example.com/v1/logs",
+        )
+        .unwrap();
+        set(&mut config, "telemetry.otlp_file", "/tmp/actual-otlp.jsonl").unwrap();
+
+        set(&mut config, "telemetry.otlp_logs_endpoint", "").unwrap();
+        set(&mut config, "telemetry.otlp_file", "").unwrap();
+
+        for key in ["telemetry.otlp_logs_endpoint", "telemetry.otlp_file"] {
+            assert!(get(&config, key)
+                .unwrap_err()
+                .to_string()
+                .contains("not set"));
+        }
+        assert_eq!(get(&config, "telemetry.enabled").unwrap(), "true");
+    }
+
     #[test]
     fn test_get_telemetry_enabled_none_in_struct() {
         let config = Config {
-            telemetry: Some(TelemetryConfig { enabled: None }),
+            telemetry: Some(TelemetryConfig {
+                enabled: None,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let err = get(&config, "telemetry.enabled").unwrap_err();
@@ -1057,6 +1173,11 @@ mod tests {
             ("include_categories", "security,testing"),
             ("exclude_categories", "deprecated"),
             ("telemetry.enabled", "false"),
+            (
+                "telemetry.otlp_logs_endpoint",
+                "https://collector.example.com/v1/logs",
+            ),
+            ("telemetry.otlp_file", "/tmp/actual-otlp.jsonl"),
             ("output_format", "agents-md"),
             ("runner", "anthropic-api"),
             ("anthropic_api_key", "sk-ant-test"),

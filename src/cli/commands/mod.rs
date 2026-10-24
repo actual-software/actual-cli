@@ -11,6 +11,8 @@ pub mod advisor;
 pub mod auth;
 pub(crate) mod brief_ledger;
 pub(crate) mod brief_memory;
+#[cfg(feature = "telemetry")]
+mod brief_telemetry;
 pub mod cache;
 pub(crate) mod check_engine;
 pub mod config;

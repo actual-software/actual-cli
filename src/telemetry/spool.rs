@@ -36,6 +36,11 @@
 //! the caller records the drop (it never blocks or fails the command). Durability
 //! therefore holds for an event the spool actually accepts; an event the lock
 //! turns away is a best-effort loss, not a guaranteed-persisted one.
+//!
+//! The same file, lock and cap back a second spool, [`OTLP_LOGS`], holding the
+//! OpenTelemetry log records [`crate::telemetry::otlp`] sends. Its uploader
+//! [`take`](Spool::take)s records out before sending them instead of removing
+//! them on confirmation, so two uploaders never send one record twice.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -57,32 +62,143 @@ pub(crate) const MAX_SPOOL_EVENTS: usize = 256;
 /// Sibling lock file guarding every mutation of the spool. See [`SpoolLock`].
 const LOCK_FILE: &str = "scope-telemetry-spool.lock";
 
-/// The spool file path, or `None` when the config dir cannot be resolved (in
-/// which case there is nowhere durable to write — the same fallback the
-/// per-install `distinct_id` makes).
-fn spool_path() -> Option<PathBuf> {
-    crate::config::paths::config_dir()
-        .ok()
-        .map(|dir| dir.join(SPOOL_FILE))
+/// One spool: a JSONL file under the config dir and the sibling lock file
+/// that guards every mutation of it.
+pub(crate) struct Spool {
+    file: &'static str,
+    lock: &'static str,
 }
 
-/// The lock file path, resolved the same way as [`spool_path`].
-fn lock_path() -> Option<PathBuf> {
-    crate::config::paths::config_dir()
-        .ok()
-        .map(|dir| dir.join(LOCK_FILE))
+/// The scope-selection events this module delivers.
+const SCOPE: Spool = Spool {
+    file: SPOOL_FILE,
+    lock: LOCK_FILE,
+};
+
+/// The OpenTelemetry log records [`crate::telemetry::otlp`] sends, one record
+/// per line.
+pub(crate) const OTLP_LOGS: Spool = Spool {
+    file: "otlp-logs-spool.jsonl",
+    lock: "otlp-logs-spool.lock",
+};
+
+impl Spool {
+    /// The spool file path, or `None` when the config dir cannot be resolved
+    /// (in which case there is nowhere durable to write — the same fallback the
+    /// per-install `distinct_id` makes).
+    fn path(&self) -> Option<PathBuf> {
+        crate::config::paths::config_dir()
+            .ok()
+            .map(|dir| dir.join(self.file))
+    }
+
+    /// Take this spool's lock, or `None` when the config dir cannot be
+    /// resolved or [`SpoolLock::acquire`] fails.
+    fn lock(&self) -> Option<SpoolLock> {
+        let dir = crate::config::paths::config_dir().ok()?;
+        SpoolLock::acquire(&dir.join(self.lock))
+    }
+
+    /// Append one event per line, keeping the file bounded.
+    ///
+    /// Best-effort: any I/O error is returned for the caller to swallow, since a
+    /// failed spool write must never fail the command. When the spool would
+    /// pass [`MAX_SPOOL_EVENTS`] lines the oldest are dropped so the file stays
+    /// bounded.
+    pub(crate) fn append_lines(&self, new: &[String]) -> std::io::Result<()> {
+        let Some(path) = self.path() else {
+            return Ok(());
+        };
+        // `path()` always lives under the config dir, so it has a parent; the
+        // `unwrap_or` is a total fallback that keeps this branch-free — and so
+        // fully coverable — rather than guarding an unreachable `None` arm.
+        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+
+        // Serialize this read-modify-write against a concurrent append's cap-trim
+        // rename and against the uploader's post-delivery removal: without the
+        // lock, two appends at the cap can race through the shared `.tmp` rename
+        // and lose an event, and an append landing inside `flush`'s
+        // read/overwrite window can be deleted. The lock is a hard precondition,
+        // never a fallback to an unlocked write — that is exactly the race this
+        // guards. If it cannot be acquired we fail open: this best-effort event is
+        // intentionally *dropped* for this run (returned as an error for the
+        // caller to record) rather than persisted unlocked or allowed to fail the
+        // command.
+        let Some(_lock) = self.lock() else {
+            return Err(std::io::Error::other(
+                "telemetry spool lock unavailable; dropping event (best-effort)",
+            ));
+        };
+
+        // The common path is a bare append; the cap is enforced only once the
+        // file has actually grown, and it operates on raw lines so a line this
+        // build cannot parse is still carried (or aged out) rather than silently
+        // lost.
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut lines: Vec<&str> = existing.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.len() + new.len() > MAX_SPOOL_EVENTS {
+            lines.extend(new.iter().map(String::as_str));
+            let drop = lines.len() - MAX_SPOOL_EVENTS;
+            crate::config::paths::write_secure(&path, joined(&lines[drop..]).as_bytes())
+        } else {
+            crate::config::paths::append_secure(&path, joined(new).as_bytes())
+        }
+    }
+
+    /// Remove and return up to `max` of the oldest lines, under the lock.
+    ///
+    /// The lines leave the file before the caller acts on them, so two callers
+    /// never handle one line twice. A missing spool, an unavailable lock or a
+    /// failed rewrite takes nothing and leaves the file as it was: a line is
+    /// returned only once it is gone from the file.
+    pub(crate) fn take(&self, max: usize) -> Vec<String> {
+        let Some(path) = self.path() else {
+            return Vec::new();
+        };
+        let Some(_lock) = self.lock() else {
+            return Vec::new();
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let mut taken: Vec<String> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        let rest = taken.split_off(taken.len().min(max));
+        // `remove_file`, not `remove_secure`: success has to mean the spool is
+        // gone, and `remove_secure` can fail on the staging file after it.
+        let rewritten = if rest.is_empty() {
+            std::fs::remove_file(&path)
+        } else {
+            crate::config::paths::write_secure(&path, joined(&rest).as_bytes())
+        };
+        if rewritten.is_err() {
+            return Vec::new();
+        }
+        taken
+    }
+}
+
+/// `lines`, each followed by a newline.
+fn joined(lines: &[impl AsRef<str>]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("{}\n", line.as_ref()))
+        .collect()
 }
 
 /// An RAII holder of the spool's exclusive advisory lock. While it is alive this
 /// process holds the lock against every other process that opened the same lock
 /// file; dropping it (or the process exiting) releases the lock.
 ///
-/// The lock serializes the read-modify-write in [`append`] against another
-/// append's cap-trim rename and against [`flush`]'s post-delivery removal — the
-/// two windows in which a concurrent writer could otherwise clobber a queued
-/// event or delete one that landed mid-flush. The network send itself is
-/// deliberately *not* held under the lock, so a slow uploader never blocks any
-/// command from appending.
+/// The lock serializes the read-modify-write in [`Spool::append_lines`] against
+/// another append's cap-trim rename, against [`flush`]'s post-delivery removal,
+/// and against [`Spool::take`]'s rewrite — the windows in which a concurrent
+/// writer could otherwise clobber a queued event or delete one that landed
+/// mid-flush. The network send itself is deliberately *not* held under the
+/// lock, so a slow uploader never blocks any command from appending.
 struct SpoolLock {
     // Held only for its lock; the OS releases the advisory lock when the fd is
     // closed on drop, so the field is never read directly.
@@ -90,21 +206,20 @@ struct SpoolLock {
 }
 
 impl SpoolLock {
-    /// Take the exclusive spool lock, blocking until it is held. Returns `None`
-    /// when the lock cannot be established — no resolvable config dir, the lock
-    /// file cannot be opened, or the advisory lock itself fails.
+    /// Take the exclusive lock on the file at `path`, blocking until it is held.
+    /// Returns `None` when the lock cannot be established — the lock file cannot
+    /// be opened, or the advisory lock itself fails.
     ///
-    /// A `None` never licenses an unlocked mutation: [`append`] and
+    /// A `None` never licenses an unlocked mutation: [`Spool::append_lines`] and
     /// [`remove_delivered`] treat it as "did not run" and leave the spool exactly
     /// as it was, so a coordination failure can never clobber or delete a
     /// concurrent event (APR-007). The affected event is simply retried on a
     /// later run, where the proxy's `insert_id` dedup makes a re-send harmless.
-    fn acquire() -> Option<Self> {
-        let path = lock_path()?;
+    fn acquire(path: &Path) -> Option<Self> {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let file = open_lock_file(&path)?;
+        let file = open_lock_file(path)?;
         // Blocks until this process holds the lock exclusively; released on drop.
         file.lock().ok()?;
         Some(Self { _file: file })
@@ -144,63 +259,18 @@ pub(crate) fn resolved_api_url(config: &Config) -> String {
         .unwrap_or_else(|| crate::api::client::DEFAULT_API_URL.to_string())
 }
 
-/// Append one event to the durable spool, keeping the file bounded.
-///
-/// Best-effort: any I/O or serialization error is returned for the caller to
-/// swallow, since a failed spool write must never fail the command. When the
-/// spool already holds [`MAX_SPOOL_EVENTS`] lines the oldest are dropped so the
-/// file stays bounded.
+/// Append one scope event to the durable spool. See [`Spool::append_lines`].
 pub(crate) fn append(event: &PlanGovernanceEvent) -> std::io::Result<()> {
-    let Some(path) = spool_path() else {
-        return Ok(());
-    };
-    // `spool_path()` always lives under the config dir, so it has a parent; the
-    // `unwrap_or` is a total fallback that keeps this branch-free — and so fully
-    // coverable — rather than guarding an unreachable `None` arm.
-    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-    let mut line = serde_json::to_string(event)
+    let line = serde_json::to_string(event)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    line.push('\n');
-
-    // Serialize this read-modify-write against a concurrent append's cap-trim
-    // rename and against the uploader's post-delivery removal: without the lock,
-    // two appends at the cap can race through the shared `.tmp` rename and lose
-    // an event, and an append landing inside `flush`'s read/overwrite window can
-    // be deleted. The lock is a hard precondition, never a fallback to an unlocked
-    // write — that is exactly the race this guards. If it cannot be acquired we
-    // fail open: this best-effort event is intentionally *dropped* for this run
-    // (returned as an error for the caller to record) rather than persisted
-    // unlocked or allowed to fail the command.
-    let Some(_lock) = SpoolLock::acquire() else {
-        return Err(std::io::Error::other(
-            "scope telemetry spool lock unavailable; dropping event (best-effort)",
-        ));
-    };
-
-    // The common path is a bare append; the cap is enforced only once the file
-    // has actually grown, and it operates on raw lines so a line this build
-    // cannot parse is still carried (or aged out) rather than silently lost.
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut lines: Vec<&str> = existing.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() >= MAX_SPOOL_EVENTS {
-        let drop = lines.len() + 1 - MAX_SPOOL_EVENTS;
-        lines.drain(0..drop);
-        let mut out = lines.join("\n");
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&line);
-        crate::config::paths::write_secure(&path, out.as_bytes())
-    } else {
-        crate::config::paths::append_secure(&path, line.as_bytes())
-    }
+    SCOPE.append_lines(&[line])
 }
 
 /// Every parseable event currently in the spool, oldest first. A missing spool
 /// or a line this build cannot parse yields nothing for that line rather than an
 /// error — the queue must survive a forward/backward schema skew.
 pub(crate) fn load_all() -> Vec<PlanGovernanceEvent> {
-    let Some(path) = spool_path() else {
+    let Some(path) = SCOPE.path() else {
         return Vec::new();
     };
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -229,11 +299,11 @@ fn line_insert_id(line: &str) -> Option<String> {
 /// The remaining set is computed from the *raw* file, not from re-parsed events,
 /// so two classes of line survive that a parse-then-rewrite would silently
 /// delete: a line this build cannot parse (a forward/backward schema skew, which
-/// then ages out through the cap in [`append`] rather than vanishing on the first
+/// then ages out through the cap in [`Spool::append_lines`] rather than vanishing on the first
 /// flush), and a line another process appended after this flush's send began (its
 /// `insert_id` is not in `delivered`, so it is retained).
 fn remove_delivered(delivered: &HashSet<String>) {
-    let Some(path) = spool_path() else {
+    let Some(path) = SCOPE.path() else {
         return;
     };
     // Never rewrite the spool without the lock: an unlocked overwrite here could
@@ -241,7 +311,7 @@ fn remove_delivered(delivered: &HashSet<String>) {
     // unavailable, retain everything and let the next flush retry — the proxy
     // deduplicates on `insert_id`, so re-sending the already-delivered events is
     // harmless.
-    let Some(_lock) = SpoolLock::acquire() else {
+    let Some(_lock) = SCOPE.lock() else {
         tracing::debug!(
             "scope telemetry: spool lock unavailable; retaining events for a later flush"
         );
@@ -392,6 +462,7 @@ mod tests {
             api_url: Some(api_url.to_string()),
             telemetry: Some(TelemetryConfig {
                 enabled: Some(true),
+                ..Default::default()
             }),
             ..Default::default()
         }
@@ -563,7 +634,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _cfg = EnvGuard::remove("ACTUAL_CONFIG");
         // An empty (non-absolute) ACTUAL_CONFIG_DIR makes `config_dir()` fail, so
-        // `spool_path()`/`lock_path()` are `None`.
+        // `Spool::path()`/`Spool::lock()` are `None`.
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", "");
 
         assert!(append(&sample_event("run-1", "id-1")).is_ok());
@@ -650,7 +721,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(LOCK_FILE)).unwrap();
 
         assert!(
-            SpoolLock::acquire().is_none(),
+            SCOPE.lock().is_none(),
             "a directory at the lock path must defeat the lock"
         );
 
@@ -1560,5 +1631,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Spool::take, the hand-off the OTLP uploader drains with ---
+
+    fn otlp_lines(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{{\"n\":{i}}}")).collect()
+    }
+
+    /// `take` hands over the oldest lines, at most `max`, and they leave the
+    /// file as they go.
+    #[test]
+    fn test_take_hands_over_the_oldest_lines_and_removes_them() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        OTLP_LOGS.append_lines(&otlp_lines(5)).unwrap();
+
+        assert_eq!(OTLP_LOGS.take(3), otlp_lines(3));
+        assert_eq!(OTLP_LOGS.take(3), otlp_lines(5)[3..]);
+        assert!(OTLP_LOGS.take(3).is_empty());
+        assert!(!home.path().join("otlp-logs-spool.jsonl").exists());
+        // The scope spool is a separate file.
+        assert!(load_all().is_empty());
+    }
+
+    /// Several lines appended at once still respect the cap, oldest first.
+    #[test]
+    fn test_append_lines_past_the_cap_keeps_the_newest() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let all = otlp_lines(MAX_SPOOL_EVENTS + 10);
+        OTLP_LOGS
+            .append_lines(&all[..MAX_SPOOL_EVENTS - 5])
+            .unwrap();
+        OTLP_LOGS
+            .append_lines(&all[MAX_SPOOL_EVENTS - 5..])
+            .unwrap();
+
+        assert_eq!(OTLP_LOGS.take(usize::MAX), all[10..]);
+    }
+
+    /// Nothing is taken without a config dir, without the lock, or from a
+    /// spool that does not exist.
+    #[test]
+    fn test_take_without_a_spool_or_the_lock_takes_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let _cfg = EnvGuard::remove("ACTUAL_CONFIG");
+            let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", "");
+            assert!(OTLP_LOGS.take(1).is_empty());
+        }
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        assert!(OTLP_LOGS.take(1).is_empty());
+
+        OTLP_LOGS.append_lines(&otlp_lines(2)).unwrap();
+        std::fs::remove_file(home.path().join("otlp-logs-spool.lock")).unwrap();
+        std::fs::create_dir(home.path().join("otlp-logs-spool.lock")).unwrap();
+        assert!(OTLP_LOGS.take(1).is_empty());
+        let spooled = std::fs::read_to_string(home.path().join("otlp-logs-spool.jsonl")).unwrap();
+        assert_eq!(spooled.lines().count(), 2);
+    }
+
+    /// A line is handed over only once it is gone from the file: when the
+    /// rewrite fails, nothing is taken and the file is left as it was. Taking
+    /// everything stages nothing, so it still succeeds, and hands over every
+    /// line exactly once.
+    #[test]
+    fn test_take_returns_nothing_when_the_rewrite_fails() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        OTLP_LOGS.append_lines(&otlp_lines(3)).unwrap();
+        // A non-empty directory where the rewrite stages its `.tmp` file.
+        let staging = home.path().join("otlp-logs-spool.jsonl.tmp");
+        std::fs::create_dir_all(staging.join("blocker")).unwrap();
+
+        assert!(OTLP_LOGS.take(1).is_empty());
+        let spooled = std::fs::read_to_string(home.path().join("otlp-logs-spool.jsonl")).unwrap();
+        assert_eq!(spooled.lines().count(), 3);
+
+        assert_eq!(OTLP_LOGS.take(3), otlp_lines(3));
+        assert!(!home.path().join("otlp-logs-spool.jsonl").exists());
     }
 }

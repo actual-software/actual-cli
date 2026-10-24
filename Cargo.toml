@@ -37,6 +37,15 @@ serde_yaml = "0.9"
 toml = "1.1"
 regex = "1"
 zip = "2"
+# OTLP log events go out as binary protobuf built with the official messages:
+# no gRPC, no SDK exporter. Only the telemetry feature uses them.
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = [
+    "logs",
+    "gen-tonic-messages",
+], optional = true }
+# The `Message` trait those messages encode with; opentelemetry-proto doesn't
+# re-export it.
+prost = { version = "0.14", optional = true }
 
 # Error handling
 thiserror = "2"
@@ -88,7 +97,7 @@ futures = "0.3"
 futures-util = "0.3"
 
 # Utilities
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 which = "8"
 tempfile = "3"
@@ -128,7 +137,7 @@ codegen-units = 1   # Better optimization, fewer symbol artifacts
 
 [features]
 default = ["telemetry"]
-telemetry = []
+telemetry = ["dep:opentelemetry-proto", "dep:prost"]
 integration = []
 
 [dev-dependencies]
@@ -143,3 +152,10 @@ tui-test = { path = "crates/tui-test" }
 rsa = { version = "0.9", features = ["pem"] }
 p256 = { version = "0.13", features = ["pem", "pkcs8"] }
 rand = "0.8"
+# The official types' own OTLP/JSON encoding, to check the file sink's JSON
+# lines against the protobuf the endpoint receives.
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = [
+    "logs",
+    "gen-tonic-messages",
+    "with-serde",
+] }

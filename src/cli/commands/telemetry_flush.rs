@@ -8,29 +8,44 @@
 //! a detached thread happens to outlive `main` — the parent returns immediately
 //! while this process drains the spool through the proxy and exits.
 //!
+//! `rules brief --claude-hook` spawns it the same way for the OTLP log spool,
+//! and every run drains both spools (see [`crate::telemetry::otlp::flush`]).
+//!
 //! Hidden from `--help`: it is an internal delivery mechanism, never a
 //! user-facing command. It is deliberately incurious about its outcome — a slow,
 //! failed, or opted-out send simply leaves events queued for the next run, and
 //! an event the proxy refuses on its own is dropped (see
-//! [`crate::telemetry::spool::flush`]).
+//! [`crate::telemetry::spool::flush`]). OTLP records leave their spool
+//! before they are sent, so a failed send drops them; an opted-out run leaves
+//! them queued.
 
 use crate::error::ActualError;
 
-/// Drain the scope-telemetry spool once, then return. Never fails: telemetry
-/// delivery must never surface an error, and this process exists only to try.
+/// Drain the scope-telemetry spool and the OTLP log spool once, side by side,
+/// then return. Never fails: telemetry delivery must never surface an error,
+/// and this process exists only to try.
 #[cfg(feature = "telemetry")]
 pub fn exec() -> Result<(), ActualError> {
     let cfg = crate::config::paths::load().unwrap_or_default();
-    // The opt-out gate and the empty-spool short-circuit both live inside
-    // `flush`; this owns only the runtime the blocking send needs.
+    // The opt-out gates and the empty-spool short-circuits live inside each
+    // `flush`; this owns only the runtime the blocking sends need.
     let api_url = crate::telemetry::spool::resolved_api_url(&cfg);
     if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        rt.block_on(crate::telemetry::spool::flush(&cfg, &api_url));
+        rt.block_on(drain(&cfg, &api_url));
     }
     Ok(())
+}
+
+/// Both spools at once, so neither waits on the other's endpoint.
+#[cfg(feature = "telemetry")]
+async fn drain(cfg: &crate::config::types::Config, api_url: &str) {
+    tokio::join!(
+        crate::telemetry::spool::flush(cfg, api_url),
+        crate::telemetry::otlp::flush(cfg),
+    );
 }
 
 /// Without the telemetry feature there is no spool to drain, so the command is a
@@ -81,6 +96,39 @@ mod tests {
             crate::telemetry::spool::load_all().is_empty(),
             "the delivered event must be drained from the spool"
         );
+    }
+
+    /// The same run drains the OTLP log spool, here to a file sink.
+    #[test]
+    fn test_exec_drains_the_otlp_spool_too() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _guards: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        let sink = home.path().join("otlp.jsonl");
+        let config_yaml = format!("telemetry:\n  otlp_file: {}\n", sink.display());
+        std::fs::write(home.path().join("config.yaml"), config_yaml).unwrap();
+        let record = crate::telemetry::otlp::Origin::resolve().context_added(
+            "s1",
+            None,
+            "grp-1",
+            &["adr-1".to_string()],
+        );
+        crate::telemetry::otlp::spool(&[record]);
+
+        assert!(exec().is_ok());
+
+        let written = std::fs::read_to_string(&sink).unwrap();
+        assert_eq!(written.lines().count(), 1, "{written}");
+        assert!(written.contains(crate::telemetry::otlp::ADR_DETECTED));
+        assert!(!home.path().join("otlp-logs-spool.jsonl").exists());
     }
 
     /// With no spooled events there is nothing to send and nothing to fail.

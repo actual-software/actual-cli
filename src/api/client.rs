@@ -18,7 +18,8 @@ use crate::error::ActualError;
 
 pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
 
-const USER_AGENT_VALUE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+pub(crate) const USER_AGENT_VALUE: &str =
+    concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug)]
 pub struct ActualApiClient {
