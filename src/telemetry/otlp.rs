@@ -1,13 +1,15 @@
 //! ADR telemetry as OpenTelemetry log events in Actual's `actual.*` event
-//! catalog, over OTLP/HTTP with protobuf encoding, starting with an ADR
-//! entering an agent's context.
+//! catalog, over OTLP/HTTP with protobuf encoding: ADRs entering an agent's
+//! context and meeting the gates, and the gate checks themselves.
 //!
 //! # Design
 //!
 //! **Events, not spans.** Each event is one `LogRecord` with `eventName` set.
 //! An ADR entering context happens at a point in time and has no duration,
 //! which is what the semantic conventions reserve events for, and an event
-//! needs no enclosing span.
+//! needs no enclosing span. A check, which does take time, is two events, one
+//! when it starts and one when it completes, and the second carries the
+//! duration.
 //!
 //! **No identity on the record.** A record names no user, organization,
 //! repository or installation, hashed or otherwise. It carries ids that
@@ -56,6 +58,12 @@ pub(crate) const ADR_DETECTED: &str = "actual.adr.detected";
 /// The event sent when a gate is evaluated: a gate blocking on an ADR's rules,
 /// or a human overriding them with `check-override`.
 pub(crate) const GATE_EVALUATED: &str = "actual.gate.evaluated";
+
+/// The event a `plan-check` or `impl-check` run sends for its start.
+pub(crate) const ACTION_STARTED: &str = "actual.action.started";
+
+/// The event the same run sends once it has a verdict.
+pub(crate) const ACTION_COMPLETED: &str = "actual.action.completed";
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 const SCHEMA_VERSION: i64 = 1;
@@ -251,6 +259,13 @@ fn strings(key: &'static str, values: &[impl AsRef<str>]) -> KeyValue {
     }
 }
 
+fn int(key: &'static str, value: i64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::IntValue(value),
+    }
+}
+
 /// The bytes `hex` spells, or `None` when it isn't whole hex digit pairs.
 fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
     let digit = |byte: u8| char::from(byte).to_digit(16);
@@ -353,19 +368,56 @@ impl Origin {
         record
     }
 
-    /// A record carrying the attributes every ADR event shares, each present
-    /// on every record and an empty string when unknown: its own event id,
-    /// which `log.record.uid` repeats, the schema version, the action and
-    /// session it belongs to, the subagent, `adr_ref` naming the logical ADR,
-    /// and the `adr_id` of each of its files.
-    fn adr_record(
+    /// The [`ACTION_STARTED`] record for a check that began at `started`:
+    /// `action_type` names the check, `plan-check` or `impl-check`, and `mode`
+    /// says how it ran, `hook` or `direct`.
+    pub(crate) fn action_started(
         &self,
-        event_name: &str,
+        started: SystemTime,
         session_id: &str,
         agent_id: Option<&str>,
-        adr_ref: &str,
-        adr_ids: &[String],
+        action_type: &str,
+        mode: &str,
     ) -> LogRecord {
+        let mut record = self.record(ACTION_STARTED, session_id, agent_id);
+        record.time_unix_nano = unix_nanos(started);
+        record.observed_time_unix_nano = record.time_unix_nano.clone();
+        record.attributes.extend([
+            text("actual.action.type", Some(action_type)),
+            text("actual.action.mode", Some(mode)),
+        ]);
+        record
+    }
+
+    /// The [`ACTION_COMPLETED`] record for the same check: its type and mode,
+    /// then its outcome, `allow`, `warn` or `block`, and how long it took.
+    pub(crate) fn action_completed(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        action_type: &str,
+        mode: &str,
+        outcome: &str,
+        duration: Duration,
+    ) -> LogRecord {
+        let mut record = self.record(ACTION_COMPLETED, session_id, agent_id);
+        record.attributes.extend([
+            text("actual.action.type", Some(action_type)),
+            text("actual.action.mode", Some(mode)),
+            text("actual.action.outcome", Some(outcome)),
+            int(
+                "actual.action.duration_ms",
+                i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+            ),
+        ]);
+        record
+    }
+
+    /// A record carrying the attributes every event shares, each present on
+    /// every record and an empty string when unknown: its own event id, which
+    /// `log.record.uid` repeats, the schema version, and the action, session
+    /// and subagent it belongs to.
+    fn record(&self, event_name: &str, session_id: &str, agent_id: Option<&str>) -> LogRecord {
         let event_id = uuid::Uuid::now_v7().to_string();
         LogRecord {
             time_unix_nano: self.time_unix_nano.clone(),
@@ -375,20 +427,33 @@ impl Origin {
             attributes: vec![
                 text("log.record.uid", Some(&event_id)),
                 text("actual.event.id", Some(&event_id)),
-                KeyValue {
-                    key: "actual.event.schema_version".to_string(),
-                    value: AnyValue::IntValue(SCHEMA_VERSION),
-                },
+                int("actual.event.schema_version", SCHEMA_VERSION),
                 text("actual.action.id", Some(&self.action_id)),
                 text("actual.session.id", Some(session_id)),
                 text("actual.agent.id", agent_id),
-                text("actual.adr.ref", Some(adr_ref)),
-                strings("actual.adr.ids", adr_ids),
             ],
             trace_id: self.trace.as_ref().map(|t| t.trace_id.clone()),
             span_id: self.trace.as_ref().map(|t| t.span_id.clone()),
             flags: self.trace.as_ref().map(|t| t.flags),
         }
+    }
+
+    /// [`Self::record`] for an ADR event, followed by `adr_ref` naming the
+    /// logical ADR and the `adr_id` of each of its files.
+    fn adr_record(
+        &self,
+        event_name: &str,
+        session_id: &str,
+        agent_id: Option<&str>,
+        adr_ref: &str,
+        adr_ids: &[String],
+    ) -> LogRecord {
+        let mut record = self.record(event_name, session_id, agent_id);
+        record.attributes.extend([
+            text("actual.adr.ref", Some(adr_ref)),
+            strings("actual.adr.ids", adr_ids),
+        ]);
+        record
     }
 }
 
@@ -1079,6 +1144,153 @@ mod tests {
             )
         );
         assert_eq!(breached, context);
+    }
+
+    /// A check's two records carry the attributes every record shares, in a
+    /// context record's order without its ADR attributes, then the check's
+    /// type and mode, and the completed record its outcome and duration. The
+    /// started record is stamped when the check started, the completed one
+    /// when the record is made.
+    #[test]
+    fn test_the_action_records_carry_the_common_attributes_then_the_check() {
+        let origin = origin(None);
+        let started = UNIX_EPOCH + Duration::from_secs(1_792_446_915);
+        // Everything but the per-record ids.
+        let shared = |record: &Value| -> Vec<(String, Value)> {
+            attributes(record)
+                .into_iter()
+                .filter(|(key, _)| key != "log.record.uid" && key != "actual.event.id")
+                .collect()
+        };
+        let mut common = shared(&record_json(&origin.context_added(
+            "session-1",
+            Some("agent-1"),
+            "grp-1",
+            &ids(&["adr-1"]),
+        )));
+        let adr: Vec<String> = common
+            .split_off(4)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            adr,
+            [
+                "actual.adr.ref",
+                "actual.adr.ids",
+                "actual.detection.method"
+            ]
+        );
+        let check = |action_type: &str, mode: &str| {
+            [
+                (
+                    "actual.action.type".to_string(),
+                    serde_json::json!({"stringValue": action_type}),
+                ),
+                (
+                    "actual.action.mode".to_string(),
+                    serde_json::json!({"stringValue": mode}),
+                ),
+            ]
+        };
+
+        let start = record_json(&origin.action_started(
+            started,
+            "session-1",
+            Some("agent-1"),
+            "plan-check",
+            "hook",
+        ));
+        assert_eq!(start["eventName"], ACTION_STARTED);
+        assert_eq!(start["severityNumber"], 9);
+        assert_eq!(start["timeUnixNano"], "1792446915000000000");
+        assert_eq!(start["observedTimeUnixNano"], start["timeUnixNano"]);
+        let mut start = shared(&start);
+        assert_eq!(start.split_off(4), check("plan-check", "hook"));
+        assert_eq!(start, common);
+
+        let done = record_json(&origin.action_completed(
+            "session-1",
+            Some("agent-1"),
+            "plan-check",
+            "hook",
+            "block",
+            Duration::from_millis(1234),
+        ));
+        assert_eq!(done["eventName"], ACTION_COMPLETED);
+        assert_eq!(done["severityNumber"], 9);
+        assert_eq!(done["timeUnixNano"], "1792446915838119000");
+        assert_eq!(done["observedTimeUnixNano"], done["timeUnixNano"]);
+        let mut done = shared(&done);
+        let mut tail = done.split_off(4);
+        assert_eq!(
+            tail.split_off(2),
+            [
+                (
+                    "actual.action.outcome".to_string(),
+                    serde_json::json!({"stringValue": "block"})
+                ),
+                (
+                    "actual.action.duration_ms".to_string(),
+                    serde_json::json!({"intValue": "1234"})
+                ),
+            ]
+        );
+        assert_eq!(tail, check("plan-check", "hook"));
+        assert_eq!(done, common);
+
+        let forever = record_json(&origin.action_completed(
+            "s",
+            None,
+            "impl-check",
+            "direct",
+            "allow",
+            Duration::MAX,
+        ));
+        assert_eq!(
+            attributes(&forever).last().unwrap().1,
+            serde_json::json!({"intValue": i64::MAX.to_string()})
+        );
+    }
+
+    /// The action records survive the official types' round trip as the ADR
+    /// records do, the duration as a 64-bit integer.
+    #[test]
+    fn test_the_action_records_round_trip_through_the_official_types() {
+        let origin = origin(None);
+        let records = [
+            origin.action_started(
+                UNIX_EPOCH + Duration::from_secs(1),
+                "s",
+                None,
+                "impl-check",
+                "direct",
+            ),
+            origin.action_completed(
+                "s",
+                None,
+                "impl-check",
+                "direct",
+                "allow",
+                Duration::from_millis(7),
+            ),
+        ];
+        let request = decoded(&records);
+        let line: Value = serde_json::from_str(&json_request(&records)).unwrap();
+
+        assert_eq!(official_json(&request, &line), line);
+        let log_records = &request.resource_logs[0].scope_logs[0].log_records;
+        assert_eq!(log_records[0].event_name, ACTION_STARTED);
+        assert_eq!(log_records[0].time_unix_nano, 1_000_000_000);
+        let duration = log_records[1].attributes.last().unwrap();
+        assert_eq!(duration.key, "actual.action.duration_ms");
+        assert_eq!(
+            duration
+                .value
+                .as_ref()
+                .and_then(|value| value.value.as_ref()),
+            Some(&common::any_value::Value::IntValue(7))
+        );
     }
 
     /// Each record gets its own event id, which `log.record.uid` repeats, and

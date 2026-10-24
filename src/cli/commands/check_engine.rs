@@ -1352,7 +1352,7 @@ pub(super) fn emit(json: String) {
 /// the values they put here — which artifact kind they judge, the label their
 /// telemetry carries, and where the artifact text came from — never in what
 /// happens once a verdict exists.
-// `command`, `agent_id`, `root` and `started_at` only feed telemetry.
+// `command`, `agent_id`, `root` and `started` only feed telemetry.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) struct HookRun<'a> {
     pub kind: check::ArtifactKind,
@@ -1367,7 +1367,7 @@ pub(super) struct HookRun<'a> {
     pub rules_dir: &'a Path,
     pub max_rounds: u32,
     #[cfg(feature = "telemetry")]
-    pub started_at: std::time::Instant,
+    pub started: super::check_telemetry::Started,
 }
 
 /// Turn the pipeline's [`Outcome`] into the hook's one line of output and the
@@ -1467,7 +1467,7 @@ fn finish_verdicts(
         .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
         .collect();
     #[cfg(feature = "telemetry")]
-    super::check_telemetry::report(run, headers, &verdicts, &blocking);
+    let records = super::check_telemetry::adr_records(run, headers, &verdicts, &blocking);
 
     if !blocking.is_empty() {
         if session_id.is_some() {
@@ -1521,10 +1521,16 @@ fn finish_verdicts(
                 // the call through this round -- so this is `warn`, not
                 // `block`, distinct from a clean pass.
                 #[cfg(feature = "telemetry")]
+                super::check_telemetry::report_round(
+                    run,
+                    crate::api::types::PlanGovernanceDecision::Warn,
+                    records,
+                );
+                #[cfg(feature = "telemetry")]
                 send_hook_governance_events(
                     run.command,
                     run.root,
-                    run.started_at,
+                    run.started.instant,
                     crate::api::types::PlanGovernanceDecision::Warn,
                     &verdicts,
                     false,
@@ -1544,10 +1550,16 @@ fn finish_verdicts(
             session,
         )));
         #[cfg(feature = "telemetry")]
+        super::check_telemetry::report_round(
+            run,
+            crate::api::types::PlanGovernanceDecision::Block,
+            records,
+        );
+        #[cfg(feature = "telemetry")]
         send_hook_governance_events(
             run.command,
             run.root,
-            run.started_at,
+            run.started.instant,
             crate::api::types::PlanGovernanceDecision::Block,
             &verdicts,
             true,
@@ -1611,10 +1623,11 @@ fn finish_verdicts(
         } else {
             crate::api::types::PlanGovernanceDecision::Allow
         };
+        super::check_telemetry::report_round(run, decision, records);
         send_hook_governance_events(
             run.command,
             run.root,
-            run.started_at,
+            run.started.instant,
             decision,
             &verdicts,
             false,
@@ -3545,7 +3558,7 @@ pub(crate) mod tests {
             rules_dir,
             max_rounds,
             #[cfg(feature = "telemetry")]
-            started_at: std::time::Instant::now(),
+            started: super::super::check_telemetry::Started::now(),
         }
     }
 
@@ -3688,6 +3701,73 @@ pub(crate) mod tests {
             log.contains("Actual implementation governance hit its round limit"),
             "{log}"
         );
+    }
+
+    /// Each of a hook round's three exits, the round limit's pass, a deny and
+    /// a clean pass, sends its action events before the plan-governance
+    /// events, so the completed record never times their hand-off to the
+    /// spool.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_finish_hook_reports_the_action_before_the_governance_events() {
+        use super::super::brief_telemetry::tests::{attribute, take_captured};
+        use super::super::check_telemetry::tests::assert_completed_before_governance;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-finish-hook-test.jsonl\n",
+        )
+        .unwrap();
+        let rules = tempdir().unwrap();
+        let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+        let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
+        let conforming = vec![checked("R-A-001", Verdict::Conforming, "", "ok")];
+
+        for (exit, max_rounds, earlier_denials, verdicts, outcome) in [
+            ("the round limit's pass", 2, 2, conflict(), "warn"),
+            ("a deny", 3, 0, conflict(), "block"),
+            ("a clean pass", 3, 0, conforming, "allow"),
+        ] {
+            let mut session = GovernanceSession::default();
+            if earlier_denials > 0 {
+                session
+                    .plan
+                    .deny_counts
+                    .insert(key.clone(), earlier_denials);
+            }
+            let run = hook_run(
+                check::ArtifactKind::Plan,
+                Some("s-order"),
+                rules.path(),
+                max_rounds,
+            );
+            take_captured();
+
+            let events = with_captured_plan_governance_events(|| {
+                finish_hook(&run, &mut session, verdicts_outcome(verdicts));
+            });
+
+            let records = take_captured();
+            assert_eq!(records.len(), 2, "{exit}");
+            assert_eq!(
+                attribute(&records[1], "actual.action.outcome"),
+                outcome,
+                "{exit}"
+            );
+            assert_completed_before_governance(&records[1], &events);
+        }
     }
 
     #[test]
