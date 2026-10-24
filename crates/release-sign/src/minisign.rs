@@ -201,7 +201,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
-    use crate::test_support::{trusted, LocalSigner};
+    use crate::test_support::{release_key, LocalSigner};
 
     const DATA: &[u8] = b"b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c  actual-darwin-arm64.tar.gz\n";
     const COMMENT: &str = "timestamp:1792800000\tfile:SHA256SUMS\ttag:v1.2.3";
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn signature_verifies_with_minisign_verify_and_names_the_key() {
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [7; 8])];
+        let keys = [release_key("primary", &signer, [7; 8])];
         let signature = sign(&signer, DATA, COMMENT).unwrap();
         let (key, text) = encode_for_trusted_key(&signature, DATA, &keys).unwrap();
         assert_eq!(key.name, "primary");
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn signature_fails_for_changed_data_or_comment() {
         let signer = LocalSigner::generate();
-        let key = trusted("primary", &signer, [7; 8]).key;
+        let key = release_key("primary", &signer, [7; 8]).key;
         let text = sign(&signer, DATA, COMMENT)
             .unwrap()
             .encode(key.key_id, "x");
@@ -266,8 +266,8 @@ mod tests {
         let primary = LocalSigner::generate();
         let spare = LocalSigner::generate();
         let keys = [
-            trusted("primary", &primary, [1; 8]),
-            trusted("spare", &spare, [2; 8]),
+            release_key("primary", &primary, [1; 8]),
+            release_key("spare", &spare, [2; 8]),
         ];
         let signature = sign(&spare, DATA, COMMENT).unwrap();
         let (key, text) = encode_for_trusted_key(&signature, DATA, &keys).unwrap();
@@ -280,7 +280,7 @@ mod tests {
     fn a_key_the_repository_does_not_trust_is_refused() {
         let committed = LocalSigner::generate();
         let other = LocalSigner::generate();
-        let keys = [trusted("primary", &committed, [1; 8])];
+        let keys = [release_key("primary", &committed, [1; 8])];
         let signature = sign(&other, DATA, COMMENT).unwrap();
         let err = encode_for_trusted_key(&signature, DATA, &keys).unwrap_err();
         assert!(err
@@ -352,7 +352,7 @@ mod tests {
     #[ignore = "needs the minisign CLI on PATH; CI runs it in the release workflow's signing-tool job"]
     fn stock_minisign_accepts_the_signature() {
         let signer = LocalSigner::generate();
-        let key = trusted("primary", &signer, [0x5a; 8]).key;
+        let key = release_key("primary", &signer, [0x5a; 8]).key;
         let text = sign(&signer, DATA, COMMENT)
             .unwrap()
             .encode(key.key_id, "x");

@@ -190,7 +190,7 @@ fn describe(run: &Run) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{trusted, FakeHost, LocalSigner, COMMIT, TAG};
+    use crate::test_support::{release_key, FakeHost, LocalSigner, COMMIT, TAG};
 
     fn options(dir: &Path, upload: bool) -> Options {
         Options {
@@ -222,7 +222,7 @@ mod tests {
     fn signs_a_consistent_release_and_uploads_to_both_pages() {
         let host = FakeHost::consistent_release();
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let signed = sign_with(&host, &signer, &keys, true).unwrap();
 
         assert_eq!(signed.key_name, "primary");
@@ -237,7 +237,7 @@ mod tests {
     fn without_upload_it_only_writes_the_signature() {
         let host = FakeHost::consistent_release();
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let signed = sign_with(&host, &signer, &keys, false).unwrap();
         assert!(signed.signature_path.exists());
         assert!(signed.uploaded_to.is_empty());
@@ -249,7 +249,7 @@ mod tests {
         let host = FakeHost::consistent_release();
         host.edit_page(MIRROR_REPO, "SHA256SUMS", |sums| sums.replacen('a', "b", 1));
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let err = sign_with(&host, &signer, &keys, true).unwrap_err();
         assert!(
             format!("{err:#}").contains("differs from the one run"),
@@ -265,7 +265,7 @@ mod tests {
             let host = FakeHost::consistent_release();
             host.edit_page(repo, "actual-linux-x64.tar.gz", |_| "tampered".into());
             let signer = LocalSigner::generate();
-            let keys = [trusted("primary", &signer, [1; 8])];
+            let keys = [release_key("primary", &signer, [1; 8])];
             let err = sign_with(&host, &signer, &keys, true).unwrap_err();
             assert!(
                 format!("{err:#}").contains("actual-linux-x64.tar.gz has SHA-256"),
@@ -281,7 +281,7 @@ mod tests {
         let host = FakeHost::consistent_release();
         host.add_to_page(SOURCE_REPO, "actual-windows-x64.zip", "unlisted");
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let err = format!("{:#}", sign_with(&host, &signer, &keys, true).unwrap_err());
         assert!(err.contains("actual-windows-x64.zip"), "{err}");
 
@@ -297,7 +297,7 @@ mod tests {
         let host = FakeHost::consistent_release();
         host.add_to_page(MIRROR_REPO, SIGNATURE_FILE, "an older signature");
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         sign_with(&host, &signer, &keys, true).unwrap();
         assert_eq!(host.uploads(), [SOURCE_REPO, MIRROR_REPO]);
     }
@@ -307,7 +307,7 @@ mod tests {
         let host = FakeHost::consistent_release();
         host.edit_artifact("actual-darwin-arm64.tar.gz", |_| "tampered".into());
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let err = format!("{:#}", sign_with(&host, &signer, &keys, true).unwrap_err());
         assert!(
             err.contains("checking the release-assets artifact"),
@@ -320,7 +320,7 @@ mod tests {
         let host = FakeHost::consistent_release();
         let committed = LocalSigner::generate();
         let other = LocalSigner::generate();
-        let keys = [trusted("primary", &committed, [1; 8])];
+        let keys = [release_key("primary", &committed, [1; 8])];
         let err = sign_with(&host, &other, &keys, true).unwrap_err();
         assert!(err.to_string().contains("doesn't verify"), "{err}");
         assert!(host.uploads().is_empty());
@@ -331,7 +331,7 @@ mod tests {
         let host = FakeHost::consistent_release();
         host.fail_uploads_to(MIRROR_REPO);
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let err = format!("{:#}", sign_with(&host, &signer, &keys, true).unwrap_err());
         assert!(err.contains("uploading SHA256SUMS.minisig to the v1.2.3 release in actual-software/actual-releases"), "{err}");
         assert_eq!(host.uploads(), [SOURCE_REPO]);
@@ -395,7 +395,7 @@ mod tests {
         }
         let host = FakeHost::consistent_release();
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [1; 8])];
+        let keys = [release_key("primary", &signer, [1; 8])];
         let work = tempfile::tempdir().unwrap();
         let mut bad = options(work.path(), true);
         bad.tag = "main".into();

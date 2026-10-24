@@ -48,7 +48,7 @@ impl Signer for LocalSigner {
     }
 }
 
-pub fn trusted(name: &str, signer: &LocalSigner, key_id: [u8; 8]) -> TrustedKey {
+pub fn release_key(name: &str, signer: &LocalSigner, key_id: [u8; 8]) -> TrustedKey {
     TrustedKey {
         name: name.into(),
         key: PublicKey {
