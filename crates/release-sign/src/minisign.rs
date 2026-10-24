@@ -126,11 +126,14 @@ pub fn encode_for_trusted_key<'a>(
     data: &[u8],
     keys: &'a [TrustedKey],
 ) -> Result<(&'a TrustedKey, String)> {
-    for trusted in keys {
-        let comment = format!("signature from the actual-cli {} release key", trusted.name);
-        let text = signature.encode(trusted.key.key_id, &comment);
-        if verify(&text, data, &trusted.key).is_ok() {
-            return Ok((trusted, text));
+    for candidate in keys {
+        let comment = format!(
+            "signature from the actual-cli {} release key",
+            candidate.name
+        );
+        let text = signature.encode(candidate.key.key_id, &comment);
+        if verify(&text, data, &candidate.key).is_ok() {
+            return Ok((candidate, text));
         }
     }
     let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
