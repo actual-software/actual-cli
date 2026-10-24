@@ -6,16 +6,11 @@ How the `actual` binary is built and published to Homebrew, npm, and GitHub Rele
 
 ## Overview
 
-A release is triggered by pushing a `v*` tag to `main`. Pre-release tags (suffixed with `-alpha`, `-beta`, `-rc`, or `-test`) are detected and skipped by all release workflows — only clean semver tags (e.g. `v0.2.0`) produce published artifacts.
+A release is triggered by pushing a `v*` tag to `main`. Pre-release tags (suffixed with `-alpha`, `-beta`, `-rc`, or `-test`) are detected and skipped by the release workflow — only clean semver tags (e.g. `v0.2.0`) produce published artifacts.
 
-The two release workflows are:
+One workflow, `.github/workflows/release.yml`, builds the binaries once per tag and feeds every channel from that build: the two GitHub Releases, the Homebrew tap and the five npm packages. It also writes `SHA256SUMS` for the four tarballs, which a member of the signing group signs after the release (see [RELEASE_SIGNING.md](RELEASE_SIGNING.md)).
 
-| Workflow | File | What it does |
-|----------|------|-------------|
-| Release | `.github/workflows/release.yml` | Builds binaries, creates GitHub Releases, updates Homebrew tap |
-| npm Publish | `.github/workflows/npm-publish.yml` | Builds binaries, publishes to npm |
-
-Both workflows build from the same tag but run independently.
+A pull request that changes `release.yml`, the signing tool in `crates/release-sign` or the public keys in `release-keys/` runs the workflow as a dry run: the same build, `SHA256SUMS` and npm packages, all checked, with every publishing job skipped.
 
 ---
 
@@ -34,7 +29,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Both workflows fire automatically on tag push.
+The release workflow fires on the tag push. Once it has published both GitHub Releases, a member of the signing group signs the release's `SHA256SUMS` with `cargo run -p release-sign -- release <tag> --kms-key <key version>`, as [RELEASE_SIGNING.md](RELEASE_SIGNING.md) describes.
 
 **Pre-release tag** (does not publish):
 ```bash
@@ -46,7 +41,7 @@ git push origin v0.2.0-beta.1
 
 ## Build matrix
 
-Both workflows build the same four targets in parallel:
+The release workflow builds the four targets once per tag, in parallel:
 
 | Target | Runner | Signing |
 |--------|--------|---------|
@@ -65,7 +60,7 @@ All builds use `cargo build --release` (LTO, stripped, single codegen unit — s
 
 ## macOS signing and notarization
 
-Both workflows have steps that sign the macOS binaries with an Apple Developer ID certificate and notarize them with `xcrun notarytool`, which would let Gatekeeper accept them without a quarantine prompt. The steps have been in both workflows since v0.1.0, but they run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets, and no release has had it. The runs for v0.2.0 through v0.8.0 show the import, sign, and notarize steps skipped in both macOS jobs of both workflows. GitHub no longer keeps step records for the v0.1.x runs, and their binaries carry no Developer ID signature either. Every published arm64 binary carries only the linker's ad hoc signature (`codesign -dv` reports `Signature=adhoc`), every x64 binary is unsigned (`codesign -dv` reports `code object is not signed at all`), and Gatekeeper rejects both (`spctl --assess --type execute` reports `rejected`).
+The macOS build jobs have steps that sign the binaries with an Apple Developer ID certificate and notarize them with `xcrun notarytool`, which would let Gatekeeper accept them without a quarantine prompt. The steps have been in the release builds since v0.1.0, but they run only when `APPLE_CERTIFICATE_P12` is set in the repo secrets, and no release has had it. The runs for v0.2.0 through v0.8.0 show the import, sign, and notarize steps skipped in both macOS jobs of both workflows. GitHub no longer keeps step records for the v0.1.x runs, and their binaries carry no Developer ID signature either. Every published arm64 binary carries only the linker's ad hoc signature (`codesign -dv` reports `Signature=adhoc`), every x64 binary is unsigned (`codesign -dv` reports `code object is not signed at all`), and Gatekeeper rejects both (`spctl --assess --type execute` reports `rejected`).
 
 Until the binaries are signed, each channel handles Gatekeeper its own way:
 
@@ -95,14 +90,18 @@ The `release.yml` workflow creates two GitHub Releases from the same artifacts, 
 
 `actual-releases` is the download source for the Homebrew formula and for manual installs. It holds no CLI source, only the release assets and the npm package scaffolding.
 
-**Artifact filenames** (each is a `.tar.gz` containing a single `actual` binary):
+**Artifact filenames** (each `.tar.gz` contains a single `actual` binary):
 
 ```
 actual-darwin-arm64.tar.gz
 actual-darwin-x64.tar.gz
 actual-linux-x64.tar.gz
 actual-linux-arm64.tar.gz
+SHA256SUMS
+SHA256SUMS.minisig
 ```
+
+`SHA256SUMS` lists the four tarballs in `sha256sum` format and ships with the release. `SHA256SUMS.minisig` appears once a member of the signing group has signed the release; [RELEASE_SIGNING.md](RELEASE_SIGNING.md) covers checking a download against it.
 
 ---
 
@@ -110,7 +109,7 @@ actual-linux-arm64.tar.gz
 
 After the GitHub Release is created, `release.yml` automatically updates the formula in `actual-software/homebrew-actual`.
 
-The update script (`scripts/update-formula.py` in the tap repo) takes the new version and SHA256 hashes computed from the release tarballs and rewrites `Formula/actual.rb` from `template/actual.rb`.
+The update script (`scripts/update-formula.py` in the tap repo) takes the new version and the tarballs' SHA256 hashes, read from the release's `SHA256SUMS`, and rewrites `Formula/actual.rb` from `template/actual.rb`.
 
 The formula is committed directly to `main` on the tap repo. Homebrew picks it up immediately when users run `brew upgrade` or `brew install`.
 
@@ -125,7 +124,7 @@ brew install actual-software/actual/actual
 
 ## npm packages
 
-The `npm-publish.yml` workflow publishes five packages to the `@actualai` scope on the public npm registry:
+The release workflow publishes five packages to the `@actualai` scope on the public npm registry:
 
 | Package | Contents |
 |---------|---------|
@@ -135,14 +134,14 @@ The `npm-publish.yml` workflow publishes five packages to the `@actualai` scope 
 | `@actualai/actual-linux-x64` | Linux x64 binary |
 | `@actualai/actual-linux-arm64` | Linux arm64 binary |
 
-The npm package scaffolding (package.json files, install scripts) lives in `actual-software/actual-releases` under `npm/`. Versions are synced from the git tag via `scripts/sync-npm-version.sh` before publishing.
+The npm package scaffolding (package.json files, install scripts) lives in `actual-software/actual-releases` under `npm/`. Versions are synced from the git tag via `scripts/sync-npm-version.sh`, and each platform package takes its binary from the release tarball. Before anything is published, the `npm Packages` job packs all five and checks that each platform package carries its tarball's binary, byte for byte. The `Publish to npm` job then publishes exactly those packed packages.
 
 **npm install (user-facing):**
 ```bash
 npm install -g @actualai/actual
 ```
 
-**Credentials:** the publish job authenticates through npm trusted publishing (GitHub OIDC, from the job's `id-token: write` permission, with npm 11.5.1 or later), so it uses no npm token, and npm records a provenance attestation for each package it publishes. Apart from the optional Apple signing secrets, the workflow needs only `TAP_GITHUB_TOKEN`, to check out `actual-software/actual-releases`.
+**Credentials:** the publish job authenticates through npm trusted publishing (GitHub OIDC, from the job's `id-token: write` permission, with npm 11.5.1 or later), so it uses no npm token, and npm records a provenance attestation for each package it publishes. npm checks the workflow's file name, so `release.yml` has to be a trusted publisher on all five packages, with direct `npm publish` allowed. Only the publish job holds `id-token: write`: npm exchanges the OIDC token even for `npm publish --dry-run`, so the job that packs and checks the packages, which also runs on pull requests, goes without it. The scaffolding checkout uses the workflow's own token, since `actual-software/actual-releases` is public.
 
 ---
 
@@ -150,8 +149,9 @@ npm install -g @actualai/actual
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| 1 | Separate `release.yml` and `npm-publish.yml` workflows | Keeps concerns isolated; a failed npm publish doesn't block a GitHub Release |
+| 1 | One release workflow and one build per tag (through v0.9.0, `npm-publish.yml` built its own binaries) | Every channel ships the same binaries. The npm and GitHub Release jobs don't depend on each other, so a failed npm publish still doesn't block a GitHub Release |
 | 2 | Pre-release tag detection via suffix pattern | Allows staging releases (`-beta`, `-rc`) without publishing to users |
 | 3 | Tarballs contain a single `actual` binary at root (no subdirectory) | Simplifies Homebrew formula and manual install — `tar xzf` drops the binary directly into the current directory |
 | 4 | Release assets mirrored to `actual-software/actual-releases` | Gave Homebrew, manual installs, and the npm scaffolding a public home while this repo was private. This repo is public now and its releases carry the same assets, but the formula and the README still download from `actual-releases` |
 | 5 | Signing conditional on `APPLE_CERTIFICATE_P12` presence | Forks and contributors can still build and test release artifacts without Apple credentials. No release run has had the secret, so no release has been Developer ID signed yet |
+| 6 | `SHA256SUMS` signed with minisign, by an org key in Google Cloud KMS, by hand after each release | Anyone can check a download with stock `minisign -V`, the key can't be exported, and nothing in GitHub can make a signature. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md) |
