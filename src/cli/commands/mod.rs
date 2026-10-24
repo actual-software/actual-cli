@@ -24,6 +24,8 @@ pub mod login;
 pub mod logout;
 pub mod mint_token;
 pub mod models;
+#[cfg(feature = "telemetry")]
+mod override_telemetry;
 pub mod plan_check;
 mod plan_check_hook;
 pub mod rules;
