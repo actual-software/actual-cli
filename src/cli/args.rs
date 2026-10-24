@@ -675,7 +675,7 @@ pub struct LoginArgs {
     /// browser — a person must approve the code, so this is not an unattended
     /// path (CI has no approver; use `auth create-token` there instead). `--org`
     /// is ignored in this mode (the org is selected on the approval page).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub device: bool,
 }
 
@@ -3047,5 +3047,39 @@ mod parse_tests {
     #[test]
     fn test_session_summary_args_from_another_command_is_none() {
         assert!(session_summary_args_from(&["actual", "status"]).is_none());
+    }
+
+    // ---- LoginArgs / `login` parsing tests ----
+
+    /// `--device` stays out of help until the auth server offers the
+    /// device-authorization grant. `--no-browser` shows the login help
+    /// actually rendered, so the absence check cannot pass on an empty page.
+    #[test]
+    fn test_login_help_hides_the_device_flag() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let mut login = cmd
+            .find_subcommand("login")
+            .expect("login is a registered subcommand")
+            .clone();
+        for help in [
+            login.render_help().to_string(),
+            login.render_long_help().to_string(),
+        ] {
+            assert!(help.contains("--no-browser"), "{help}");
+            assert!(
+                !help.contains("--device"),
+                "login help lists --device: {help}"
+            );
+        }
+    }
+
+    /// Hidden, not removed: `--device` still selects the device flow.
+    #[test]
+    fn test_login_device_flag_still_parses() {
+        let cli = Cli::try_parse_from(["actual", "login", "--device"]).unwrap();
+        #[rustfmt::skip]
+        let Command::Login(args) = cli.command else { panic!("expected Login command") };
+        assert!(args.device);
     }
 }

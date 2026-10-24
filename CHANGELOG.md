@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `login --device` is hidden from help while the Actual AI server lacks the device-authorization grant, which a device sign-in needs. The flag still parses and the flow is unchanged
+
 ## [0.9.0] - 2026-10-23
 
 ### Added
