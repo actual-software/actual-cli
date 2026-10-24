@@ -52,7 +52,7 @@ impl PublicKey {
 
     /// The key id as `minisign` prints it.
     pub fn key_id_hex(&self) -> String {
-        format!("{:X}", u64::from_le_bytes(self.key_id))
+        format!("{:016X}", u64::from_le_bytes(self.key_id))
     }
 
     /// The `minisign.pub` file for this key, in the layout `minisign -G` writes.
@@ -213,7 +213,7 @@ mod tests {
             key: [9; 32],
         };
         let text = key.to_file_contents();
-        assert!(text.starts_with("untrusted comment: minisign public key 807060504030201\n"));
+        assert!(text.starts_with("untrusted comment: minisign public key 0807060504030201\n"));
         assert_eq!(PublicKey::parse(&text).unwrap(), key);
     }
 
