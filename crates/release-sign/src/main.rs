@@ -184,7 +184,7 @@ fn public_key(pem: &str, key_id: Option<&str>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{trusted, LocalSigner};
+    use crate::test_support::{release_key, LocalSigner};
 
     const RFC_8410_PEM: &str =
         "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n-----END PUBLIC KEY-----\n";
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn signs_a_local_file_next_to_it() {
         let signer = LocalSigner::generate();
-        let keys = [trusted("primary", &signer, [9; 8])];
+        let keys = [release_key("primary", &signer, [9; 8])];
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("signing-test.txt");
         fs::write(&file, "test\n").unwrap();
