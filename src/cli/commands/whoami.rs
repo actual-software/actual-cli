@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::auth::store::{self, StoredCredentials};
 use crate::cli::ui::theme;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 pub fn exec() -> Result<(), ActualError> {
     match store::load()? {
@@ -21,24 +21,41 @@ pub fn exec() -> Result<(), ActualError> {
 
 /// Print the cached identity. **Never prints token material.**
 fn print_identity(creds: &StoredCredentials) {
-    println!(
-        "{} Signed in to {}",
+    print!("{}", format_identity(creds, Utc::now()));
+}
+
+/// The identity as `print_identity` prints it at `now`. The auth server
+/// supplied every field except the expiry, so control characters are dropped
+/// from each of them.
+fn format_identity(creds: &StoredCredentials, now: DateTime<Utc>) -> String {
+    let mut text = format!(
+        "{} Signed in to {}\n",
         theme::success(&theme::SUCCESS),
         theme::success("Actual AI")
     );
-    println!("  {:<14} {}", "Organization:", creds.organization_id);
+    text.push_str(&server_row("Organization:", &creds.organization_id));
     if let Some(email) = &creds.email {
-        println!("  {:<14} {}", "Account:", email);
+        text.push_str(&server_row("Account:", email));
     } else if let Some(subject) = &creds.subject {
-        println!("  {:<14} {}", "Account:", subject);
+        text.push_str(&server_row("Account:", subject));
     }
-    println!("  {:<14} {}", "Member:", creds.member_id);
+    text.push_str(&server_row("Member:", &creds.member_id));
     if let Some(scope) = &creds.scope {
-        println!("  {:<14} {}", "Scopes:", scope);
+        text.push_str(&server_row("Scopes:", scope));
     }
-    if let Some(expired) = expired_note(creds, Utc::now()) {
-        println!("  {:<14} {}", "Access token:", theme::warning(expired));
+    if let Some(expired) = expired_note(creds, now) {
+        text.push_str(&format!(
+            "  {:<14} {}\n",
+            "Access token:",
+            theme::warning(expired)
+        ));
     }
+    text
+}
+
+/// One `label  value` row whose value the auth server supplied.
+pub(crate) fn server_row(label: &str, value: &str) -> String {
+    format!("  {label:<14} {}\n", sanitize_server_text(value))
 }
 
 /// `"expired <when>"` once the access token's expiry has passed at `now`, or
@@ -110,6 +127,42 @@ mod tests {
         c.email = None;
         c.subject = Some("sub-123".to_string());
         print_identity(&c);
+    }
+
+    #[test]
+    fn test_format_identity_drops_control_characters_from_server_fields() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        // The fields as the auth server's JSON sent them, read back from the
+        // credentials file the way `exec` reads them.
+        let signed_in: StoredCredentials = serde_json::from_str(
+            r#"{"access_token":"secret","refresh_token":"secret","organization_id":"\u001b[31morg\u0007-1","member_id":"member\u007f-1","email":"\u001b]0;pwned\u0007dev@example.com","subject":"unused","scope":"openid\u0007 adr:query"}"#,
+        )
+        .unwrap();
+        store::save(&signed_in).unwrap();
+        let mut creds = store::load().unwrap().unwrap();
+        let header = format!(
+            "{} Signed in to {}\n",
+            theme::success(&theme::SUCCESS),
+            theme::success("Actual AI")
+        );
+        assert_eq!(
+            format_identity(&creds, Utc::now()),
+            format!(
+                "{header}  Organization:  [31morg-1\n  Account:       ]0;pwneddev@example.com\n  \
+                 Member:        member-1\n  Scopes:        openid adr:query\n"
+            )
+        );
+
+        creds.email = None;
+        creds.subject = Some("\u{1b}[2Juser\u{7f}-1".to_string());
+        assert!(
+            format_identity(&creds, Utc::now()).contains("\n  Account:       [2Juser-1\n"),
+            "the subject fallback is filtered too"
+        );
     }
 
     #[test]
