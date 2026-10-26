@@ -123,11 +123,13 @@ impl LoopbackServer {
                             "OAuth state mismatch — possible CSRF; aborting login.".to_string(),
                         ));
                     }
+                    // The code exchange hasn't run yet and can still fail, so
+                    // this page must not claim the user is signed in.
                     write_html(
                         &mut stream,
                         "200 OK",
-                        "Signed in",
-                        "You're signed in to Actual AI. You can close this tab and return to the terminal.",
+                        "Almost done",
+                        "Return to the terminal to finish signing in to Actual AI. You can close this tab.",
                     )
                     .await;
                     return Ok(AuthRedirect { code, state });
@@ -325,9 +327,14 @@ mod tests {
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result.code, "the-code");
         assert_eq!(result.state, "xyz");
+        let page = String::from_utf8_lossy(&resp);
         assert!(
-            String::from_utf8_lossy(&resp).contains("Signed in"),
-            "browser should see the success page"
+            page.contains("Return to the terminal to finish signing in"),
+            "browser should be sent back to the terminal: {page}"
+        );
+        assert!(
+            !page.to_lowercase().contains("signed in"),
+            "the code exchange hasn't run yet, so the page must not say signed in: {page}"
         );
     }
 
