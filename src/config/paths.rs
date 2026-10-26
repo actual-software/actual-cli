@@ -100,7 +100,7 @@ pub fn load_from(path: &Path) -> Result<Config, ActualError> {
             }
             let contents = String::from_utf8(bytes)
                 .map_err(|e| config_error(format!("Config file is not valid UTF-8: {e}")))?;
-            serde_yml::from_str(&contents)
+            crate::yaml::from_str(&contents)
                 .map_err(|e| config_error(format!("Failed to parse config YAML: {e}")))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -130,7 +130,7 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
             .map_err(|e| config_error(format!("Failed to create config directory: {e}")))?;
     }
 
-    let yaml = serde_yml::to_string(config)
+    let yaml = crate::yaml::to_string(config)
         .map_err(|e| config_error(format!("Failed to serialize config to YAML: {e}")))?;
     write_config_secure(path, &yaml)?;
 

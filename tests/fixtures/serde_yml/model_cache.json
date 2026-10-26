@@ -1,0 +1,14 @@
+{
+  "openai": {
+    "fetched_at": "2026-10-25T09:00:00Z",
+    "models": [
+      "gpt-5",
+      "o3",
+      "4o"
+    ]
+  },
+  "anthropic": {
+    "fetched_at": null,
+    "models": []
+  }
+}

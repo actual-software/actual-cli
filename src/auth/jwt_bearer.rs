@@ -429,12 +429,8 @@ mod tests {
 
     /// Decode an assertion's claims WITHOUT checking the signature or the time
     /// claims — for tests that only inspect `jti`/`exp`/`iat` values.
-    fn decode_claims_only(assertion: &str, key: &DecodingKey, alg: Algorithm) -> AssertionClaims {
-        let mut validation = Validation::new(alg);
-        validation.insecure_disable_signature_validation();
-        validation.validate_exp = false;
-        validation.validate_aud = false;
-        decode::<AssertionClaims>(assertion, key, &validation)
+    fn decode_claims_only(assertion: &str) -> AssertionClaims {
+        jsonwebtoken::dangerous::insecure_decode::<AssertionClaims>(assertion)
             .expect("decode claims")
             .claims
     }
@@ -586,7 +582,7 @@ mod tests {
 
     #[test]
     fn each_assertion_gets_a_fresh_unique_jti() {
-        let (priv_pem, pub_pem) = ec_keypair();
+        let (priv_pem, _pub) = ec_keypair();
         let a =
             build_and_sign_assertion(&params(AssertionAlgorithm::Es256), &priv_pem, 1_700_000_000)
                 .unwrap();
@@ -594,9 +590,8 @@ mod tests {
             build_and_sign_assertion(&params(AssertionAlgorithm::Es256), &priv_pem, 1_700_000_000)
                 .unwrap();
 
-        let key = DecodingKey::from_ec_pem(&pub_pem).unwrap();
-        let ja = decode_claims_only(&a, &key, Algorithm::ES256).jti;
-        let jb = decode_claims_only(&b, &key, Algorithm::ES256).jti;
+        let ja = decode_claims_only(&a).jti;
+        let jb = decode_claims_only(&b).jti;
         assert_ne!(
             ja, jb,
             "each assertion must carry a unique jti (anti-replay)"
@@ -605,14 +600,13 @@ mod tests {
 
     #[test]
     fn lifetime_is_clamped_to_the_server_cap() {
-        let (priv_pem, pub_pem) = ec_keypair();
+        let (priv_pem, _pub) = ec_keypair();
         let mut p = params(AssertionAlgorithm::Es256);
         p.lifetime_seconds = 10_000; // absurd; must clamp to 300
         let now = 1_700_000_000;
         let assertion = build_and_sign_assertion(&p, &priv_pem, now).unwrap();
 
-        let key = DecodingKey::from_ec_pem(&pub_pem).unwrap();
-        let claims = decode_claims_only(&assertion, &key, Algorithm::ES256);
+        let claims = decode_claims_only(&assertion);
         assert_eq!(claims.exp - claims.iat, MAX_ASSERTION_LIFETIME_SECONDS);
     }
 

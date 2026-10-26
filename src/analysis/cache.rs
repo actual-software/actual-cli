@@ -176,7 +176,7 @@ pub fn get_git_branch(repo_path: &Path) -> Option<String> {
 ///
 /// When this returns `true`, the caller should skip persisting the cache entry.
 fn is_analysis_cache_oversized(cached: &CachedAnalysis) -> bool {
-    let size_result = serde_yml::to_string(cached)
+    let size_result = crate::yaml::to_string(cached)
         .map(|s| s.len())
         .map_err(|e| e.to_string());
     is_analysis_cache_oversized_inner(size_result)
@@ -1031,7 +1031,7 @@ cached_analysis:
   analyzed_at: "2024-01-01T00:00:00Z"
 "#;
 
-        let cfg: config::Config = serde_yml::from_str(yaml).expect("should parse old cache YAML");
+        let cfg: config::Config = crate::yaml::from_str(yaml).expect("should parse old cache YAML");
         let cached = cfg.cached_analysis.expect("should have cached_analysis");
         assert_eq!(cached.repo_path, "/home/user/project");
         assert_eq!(cached.head_commit.as_deref(), Some("abc123def456"));
@@ -1141,7 +1141,7 @@ cached_analysis:
         };
 
         // Sanity-check the fixture.
-        let size = serde_yml::to_string(&big_cached)
+        let size = crate::yaml::to_string(&big_cached)
             .map(|s| s.len())
             .unwrap_or(0);
         assert!(size > CACHE_MAX_SIZE_BYTES, "fixture must exceed limit");
@@ -1211,7 +1211,9 @@ cached_analysis:
             analysis: big_analysis,
             analyzed_at: chrono::Utc::now(),
         };
-        let size = serde_yml::to_string(&cached).map(|s| s.len()).unwrap_or(0);
+        let size = crate::yaml::to_string(&cached)
+            .map(|s| s.len())
+            .unwrap_or(0);
         assert!(
             size > CACHE_MAX_SIZE_BYTES,
             "test fixture must exceed the limit ({size} bytes vs {CACHE_MAX_SIZE_BYTES} bytes)"

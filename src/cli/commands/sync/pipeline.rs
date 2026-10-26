@@ -4538,8 +4538,8 @@ mod tests {
         };
 
         // Serialize to YAML and back
-        let yaml = serde_yml::to_string(&cached).unwrap();
-        let restored: CachedTailoring = serde_yml::from_str(&yaml).unwrap();
+        let yaml = crate::yaml::to_string(&cached).unwrap();
+        let restored: CachedTailoring = crate::yaml::from_str(&yaml).unwrap();
         assert_eq!(cached.cache_key, restored.cache_key);
         assert_eq!(cached.tailoring, restored.tailoring);
     }
@@ -4550,7 +4550,7 @@ mod tests {
         // miss) rather than failing to parse the entire Config.
         use crate::config::Config;
         let yaml = "cached_tailoring:\n  garbage_field: some_value\n";
-        let cfg: Config = serde_yml::from_str(yaml).expect("config must parse despite bad cache");
+        let cfg: Config = crate::yaml::from_str(yaml).expect("config must parse despite bad cache");
         assert!(
             cfg.cached_tailoring.is_none(),
             "corrupt cached_tailoring should be treated as absent"

@@ -88,7 +88,7 @@ fn cache_path() -> Option<std::path::PathBuf> {
 fn load_cache_file(path: &std::path::Path) -> ModelCacheFile {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| serde_yml::from_str(&s).ok())
+        .and_then(|s| crate::yaml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
@@ -96,8 +96,8 @@ fn save_cache_file(path: &std::path::Path, cache: &ModelCacheFile) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // serde_yml::to_string on a well-formed struct is infallible in practice
-    let yaml = serde_yml::to_string(cache).unwrap_or_default();
+    // YAML serialization of a well-formed struct is infallible in practice
+    let yaml = crate::yaml::to_string(cache).unwrap_or_default();
     // 0600 and stage-then-rename (see `write_secure`'s own doc) -- model
     // names are not secrets, but this keeps the config directory's write
     // posture uniform and removes the write-then-chmod window a plain
@@ -1634,5 +1634,28 @@ mod tests {
             || Err("synthetic runtime build failure".to_string()),
         );
         assert!(result.is_empty());
+    }
+
+    /// A model cache serde_yml 0.0.12 wrote reads back unchanged.
+    #[test]
+    fn test_reads_model_cache_written_by_serde_yml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("models.yaml");
+        std::fs::write(
+            &path,
+            include_str!("../tests/fixtures/serde_yml/model_cache.yaml"),
+        )
+        .unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/serde_yml/model_cache.json"))
+                .unwrap();
+        let cache = load_cache_file(&path);
+        assert_eq!(serde_json::to_value(&cache).unwrap(), expected);
+
+        save_cache_file(&path, &cache);
+        assert_eq!(
+            serde_json::to_value(load_cache_file(&path)).unwrap(),
+            expected
+        );
     }
 }

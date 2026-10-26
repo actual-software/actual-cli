@@ -32,7 +32,7 @@ url = "2"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "0.0.12"
+serde-saphyr = { version = "2", default-features = false, features = ["serialize", "deserialize"] }
 serde_yaml = "0.9"
 toml = "1.1"
 regex = "1"
@@ -81,7 +81,7 @@ chacha20poly1305 = "0.10"
 argon2 = "0.5"
 
 # JWS signing for the headless RFC 7523 jwt-bearer client (RS256 / ES256)
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 
 # Async utilities
 futures = "0.3"

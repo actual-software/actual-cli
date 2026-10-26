@@ -134,7 +134,7 @@ pub fn load_from(path: &Path) -> Result<Option<StoredCredentials>, ActualError> 
             let contents = String::from_utf8(bytes).map_err(|e| {
                 credentials_error(format!("Credentials file is not valid UTF-8: {e}"))
             })?;
-            let creds = serde_yml::from_str(&contents)
+            let creds = crate::yaml::from_str(&contents)
                 .map_err(|e| credentials_error(format!("Failed to parse credentials: {e}")))?;
             Ok(Some(creds))
         }
@@ -157,7 +157,7 @@ pub fn save_to(creds: &StoredCredentials, path: &Path) -> Result<(), ActualError
         std::fs::create_dir_all(parent)
             .map_err(|e| credentials_error(format!("Failed to create config directory: {e}")))?;
     }
-    let yaml = serde_yml::to_string(creds)
+    let yaml = crate::yaml::to_string(creds)
         .map_err(|e| credentials_error(format!("Failed to serialize credentials: {e}")))?;
     write_secure(path, &yaml)
 }
@@ -490,5 +490,26 @@ mod tests {
         // secure write then fails (can't open "/" for writing).
         let err = save_to(&sample(), Path::new("/")).unwrap_err();
         assert!(err.to_string().contains("Failed to"), "got: {err}");
+    }
+
+    /// A credentials file serde_yml 0.0.12 wrote reads back unchanged.
+    #[test]
+    fn test_reads_credentials_written_by_serde_yml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("credentials.yaml");
+        std::fs::write(
+            &path,
+            include_str!("../../tests/fixtures/serde_yml/credentials.yaml"),
+        )
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/serde_yml/credentials.json"
+        ))
+        .unwrap();
+        let creds = load_from(&path).unwrap().expect("credentials present");
+        assert_eq!(serde_json::to_value(&creds).unwrap(), expected);
+
+        save_to(&creds, &path).unwrap();
+        assert_eq!(load_from(&path).unwrap(), Some(creds));
     }
 }

@@ -1,0 +1,131 @@
+api_url: https://api.example.test
+model: claude-sonnet-4
+include_categories:
+- security
+- testing
+exclude_categories: []
+include_general: true
+max_per_framework: 5
+max_budget_usd: 0.1
+batch_size: 10
+concurrency: 4
+invocation_timeout_secs: 4294967296
+output_format: agents-md
+telemetry:
+  enabled: false
+rejected_adrs:
+  'key: with colon': []
+  /home/user/project:
+  - '123'
+  - 'yes'
+  - 'null'
+  - '~'
+  - ' padded '
+  - 'a # not a comment'
+  - 'key: value'
+  - café ✓
+  - ''
+  - '- dash'
+  - '*star'
+  - '&amp'
+  - '!bang'
+  - '%pct'
+  - '@at'
+  - '`tick'
+  - '0o17'
+  - '1e3'
+  - '.inf'
+  - 'true'
+  - '2026-10-25'
+  - |
+    multi
+    line
+  - "tab\there"
+  - quote ' and " both
+  - '{brace}'
+  - '[bracket]'
+  - 'trailing:'
+  - ?question
+  - '|pipe'
+  - '>gt'
+  - '''single'''
+  - '"double"'
+sticky_repo_scope:
+  /home/user/project:
+    repo_unique_id: github.com/acme/project
+    qualified_name: acme/project
+  /home/user/other: {}
+cached_analysis:
+  repo_path: /home/user/project
+  head_commit: abc123
+  config_hash: deadbeef
+  analysis:
+    is_monorepo: true
+    workspace_type: pnpm
+    projects:
+    - path: apps/web
+      name: web
+      languages:
+      - language: typescript
+        loc: 1200
+      - language: haskell
+        loc: 3
+      frameworks:
+      - name: nextjs
+        category: web-frontend
+        source: package_json
+      - name: custom-thing
+        category: something-else
+      package_manager: pnpm
+      description: 'The web app: front end'
+      dep_count: 12
+      dev_dep_count: 4
+      selection:
+        language:
+          language: typescript
+          loc: 1200
+        framework:
+          name: nextjs
+          category: web-frontend
+        auto_selected: true
+    - path: '.'
+      name: root
+      languages: []
+      frameworks: []
+      package_manager: null
+      description: null
+      dep_count: 0
+      dev_dep_count: 0
+  analyzed_at: '2026-10-25T10:00:00.123456789Z'
+cached_tailoring:
+  cache_key: abc123def456
+  repo_path: /home/user/project
+  tailoring:
+    files:
+    - path: CLAUDE.md
+      sections:
+      - adr_id: adr-1
+        content: "## Rule one\nUse `cargo fmt`.\n\n- item: with colon\n    indented line\ntrailing spaces   \n"
+      - adr_id: adr-2
+        content: single line
+      reasoning: 'Applies because: tests'
+    skipped_adrs:
+    - id: adr-9
+      reason: not relevant
+    summary:
+      total_input: 3
+      applicable: 2
+      not_applicable: 1
+      files_generated: 1
+  tailored_at: '2026-10-25T11:00:00Z'
+runner: anthropic-api
+anthropic_api_key: sk-test-anthropic
+openai_api_key: sk-test-openai
+cursor_api_key: cur-test
+max_turns: 8
+max_tokens: 4096
+rules_min_score: 0.4
+rules_min_score_by_repo:
+  /home/user/project: 0.55
+update_check:
+  enabled: true
