@@ -21,7 +21,7 @@ use crate::auth::jwt_bearer::{
 use crate::auth::oauth;
 use crate::cli::args::MintTokenArgs;
 use crate::cli::ui::theme;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 /// Environment variable holding the private key PEM inline (used when no key
 /// file is given). Preferred with a secret manager — keeps the key off argv.
@@ -80,6 +80,18 @@ pub fn exec(args: &MintTokenArgs) -> Result<(), ActualError> {
         .map_err(|e| ActualError::InternalError(format!("failed to write token to stdout: {e}")))?;
 
     // Non-sensitive success summary → stderr. Never the token itself.
+    eprintln!(
+        "{} minted token ({})",
+        theme::success(&theme::SUCCESS),
+        minted_summary(&token)
+    );
+
+    Ok(())
+}
+
+/// The expiry and scope the success summary reports, with control characters
+/// dropped from the scope the server granted.
+fn minted_summary(token: &jwt_bearer::MintedToken) -> String {
     let expiry = token
         .expires_in
         .map(|s| format!("expires in {s}s"))
@@ -87,14 +99,9 @@ pub fn exec(args: &MintTokenArgs) -> Result<(), ActualError> {
     let scope_note = token
         .scope
         .as_deref()
-        .map(|s| format!("scope: {s}"))
+        .map(|s| format!("scope: {}", sanitize_server_text(s)))
         .unwrap_or_else(|| "scope: (server default)".to_string());
-    eprintln!(
-        "{} minted token ({expiry}; {scope_note})",
-        theme::success(&theme::SUCCESS)
-    );
-
-    Ok(())
+    format!("{expiry}; {scope_note}")
 }
 
 /// Load the private key PEM. A key **file** (`--key` / its env) wins when given;
@@ -311,6 +318,39 @@ mod tests {
         let err = unix_seconds(before).unwrap_err();
         assert!(
             matches!(err, ActualError::InternalError(ref m) if m.contains("before the Unix epoch"))
+        );
+    }
+
+    #[tokio::test]
+    async fn minted_summary_drops_control_characters_from_the_granted_scope() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"token_type":"Bearer","access_token":"minted-abc","expires_in":300,"scope":"adr:query\u0007 \u001b]0;pwned\u0007adr:review\u007f"}"#,
+            )
+            .create_async()
+            .await;
+        let http = oauth::build_http_client(&server.url()).unwrap();
+        let token = jwt_bearer::mint_token(&http, &server.url(), "assertion", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            minted_summary(&token),
+            "expires in 300s; scope: adr:query ]0;pwnedadr:review"
+        );
+
+        let bare = jwt_bearer::MintedToken {
+            access_token: "t".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: None,
+            scope: None,
+        };
+        assert_eq!(
+            minted_summary(&bare),
+            "no expiry reported; scope: (server default)"
         );
     }
 }

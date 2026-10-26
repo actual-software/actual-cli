@@ -25,7 +25,7 @@ use crate::auth::store::{self, StoredCredentials};
 use crate::auth::{oauth, pat, token_store};
 use crate::cli::args::CreateTokenArgs;
 use crate::cli::ui::theme;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 pub fn exec(args: &CreateTokenArgs) -> Result<(), ActualError> {
     build_runtime()?.block_on(run(args))
@@ -136,7 +136,7 @@ fn print_result(
         theme::success(format!("\"{}\"", args.name))
     )?;
     if let Some(id) = &issued.id {
-        writeln!(err, "  {:<12} {}", "Token id:", id)?;
+        writeln!(err, "  {:<12} {}", "Token id:", sanitize_server_text(id))?;
     }
     // Prefer the scopes the server granted; fall back to what was requested.
     let scopes = if issued.scopes.is_empty() {
@@ -144,9 +144,9 @@ fn print_result(
     } else {
         issued.scopes.join(" ")
     };
-    writeln!(err, "  {:<12} {}", "Scopes:", scopes)?;
+    writeln!(err, "  {:<12} {}", "Scopes:", sanitize_server_text(&scopes))?;
     if let Some(exp) = &issued.expires_at {
-        writeln!(err, "  {:<12} {}", "Expires:", exp)?;
+        writeln!(err, "  {:<12} {}", "Expires:", sanitize_server_text(exp))?;
     }
     writeln!(err, "  {:<12} {}", "Stored in:", backend.label())?;
     writeln!(err)?;
@@ -211,7 +211,7 @@ fn print_unstored_token(
     );
     match &issued.id {
         Some(id) => {
-            let _ = writeln!(err, "  {:<12} {}", "Token id:", id);
+            let _ = writeln!(err, "  {:<12} {}", "Token id:", sanitize_server_text(id));
             let _ = writeln!(err);
             let _ = writeln!(
                 err,
@@ -487,6 +487,55 @@ mod tests {
             !err_s.contains("actl_pat_only"),
             "the secret must never leak to stderr: {err_s}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_printed_metadata_drops_control_characters() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", pat::ISSUANCE_PATH)
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"token":"actl_pat_ctl","id":"tok\u001b[31m_42\u0007","scopes":["adr:query\u007f","\u001b]0;pwned\u0007adr:review"],"expires_at":"2030-01-01\u001b[2JT00:00:00Z"}"#,
+            )
+            .create_async()
+            .await;
+        let args = sample_args("agent-x");
+        let issued = pat::issue(&server.url(), "session-token", &args.name, &args.scopes)
+            .await
+            .unwrap();
+        mock.assert_async().await;
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_result(
+            &mut out,
+            &mut err,
+            &args,
+            &issued,
+            token_store::Backend::EncryptedFile,
+        )
+        .unwrap();
+        // The secret on stdout is never altered, so a script still captures it.
+        assert_eq!(String::from_utf8(out).unwrap(), "actl_pat_ctl\n");
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(
+            err_s.contains(
+                "\n  Token id:    tok[31m_42\n  Scopes:      adr:query ]0;pwnedadr:review\
+                 \n  Expires:     2030-01-01[2JT00:00:00Z\n"
+            ),
+            "{err_s:?}"
+        );
+        assert!(!err_s.contains(['\x07', '\x7f']), "{err_s:?}");
+
+        let store_err = ActualError::ConfigError("keychain unavailable".to_string());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_unstored_token(&mut out, &mut err, &args, &issued, &store_err).unwrap();
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(err_s.contains("\n  Token id:    tok[31m_42\n"), "{err_s:?}");
+        assert!(!err_s.contains(['\x07', '\x7f']), "{err_s:?}");
     }
 
     #[test]
