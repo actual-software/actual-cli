@@ -19,7 +19,7 @@ fn parse_all(files: &[(&str, &str)]) -> Result<Vec<TrustedKey>> {
         .iter()
         .map(|(name, text)| {
             let key = PublicKey::parse(text).with_context(|| {
-                format!("release-keys/{name}.pub can't be used (the one-time setup in docs/RELEASE_SIGNING.md writes it)")
+                format!("release-keys/{name}.pub can't be used (the one-time setup of the signing keys, in the team's internal docs, writes it)")
             })?;
             Ok(TrustedKey {
                 name: (*name).to_owned(),
@@ -38,7 +38,10 @@ mod tests {
         let err = parse_all(&[("primary", "untrusted comment: placeholder\n")]).unwrap_err();
         let text = format!("{err:#}");
         assert!(
-            text.contains("release-keys/primary.pub") && text.contains("RELEASE_SIGNING.md"),
+            text.contains("release-keys/primary.pub")
+                && text.contains(
+                    "the one-time setup of the signing keys, in the team's internal docs"
+                ),
             "{text}"
         );
     }

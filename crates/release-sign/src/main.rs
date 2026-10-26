@@ -1,5 +1,6 @@
 //! Signs a published actual-cli release's SHA256SUMS with the org's Cloud KMS
-//! key. docs/RELEASE_SIGNING.md covers the one-time setup and when to run it.
+//! key. docs/RELEASE_SIGNING.md covers when to run it, and the one-time setup
+//! of the signing keys is in the team's internal docs.
 
 mod github;
 mod keys;
