@@ -14,7 +14,7 @@ use crate::api::types::{
     PlanGovernanceEventRequest, PlanGovernanceEventResponse, PlanGovernanceReply, TelemetryRequest,
 };
 use crate::config::types::Config;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
 
@@ -217,9 +217,10 @@ impl ActualApiClient {
         status: reqwest::StatusCode,
         response: reqwest::Response,
     ) -> ActualError {
-        match response.json::<ConnectedReposErrorBody>().await {
-            Ok(body) if !body.message.is_empty() => {
-                ActualError::ApiError(format!("HTTP {status}: {}", body.message))
+        let parsed = response.json::<ConnectedReposErrorBody>().await;
+        match parsed.map(|body| sanitize_server_text(&body.message)) {
+            Ok(message) if !message.is_empty() => {
+                ActualError::ApiError(format!("HTTP {status}: {message}"))
             }
             _ => ActualError::ApiError(format!("HTTP {status}")),
         }
@@ -357,8 +358,8 @@ impl ActualApiClient {
         if status.is_client_error() {
             match response.json::<ApiErrorResponse>().await {
                 Ok(error_response) => ActualError::ApiResponseError {
-                    code: error_response.error.code,
-                    message: error_response.error.message,
+                    code: sanitize_server_text(&error_response.error.code),
+                    message: sanitize_server_text(&error_response.error.message),
                 },
                 Err(e) => ActualError::ApiError(format!(
                     "HTTP {status}: failed to parse error response: {e}"
@@ -370,7 +371,8 @@ impl ActualApiClient {
             match response.json::<ApiErrorResponse>().await {
                 Ok(body) => ActualError::ApiError(format!(
                     "HTTP {status}: {}: {}",
-                    body.error.code, body.error.message
+                    sanitize_server_text(&body.error.code),
+                    sanitize_server_text(&body.error.message)
                 )),
                 Err(_) => ActualError::ApiError(format!("HTTP {status}")),
             }
@@ -773,6 +775,59 @@ mod tests {
         assert!(
             matches!(err, ActualError::ApiError(ref msg)
                 if msg == "HTTP 500 Internal Server Error: INTERNAL: matcher crashed"),
+            "got {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_api_error_drops_control_characters() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{"error": {"code": "INVALID\u0007_REQUEST", "message": "\u001b[31mno\u007f projects", "details": null}}"#;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let err = client
+            .post_match(&sample_match_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiResponseError { ref code, ref message }
+                if code == "INVALID_REQUEST" && message == "[31mno projects"),
+            "got {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_server_error_drops_control_characters() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error": {"code": "INTER\u0007NAL", "message": "\u001b[31mmatcher\u007f crashed", "details": null}}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let err = client
+            .post_match(&sample_match_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref msg)
+                if msg == "HTTP 500 Internal Server Error: INTERNAL: [31mmatcher crashed"),
             "got {err:?}"
         );
         mock.assert_async().await;
@@ -2232,6 +2287,31 @@ mod tests {
         let err = client.list_connected_repos("org").await.unwrap_err();
         assert!(
             matches!(err, ActualError::ApiError(ref m) if m.contains("404") && m.contains("organization not found")),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_error_drops_control_characters() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error":"not_found","message":"\u001b[31morganization\u0007 not found\u007f"}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "HTTP 404 Not Found: [31morganization not found"),
             "got: {err:?}"
         );
         mock.assert_async().await;

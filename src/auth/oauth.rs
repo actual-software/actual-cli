@@ -19,7 +19,7 @@ use serde::Deserialize;
 use crate::auth::loopback::LoopbackServer;
 use crate::auth::pkce::{self, PkcePair};
 use crate::auth::store::StoredCredentials;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 /// Default OAuth client id for the CLI. Overridable via `ACTUAL_OAUTH_CLIENT_ID`.
 const DEFAULT_CLIENT_ID: &str = "actual-cli";
@@ -228,8 +228,9 @@ pub(crate) async fn auth_error(context: &str, response: reqwest::Response) -> Ac
     response_error(context, status, &body)
 }
 
-/// `"{context} (HTTP {status}): {error}: {error_description}"`, dropping
-/// whichever OAuth field is absent or empty.
+/// `"{context} (HTTP {status}): {error}: {error_description}"`, with each OAuth
+/// field passed through [`sanitize_server_text`] and dropped when that leaves
+/// it absent or empty.
 fn response_error(
     context: &str,
     status: reqwest::StatusCode,
@@ -237,9 +238,10 @@ fn response_error(
 ) -> ActualError {
     let mut message = format!("{context} (HTTP {status})");
     for part in [&body.error, &body.error_description].into_iter().flatten() {
+        let part = sanitize_server_text(part);
         if !part.is_empty() {
             message.push_str(": ");
-            message.push_str(part);
+            message.push_str(&part);
         }
     }
     ActualError::ApiError(message)
@@ -1257,6 +1259,21 @@ mod tests {
         assert!(
             matches!(err, ActualError::ApiError(ref m) if m == "Token refresh failed \
                 (HTTP 500 Internal Server Error): server_error: Failed to process token request"),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_error_drops_control_characters_from_server_text() {
+        // JSON escapes decode to the real characters; the error field is only a BEL.
+        let err = refresh_answered_with(
+            500,
+            r#"{"error":"\u0007","error_description":"\u001b[31mdatabase\u007f down\u0007"}"#,
+        )
+        .await;
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m == "Token refresh failed \
+                (HTTP 500 Internal Server Error): [31mdatabase down"),
             "got: {err:?}"
         );
     }
