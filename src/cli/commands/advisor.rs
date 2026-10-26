@@ -365,7 +365,7 @@ fn org_mismatch_message(
 }
 
 /// If the stored access token is expired (or about to be), refresh it with the
-/// rotation primitive and re-persist. A refresh token the server rejects
+/// rotation primitive and re-persist. A session `oauth::refresh` can't renew
 /// surfaces as `NotLoggedIn`; any other refresh failure keeps its own error.
 async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
     if creds.refresh_token.is_empty() {
@@ -1283,6 +1283,17 @@ mod tests {
             matches!(err, ActualError::ApiError(ref m) if m.starts_with("Token refresh request failed")),
             "got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_missing_auth_url_is_not_logged_in() {
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        c.auth_url = None;
+        let err = ensure_fresh(c).await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.hint().as_deref(), Some("actual login"));
     }
 
     #[tokio::test]
