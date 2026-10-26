@@ -23,7 +23,7 @@ use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::config::sticky;
 use crate::config::types::StickyScope;
-use crate::error::{sanitize_server_text, ActualError};
+use crate::error::{sanitize_server_lines, sanitize_server_text, ActualError};
 use sha2::{Digest, Sha256};
 
 /// Hard wall-clock cap on polling before giving up, matching the browser
@@ -247,10 +247,11 @@ fn short_id(id: &str) -> String {
 /// Render a repo scope for a user-facing line: `owner/name (shortid)` when the
 /// name is known, else `repo shortid` (a scope pinned by bare UUID has no name).
 fn format_repo_scope(qualified_name: Option<&str>, id: &str) -> String {
-    match qualified_name {
+    let scope = match qualified_name {
         Some(name) => format!("{} ({})", name, short_id(id)),
         None => format!("repo {}", short_id(id)),
-    }
+    };
+    sanitize_server_text(&scope)
 }
 
 /// Read the `origin` remote URL of the git repo containing `dir`, or `None` when
@@ -291,35 +292,48 @@ async fn auto_detect_repo(dir: &Path, client: &ActualApiClient, org_id: &str) ->
         // the org-level query below surfaces any real error with better guidance.
         Err(_) => return None,
     };
-    match match_remote_to_repos(&remote, &repos).as_slice() {
-        [single] => {
-            eprintln!(
-                "{} scoped to {} ({})",
+    let (repo_unique_id, note) =
+        detection_outcome(&remote, &match_remote_to_repos(&remote, &repos));
+    eprintln!("{note}");
+    repo_unique_id
+}
+
+/// The repo auto-detection scopes on, given the connected repos that match
+/// `remote`, and the note it prints on stderr. Only a single match scopes the
+/// query; none or several leave it at org level.
+fn detection_outcome(
+    remote: &RepoRemote,
+    matches: &[&ConnectedRepository],
+) -> (Option<String>, String) {
+    match matches {
+        [single] => (
+            Some(single.repo_unique_id.clone()),
+            format!(
+                "{} scoped to {}",
                 theme::hint("advisor"),
-                qualified_name(single),
-                short_id(&single.repo_unique_id)
-            );
-            Some(single.repo_unique_id.clone())
-        }
-        [] => {
-            eprintln!(
+                format_repo_scope(Some(&qualified_name(single)), &single.repo_unique_id)
+            ),
+        ),
+        [] => (
+            None,
+            format!(
                 "{} {} is not a connected repository; querying at org level",
                 theme::hint("advisor"),
                 remote.slug()
-            );
-            None
-        }
+            ),
+        ),
         many => {
-            eprintln!(
+            let mut note = format!(
                 "{} origin remote {} matches multiple connected repositories; \
                  pass --repo owner/name to scope one. Querying at org level.",
                 theme::hint("advisor"),
                 remote.slug()
             );
             for repo in many {
-                eprintln!("    • {}", qualified_name(repo));
+                note.push_str("\n    • ");
+                note.push_str(&sanitize_server_text(&qualified_name(repo)));
             }
-            None
+            (None, note)
         }
     }
 }
@@ -674,25 +688,32 @@ async fn sleep_for(retry_after: Option<u64>, default: Duration) {
     tokio::time::sleep(next_delay(retry_after, default)).await;
 }
 
-/// Render the advisor answer. **Never prints token material.**
+/// Print the advisor answer. **Never prints token material.**
 fn print_answer(output: &AdvisorOutput) {
-    println!("{}", output.summary);
+    print!("{}", render_answer(output));
+}
+
+/// The advisor answer as `print_answer` prints it, with control characters
+/// dropped from every part the server supplied.
+fn render_answer(output: &AdvisorOutput) -> String {
+    let mut text = format!("{}\n", sanitize_server_lines(&output.summary));
     if !output.interpreter.related_adrs.is_empty() {
-        println!("\n{}", theme::hint("Related ADRs:"));
+        text.push_str(&format!("\n{}\n", theme::hint("Related ADRs:")));
         for adr in &output.interpreter.related_adrs {
-            println!(
-                "  • {} ({}, confidence {:.0}%)",
-                adr.title,
-                adr.scope,
+            text.push_str(&format!(
+                "  • {} ({}, confidence {:.0}%)\n",
+                sanitize_server_text(&adr.title),
+                sanitize_server_text(&adr.scope),
                 adr.confidence * 100.0
-            );
-            // Render the server-provided deep link (used verbatim) on its own
-            // line; skip a null or empty url so the ADR still prints cleanly.
+            ));
+            // Render the server-provided deep link on its own line; skip a
+            // null or empty url so the ADR still prints cleanly.
             if let Some(url) = adr.url.as_deref().filter(|u| !u.is_empty()) {
-                println!("    {url}");
+                text.push_str(&format!("    {}\n", sanitize_server_text(url)));
             }
         }
     }
+    text
 }
 
 #[cfg(test)]
@@ -807,6 +828,22 @@ mod tests {
             },
         };
         print_answer(&without);
+    }
+
+    #[test]
+    fn test_render_answer_drops_control_characters_from_server_text() {
+        let output: AdvisorOutput = serde_json::from_str(
+            r#"{"summary":"Use \u001b[31mthe\u0007 App Router.\r\n\n\tKeep it\u007f.","interpreter":{"summary":"i","related_adrs":[{"id":"a1","name":"n","title":"\u001b]0;pwned\u0007Use the App Router","policy":"p","instructions":"i","scope":"front\u007fend","relevance_reason":"r","confidence":0.92,"url":"https://app.example.com/d/1\u001b[2J"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            render_answer(&output),
+            format!(
+                "Use [31mthe App Router.\n\n\tKeep it.\n\n{}\n  • ]0;pwnedUse the App Router \
+                 (frontend, confidence 92%)\n    https://app.example.com/d/1[2J\n",
+                theme::hint("Related ADRs:")
+            )
+        );
     }
 
     #[test]
@@ -1969,6 +2006,41 @@ mod tests {
         assert!(auto_detect_repo(dir.path(), &client, "org").await.is_none());
     }
 
+    #[test]
+    fn test_detection_outcome_drops_control_characters_from_repo_names() {
+        let repos: Vec<ConnectedRepository> = serde_json::from_str(
+            r#"[{"repo_unique_id":"\u001b[2Jid-a-1234","name":"cli\u0007","external_owner":"\u001b[31mevil"},{"repo_unique_id":"id-b","name":"cli","external_owner":"other\u007f"}]"#,
+        )
+        .unwrap();
+        let remote = RepoRemote {
+            owner: "evil".to_string(),
+            name: "cli".to_string(),
+        };
+
+        let (id, note) = detection_outcome(&remote, &[&repos[0]]);
+        // The query still scopes on the id exactly as the API sent it.
+        assert_eq!(id.as_deref(), Some("\x1b[2Jid-a-1234"));
+        assert_eq!(
+            note,
+            format!(
+                "{} scoped to [31mevil/cli ([2Jid-a)",
+                theme::hint("advisor")
+            )
+        );
+
+        let (id, note) = detection_outcome(&remote, &[&repos[0], &repos[1]]);
+        assert_eq!(id, None);
+        assert_eq!(
+            note,
+            format!(
+                "{} origin remote evil/cli matches multiple connected repositories; \
+                 pass --repo owner/name to scope one. Querying at org level.\
+                 \n    • [31mevil/cli\n    • other/cli",
+                theme::hint("advisor")
+            )
+        );
+    }
+
     #[tokio::test]
     async fn test_auto_detect_repo_org_fallback_on_api_error() {
         let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
@@ -2069,6 +2141,25 @@ mod tests {
             "actual-software/actual-cli (abcdef12)"
         );
         assert_eq!(format_repo_scope(None, "abcdef1234567890"), "repo abcdef12");
+    }
+
+    #[test]
+    fn test_format_repo_scope_drops_control_characters() {
+        // `--repo` stores the name and id the connected-repos lookup returned,
+        // and the remembered-scope note and `--show-scope` print them later.
+        let repo: ConnectedRepository = serde_json::from_str(
+            r#"{"repo_unique_id":"\u001b[2Jabcdef12","name":"cli\u007f","external_owner":"\u001b[31mevil\u0007"}"#,
+        )
+        .unwrap();
+        let scope = StickyScope::repo(&repo.repo_unique_id, Some(qualified_name(&repo)));
+        assert_eq!(
+            format_repo_scope(
+                scope.qualified_name.as_deref(),
+                scope.repo_unique_id.as_deref().unwrap()
+            ),
+            "[31mevil/cli ([2Jabcd)"
+        );
+        assert_eq!(format_repo_scope(None, "\x1b[2Jabcdef12"), "repo [2Jabcd");
     }
 
     #[test]
