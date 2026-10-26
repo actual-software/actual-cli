@@ -276,13 +276,13 @@ impl ActualError {
     }
 }
 
-/// The most characters of one server-supplied field an error message carries.
+/// The most characters of one server-supplied field the CLI prints.
 const SERVER_TEXT_MAX_CHARS: usize = 1_000;
 
-/// Make text a server supplied safe to put in an error message, which the
-/// error box prints to the terminal as it stands: control characters are
-/// dropped, a tab or line break becomes a space so the field stays on one
-/// line, and anything past [`SERVER_TEXT_MAX_CHARS`] is cut to "…".
+/// Make one field of text a server supplied safe to print, in an error message
+/// or elsewhere: control characters are dropped, a tab or line break becomes a
+/// space so the field stays on one line, and anything past
+/// [`SERVER_TEXT_MAX_CHARS`] is cut to "…".
 pub(crate) fn sanitize_server_text(text: &str) -> String {
     let mut chars = text.chars().filter_map(|c| match c {
         '\t' | '\n' | '\r' => Some(' '),
@@ -294,6 +294,15 @@ pub(crate) fn sanitize_server_text(text: &str) -> String {
         clean.push('…');
     }
     clean
+}
+
+/// Make multi-line text a server supplied safe to print, such as the advisor's
+/// markdown answer or an API's error body: every control character except `\n`
+/// and `\t` is dropped, carriage returns included, and nothing is cut.
+pub(crate) fn sanitize_server_lines(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
 }
 
 #[cfg(test)]
@@ -321,6 +330,16 @@ mod tests {
         assert_eq!(sanitize_server_text(&at_cap), at_cap);
         let over = format!("{at_cap}x");
         assert_eq!(sanitize_server_text(&over), format!("{at_cap}…"));
+    }
+
+    #[test]
+    fn test_sanitize_server_lines_keeps_lines_and_tabs_only() {
+        assert_eq!(
+            sanitize_server_lines("\x1b[31mred\x1b[0m\tbell\x07\r\ndel\x7f csi\u{9b}2J\n"),
+            "[31mred[0m\tbell\ndel csi2J\n"
+        );
+        let long = "é".repeat(SERVER_TEXT_MAX_CHARS + 1);
+        assert_eq!(sanitize_server_lines(&long), long);
     }
 
     #[test]
