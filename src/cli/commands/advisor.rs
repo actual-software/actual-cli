@@ -23,7 +23,7 @@ use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::config::sticky;
 use crate::config::types::StickyScope;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 use sha2::{Digest, Sha256};
 
 /// Hard wall-clock cap on polling before giving up, matching the browser
@@ -640,7 +640,10 @@ async fn poll_to_completion(
                         None => Outcome::Failed(Some("advisor returned no result".to_string())),
                     });
                 }
-                AdvisorJobStatus::Failed => return Ok(Outcome::Failed(status.error)),
+                AdvisorJobStatus::Failed => {
+                    let error = status.error.as_deref().map(sanitize_server_text);
+                    return Ok(Outcome::Failed(error));
+                }
                 AdvisorJobStatus::Pending | AdvisorJobStatus::Running => {
                     sleep_for(retry_after, poll_interval).await;
                 }
@@ -932,6 +935,44 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("stream ended")));
+    }
+
+    #[tokio::test]
+    async fn test_run_failed_query_drops_control_characters_from_the_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _s = server
+            .mock("POST", "/v1/advisor/query")
+            .with_body(START_BODY)
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+        let _p = server
+            .mock("GET", POLL_PATH)
+            .with_body(
+                r#"{"query_id":"q1","status":"failed","result":null,"error":"\u001b[31mstream\u0007 ended\u007f"}"#,
+            )
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+        let err = run(
+            &args(&server.url(), None),
+            None,
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "Advisor query failed: [31mstream ended"),
+            "got: {err:?}"
+        );
     }
 
     #[tokio::test]

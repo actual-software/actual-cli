@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 /// The authorization code + state returned on the redirect.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,9 +89,11 @@ impl LoopbackServer {
             if let Some(err) = params
                 .iter()
                 .find(|(k, _)| k == "error")
-                .map(|(_, v)| v.clone())
+                .map(|(_, v)| sanitize_server_text(v))
             {
-                let desc = param(&params, "error_description").unwrap_or_default();
+                let desc = param(&params, "error_description")
+                    .map(|desc| sanitize_server_text(&desc))
+                    .unwrap_or_default();
                 write_html(
                     &mut stream,
                     "400 Bad Request",
@@ -375,6 +377,31 @@ mod tests {
         assert!(
             matches!(err, ActualError::ApiError(ref m) if m.contains("access_denied")),
             "expected authorization-failed error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_code_error_param_drops_control_characters() {
+        let server = LoopbackServer::bind().await.unwrap();
+        let port = server.port();
+        let handle =
+            tokio::spawn(async move { server.wait_for_code("s", Duration::from_secs(5)).await });
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(
+                b"GET /callback?error=access%1B[31m_denied%07&error_description=no%7Fpe HTTP/1.1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let _ = stream.read_to_end(&mut resp).await;
+
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "Authorization failed: access[31m_denied — nope"),
+            "got: {err:?}"
         );
     }
 

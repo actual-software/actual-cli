@@ -276,11 +276,52 @@ impl ActualError {
     }
 }
 
+/// The most characters of one server-supplied field an error message carries.
+const SERVER_TEXT_MAX_CHARS: usize = 1_000;
+
+/// Make text a server supplied safe to put in an error message, which the
+/// error box prints to the terminal as it stands: control characters are
+/// dropped, a tab or line break becomes a space so the field stays on one
+/// line, and anything past [`SERVER_TEXT_MAX_CHARS`] is cut to "…".
+pub(crate) fn sanitize_server_text(text: &str) -> String {
+    let mut chars = text.chars().filter_map(|c| match c {
+        '\t' | '\n' | '\r' => Some(' '),
+        c if c.is_control() => None,
+        c => Some(c),
+    });
+    let mut clean: String = chars.by_ref().take(SERVER_TEXT_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        clean.push('…');
+    }
+    clean
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
     use super::*;
+
+    #[test]
+    fn test_sanitize_server_text_drops_control_characters() {
+        // Without its ESC, the rest of a sequence is plain text.
+        assert_eq!(
+            sanitize_server_text("\x1b[31mred\x1b[0m, bell\x07, del\x7f, csi\u{9b}2J"),
+            "[31mred[0m, bell, del, csi2J"
+        );
+        assert_eq!(
+            sanitize_server_text("one\ttwo\nthree\rfour"),
+            "one two three four"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_server_text_cuts_a_long_field() {
+        let at_cap = "é".repeat(SERVER_TEXT_MAX_CHARS);
+        assert_eq!(sanitize_server_text(&at_cap), at_cap);
+        let over = format!("{at_cap}x");
+        assert_eq!(sanitize_server_text(&over), format!("{at_cap}…"));
+    }
 
     #[test]
     fn test_exit_codes() {
