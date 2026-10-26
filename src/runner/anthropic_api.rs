@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::error::ActualError;
+use crate::error::{sanitize_server_lines, ActualError};
 use crate::tailoring::types::TailoringOutput;
 
 use super::http_retry::{
@@ -247,7 +247,7 @@ impl AnthropicApiRunner {
                 tracing::debug!("Anthropic API error body: {body_str}");
                 return Err(ActualError::RunnerFailed {
                     message: format!("Anthropic API error: {status}"),
-                    stderr: body_str,
+                    stderr: sanitize_server_lines(&body_str),
                 });
             }
 
@@ -255,7 +255,7 @@ impl AnthropicApiRunner {
                 let body = extract_error_body(response.bytes().await, 4096);
                 return Err(ActualError::RunnerFailed {
                     message: format!("Anthropic API error: {status}"),
-                    stderr: body,
+                    stderr: sanitize_server_lines(&body),
                 });
             }
 
@@ -907,6 +907,30 @@ mod tests {
             "expected RunnerFailed, got: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn test_error_bodies_drop_control_characters() {
+        for status in [400, 500] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("POST", "/v1/messages")
+                .with_status(status)
+                .with_body("\x1b]0;pwned\x07Bad\x7f gateway\r\n\tline two\x1b[2J")
+                .create_async()
+                .await;
+            let result = make_runner(&server.url())
+                .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+                .await;
+            mock.assert_async().await;
+            match result {
+                Err(ActualError::RunnerFailed { stderr, .. }) => assert_eq!(
+                    stderr, "]0;pwnedBad gateway\n\tline two[2J",
+                    "status {status}"
+                ),
+                other => panic!("status {status}: expected RunnerFailed, got: {other:?}"),
+            }
+        }
     }
 
     // Test: HTTP 400 without credit_limit_reached maps to RunnerFailed
