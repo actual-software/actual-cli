@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `login --device` is hidden from help while the Actual AI server lacks the device-authorization grant, which a device sign-in needs. The flag still parses and the flow is unchanged
 
 ### Fixed
+- The page the browser shows after you approve `login` says to return to the terminal to finish signing in, instead of "Signed in". It appears before the CLI exchanges the code for a session, so when that exchange failed, the browser said "Signed in" and the terminal reported the error
 - The error box wraps a long message and its `Fix:` line instead of cutting them off at the terminal edge, so the server's reason for a failed sign-in is on screen. A message with line breaks stays inside the box, and a runner's stderr appears once, under "Subprocess output"
 - A failed sign-in, token mint, token issuance or API request reports the status line plus the OAuth `error` and `error_description` (or the API's error code and message), not up to 2 KB of the response body, which for an error page was HTML
 - Text the auth server or the API sends for an error message loses its control characters before the error box prints it, so a misbehaving server can't write escape sequences to the terminal. A tab or line break in that text prints as a space, and a field longer than 1,000 characters is cut with "…"
