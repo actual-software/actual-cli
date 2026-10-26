@@ -408,19 +408,22 @@ async fn login_with(
 /// returns a new refresh token and revokes the old one). Identity fields
 /// (org/member/email/subject) and the auth URL are preserved from `creds`.
 ///
-/// A missing refresh token, or one the server rejects, comes back as
-/// [`ActualError::NotLoggedIn`]; every other failure keeps its own error.
+/// A session `actual login` would have to replace comes back as
+/// [`ActualError::NotLoggedIn`]: a missing refresh token or auth server URL, a
+/// stored URL [`build_http_client`] refuses, or a refresh token the server
+/// rejects. Every other failure keeps its own error.
 pub async fn refresh(creds: &StoredCredentials) -> Result<StoredCredentials, ActualError> {
-    let base_url = creds.auth_url.clone().ok_or_else(|| {
-        ActualError::ConfigError(
-            "Stored credentials have no auth server URL — run `actual login` again.".to_string(),
-        )
-    })?;
+    let Some(base_url) = creds.auth_url.clone() else {
+        return Err(ActualError::NotLoggedIn);
+    };
     if creds.refresh_token.is_empty() {
         return Err(ActualError::NotLoggedIn);
     }
     let cfg = OAuthConfig::new(base_url);
-    let http = build_http_client(&cfg.base_url)?;
+    let http = match build_http_client(&cfg.base_url) {
+        Err(ActualError::ConfigError(_)) => return Err(ActualError::NotLoggedIn),
+        built => built?,
+    };
     let token = refresh_tokens(&http, &cfg.base_url, &cfg.client_id, &creds.refresh_token).await?;
     Ok(apply_refresh(creds, token))
 }
@@ -1091,10 +1094,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_no_auth_url_errors() {
-        let creds = creds_with_auth(None, "r");
-        let err = refresh(&creds).await.unwrap_err();
-        assert!(matches!(err, ActualError::ConfigError(ref m) if m.contains("auth server URL")));
+    async fn test_refresh_missing_or_refused_auth_url_is_not_logged_in() {
+        for auth_url in [None, Some("http://auth.example.com".to_string())] {
+            let creds = creds_with_auth(auth_url.clone(), "r");
+            let err = refresh(&creds).await.unwrap_err();
+            assert!(
+                matches!(err, ActualError::NotLoggedIn),
+                "{auth_url:?}: got {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -55,8 +55,8 @@ fn resolve_api_url(flag: Option<&str>) -> String {
 
 /// If the stored access token is expired (or about to be), refresh it with the
 /// rotation primitive and re-persist. Mirrors `commands::advisor::ensure_fresh`:
-/// a refresh token the server rejects surfaces as `NotLoggedIn`, and any other
-/// refresh failure keeps its own error.
+/// a session `oauth::refresh` can't renew surfaces as `NotLoggedIn`, and any
+/// other refresh failure keeps its own error.
 async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
     if creds.refresh_token.is_empty() {
         return Ok(creds);
@@ -385,6 +385,17 @@ mod tests {
         let out = ensure_fresh(creds).await.unwrap();
         assert_eq!(out.access_token, "refreshed");
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_missing_auth_url_is_not_logged_in() {
+        let mut creds = sample_creds();
+        creds.auth_url = None;
+        creds.expires_at = Some(Utc::now() - ChronoDuration::hours(1));
+        let err = ensure_fresh(creds).await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.hint().as_deref(), Some("actual login"));
     }
 
     #[tokio::test]
