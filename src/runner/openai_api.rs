@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::error::ActualError;
+use crate::error::{sanitize_server_lines, ActualError};
 use crate::tailoring::types::TailoringOutput;
 
 use super::http_retry::{
@@ -285,7 +285,7 @@ impl OpenAiApiRunner {
                 let body_text = extract_error_body(response.bytes().await, 4096);
                 return Err(ActualError::RunnerFailed {
                     message: format!("OpenAI API error: {status}"),
-                    stderr: body_text,
+                    stderr: sanitize_server_lines(&body_text),
                 });
             }
 
@@ -294,7 +294,7 @@ impl OpenAiApiRunner {
                 let body_text = extract_error_body(response.bytes().await, 4096);
                 return Err(ActualError::RunnerFailed {
                     message: format!("HTTP {status}"),
-                    stderr: body_text,
+                    stderr: sanitize_server_lines(&body_text),
                 });
             }
 
@@ -310,7 +310,7 @@ impl OpenAiApiRunner {
                 };
                 ActualError::RunnerFailed {
                     message: format!("Failed to parse OpenAI API response: {e}"),
-                    stderr: truncated,
+                    stderr: sanitize_server_lines(&truncated),
                 }
             })?;
         };
@@ -986,6 +986,32 @@ mod tests {
         }
 
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_error_bodies_drop_control_characters() {
+        // A server error, any other failure status, and a success body that
+        // isn't JSON each carry the raw body into stderr.
+        for status in [500, 404, 200] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("POST", "/v1/responses")
+                .with_status(status)
+                .with_body("\x1b]0;pwned\x07Bad\x7f gateway\r\n\tline two\x1b[2J")
+                .create_async()
+                .await;
+            let result = make_runner(&server)
+                .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+                .await;
+            mock.assert_async().await;
+            match result {
+                Err(ActualError::RunnerFailed { stderr, .. }) => assert_eq!(
+                    stderr, "]0;pwnedBad gateway\n\tline two[2J",
+                    "status {status}"
+                ),
+                other => panic!("status {status}: expected RunnerFailed, got: {other:?}"),
+            }
+        }
     }
 
     // Test 9: model_override is respected
