@@ -15,7 +15,7 @@ use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
 use crate::config;
 use crate::config::types::{Config, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_MODEL};
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 use crate::generation::markers;
 use crate::generation::OutputFormat;
 use crate::runner::binary::find_claude_binary;
@@ -159,9 +159,10 @@ fn format_sign_in_section(
                 .as_deref()
                 .or(creds.subject.as_deref())
                 .unwrap_or(&creds.member_id);
+            let org = &creds.organization_id;
             let panel = panel
-                .kv("Account", who)
-                .kv("Organization", &creds.organization_id);
+                .kv("Account", &sanitize_server_text(who))
+                .kv("Organization", &sanitize_server_text(org));
             match expired_note(&creds, now) {
                 Some(note) => panel.kv("Access token", &note),
                 None => panel,
@@ -791,6 +792,20 @@ mod tests {
             p.contains("Access token: expired 2026-10-23 10:00 UTC"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn test_format_sign_in_section_drops_control_characters_from_server_fields() {
+        // An OSC sequence survives `plain`, so only the filter removes it.
+        let creds: StoredCredentials = serde_json::from_str(
+            r#"{"access_token":"a","refresh_token":"r","organization_id":"\u001b[31morg\u007f-1","member_id":"m","email":"\u001b]0;pwned\u0007dev@example.com"}"#,
+        )
+        .unwrap();
+        let rendered = format_sign_in_section(Ok(Some(creds)), sign_in_now(), 80);
+        let p = plain(&rendered);
+        assert!(p.contains("Account: ]0;pwneddev@example.com"), "{p:?}");
+        assert!(p.contains("Organization: [31morg-1"), "{p:?}");
+        assert!(!rendered.contains(['\x07', '\x7f']), "{rendered:?}");
     }
 
     #[test]

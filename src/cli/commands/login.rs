@@ -7,8 +7,9 @@
 use crate::auth::oauth::{self, OAuthConfig, DEFAULT_LOGIN_TIMEOUT};
 use crate::auth::store::{self, StoredCredentials};
 use crate::cli::args::LoginArgs;
+use crate::cli::commands::whoami::server_row;
 use crate::cli::ui::theme;
-use crate::error::ActualError;
+use crate::error::{sanitize_server_text, ActualError};
 
 pub fn exec(args: &LoginArgs) -> Result<(), ActualError> {
     let base_url = oauth::resolve_auth_url(args.api_url.as_deref())?;
@@ -47,25 +48,32 @@ fn exec_device(base_url: String) -> Result<(), ActualError> {
 /// the answer channel (stdout) stays clean for scripting. Never prints token
 /// material — only the verification URL and the short user code.
 fn print_device_prompt(device: &oauth::DeviceCodeResponse) {
-    eprintln!();
-    eprintln!("{} To sign in, open this URL on any device:", theme::BULLET);
-    eprintln!("    {}", theme::accent(&device.verification_uri));
-    eprintln!("  and enter the code:");
-    eprintln!("    {}", theme::accent_secondary(&device.user_code));
+    eprint!("{}", format_device_prompt(device));
+}
+
+/// The prompt `print_device_prompt` writes. The auth server sent the URLs and
+/// the code, so control characters are dropped from them.
+fn format_device_prompt(device: &oauth::DeviceCodeResponse) -> String {
+    let mut text = format!(
+        "\n{} To sign in, open this URL on any device:\n    {}\n  and enter the code:\n    {}\n",
+        theme::BULLET,
+        theme::accent(sanitize_server_text(&device.verification_uri)),
+        theme::accent_secondary(sanitize_server_text(&device.user_code))
+    );
     if let Some(complete) = &device.verification_uri_complete {
-        eprintln!();
-        eprintln!("  Or open this URL to skip entering the code:");
-        eprintln!("    {}", theme::muted(complete));
+        text.push_str(&format!(
+            "\n  Or open this URL to skip entering the code:\n    {}\n",
+            theme::muted(sanitize_server_text(complete))
+        ));
     }
-    eprintln!();
-    eprintln!(
-        "  {}",
+    text.push_str(&format!(
+        "\n  {}\n\n",
         theme::muted(format!(
             "Waiting for approval… (code expires in {}s)",
             device.expires_in
         ))
-    );
-    eprintln!();
+    ));
+    text
 }
 
 /// Build a single-threaded tokio runtime so the sync CLI dispatch path can
@@ -80,18 +88,25 @@ fn build_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
 /// Print a success summary. **Never prints token material** — only the
 /// non-sensitive identity fields.
 fn print_success(creds: &StoredCredentials) {
-    println!(
-        "{} Signed in to {}",
+    print!("{}", format_success(creds));
+}
+
+/// The summary `print_success` prints, with control characters dropped from
+/// the identity fields the auth server returned.
+fn format_success(creds: &StoredCredentials) -> String {
+    let mut text = format!(
+        "{} Signed in to {}\n",
         theme::success(&theme::SUCCESS),
         theme::success("Actual AI")
     );
-    println!("  {:<14} {}", "Organization:", creds.organization_id);
+    text.push_str(&server_row("Organization:", &creds.organization_id));
     if let Some(email) = &creds.email {
-        println!("  {:<14} {}", "Account:", email);
+        text.push_str(&server_row("Account:", email));
     } else if let Some(subject) = &creds.subject {
-        println!("  {:<14} {}", "Account:", subject);
+        text.push_str(&server_row("Account:", subject));
     }
-    println!("  {:<14} {}", "Member:", creds.member_id);
+    text.push_str(&server_row("Member:", &creds.member_id));
+    text
 }
 
 #[cfg(test)]
@@ -164,6 +179,53 @@ mod tests {
             expires_in: 120,
         };
         print_device_prompt(&without_complete);
+    }
+
+    #[test]
+    fn test_format_device_prompt_drops_control_characters() {
+        let device: oauth::DeviceCodeResponse = serde_json::from_str(
+            r#"{"device_code":"d","user_code":"WXYZ\u0007-1234\u007f","verification_uri":"https://auth.example/device\u001b[2J","verification_uri_complete":"https://auth.example/device?user_code=\u001b]0;pwned\u0007WXYZ-1234","expires_in":300}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            format_device_prompt(&device),
+            format!(
+                "\n{} To sign in, open this URL on any device:\n    {}\n  and enter the code:\n    {}\n\
+                 \n  Or open this URL to skip entering the code:\n    {}\n\n  {}\n\n",
+                theme::BULLET,
+                theme::accent("https://auth.example/device[2J"),
+                theme::accent_secondary("WXYZ-1234"),
+                theme::muted("https://auth.example/device?user_code=]0;pwnedWXYZ-1234"),
+                theme::muted("Waiting for approval… (code expires in 300s)")
+            )
+        );
+    }
+
+    #[test]
+    fn test_format_success_drops_control_characters() {
+        let mut creds: StoredCredentials = serde_json::from_str(
+            r#"{"access_token":"secret","refresh_token":"secret","organization_id":"\u001b[31morg\u0007-1","member_id":"member\u007f-1","email":"\u001b]0;pwned\u0007dev@example.com"}"#,
+        )
+        .unwrap();
+        let header = format!(
+            "{} Signed in to {}\n",
+            theme::success(&theme::SUCCESS),
+            theme::success("Actual AI")
+        );
+        assert_eq!(
+            format_success(&creds),
+            format!(
+                "{header}  Organization:  [31morg-1\n  Account:       ]0;pwneddev@example.com\n  \
+                 Member:        member-1\n"
+            )
+        );
+
+        creds.email = None;
+        creds.subject = Some("\u{1b}[2Juser\u{7f}-1".to_string());
+        assert!(
+            format_success(&creds).contains("\n  Account:       [2Juser-1\n"),
+            "the subject fallback is filtered too"
+        );
     }
 
     #[test]
