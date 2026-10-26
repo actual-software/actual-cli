@@ -157,7 +157,7 @@ fn not_found_message(value: &str, repos: &[ConnectedRepository]) -> String {
     let mut msg = format!("No connected repository matches '{value}'. Connected repositories:");
     for repo in repos {
         msg.push_str("\n  • ");
-        msg.push_str(&qualified_name(repo));
+        msg.push_str(&sanitize_server_text(&qualified_name(repo)));
     }
     msg
 }
@@ -169,7 +169,7 @@ fn ambiguous_message(value: &str, matches: &[&ConnectedRepository]) -> String {
         format!("'{value}' matches multiple connected repositories; qualify it as owner/name:");
     for repo in matches {
         msg.push_str("\n  • ");
-        msg.push_str(&qualified_name(repo));
+        msg.push_str(&sanitize_server_text(&qualified_name(repo)));
     }
     msg
 }
@@ -344,7 +344,9 @@ fn org_mismatch_message(
     target_org: &str,
     explicit_org: bool,
 ) -> (String, String) {
-    if explicit_org && target_org != session_org {
+    let targets_another_org = explicit_org && target_org != session_org;
+    let session_org = sanitize_server_text(session_org);
+    if targets_another_org {
         (
             format!(
                 "Advisor request denied (HTTP 403): this session is scoped to organization \
@@ -1444,6 +1446,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_org_mismatch_message_drops_control_characters_from_the_session_org() {
+        let session = "org-\x1b[31mA\x07\x7f";
+        let (message, hint) = org_mismatch_message(session, "org-B", true);
+        assert_eq!(
+            message,
+            "Advisor request denied (HTTP 403): this session is scoped to organization \
+             org-[31mA, but you requested organization org-B."
+        );
+        assert_eq!(
+            hint,
+            "actual login --org org-B  (or drop --org to query org-[31mA)"
+        );
+        let (message, _) = org_mismatch_message(session, session, false);
+        assert_eq!(
+            message,
+            "Advisor request denied (HTTP 403): this session (organization org-[31mA) \
+             was rejected as cross-organization, or your token carries no usable \
+             organization."
+        );
+    }
+
     // --- --repo name resolution ---
 
     fn repo(owner: &str, name: &str, id: &str) -> ConnectedRepository {
@@ -1533,6 +1557,38 @@ mod tests {
             msg.contains("no connected repositories"),
             "expected empty-org phrasing in: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_repo_errors_drop_control_characters_from_repo_names() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"id-a","name":"cli","external_owner":"\u001b[31mevil\u0007"},{"repo_unique_id":"id-b","name":"cli","external_owner":"other-org"},{"repo_unique_id":"id-c","name":"tool\u007f","external_owner":"acme"}]}"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let not_found = resolve_repo("nope", &client, "org").await.err().unwrap();
+        assert_eq!(
+            not_found.to_string(),
+            "No connected repository matches 'nope'. Connected repositories:\
+             \n  • [31mevil/cli\n  • other-org/cli\n  • acme/tool"
+        );
+        let ambiguous = resolve_repo("cli", &client, "org").await.err().unwrap();
+        assert_eq!(
+            ambiguous.to_string(),
+            "'cli' matches multiple connected repositories; qualify it as owner/name:\
+             \n  • [31mevil/cli\n  • other-org/cli"
+        );
+        m.assert_async().await;
     }
 
     #[tokio::test]
