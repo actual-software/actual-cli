@@ -14,6 +14,7 @@ pub mod tailoring;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 pub mod update_check;
+pub(crate) mod yaml;
 
 pub use cli::commands::handle_result;
 

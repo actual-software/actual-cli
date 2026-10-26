@@ -83,7 +83,7 @@ pub(crate) fn store_tailoring_cache(
     root_dir: &Path,
     output: &TailoringOutput,
 ) {
-    let size_result = serde_yml::to_string(output)
+    let size_result = crate::yaml::to_string(output)
         .map(|s| s.len())
         .map_err(|e| e.to_string());
     store_tailoring_cache_inner(config, cfg_path, cache_key, root_dir, output, size_result);

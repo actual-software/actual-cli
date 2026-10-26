@@ -418,13 +418,13 @@ pub(crate) fn cache_path() -> Option<PathBuf> {
 fn load_cache(path: &Path) -> UpdateCache {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|yaml| serde_yml::from_str(&yaml).ok())
+        .and_then(|yaml| crate::yaml::from_str(&yaml).ok())
         .unwrap_or_default()
 }
 
 /// Write the cache, and report whether it landed.
 fn save_cache(path: &Path, cache: &UpdateCache) -> bool {
-    let yaml = serde_yml::to_string(cache).unwrap_or_default();
+    let yaml = crate::yaml::to_string(cache).unwrap_or_default();
     path.parent()
         .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
         && crate::config::paths::write_secure(path, yaml.as_bytes()).is_ok()
@@ -1402,6 +1402,24 @@ mod tests {
         assert_eq!(
             look_up(true, Some(&Config::default()), &closed_url(), Some(&path)),
             Latest::Unavailable
+        );
+    }
+
+    /// An update-check cache serde_yml 0.0.12 wrote reads back unchanged.
+    #[test]
+    fn test_reads_update_cache_written_by_serde_yml() {
+        let yaml = include_str!("../tests/fixtures/serde_yml/update_cache.yaml");
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/serde_yml/update_cache.json"
+        ))
+        .unwrap();
+        let cache: UpdateCache = crate::yaml::from_str(yaml).expect("parse serde_yml output");
+        assert_eq!(serde_json::to_value(&cache).unwrap(), expected);
+
+        let rewritten = crate::yaml::to_string(&cache).unwrap();
+        assert_eq!(
+            crate::yaml::from_str::<UpdateCache>(&rewritten).unwrap(),
+            cache
         );
     }
 }

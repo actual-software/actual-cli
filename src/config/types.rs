@@ -359,8 +359,8 @@ fn deserialize_optional_cached_analysis<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<serde_yml::Value> = Option::deserialize(deserializer)?;
-    Ok(opt.and_then(|v| serde_yml::from_value(v).ok()))
+    let opt: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// Deserializes `Option<CachedTailoring>`, returning `None` if the YAML
@@ -375,8 +375,8 @@ fn deserialize_optional_cached_tailoring<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<serde_yml::Value> = Option::deserialize(deserializer)?;
-    Ok(opt.and_then(|v| serde_yml::from_value(v).ok()))
+    let opt: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 #[cfg(test)]
@@ -424,8 +424,8 @@ mod tests {
             }),
         };
 
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -433,14 +433,14 @@ mod tests {
     #[test]
     fn test_default_config_serializes_to_valid_yaml() {
         let config = Config::default();
-        let yaml = serde_yml::to_string(&config).expect("serialize default to YAML");
-        let _parsed: Config = serde_yml::from_str(&yaml).expect("deserialize default YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize default to YAML");
+        let _parsed: Config = crate::yaml::from_str(&yaml).expect("deserialize default YAML");
     }
 
     /// Empty YAML `{}` deserializes to default Config.
     #[test]
     fn test_empty_yaml_deserializes_to_default() {
-        let config: Config = serde_yml::from_str("{}").expect("deserialize empty YAML");
+        let config: Config = crate::yaml::from_str("{}").expect("deserialize empty YAML");
         assert_eq!(config, Config::default());
     }
 
@@ -462,8 +462,8 @@ mod tests {
             ..Config::default()
         };
 
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn test_partial_yaml_deserializes_with_defaults() {
         let yaml = "model: opus\nbatch_size: 10\n";
-        let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
+        let config: Config = crate::yaml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.model, Some("opus".to_string()));
         assert_eq!(config.batch_size, Some(10));
         assert_eq!(
@@ -490,12 +490,12 @@ mod tests {
             output_format: Some(OutputFormat::ClaudeMd),
             ..Config::default()
         };
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("claude-md"),
             "YAML must contain 'claude-md': {yaml}"
         );
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -506,12 +506,12 @@ mod tests {
             output_format: Some(OutputFormat::AgentsMd),
             ..Config::default()
         };
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("agents-md"),
             "YAML must contain 'agents-md': {yaml}"
         );
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -522,12 +522,12 @@ mod tests {
             output_format: Some(OutputFormat::CursorRules),
             ..Config::default()
         };
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("cursor-rules"),
             "YAML must contain 'cursor-rules': {yaml}"
         );
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn test_partial_yaml_with_output_format() {
         let yaml = "output_format: agents-md\n";
-        let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
+        let config: Config = crate::yaml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.output_format, Some(OutputFormat::AgentsMd));
     }
 
@@ -546,12 +546,12 @@ mod tests {
             runner: Some("anthropic-api".to_string()),
             ..Config::default()
         };
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("anthropic-api"),
             "YAML must contain 'anthropic-api': {yaml}"
         );
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -563,7 +563,7 @@ mod tests {
             openai_api_key: Some("sk-openai-test456".to_string()),
             ..Config::default()
         };
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("sk-ant-test123"),
             "YAML must contain anthropic key: {yaml}"
@@ -572,7 +572,7 @@ mod tests {
             yaml.contains("sk-openai-test456"),
             "YAML must contain openai key: {yaml}"
         );
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn test_cursor_model_yaml_alias_loads_into_model() {
         let yaml = "cursor_model: cursor-fast\n";
-        let config: Config = serde_yml::from_str(yaml).expect("deserialize cursor_model alias");
+        let config: Config = crate::yaml::from_str(yaml).expect("deserialize cursor_model alias");
         assert_eq!(
             config.model,
             Some("cursor-fast".to_string()),
@@ -606,8 +606,8 @@ mod tests {
             ..Config::default()
         };
 
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_corrupted_cached_analysis_yaml_deserializes_as_none() {
         let yaml = "cached_analysis:\n  not_a_valid_field: oops\n";
-        let cfg: Config = serde_yml::from_str(yaml).expect("config should still parse");
+        let cfg: Config = crate::yaml::from_str(yaml).expect("config should still parse");
         assert!(
             cfg.cached_analysis.is_none(),
             "corrupt cached_analysis must degrade to None, not fail config parsing"
@@ -692,7 +692,7 @@ mod tests {
     fn test_corrupted_cached_tailoring_yaml_deserializes_as_none() {
         // Corrupt cached_tailoring → graceful degradation: treat as absent (None)
         let yaml = "cached_tailoring:\n  not_a_valid_field: oops\n";
-        let cfg: Config = serde_yml::from_str(yaml).expect("config should still parse");
+        let cfg: Config = crate::yaml::from_str(yaml).expect("config should still parse");
         assert!(
             cfg.cached_tailoring.is_none(),
             "corrupt cached_tailoring must degrade to None, not fail config parsing"
@@ -706,9 +706,9 @@ mod tests {
             max_tokens: Some(32768),
             ..Config::default()
         };
-        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let yaml = crate::yaml::to_string(&config).expect("serialize to YAML");
         assert!(yaml.contains("32768"), "YAML must contain '32768': {yaml}");
-        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = crate::yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn test_partial_yaml_with_max_tokens() {
         let yaml = "max_tokens: 8192\n";
-        let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
+        let config: Config = crate::yaml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.max_tokens, Some(8192));
     }
 
@@ -725,5 +725,33 @@ mod tests {
     fn test_max_tokens_defaults_to_none() {
         let config = Config::default();
         assert_eq!(config.max_tokens, None);
+    }
+
+    /// A config file serde_yml 0.0.12 wrote, which every install before the
+    /// serde-saphyr swap has, reads back to the value serde_yml read it as.
+    #[test]
+    fn test_reads_config_written_by_serde_yml() {
+        let yaml = include_str!("../../tests/fixtures/serde_yml/config.yaml");
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/serde_yml/config.json"))
+                .expect("fixture JSON");
+        let config: Config = crate::yaml::from_str(yaml).expect("parse serde_yml output");
+        assert_eq!(serde_json::to_value(&config).expect("to JSON"), expected);
+
+        let rewritten = crate::yaml::to_string(&config).expect("serialize to YAML");
+        let reread: Config = crate::yaml::from_str(&rewritten).expect("reparse");
+        assert_eq!(reread, config);
+    }
+
+    /// A cache block that is valid YAML but fails its schema is dropped,
+    /// keeping the rest of the config.
+    #[test]
+    fn test_schema_mismatched_cache_blocks_are_dropped() {
+        let yaml =
+            "model: kept\ncached_analysis:\n  repo_path: [not, a, string]\ncached_tailoring: 42\n";
+        let config: Config = crate::yaml::from_str(yaml).expect("config should still parse");
+        assert_eq!(config.model.as_deref(), Some("kept"));
+        assert!(config.cached_analysis.is_none());
+        assert!(config.cached_tailoring.is_none());
     }
 }

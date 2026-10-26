@@ -44,7 +44,7 @@ fn run_with_resolver(
 }
 
 fn serialize_config_for_display(cfg: &config::Config) -> Result<String, ActualError> {
-    serde_yml::to_string(cfg)
+    crate::yaml::to_string(cfg)
         .map_err(|e| ActualError::ConfigError(format!("Failed to serialize config to YAML: {e}")))
 }
 
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn test_show_after_setting_api_key_redacts_in_yaml() {
         // Verify that the redact_yaml function correctly handles the YAML that
-        // serde_yml would produce for a set API key.
+        // the config serializer would produce for a set API key.
         let yaml_with_key = "anthropic_api_key: sk-ant-actual-key\nmodel: ~\n";
         let redacted = redact_yaml(yaml_with_key);
         assert!(
@@ -706,5 +706,27 @@ mod tests {
             result.is_ok(),
             "show should succeed when no API keys are set"
         );
+    }
+
+    /// `config show` redacts line by line, so it depends on the serializer
+    /// keeping each key's value on the key's own line, long values included.
+    #[test]
+    fn test_show_redacts_long_and_quoted_api_keys() {
+        let long = format!("sk-ant-api03-{}", "x".repeat(300));
+        let quoted = "secret: with #hash, 'single' and \"double\" quotes ".repeat(6);
+        let cfg = config::Config {
+            anthropic_api_key: Some(long.clone()),
+            openai_api_key: Some(quoted.clone()),
+            cursor_api_key: Some("cursor-secret".to_string()),
+            ..config::Config::default()
+        };
+        let shown = redact_yaml(&serialize_config_for_display(&cfg).unwrap());
+        for fragment in ["xxxxxxxxxx", "#hash", "'single'", "double", "cursor-secret"] {
+            assert!(
+                !shown.contains(fragment),
+                "{fragment} leaked into:\n{shown}"
+            );
+        }
+        assert_eq!(shown.matches("[redacted]").count(), 3, "got:\n{shown}");
     }
 }
