@@ -172,13 +172,10 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
         verdicts, partial, ..
     } = &outcome
     {
+        let warn_reasons = super::check_telemetry::direct_warn_reasons(verdicts, partial.is_some());
         let decision = if verdicts.iter().any(|v| v.verdict.blocks()) {
             crate::api::types::PlanGovernanceDecision::Block
-        } else if verdicts
-            .iter()
-            .any(|v| v.verdict == Verdict::RequiresDecision)
-            || partial.is_some()
-        {
+        } else if !warn_reasons.is_empty() {
             crate::api::types::PlanGovernanceDecision::Warn
         } else {
             crate::api::types::PlanGovernanceDecision::Allow
@@ -202,7 +199,7 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
             agent_id: None,
             started,
         };
-        super::check_telemetry::report(&action, decision, Vec::new());
+        super::check_telemetry::report(&action, decision, &warn_reasons, Vec::new());
         send_governance_events(
             "impl-check",
             &root,
@@ -1211,8 +1208,9 @@ mod tests {
     }
 
     /// A `requires_decision` verdict does not fail direct mode (only a real
-    /// conflict does), but it is not a clean pass either: `--json` reports it
-    /// and the telemetry decision is `warn`.
+    /// conflict does), but it is not a clean pass either: `--json` reports it,
+    /// the telemetry decision is `warn`, and the completed action record names
+    /// the verdict as the reason.
     #[cfg(unix)]
     #[test]
     fn test_exec_direct_json_requires_decision_exits_ok_and_warns() {
@@ -1247,6 +1245,24 @@ mod tests {
 
         #[cfg(feature = "telemetry")]
         {
+            use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
+
+            let _env: Vec<EnvGuard> = [
+                "ACTUAL_NO_TELEMETRY",
+                "ACTUAL_OTLP_LOGS_ENDPOINT",
+                "ACTUAL_OTLP_FILE",
+                "TRACEPARENT",
+            ]
+            .into_iter()
+            .map(EnvGuard::remove)
+            .collect();
+            std::fs::write(
+                home.path().join("config.yaml"),
+                "telemetry:\n  otlp_file: /tmp/actual-otlp-impl-check-decision-test.jsonl\n",
+            )
+            .unwrap();
+            take_captured();
+
             let events = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
             let completed = events
                 .iter()
@@ -1258,6 +1274,12 @@ mod tests {
             assert_eq!(
                 completed.properties.as_ref().unwrap().decision,
                 Some(crate::api::types::PlanGovernanceDecision::Warn)
+            );
+            let records = take_captured();
+            assert_eq!(attribute(&records[1], "actual.action.outcome"), "warn");
+            assert_eq!(
+                attribute(&records[1], "actual.action.warn_reasons"),
+                serde_json::json!(["requires_decision"])
             );
         }
         #[cfg(not(feature = "telemetry"))]

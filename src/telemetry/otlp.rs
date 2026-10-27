@@ -390,7 +390,9 @@ impl Origin {
     }
 
     /// The [`ACTION_COMPLETED`] record for the same check: its type and mode,
-    /// then its outcome, `allow`, `warn` or `block`, and how long it took.
+    /// then its outcome, `allow`, `warn` or `block`, what made a `warn` one,
+    /// and how long it took.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn action_completed(
         &self,
         session_id: &str,
@@ -398,6 +400,7 @@ impl Origin {
         action_type: &str,
         mode: &str,
         outcome: &str,
+        warn_reasons: &[&str],
         duration: Duration,
     ) -> LogRecord {
         let mut record = self.record(ACTION_COMPLETED, session_id, agent_id);
@@ -405,6 +408,7 @@ impl Origin {
             text("actual.action.type", Some(action_type)),
             text("actual.action.mode", Some(mode)),
             text("actual.action.outcome", Some(outcome)),
+            strings("actual.action.warn_reasons", warn_reasons),
             int(
                 "actual.action.duration_ms",
                 i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
@@ -1148,9 +1152,9 @@ mod tests {
 
     /// A check's two records carry the attributes every record shares, in a
     /// context record's order without its ADR attributes, then the check's
-    /// type and mode, and the completed record its outcome and duration. The
-    /// started record is stamped when the check started, the completed one
-    /// when the record is made.
+    /// type and mode, and the completed record its outcome, warn reasons and
+    /// duration. The started record is stamped when the check started, the
+    /// completed one when the record is made.
     #[test]
     fn test_the_action_records_carry_the_common_attributes_then_the_check() {
         let origin = origin(None);
@@ -1214,7 +1218,8 @@ mod tests {
             Some("agent-1"),
             "plan-check",
             "hook",
-            "block",
+            "warn",
+            &["partial_coverage", "active_override"],
             Duration::from_millis(1234),
         ));
         assert_eq!(done["eventName"], ACTION_COMPLETED);
@@ -1228,7 +1233,11 @@ mod tests {
             [
                 (
                     "actual.action.outcome".to_string(),
-                    serde_json::json!({"stringValue": "block"})
+                    serde_json::json!({"stringValue": "warn"})
+                ),
+                (
+                    "actual.action.warn_reasons".to_string(),
+                    serde_json::json!({"arrayValue": {"values": [{"stringValue": "partial_coverage"}, {"stringValue": "active_override"}]}})
                 ),
                 (
                     "actual.action.duration_ms".to_string(),
@@ -1245,6 +1254,7 @@ mod tests {
             "impl-check",
             "direct",
             "allow",
+            &[],
             Duration::MAX,
         ));
         assert_eq!(
@@ -1254,7 +1264,8 @@ mod tests {
     }
 
     /// The action records survive the official types' round trip as the ADR
-    /// records do, the duration as a 64-bit integer.
+    /// records do, the warn reasons as a list and the duration as a 64-bit
+    /// integer.
     #[test]
     fn test_the_action_records_round_trip_through_the_official_types() {
         let origin = origin(None);
@@ -1271,7 +1282,8 @@ mod tests {
                 None,
                 "impl-check",
                 "direct",
-                "allow",
+                "warn",
+                &["requires_decision"],
                 Duration::from_millis(7),
             ),
         ];
