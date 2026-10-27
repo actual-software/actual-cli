@@ -45,10 +45,12 @@ A run stopped partway, as by Ctrl-C during the download, leaves its scratch dire
 |---|---|
 | Installed with Homebrew (`/Cellar/actual/` in the binary's path) | `brew upgrade actual-software/actual/actual` |
 | Installed with npm (`/node_modules/@actualai/actual-` in the path) | `npm install -g @actualai/actual@latest` |
-| Built with `cargo install` (`/.cargo/bin/` in the path) | `cargo install --git https://github.com/actual-software/actual-cli.git --force` |
-| A directory you can't write, or a binary another user installed, such as `/usr/local/bin/actual` after the README's `sudo mv` | The release page, and a suggestion to keep `actual` somewhere you own, such as `~/.local/bin` |
+| Built with `cargo install` (`/.cargo/bin/` in the path) | `cargo install -f --git https://github.com/actual-software/actual-cli` |
+| A directory you can't write, such as `/usr/local/bin` after the README's `sudo mv` | A suggestion to move `actual` to a directory you own, such as `~/.local/bin` |
+| A binary another user owns, such as one copied into place with `sudo cp` | A suggestion to install your own copy in a directory you own |
 | Running as root | A suggestion to run it as the user who installed `actual` |
-| `CI` is set, or `actual` started this process itself (`ACTUAL_CLI_SUBPROCESS=1`) | A suggestion to run it from your own terminal |
+| `CI` is set | A suggestion to install a pinned release in the pipeline |
+| `actual` started this process itself (`ACTUAL_CLI_SUBPROCESS=1`) | A suggestion to run it from your own terminal |
 | Update checks are off: `ACTUAL_NO_UPDATE_CHECK`, `update_check.enabled: false`, or a config file that fails to load | How to turn them back on |
 | No release build for your platform | How to build from source |
 
