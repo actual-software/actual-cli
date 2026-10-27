@@ -1,11 +1,11 @@
 //! The OpenTelemetry events `plan-check` and `impl-check` send once the judge
 //! has answered. Every run that reaches a verdict sends an
 //! [`otlp::ACTION_STARTED`] record, stamped when the check started, and an
-//! [`otlp::ACTION_COMPLETED`] record with its outcome and duration. A hook
-//! round also sends, between those two, one [`otlp::ADR_DETECTED`] record per
-//! logical ADR it judged a rule of, with the gate as how it was detected, and
-//! one [`otlp::GATE_EVALUATED`] record per logical ADR it blocked on, with the
-//! outcome `breached` and the gate.
+//! [`otlp::ACTION_COMPLETED`] record with its outcome, what made a `warn` one,
+//! and its duration. A hook round also sends, between those two, one
+//! [`otlp::ADR_DETECTED`] record per logical ADR it judged a rule of, with the
+//! gate as how it was detected, and one [`otlp::GATE_EVALUATED`] record per
+//! logical ADR it blocked on, with the outcome `breached` and the gate.
 //!
 //! # Design
 //!
@@ -52,7 +52,7 @@ use super::brief_ledger::{self, LedgerKey};
 use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::HookRun;
 use crate::api::types::PlanGovernanceDecision;
-use crate::rules::check::{ArtifactKind, CheckedRule};
+use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
 use crate::rules::types::AdrMeta;
 use crate::telemetry::otlp;
 
@@ -83,12 +83,42 @@ pub(super) struct Action<'a> {
     pub started: Started,
 }
 
+/// What made a check `warn`, as `actual.action.warn_reasons` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WarnReason {
+    /// Every rule a hook round blocked on had been denied more times than
+    /// `--max-rounds` allows, so the round went through.
+    RoundLimit,
+    /// A direct run judged a rule as needing a decision, which only the hooks
+    /// deny on.
+    RequiresDecision,
+    /// The judge saw only some of the rules that apply.
+    PartialCoverage,
+    /// A hook round passed while the session carries an override.
+    ActiveOverride,
+}
+
+/// What makes a direct run that blocks on nothing `warn`.
+pub(super) fn direct_warn_reasons(verdicts: &[CheckedRule], partial: bool) -> Vec<WarnReason> {
+    let requires_decision = verdicts
+        .iter()
+        .any(|v| v.verdict == Verdict::RequiresDecision);
+    [
+        requires_decision.then_some(WarnReason::RequiresDecision),
+        partial.then_some(WarnReason::PartialCoverage),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Report a run that came to `decision`: its started record, then `records`,
-/// then its completed record, in one dispatch. Best-effort and silent, like
-/// the hook's other telemetry.
+/// then its completed record, in one dispatch. `warn_reasons` go out only on
+/// a `warn`. Best-effort and silent, like the hook's other telemetry.
 pub(super) fn report(
     action: &Action<'_>,
     decision: PlanGovernanceDecision,
+    warn_reasons: &[WarnReason],
     records: Vec<otlp::LogRecord>,
 ) {
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
@@ -101,6 +131,10 @@ pub(super) fn report(
     let session_id = action.session_id.unwrap_or_default();
     let action_type = action_type(action.kind);
     let mode = if action.hook { "hook" } else { "direct" };
+    let warn_reasons: Vec<&str> = match decision {
+        PlanGovernanceDecision::Warn => warn_reasons.iter().map(|&r| warn_reason(r)).collect(),
+        PlanGovernanceDecision::Allow | PlanGovernanceDecision::Block => Vec::new(),
+    };
     let mut all = vec![origin.action_started(
         action.started.time,
         session_id,
@@ -115,6 +149,7 @@ pub(super) fn report(
         action_type,
         mode,
         outcome(decision),
+        &warn_reasons,
         action.started.instant.elapsed(),
     ));
     brief_telemetry::dispatch(all);
@@ -124,6 +159,7 @@ pub(super) fn report(
 pub(super) fn report_round(
     run: &HookRun<'_>,
     decision: PlanGovernanceDecision,
+    warn_reasons: &[WarnReason],
     records: Vec<otlp::LogRecord>,
 ) {
     let action = Action {
@@ -133,7 +169,7 @@ pub(super) fn report_round(
         agent_id: run.agent_id,
         started: run.started,
     };
-    report(&action, decision, records);
+    report(&action, decision, warn_reasons, records);
 }
 
 /// The records for the logical ADRs a hook round judged, and those it blocked
@@ -232,6 +268,15 @@ fn outcome(decision: PlanGovernanceDecision) -> &'static str {
     }
 }
 
+fn warn_reason(reason: WarnReason) -> &'static str {
+    match reason {
+        WarnReason::RoundLimit => "round_limit",
+        WarnReason::RequiresDecision => "requires_decision",
+        WarnReason::PartialCoverage => "partial_coverage",
+        WarnReason::ActiveOverride => "active_override",
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -239,7 +284,6 @@ pub(super) mod tests {
     use std::path::Path;
 
     use super::super::brief_telemetry::tests::{attribute, take_captured};
-    use crate::rules::check::Verdict;
     use crate::rules::types::RuleLevel;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
     use serde_json::json;
@@ -721,6 +765,7 @@ pub(super) mod tests {
             report(
                 &hook_action(time),
                 PlanGovernanceDecision::Block,
+                &[],
                 vec![used],
             );
 
@@ -757,14 +802,20 @@ pub(super) mod tests {
     }
 
     /// Each decision reaches the completed record in the plan-governance
-    /// events' words, and a direct run sends its session and agent empty.
+    /// events' words, with the warn reasons on a `warn` only, and a direct run
+    /// sends its session and agent empty.
     #[test]
     fn test_a_direct_run_reports_each_outcome_with_no_session() {
         with_config(WITH_FILE, |_| {
-            for (decision, outcome) in [
-                (PlanGovernanceDecision::Allow, "allow"),
-                (PlanGovernanceDecision::Warn, "warn"),
-                (PlanGovernanceDecision::Block, "block"),
+            let reasons = [WarnReason::RequiresDecision, WarnReason::PartialCoverage];
+            for (decision, outcome, sent) in [
+                (PlanGovernanceDecision::Allow, "allow", json!([])),
+                (
+                    PlanGovernanceDecision::Warn,
+                    "warn",
+                    json!(["requires_decision", "partial_coverage"]),
+                ),
+                (PlanGovernanceDecision::Block, "block", json!([])),
             ] {
                 let action = Action {
                     kind: ArtifactKind::Diff,
@@ -774,7 +825,7 @@ pub(super) mod tests {
                     started: Started::now(),
                 };
 
-                report(&action, decision, Vec::new());
+                report(&action, decision, &reasons, Vec::new());
 
                 let records = take_captured();
                 assert_eq!(records.len(), 2, "{outcome}");
@@ -785,12 +836,49 @@ pub(super) mod tests {
                     assert_eq!(attribute(record, "actual.action.mode"), "direct");
                 }
                 assert_eq!(attribute(&records[1], "actual.action.outcome"), outcome);
+                assert_eq!(
+                    attribute(&records[1], "actual.action.warn_reasons"),
+                    sent,
+                    "{outcome}"
+                );
             }
         });
     }
 
+    /// A direct run warns for a rule that needs a decision and for a judge
+    /// that saw only some of the rules, naming both when both hold. A
+    /// conflict is a block, never a warn reason.
+    #[test]
+    fn test_a_direct_run_warns_for_a_decision_and_for_partial_coverage() {
+        let decision = judged("signing-a1", Verdict::RequiresDecision);
+        let conforming = judged("signing-a2", Verdict::Conforming);
+        let conflicting = judged("rotation", Verdict::Conflicting);
+        for (verdicts, partial, expected) in [
+            (vec![conforming.clone()], false, vec![]),
+            (vec![conflicting], false, vec![]),
+            (
+                vec![conforming.clone(), decision.clone()],
+                false,
+                vec![WarnReason::RequiresDecision],
+            ),
+            (
+                vec![conforming.clone()],
+                true,
+                vec![WarnReason::PartialCoverage],
+            ),
+            (
+                vec![decision, conforming],
+                true,
+                vec![WarnReason::RequiresDecision, WarnReason::PartialCoverage],
+            ),
+        ] {
+            assert_eq!(direct_warn_reasons(&verdicts, partial), expected);
+        }
+    }
+
     /// A hook round reports the run its `HookRun` describes: its kind, its
-    /// session and agent, and when it started.
+    /// session and agent, and when it started, beside the outcome and warn
+    /// reasons it was given.
     #[test]
     fn test_a_round_reports_the_run_it_describes() {
         with_config(WITH_FILE, |home| {
@@ -810,7 +898,12 @@ pub(super) mod tests {
                 },
             };
 
-            report_round(&run, PlanGovernanceDecision::Allow, Vec::new());
+            report_round(
+                &run,
+                PlanGovernanceDecision::Warn,
+                &[WarnReason::RoundLimit],
+                Vec::new(),
+            );
 
             let records = take_captured();
             assert_eq!(records[0]["timeUnixNano"], "7000000000");
@@ -818,7 +911,11 @@ pub(super) mod tests {
             assert_eq!(attribute(&records[1], "actual.agent.id"), "");
             assert_eq!(attribute(&records[1], "actual.action.type"), "impl-check");
             assert_eq!(attribute(&records[1], "actual.action.mode"), "hook");
-            assert_eq!(attribute(&records[1], "actual.action.outcome"), "allow");
+            assert_eq!(attribute(&records[1], "actual.action.outcome"), "warn");
+            assert_eq!(
+                attribute(&records[1], "actual.action.warn_reasons"),
+                json!(["round_limit"])
+            );
         });
     }
 
@@ -832,6 +929,7 @@ pub(super) mod tests {
                 report(
                     &hook_action(SystemTime::now()),
                     PlanGovernanceDecision::Allow,
+                    &[],
                     Vec::new(),
                 );
 
@@ -845,6 +943,7 @@ pub(super) mod tests {
             report(
                 &hook_action(SystemTime::now()),
                 PlanGovernanceDecision::Allow,
+                &[],
                 Vec::new(),
             );
 
@@ -863,6 +962,7 @@ pub(super) mod tests {
             report(
                 &hook_action(SystemTime::now()),
                 PlanGovernanceDecision::Allow,
+                &[],
                 Vec::new(),
             );
             built = take_captured().len();

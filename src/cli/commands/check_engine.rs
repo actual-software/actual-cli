@@ -1522,6 +1522,7 @@ fn finish_verdicts(
                 super::check_telemetry::report_round(
                     run,
                     crate::api::types::PlanGovernanceDecision::Warn,
+                    &[super::check_telemetry::WarnReason::RoundLimit],
                     records,
                 );
                 #[cfg(feature = "telemetry")]
@@ -1551,6 +1552,7 @@ fn finish_verdicts(
         super::check_telemetry::report_round(
             run,
             crate::api::types::PlanGovernanceDecision::Block,
+            &[],
             records,
         );
         #[cfg(feature = "telemetry")]
@@ -1616,12 +1618,20 @@ fn finish_verdicts(
     }
     #[cfg(feature = "telemetry")]
     {
-        let decision = if partial.is_some() || has_override_reminder {
-            crate::api::types::PlanGovernanceDecision::Warn
-        } else {
+        use super::check_telemetry::WarnReason;
+        let warn_reasons: Vec<WarnReason> = [
+            partial.is_some().then_some(WarnReason::PartialCoverage),
+            has_override_reminder.then_some(WarnReason::ActiveOverride),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let decision = if warn_reasons.is_empty() {
             crate::api::types::PlanGovernanceDecision::Allow
+        } else {
+            crate::api::types::PlanGovernanceDecision::Warn
         };
-        super::check_telemetry::report_round(run, decision, records);
+        super::check_telemetry::report_round(run, decision, &warn_reasons, records);
         send_hook_governance_events(
             run.command,
             run.root,
@@ -3765,6 +3775,144 @@ pub(crate) mod tests {
                 "{exit}"
             );
             assert_completed_before_governance(&records[1], &events);
+        }
+    }
+
+    /// A hook round that warns names what made it one on the completed
+    /// record: the round limit's pass, which names nothing else even over
+    /// some of the rules and under an override, and a clean pass over some of
+    /// the rules, under an override, or both. A deny and a fully clean pass
+    /// name nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_finish_hook_names_what_made_a_round_warn() {
+        use super::super::brief_telemetry::tests::{attribute, take_captured};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-warn-reasons-test.jsonl\n",
+        )
+        .unwrap();
+        let rules = tempdir().unwrap();
+        let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
+        let conforming = || vec![checked("R-A-001", Verdict::Conforming, "", "ok")];
+        let over_some_rules = |verdicts| {
+            let mut outcome = verdicts_outcome(verdicts);
+            if let Outcome::Verdicts { partial, .. } = &mut outcome {
+                *partial = Some((40, 55));
+            }
+            outcome
+        };
+        let session = |exhausted: bool, overridden: bool| {
+            let mut session = GovernanceSession::default();
+            if exhausted {
+                let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+                session.plan.deny_counts.insert(key, 2);
+            }
+            if overridden {
+                session.overrides.push(governance_session::Override {
+                    key: governance_session::key("cross-cutting-token-signing-1c57", "R-A-009"),
+                    reason: "reviewed".to_string(),
+                    at: chrono::Utc::now(),
+                    round: 1,
+                });
+            }
+            session
+        };
+
+        for (exit, mut session, outcome, max_rounds, decision, reasons) in [
+            (
+                "the round limit's pass",
+                session(true, false),
+                verdicts_outcome(conflict()),
+                2,
+                "warn",
+                serde_json::json!(["round_limit"]),
+            ),
+            (
+                "the round limit's pass over some rules, under an override",
+                session(true, true),
+                over_some_rules(conflict()),
+                2,
+                "warn",
+                serde_json::json!(["round_limit"]),
+            ),
+            (
+                "a deny under an override",
+                session(false, true),
+                verdicts_outcome(conflict()),
+                3,
+                "block",
+                serde_json::json!([]),
+            ),
+            (
+                "a clean pass",
+                session(false, false),
+                verdicts_outcome(conforming()),
+                3,
+                "allow",
+                serde_json::json!([]),
+            ),
+            (
+                "a clean pass over some rules",
+                session(false, false),
+                over_some_rules(conforming()),
+                3,
+                "warn",
+                serde_json::json!(["partial_coverage"]),
+            ),
+            (
+                "a clean pass under an override",
+                session(false, true),
+                verdicts_outcome(conforming()),
+                3,
+                "warn",
+                serde_json::json!(["active_override"]),
+            ),
+            (
+                "a clean pass over some rules, under an override",
+                session(false, true),
+                over_some_rules(conforming()),
+                3,
+                "warn",
+                serde_json::json!(["partial_coverage", "active_override"]),
+            ),
+        ] {
+            let run = hook_run(
+                check::ArtifactKind::Plan,
+                Some("s-warn"),
+                rules.path(),
+                max_rounds,
+            );
+            take_captured();
+
+            finish_hook(&run, &mut session, outcome);
+
+            let records = take_captured();
+            assert_eq!(records.len(), 2, "{exit}");
+            let completed = &records[1];
+            assert_eq!(
+                attribute(completed, "actual.action.outcome"),
+                decision,
+                "{exit}"
+            );
+            assert_eq!(
+                attribute(completed, "actual.action.warn_reasons"),
+                reasons,
+                "{exit}"
+            );
         }
     }
 

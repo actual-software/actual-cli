@@ -244,13 +244,10 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         verdicts, partial, ..
     } = &outcome
     {
+        let warn_reasons = super::check_telemetry::direct_warn_reasons(verdicts, partial.is_some());
         let decision = if verdicts.iter().any(|v| v.verdict.blocks()) {
             crate::api::types::PlanGovernanceDecision::Block
-        } else if verdicts
-            .iter()
-            .any(|v| v.verdict == Verdict::RequiresDecision)
-            || partial.is_some()
-        {
+        } else if !warn_reasons.is_empty() {
             crate::api::types::PlanGovernanceDecision::Warn
         } else {
             crate::api::types::PlanGovernanceDecision::Allow
@@ -274,7 +271,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
             agent_id: None,
             started,
         };
-        super::check_telemetry::report(&action, decision, Vec::new());
+        super::check_telemetry::report(&action, decision, &warn_reasons, Vec::new());
         send_governance_events(
             "plan-check",
             &root,
@@ -1014,13 +1011,30 @@ mod tests {
     /// `decision=allow` -- identical to a run that judged everything. The
     /// hook path already treats `partial.is_some()` as `warn` (see
     /// `test_exec_hook_with_round_limit_pass_emits_warn_governance_events`);
-    /// direct mode must match it.
+    /// direct mode must match it, and its completed action record names
+    /// partial coverage as the reason.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_direct_partial_coverage_emits_warn_not_allow() {
+        use crate::cli::commands::brief_telemetry::tests::{attribute, take_captured};
+
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
+        let _env: Vec<EnvGuard> = [
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-plan-check-partial-test.jsonl\n",
+        )
+        .unwrap();
 
         let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
         for i in 0..(MAX_RULES_JUDGED + 1) {
@@ -1058,6 +1072,7 @@ mod tests {
         args.repo = Some(root.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         args.no_rank = true;
+        take_captured();
 
         let events = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
 
@@ -1071,6 +1086,12 @@ mod tests {
             completed.properties.as_ref().unwrap().decision,
             Some(crate::api::types::PlanGovernanceDecision::Warn),
             "a run that only judged a prefix of the applicable rules must warn, not allow"
+        );
+        let records = take_captured();
+        assert_eq!(attribute(&records[1], "actual.action.outcome"), "warn");
+        assert_eq!(
+            attribute(&records[1], "actual.action.warn_reasons"),
+            serde_json::json!(["partial_coverage"])
         );
     }
 
