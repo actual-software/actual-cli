@@ -453,8 +453,8 @@ pub enum Command {
     ///
     /// Checks the release's signature against the keys built into actual and
     /// its archive against SHA256SUMS before renaming the new binary into
-    /// place. A copy installed with Homebrew or npm gets that package
-    /// manager's command instead. See docs/SELF_UPDATE.md.
+    /// place. A copy installed with Homebrew, npm or cargo gets that tool's
+    /// command instead. See docs/SELF_UPDATE.md.
     SelfUpdate,
 
     /// Internal: look up the latest published version once, record it in the
