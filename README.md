@@ -111,6 +111,8 @@ xattr -dr com.apple.quarantine /usr/local/bin/actual
 actual --version
 ```
 
+`actual self-update` upgrades a binary installed this way after checking the new release's signature, but only in a directory you can write without `sudo`. To use it, put `actual` somewhere you own, such as `~/.local/bin`, instead of `/usr/local/bin`. See [docs/SELF_UPDATE.md](docs/SELF_UPDATE.md).
+
 To build from source you need a C compiler for the tree-sitter native dependencies:
 
 ```bash

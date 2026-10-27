@@ -116,6 +116,52 @@ fn test_version_json_keeps_its_local_facts_when_the_config_cannot_load() {
     assert!(!dir.path().join("update-check.yaml").exists());
 }
 
+// ---- `actual self-update` ----
+//
+// Each case refuses before any request, so the test binary is never replaced.
+
+#[test]
+fn test_self_update_is_listed_in_help() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("self-update"));
+}
+
+#[test]
+fn test_self_update_refuses_under_ci() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .arg("self-update")
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env("CI", "true")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "actual self-update doesn't run under CI",
+        ))
+        .stderr(predicate::str::contains("Fix:"));
+    assert!(!dir.path().join("self-update.lock").exists());
+}
+
+#[test]
+fn test_self_update_refuses_with_update_checks_off() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .arg("self-update")
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("CI")
+        .env_remove("ACTUAL_CLI_SUBPROCESS")
+        .env("ACTUAL_NO_UPDATE_CHECK", "1")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Update checks are turned off"));
+    assert!(!dir.path().join("update-check.yaml").exists());
+}
+
 /// With stderr piped, as under an agent's tool call or a script, a command
 /// neither prints the notice nor starts a lookup, even with a newer version
 /// cached and the last lookup days old.
