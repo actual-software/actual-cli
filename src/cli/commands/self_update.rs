@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::release_verify::{self, ReleaseKey, SIGNATURE_FILE, SUMS_FILE};
-use crate::update_check::{self, Channel, Latest, CURRENT_VERSION, RELEASE_URL};
+use crate::update_check::{self, Channel, Latest, CURRENT_VERSION};
 
 /// Every release's files are at `<base>/v<version>/<file>`, on the mirror the
 /// manual install and Homebrew download from too.
@@ -22,9 +22,9 @@ const DOWNLOAD_BASE: &str = "https://github.com/actual-software/actual-releases/
 /// The one file in each release archive.
 const BINARY: &str = "actual";
 
-/// What upgrades a copy built from source, as the README's install builds it.
-const CARGO_COMMAND: &str =
-    "cargo install --git https://github.com/actual-software/actual-cli.git --force";
+/// Builds actual from source, as the README's install does, replacing any
+/// copy built that way.
+const CARGO_COMMAND: &str = "cargo install -f --git https://github.com/actual-software/actual-cli";
 
 const LOCK_FILENAME: &str = "self-update.lock";
 const STAGING_PREFIX: &str = ".actual-self-update-";
@@ -36,7 +36,7 @@ const SMALL_FILE_LIMIT: u64 = 64 * 1024;
 const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(600);
 const ARCHIVE_LIMIT: u64 = 256 * 1024 * 1024;
 
-const REPORT_HINT: &str = "Nothing was replaced. Try again, and if it keeps failing, report it as https://github.com/actual-software/actual-cli/security/policy describes.";
+const REPORT_HINT: &str = "Report it at https://github.com/actual-software/actual-cli/security";
 
 /// What `actual self-update` reads from the machine it runs on.
 struct Setup<'a> {
@@ -91,8 +91,11 @@ fn run(setup: &Setup, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Ac
     check_unmanaged(&exe)?;
     let archive_name = archive_for(setup.os, setup.arch).ok_or_else(|| {
         refused(
-            format!("There's no release build of actual for {} on {}.", setup.os, setup.arch),
-            "Build it from source: cargo install --git https://github.com/actual-software/actual-cli.git",
+            format!(
+                "There's no release build of actual for {} on {}.",
+                setup.os, setup.arch
+            ),
+            CARGO_COMMAND,
         )
     })?;
     let latest = latest_version(setup)?;
@@ -181,7 +184,7 @@ fn check_allowed(setup: &Setup) -> Result<(), ActualError> {
         Some(config) if update_check::is_disabled(config) => Err(refused(
             "Update checks are turned off, so actual self-update won't run.",
             format!(
-                "Unset {} and set update_check.enabled to true, or download the release yourself",
+                "Unset {} and set update_check.enabled to true.",
                 update_check::OPT_OUT_ENV
             ),
         )),
@@ -255,7 +258,7 @@ fn staging_dir(exe: &Path, latest: &str) -> Result<tempfile::TempDir, ActualErro
                     "actual {latest} is out, but actual self-update can't write to {} ({e}).",
                     dir.display()
                 ),
-                format!("Download it from {RELEASE_URL}, or move actual to a directory you own, such as ~/.local/bin, and run actual self-update from there."),
+                "Move actual to a directory you own, such as ~/.local/bin, and retry.",
             )
         })
 }
@@ -303,22 +306,22 @@ fn check_not_root(owner: u32) -> Result<(), ActualError> {
     if owner == 0 {
         return Err(refused(
             "actual self-update doesn't replace a binary as root.",
-            format!("Run it as the user who installed actual, or download the release from {RELEASE_URL}"),
+            "Run it as the user who installed actual.",
         ));
     }
     Ok(())
 }
 
-/// A binary another user installed, typically root through `sudo mv`, stays
-/// theirs to replace, even in a directory this user can write.
+/// A binary another user owns, such as one copied into place with `sudo cp`,
+/// stays theirs to replace, even in a directory this user can write.
 fn check_owned_by(exe: &Path, owner: u32, user: u32, latest: &str) -> Result<(), ActualError> {
     if owner != user {
         return Err(refused(
             format!(
-                "actual {latest} is out, but {} belongs to another user, so actual self-update leaves it alone.",
+                "actual {latest} is out, but another user owns {}, so actual self-update leaves it alone.",
                 exe.display()
             ),
-            format!("Download it from {RELEASE_URL} and install it the way this copy was installed, or move actual to a directory you own, such as ~/.local/bin."),
+            "Install your own copy in a directory you own, such as ~/.local/bin.",
         ));
     }
     Ok(())
@@ -396,7 +399,7 @@ fn download_error(e: ::self_update::errors::Error, file: &str, latest: &str) -> 
     match e {
         ::self_update::errors::Error::NotFound { .. } => failed(
             format!("The release page for actual {latest} has no {file} yet, so actual self-update can't check that release."),
-            Some(format!("Try again later, or download it from {RELEASE_URL}")),
+            Some("Try again later.".to_string()),
         ),
         other => failed(format!("Couldn't download {file} for actual {latest}: {other}"), None),
     }
@@ -637,9 +640,21 @@ mod tests {
         }
     }
 
+    /// One row of a default 80-column error panel, inside its border and
+    /// padding. A hint that fits is never cut short or split across rows.
+    const PANEL_INNER: usize = 80 - 4;
+
+    /// Every refusal and failure the tests reach comes back through here, so
+    /// each one's hint is held to one row after "Fix: ".
     fn update(setup: &Setup) -> (Result<(), ActualError>, String, String) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let result = run(setup, &mut out, &mut err);
+        if let Some(hint) = result.as_ref().err().and_then(ActualError::hint) {
+            assert!(
+                hint.len() + "Fix: ".len() <= PANEL_INNER,
+                "the error panel would cut or wrap this hint: {hint}"
+            );
+        }
         (
             result,
             String::from_utf8(out).unwrap(),
@@ -859,11 +874,7 @@ mod tests {
         let mut page = Page::signed_by(&f.primary, archive(Entry::File(NEW_BINARY)));
         page.signature = None;
         let err = assert_refused_release(&mut f, page, [1, 1, 0], "has no SHA256SUMS.minisig yet");
-        let hint = err.hint().unwrap().into_owned();
-        assert_eq!(
-            hint,
-            format!("Try again later, or download it from {RELEASE_URL}")
-        );
+        assert_eq!(err.hint().as_deref(), Some("Try again later."));
     }
 
     #[test]
@@ -1024,7 +1035,7 @@ mod tests {
             |s| s.os = "windows",
             "There's no release build of actual for windows on x86_64.",
         );
-        assert!(err.hint().unwrap().contains("cargo install --git"));
+        assert_eq!(err.hint().as_deref(), Some(CARGO_COMMAND));
     }
 
     #[test]
@@ -1088,7 +1099,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "actual {FUTURE} is out, but {} belongs to another user, so actual self-update leaves it alone.",
+                "actual {FUTURE} is out, but another user owns {}, so actual self-update leaves it alone.",
                 f.exe.display()
             )
         );
