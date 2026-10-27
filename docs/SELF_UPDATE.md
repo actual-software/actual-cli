@@ -45,7 +45,7 @@ A run stopped partway, as by Ctrl-C during the download, leaves its scratch dire
 |---|---|
 | Installed with Homebrew (`/Cellar/actual/` in the binary's path) | `brew upgrade actual-software/actual/actual` |
 | Installed with npm (`/node_modules/@actualai/actual-` in the path) | `npm install -g @actualai/actual@latest` |
-| Built with `cargo install` (`/.cargo/bin/` in the path) | `cargo install -f --git https://github.com/actual-software/actual-cli` |
+| Built with `cargo install` (`/.cargo/bin/` in the path) | `cargo install -f --git https://github.com/actual-software/actual-cli actual-cli` |
 | A directory you can't write, such as `/usr/local/bin` after the README's `sudo mv` | A suggestion to move `actual` to a directory you own, such as `~/.local/bin` |
 | A binary another user owns, such as one copied into place with `sudo cp` | A suggestion to install your own copy in a directory you own |
 | Running as root | A suggestion to run it as the user who installed `actual` |
