@@ -273,8 +273,8 @@ ran the command:
 
 - `actual.action.started`, stamped when the check started, before its judge
   was called.
-- `actual.action.completed`, once the check has its verdict, with its outcome
-  and how long it took.
+- `actual.action.completed`, once the check has its verdict, with its outcome,
+  what made a `warn` one, and how long it took.
 
 They go wherever the run's plan-governance `check_started` and
 `check_completed` events go, with the same outcome. A run outside a Claude Code
@@ -282,8 +282,8 @@ hook sends them with no session or agent.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
-blocked on, which of them a human overrode, and how each check came out and how
-long it took.
+blocked on, which of them a human overrode, how each check came out and what
+made a check warn, and how long it took.
 
 **Nothing is sent, or built, unless you configure an output.** Both are unset by
 default:
@@ -309,7 +309,8 @@ on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.gate.evaluated` events, `actual.gate.type` on breach events and
 `actual.gate.denied_types` on override events. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
-`actual.action.outcome` and `actual.action.duration_ms`. An unknown value is
+`actual.action.outcome`, `actual.action.warn_reasons` and
+`actual.action.duration_ms`. An unknown value is
 sent as an empty string. None of them names you, your organization, your
 repository or this installation, so an event carries the same fields logged in
 or out:
@@ -331,6 +332,7 @@ or out:
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
 | `actual.action.mode` | How the check ran: `hook` when Claude Code ran it as a hook, `direct` when someone ran the command | anonymous |
 | `actual.action.outcome` | What the check came to, as its plan-governance `check_completed` event records it: `allow`, `warn` or `block` | anonymous |
+| `actual.action.warn_reasons` | What made a `warn` one, and an empty list for `allow` and `block`: `round_limit` when a hook let a round through because every rule it blocked on had been denied more times than `--max-rounds` allows, `requires_decision` when a run outside a hook judged a rule as needing a decision, `partial_coverage` when the judge saw only some of the rules that apply, and `active_override` when a hook round passed while the session carries an override. A check that warns for more than one of these names each | anonymous |
 | `actual.action.duration_ms` | How long the check took, in milliseconds | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
