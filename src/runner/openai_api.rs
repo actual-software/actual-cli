@@ -304,7 +304,12 @@ impl OpenAiApiRunner {
 
             break serde_json::from_str::<ApiResponse>(&body_text).map_err(|e| {
                 let truncated = if body_text.len() > 2048 {
-                    format!("{}...(truncated)", &body_text[..2048])
+                    // Slicing inside a multibyte character panics.
+                    let mut cut = 2048;
+                    while !body_text.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    format!("{}...(truncated)", &body_text[..cut])
                 } else {
                     body_text.clone()
                 };
@@ -1269,6 +1274,39 @@ mod tests {
         }
 
         mock.assert_async().await;
+    }
+
+    // Test 14c: a character across byte 2,048 is cut whole, not split
+    #[tokio::test]
+    async fn test_malformed_json_response_truncated_at_char_boundary() {
+        let mut server = Server::new_async().await;
+
+        // The two bytes of "é" are bytes 2,047 and 2,048.
+        let ascii = "x".repeat(2047);
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!("{ascii}é, then more text"))
+            .create_async()
+            .await;
+
+        let result = make_runner(&server)
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::RunnerFailed { message, stderr }) => {
+                assert!(
+                    message.contains("Failed to parse OpenAI API response"),
+                    "expected parse error message, got: {message}"
+                );
+                assert_eq!(stderr, format!("{ascii}...(truncated)"));
+            }
+            other => panic!("expected RunnerFailed, got: {other:?}"),
+        }
     }
 
     // Test 15: output has a non-message type item (no message item found at all)
