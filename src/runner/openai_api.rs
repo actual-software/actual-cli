@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::error::{sanitize_server_lines, ActualError};
+use crate::error::{sanitize_server_lines, sanitize_server_text, ActualError};
 use crate::tailoring::types::TailoringOutput;
 
 use super::http_retry::{
@@ -341,7 +341,8 @@ impl OpenAiApiRunner {
             if content.content_type == "refusal" {
                 let reason = content
                     .refusal
-                    .clone()
+                    .as_deref()
+                    .map(sanitize_server_text)
                     .unwrap_or_else(|| "unknown reason".to_string());
                 return Err(ActualError::TailoringValidationError(format!(
                     "OpenAI refused: {reason}"
@@ -1104,6 +1105,45 @@ mod tests {
         }
 
         mock.assert_async().await;
+    }
+
+    // Test 11b: the refusal text loses its control characters
+    #[tokio::test]
+    async fn test_refusal_drops_control_characters() {
+        let mut server = Server::new_async().await;
+
+        let body = serde_json::json!({
+            "id": "resp_test",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "refusal",
+                    "refusal": "\x1b]0;pwned\x07I cannot\r help\x7f\x1b[2J"
+                }]
+            }]
+        })
+        .to_string();
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let result = make_runner(&server)
+            .run_tailoring("bad request", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::TailoringValidationError(msg)) => {
+                assert_eq!(msg, "OpenAI refused: ]0;pwnedI cannot  help[2J")
+            }
+            other => panic!("expected TailoringValidationError, got: {other:?}"),
+        }
     }
 
     // Test 12: message item with null content falls back to empty vec (unwrap_or_default),
