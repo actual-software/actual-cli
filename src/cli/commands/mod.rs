@@ -29,6 +29,7 @@ pub mod rules_brief;
 pub mod rules_rank;
 pub mod rules_scope;
 pub mod runners;
+pub mod self_update;
 pub mod session_summary;
 pub mod status;
 pub mod sync;

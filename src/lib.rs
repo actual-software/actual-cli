@@ -8,6 +8,7 @@ pub mod error;
 pub mod generation;
 pub mod model_cache;
 pub mod net;
+pub mod release_verify;
 pub mod rules;
 pub mod runner;
 pub mod tailoring;
@@ -51,6 +52,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Session(args) => cli::commands::session_summary::exec(args),
         Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
         Command::Version(args) => cli::commands::version::exec(args),
+        Command::SelfUpdate => cli::commands::self_update::exec(),
         Command::UpdateCheck => cli::commands::version::exec_refresh(),
     }
 }
@@ -243,5 +245,24 @@ mod tests {
         let _off = EnvGuard::set(update_check::OPT_OUT_ENV, "1");
         assert!(run(Cli::parse_from(["actual", "version", "--check"])).is_ok());
         assert!(run(Cli::parse_from(["actual", "__update-check"])).is_ok());
+    }
+
+    #[test]
+    fn test_run_self_update_dispatch_refuses_with_update_checks_off() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        // Exercises the Command::SelfUpdate arm. With update checks off it
+        // refuses before any request, so the test binary is never replaced.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _off = EnvGuard::set(update_check::OPT_OUT_ENV, "1");
+        let result = run(Cli::parse_from(["actual", "self-update"]));
+        assert!(
+            matches!(result, Err(ActualError::SelfUpdateRefused { .. })),
+            "{result:?}"
+        );
     }
 }
