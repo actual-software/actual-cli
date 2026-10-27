@@ -8,7 +8,7 @@
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -27,6 +27,10 @@ const CARGO_COMMAND: &str =
     "cargo install --git https://github.com/actual-software/actual-cli.git --force";
 
 const LOCK_FILENAME: &str = "self-update.lock";
+const STAGING_PREFIX: &str = ".actual-self-update-";
+/// Older than any live run's scratch directory, since every download gives
+/// up at its timeout well before this.
+const LEFTOVER_AGE: Duration = Duration::from_secs(3600);
 const SMALL_FILE_TIMEOUT: Duration = Duration::from_secs(30);
 const SMALL_FILE_LIMIT: u64 = 64 * 1024;
 const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -101,6 +105,7 @@ fn run(setup: &Setup, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Ac
     let user = (setup.owner)(staging.path())?;
     check_not_root(user)?;
     check_owned_by(&exe, (setup.owner)(&exe)?, user, &latest)?;
+    sweep_leftovers(staging.path(), SystemTime::now());
     let before = identity(&exe)?;
     let _lock = lock(setup.lock_path.as_deref(), err)?;
     if identity(&exe)? != before {
@@ -242,7 +247,7 @@ fn latest_version(setup: &Setup) -> Result<String, ActualError> {
 fn staging_dir(exe: &Path, latest: &str) -> Result<tempfile::TempDir, ActualError> {
     let dir = exe.parent().unwrap_or(exe);
     tempfile::Builder::new()
-        .prefix(".actual-self-update-")
+        .prefix(STAGING_PREFIX)
         .tempdir_in(dir)
         .map_err(|e| {
             refused(
@@ -253,6 +258,32 @@ fn staging_dir(exe: &Path, latest: &str) -> Result<tempfile::TempDir, ActualErro
                 format!("Download it from {RELEASE_URL}, or move actual to a directory you own, such as ~/.local/bin, and run actual self-update from there."),
             )
         })
+}
+
+/// Remove the scratch directories that runs killed mid-download, as by Ctrl-C,
+/// left beside the binary. Each stays until it is [`LEFTOVER_AGE`] old, so a
+/// run still downloading next to this one keeps its own.
+fn sweep_leftovers(staging: &Path, now: SystemTime) {
+    let dir = staging.parent().unwrap_or(staging);
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if is_leftover(&entry, staging, now) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn is_leftover(entry: &std::fs::DirEntry, staging: &Path, now: SystemTime) -> bool {
+    let age = entry
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map(|modified| now.duration_since(modified).unwrap_or_default());
+    entry
+        .file_name()
+        .to_string_lossy()
+        .starts_with(STAGING_PREFIX)
+        && entry.path() != staging
+        && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        && age.is_ok_and(|age| age > LEFTOVER_AGE)
 }
 
 /// A directory this process just made belongs to its effective user.
@@ -651,6 +682,59 @@ mod tests {
         assert_eq!(f.installed(), [BINARY]);
         registry.assert();
         assert_all(files);
+    }
+
+    /// A scratch directory another run left, as if it was made `hours_ago`.
+    fn leftover(dir: &Path, name: &str, hours_ago: u64) -> PathBuf {
+        let path = dir.join(format!("{STAGING_PREFIX}{name}"));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join(ARCHIVE), b"half an archive").unwrap();
+        let then = SystemTime::now() - Duration::from_secs(hours_ago * 3600);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_run_removes_what_an_interrupted_run_left_behind() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 1);
+        let page = Page::signed_by(&f.primary, archive(Entry::File(NEW_BINARY)));
+        f.publish(&page, [1, 1, 1]);
+        let dir = f.exe.parent().unwrap().to_path_buf();
+        let stale = leftover(&dir, "killed", 2);
+        let recent = leftover(&dir, "running", 0);
+
+        update(&f.setup()).0.unwrap();
+
+        assert!(!stale.exists(), "an hour-old leftover is removed");
+        assert!(recent.exists(), "a recent one may belong to a live run");
+        assert_eq!(std::fs::read(&f.exe).unwrap(), NEW_BINARY);
+    }
+
+    #[test]
+    fn sweep_leftovers_removes_only_old_scratch_directories_beside_the_binary() {
+        let dir = tempdir().unwrap();
+        let ours = leftover(dir.path(), "ours", 2);
+        let old = leftover(dir.path(), "old", 2);
+        let fresh = leftover(dir.path(), "fresh", 0);
+        let file = dir.path().join(format!("{STAGING_PREFIX}file"));
+        std::fs::write(&file, b"").unwrap();
+        let unrelated = dir.path().join("other");
+        std::fs::create_dir(&unrelated).unwrap();
+
+        sweep_leftovers(&ours, SystemTime::now());
+
+        assert!(!old.exists());
+        for kept in [&ours, &fresh, &file, &unrelated] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        // A clock set back before the directory's time counts it as new.
+        sweep_leftovers(&ours, SystemTime::UNIX_EPOCH);
+        assert!(fresh.exists());
     }
 
     #[test]

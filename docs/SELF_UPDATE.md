@@ -37,6 +37,8 @@ The new binary is unpacked into a scratch directory beside the old one, given th
 
 Two runs at once don't both replace the file. Each holds `~/.actualai/actual/self-update.lock` while it downloads and installs, and a run that had to wait checks whether the other one already replaced the binary, stopping if it did.
 
+A run stopped partway, as by Ctrl-C during the download, leaves its scratch directory behind: a hidden `.actual-self-update-` directory next to the binary. The next run removes any that are more than an hour old, which no live run's can be.
+
 ## When it refuses
 
 | Situation | What it prints instead |
@@ -50,4 +52,4 @@ Two runs at once don't both replace the file. Each holds `~/.actualai/actual/sel
 | Update checks are off: `ACTUAL_NO_UPDATE_CHECK`, `update_check.enabled: false`, or a config file that fails to load | How to turn them back on |
 | No release build for your platform | How to build from source |
 
-A refusal exits with status 2. The ones about who owns the binary and its directory come after the version lookup, so they can name the new release; the others make no request at all. A failed download or check exits with status 1 and leaves the old binary as it was. There's no hook mode, and the [daily notice](UPDATE_CHECK.md) that suggests `actual self-update` never shows in the hook modes or under `--json`.
+A refusal exits with status 2. The ones about who is running it and who owns the binary and its directory come after the version lookup, so they can name the new release; the others make no request at all. A failed download or check exits with status 1 and leaves the old binary as it was. There's no hook mode, and the [daily notice](UPDATE_CHECK.md) that suggests `actual self-update` never shows in the hook modes or under `--json`.
