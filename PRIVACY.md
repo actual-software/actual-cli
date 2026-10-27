@@ -274,8 +274,8 @@ HTTPS `GET` of `https://registry.npmjs.org/@actualai/actual/latest` with a
 `User-Agent: actual-cli/<version>` header, made by a background process so the
 command never waits for it. It carries no account, repository, file or
 telemetry data; like any web request, it shows npm your IP address.
-`actual version --check` makes the same request when you run it. The answer is
-kept in `~/.actualai/actual/update-check.yaml`.
+`actual version --check` and `actual self-update` make the same request when
+you run them. The answer is kept in `~/.actualai/actual/update-check.yaml`.
 
 `ACTUAL_NO_UPDATE_CHECK=1`, or `update_check.enabled: false` in the config
 file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
@@ -286,7 +286,8 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 |-------------|------|----------|
 | `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
-| `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
+| `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check` or `actual self-update`; no account or repository data | HTTPS |
+| `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject

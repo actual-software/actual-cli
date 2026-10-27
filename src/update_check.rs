@@ -31,7 +31,7 @@ pub const OPT_OUT_ENV: &str = "ACTUAL_NO_UPDATE_CHECK";
 /// hour per IP address, which a shared office address can use up.
 pub(crate) const REGISTRY_URL: &str = "https://registry.npmjs.org/@actualai/actual/latest";
 
-/// Where a binary that no package manager owns gets its upgrade.
+/// The latest release's page, for downloading a release by hand.
 pub const RELEASE_URL: &str = "https://github.com/actual-software/actual-releases/releases/latest";
 
 /// What upgrades a binary that no package manager owns.
@@ -130,7 +130,7 @@ pub(crate) fn env_is_set(name: &str) -> bool {
 /// True when a registry request may go out: the configuration loaded, and
 /// [`is_disabled`] finds update checks on. A configuration that couldn't load
 /// may be the one turning them off, so it counts as off.
-pub(crate) fn may_check(config: Option<&Config>) -> bool {
+fn may_check(config: Option<&Config>) -> bool {
     config.is_some_and(|config| !is_disabled(config))
 }
 
