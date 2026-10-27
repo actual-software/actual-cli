@@ -449,6 +449,14 @@ pub enum Command {
     /// Print the version, how this copy was installed, and how to upgrade it
     Version(VersionArgs),
 
+    /// Replace a hand-downloaded actual with the latest signed release
+    ///
+    /// Checks the release's signature against the keys built into actual and
+    /// its archive against SHA256SUMS before renaming the new binary into
+    /// place. A copy installed with Homebrew or npm gets that package
+    /// manager's command instead. See docs/SELF_UPDATE.md.
+    SelfUpdate,
+
     /// Internal: look up the latest published version once, record it in the
     /// update-check cache, then exit.
     ///
