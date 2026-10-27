@@ -7,6 +7,8 @@ use std::process::Command;
 use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
+use crate::spawn::spawn_with_etxtbsy_retry;
+
 /// A workflow run, with the fields that tie it to a tag.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Run {
@@ -64,9 +66,7 @@ impl Gh {
             .map(|a| a.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
-        let output = Command::new(&self.program)
-            .args(&args)
-            .output()
+        let output = spawn_with_etxtbsy_retry(|| Command::new(&self.program).args(&args).output())
             .with_context(|| {
                 format!(
                     "running {} (is the GitHub CLI installed?)",
