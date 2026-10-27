@@ -7,6 +7,7 @@ mod keys;
 mod kms;
 mod minisign;
 mod release;
+mod spawn;
 mod sums;
 #[cfg(test)]
 mod test_support;

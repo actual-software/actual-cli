@@ -11,6 +11,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 
 use crate::minisign::Signer;
+use crate::spawn::spawn_with_etxtbsy_retry;
 
 const ENDPOINT: &str = "https://cloudkms.googleapis.com";
 
@@ -130,15 +131,17 @@ fn check_key_version_name(name: &str) -> Result<()> {
 
 /// An access token for the signer's own `gcloud` login.
 pub fn gcloud_access_token(gcloud: &Path) -> Result<String> {
-    let output = Command::new(gcloud)
-        .args(["auth", "print-access-token"])
-        .output()
-        .with_context(|| {
-            format!(
-                "running {} (is the Google Cloud CLI installed?)",
-                gcloud.display()
-            )
-        })?;
+    let output = spawn_with_etxtbsy_retry(|| {
+        Command::new(gcloud)
+            .args(["auth", "print-access-token"])
+            .output()
+    })
+    .with_context(|| {
+        format!(
+            "running {} (is the Google Cloud CLI installed?)",
+            gcloud.display()
+        )
+    })?;
     ensure!(
         output.status.success(),
         "`gcloud auth print-access-token` failed; run `gcloud auth login` with your work account first: {}",
