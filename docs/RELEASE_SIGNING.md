@@ -43,7 +43,7 @@ Once the release workflow has published both release pages, one member of the si
 cargo run -p release-sign -- release v0.10.0 --kms-key "projects/$PROJECT/locations/$LOCATION/keyRings/$KEY_RING/cryptoKeys/release-signing-primary/cryptoKeyVersions/1"
 ```
 
-`--kms-key` can also come from `RELEASE_SIGN_KMS_KEY`. Before it asks KMS for anything, the tool checks three things:
+Maintainers will find the values of `$PROJECT`, `$LOCATION` and `$KEY_RING` in the team's internal docs. `--kms-key` can also come from `RELEASE_SIGN_KMS_KEY`. Before it asks KMS for anything, the tool checks three things:
 
 1. that the tag resolves to a commit, and that exactly one push run of `release.yml` built that commit for that tag;
 2. that the `SHA256SUMS` in that run's `release-assets` artifact matches every tarball the run built;
