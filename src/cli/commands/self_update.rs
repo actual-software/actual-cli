@@ -22,9 +22,11 @@ const DOWNLOAD_BASE: &str = "https://github.com/actual-software/actual-releases/
 /// The one file in each release archive.
 const BINARY: &str = "actual";
 
-/// Builds actual from source, as the README's install does, replacing any
-/// copy built that way.
-const CARGO_COMMAND: &str = "cargo install -f --git https://github.com/actual-software/actual-cli";
+/// Builds actual from source, replacing any copy built that way. It names the
+/// package, since the repository holds another one with a binary and cargo
+/// won't choose between them.
+const CARGO_COMMAND: &str =
+    "cargo install -f --git https://github.com/actual-software/actual-cli actual-cli";
 
 const LOCK_FILENAME: &str = "self-update.lock";
 const STAGING_PREFIX: &str = ".actual-self-update-";
@@ -645,13 +647,15 @@ mod tests {
     const PANEL_INNER: usize = 80 - 4;
 
     /// Every refusal and failure the tests reach comes back through here, so
-    /// each one's hint is held to one row after "Fix: ".
+    /// each one's hint is held to one row after "Fix: ". The cargo command is
+    /// the one exception: it has to name the package, and no spelling that
+    /// does fits in one row.
     fn update(setup: &Setup) -> (Result<(), ActualError>, String, String) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let result = run(setup, &mut out, &mut err);
         if let Some(hint) = result.as_ref().err().and_then(ActualError::hint) {
             assert!(
-                hint.len() + "Fix: ".len() <= PANEL_INNER,
+                hint == CARGO_COMMAND || hint.len() + "Fix: ".len() <= PANEL_INNER,
                 "the error panel would cut or wrap this hint: {hint}"
             );
         }
