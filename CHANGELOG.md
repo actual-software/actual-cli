@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Text the auth server or the API sends for an error message loses its control characters before the error box prints it, so a misbehaving server can't write escape sequences to the terminal. A tab or line break in that text prints as a space, and a field longer than 1,000 characters is cut with "…"
 - The same filter covers what the CLI prints from a server outside error messages: the `advisor` answer, its related ADRs and its scope notes, the sign-in details `whoami`, `login` and `status` show, the `login --device` prompt, the token details `auth create-token` and `mint-token` show, and the Anthropic or OpenAI response body in a runner error. The advisor's answer and a response body keep their line breaks
 - When the session refresh fails because of a server error or a network problem, `advisor` and `auth create-token` report that failure and name the refresh step. Only a refresh token the server rejects (`invalid_grant`), or a credentials file whose auth server URL is missing or fails the HTTPS check, reports "Not signed in"
+- A success response from the OpenAI API that the runner can't parse no longer crashes the command when it runs past 2 KB with a multibyte character across the 2 KB mark. The runner error shows the body cut before that character
+- The reason OpenAI gives when it refuses a request loses its control characters before the CLI prints it, and a line break in it prints as a space
 
 ## [0.9.0] - 2026-10-23
 
