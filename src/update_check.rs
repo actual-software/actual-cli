@@ -1,8 +1,9 @@
 //! The once-a-day update notice, and the facts `actual version` reports.
 //!
 //! The running binary's own path names the channel that installed it, so the
-//! notice can print that channel's upgrade command. The CLI never replaces its
-//! own binary: Homebrew and npm keep records of the files they installed.
+//! notice can print that channel's upgrade command. Homebrew and npm keep
+//! records of the files they installed, so only a copy neither owns is
+//! pointed at `actual self-update`, and the check itself never replaces it.
 //!
 //! No command waits on the network for the notice. After a command succeeds,
 //! [`after_command`] prints a notice the local cache already holds, and when
@@ -32,6 +33,9 @@ pub(crate) const REGISTRY_URL: &str = "https://registry.npmjs.org/@actualai/actu
 
 /// Where a binary that no package manager owns gets its upgrade.
 pub const RELEASE_URL: &str = "https://github.com/actual-software/actual-releases/releases/latest";
+
+/// What upgrades a binary that no package manager owns.
+pub const SELF_UPDATE_COMMAND: &str = "actual self-update";
 
 /// The longest one registry lookup may take.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -96,6 +100,12 @@ impl Channel {
         }
     }
 
+    /// The command the notice and `actual version` print: the package
+    /// manager's, or `actual self-update` for a copy no package manager owns.
+    pub fn upgrade_hint(self) -> &'static str {
+        self.upgrade_command().unwrap_or(SELF_UPDATE_COMMAND)
+    }
+
     /// How `actual version` names the channel.
     pub fn label(self) -> &'static str {
         match self {
@@ -113,14 +123,14 @@ pub fn is_disabled(config: &Config) -> bool {
     env_is_set(OPT_OUT_ENV) || config.update_check.as_ref().and_then(|u| u.enabled) == Some(false)
 }
 
-fn env_is_set(name: &str) -> bool {
+pub(crate) fn env_is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
 /// True when a registry request may go out: the configuration loaded, and
 /// [`is_disabled`] finds update checks on. A configuration that couldn't load
 /// may be the one turning them off, so it counts as off.
-fn may_check(config: Option<&Config>) -> bool {
+pub(crate) fn may_check(config: Option<&Config>) -> bool {
     config.is_some_and(|config| !is_disabled(config))
 }
 
@@ -129,9 +139,10 @@ fn may_check(config: Option<&Config>) -> bool {
 /// Hook modes and machine-readable output never do: the actual skill's hooks
 /// start `actual` on every file read, edit, prompt and turn end, and a `--json`
 /// caller parses what it gets. `mint-token` is the headless path for scripts
-/// and CI, the hidden commands are internal, and `version` reports the same
-/// facts itself. The match has no wildcard arm, so a new command has to be
-/// placed on one side or the other.
+/// and CI, the hidden commands are internal, `version` reports the same
+/// facts itself, and after `self-update` the cache would announce the release
+/// it just installed. The match has no wildcard arm, so a new command has to
+/// be placed on one side or the other.
 pub fn applies_to(command: &Command) -> bool {
     match command {
         Command::AdrBot(_)
@@ -160,6 +171,7 @@ pub fn applies_to(command: &Command) -> bool {
         },
         Command::MintToken(_)
         | Command::Version(_)
+        | Command::SelfUpdate
         | Command::UpdateCheck
         | Command::TelemetryFlush => false,
     }
@@ -260,13 +272,12 @@ fn take_claim(cache_path: &Path, now: DateTime<Utc>) -> Option<Claim> {
 }
 
 /// The notice, after a blank line: the new release, then the command that
-/// upgrades this install, or where to download it.
+/// upgrades this install.
 fn notice(latest: &str, channel: Channel) -> String {
-    let upgrade = match channel.upgrade_command() {
-        Some(command) => format!("To upgrade, run: {}", theme::hint(command).for_stderr()),
-        None => format!("Download it from {}", theme::hint(RELEASE_URL).for_stderr()),
-    };
-    format!("\nactual {latest} is available (you have {CURRENT_VERSION}).\n{upgrade}")
+    let command = theme::hint(channel.upgrade_hint()).for_stderr();
+    format!(
+        "\nactual {latest} is available (you have {CURRENT_VERSION}).\nTo upgrade, run: {command}"
+    )
 }
 
 /// Start `actual __update-check` as a detached child, or do nothing without an
@@ -574,6 +585,15 @@ mod tests {
             Some("npm install -g @actualai/actual@latest")
         );
         assert_eq!(Channel::Other.upgrade_command(), None);
+        assert_eq!(
+            Channel::Homebrew.upgrade_hint(),
+            "brew upgrade actual-software/actual/actual"
+        );
+        assert_eq!(
+            Channel::Npm.upgrade_hint(),
+            "npm install -g @actualai/actual@latest"
+        );
+        assert_eq!(Channel::Other.upgrade_hint(), "actual self-update");
         assert_eq!(Channel::Homebrew.label(), "Homebrew");
         assert_eq!(Channel::Npm.label(), "npm");
         assert_eq!(Channel::Other.label(), "not Homebrew or npm");
@@ -677,6 +697,7 @@ mod tests {
             ],
             &["version"],
             &["version", "--check", "--json"],
+            &["self-update"],
             &["__update-check"],
             &["__telemetry-flush"],
         ];
@@ -861,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn after_command_links_the_release_for_a_binary_no_package_manager_owns() {
+    fn after_command_names_self_update_for_a_binary_no_package_manager_owns() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::remove(OPT_OUT_ENV);
         let dir = tempdir().unwrap();
@@ -877,8 +898,8 @@ mod tests {
         );
 
         let (out, refresh) = after(&Config::default(), &path, now, Channel::Other);
-        assert!(out.contains("Download it from "), "{out}");
-        assert!(out.contains(RELEASE_URL), "{out}");
+        assert!(out.contains("To upgrade, run: "), "{out}");
+        assert!(out.contains("actual self-update"), "{out}");
         assert!(refresh, "the cached answer is more than a day old");
     }
 

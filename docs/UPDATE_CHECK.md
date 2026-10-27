@@ -1,6 +1,6 @@
 # Update check
 
-Once a day, `actual` tells you when a newer release is out and prints the command that upgrades the copy you're running. It never replaces its own binary: Homebrew and npm keep track of the files they install, so the upgrade stays with them.
+Once a day, `actual` tells you when a newer release is out and prints the command that upgrades the copy you're running. The check itself never replaces the binary. Homebrew and npm keep track of the files they install, so for their copies the upgrade stays with them; for a copy you downloaded by hand, the notice names [`actual self-update`](SELF_UPDATE.md).
 
 ## The notice
 
@@ -17,7 +17,7 @@ The command depends on how the running binary was installed, which `actual` read
 |---|---|---|
 | Homebrew | `/Cellar/actual/` | `brew upgrade actual-software/actual/actual` |
 | npm | `/node_modules/@actualai/actual-` | `npm install -g @actualai/actual@latest` |
-| Anything else | | A link to the [latest release](https://github.com/actual-software/actual-releases/releases/latest) |
+| Anything else | | [`actual self-update`](SELF_UPDATE.md) |
 
 The Homebrew command names the tap in full because a bare `brew upgrade actual` reaches Homebrew's unrelated `actual` cask.
 
@@ -81,7 +81,7 @@ A config file that fails to load counts as off as well, because it may be the fi
 | `latest_version` | The latest published version. `null` without `--check`, with the check turned off or a config file that fails to load, or when the registry didn't answer. |
 | `update_available` | Whether `latest_version` is newer than `current_version`. `null` whenever `latest_version` is. |
 | `channel` | `homebrew`, `npm` or `other`. |
-| `upgrade_command` | The upgrade command for `channel`, or `null` for `other`. |
-| `release_url` | The latest release's page, which is the way to upgrade when `upgrade_command` is `null`. |
+| `upgrade_command` | The upgrade command for `channel`, or `null` for `other`, whose copies upgrade with [`actual self-update`](SELF_UPDATE.md). |
+| `release_url` | The latest release's page, for downloading a release by hand. |
 
 New fields may be added; existing ones keep their names and meanings. A minimum-version check needs only the local facts, so `actual version --json` answers it without a request. A release from before this command existed rejects `version` as an unknown subcommand and exits with status 2.

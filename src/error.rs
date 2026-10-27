@@ -176,6 +176,19 @@ pub enum ActualError {
     /// whole remedy, so no hint is needed.
     #[error("{0}")]
     NotInteractive(String),
+
+    /// `actual self-update` won't replace this copy of `actual`: a package
+    /// manager owns it, it runs under CI, or the user can't write where it
+    /// lives. The hint is how to upgrade it instead.
+    #[error("{message}")]
+    SelfUpdateRefused { message: String, hint: String },
+
+    /// `actual self-update` stopped before replacing the binary.
+    #[error("{message}")]
+    SelfUpdateFailed {
+        message: String,
+        hint: Option<String>,
+    },
 }
 
 impl ActualError {
@@ -195,7 +208,8 @@ impl ActualError {
             | Self::NoRunnerAvailable { .. }
             | Self::OrgMismatch { .. }
             | Self::RepoNotFound(_)
-            | Self::NotInteractive(_) => 2,
+            | Self::NotInteractive(_)
+            | Self::SelfUpdateRefused { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
             Self::IoError(_) => 5,
@@ -255,6 +269,8 @@ impl ActualError {
             // Carried on the variant rather than matched to a static string,
             // for the panel-truncation reason documented on it.
             Self::Sec1KeyUnsupported { hint, .. } => Some(Cow::Owned(hint.clone())),
+            Self::SelfUpdateRefused { hint, .. } => Some(Cow::Owned(hint.clone())),
+            Self::SelfUpdateFailed { hint, .. } => hint.clone().map(Cow::Owned),
             _ => None,
         }
     }
@@ -991,5 +1007,32 @@ mod tests {
             !msg.contains("openssl"),
             "the command belongs on the hint, not in Display: {msg}"
         );
+    }
+
+    #[test]
+    fn test_self_update_errors_exit_codes_display_and_hints() {
+        let refused = ActualError::SelfUpdateRefused {
+            message: "installed with Homebrew".to_string(),
+            hint: "brew upgrade actual-software/actual/actual".to_string(),
+        };
+        assert_eq!(refused.exit_code(), 2);
+        assert_eq!(refused.to_string(), "installed with Homebrew");
+        assert_eq!(
+            refused.hint().as_deref(),
+            Some("brew upgrade actual-software/actual/actual")
+        );
+
+        let failed = ActualError::SelfUpdateFailed {
+            message: "not signed yet".to_string(),
+            hint: Some("Try again later".to_string()),
+        };
+        assert_eq!(failed.exit_code(), 1);
+        assert_eq!(failed.to_string(), "not signed yet");
+        assert_eq!(failed.hint().as_deref(), Some("Try again later"));
+        let bare = ActualError::SelfUpdateFailed {
+            message: "bad signature".to_string(),
+            hint: None,
+        };
+        assert_eq!(bare.hint(), None);
     }
 }

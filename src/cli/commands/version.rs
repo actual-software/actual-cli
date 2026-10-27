@@ -103,10 +103,7 @@ fn render_text(channel: Channel, latest: &Latest) -> String {
     if let Some(line) = latest_line {
         lines.push(row("Latest:", &line));
     }
-    lines.push(match channel.upgrade_command() {
-        Some(command) => row("Upgrade with:", command),
-        None => row("Download from:", RELEASE_URL),
-    });
+    lines.push(row("Upgrade with:", channel.upgrade_hint()));
     lines.join("\n")
 }
 
@@ -197,7 +194,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains(&format!("Download from:  {RELEASE_URL}")),
+            text.contains("Upgrade with:   actual self-update"),
             "{text}"
         );
     }
