@@ -7,12 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
 ### Added
 - `whoami` shows when the access token expired, once it has, instead of only "Signed in"
 - `status` has an Actual AI panel with the signed-in account and organization, read from the local credentials file with no network call
 
 ### Changed
 - `login --device` is hidden from help while the Actual AI server lacks the device-authorization grant, which a device sign-in needs. The flag still parses and the flow is unchanged
+- `plan-check`, `impl-check` and `check-override` queue their telemetry events in the local spool and leave the sending to the background uploader, as `rules select` does, so no check waits on the network, even when the telemetry endpoint never answers
+- YAML is read and written with serde-saphyr in place of serde_yml and libyml, which have security advisories and no fixed release. The config file, stored credentials and caches keep their format, so files an earlier version wrote read back the same and 0.9.0 reads what this version writes. A YAML parse error reads differently
 
 ### Fixed
 - The page the browser shows after you approve `login` says to return to the terminal to finish signing in, instead of "Signed in". It appears before the CLI exchanges the code for a session, so when that exchange failed, the browser said "Signed in" and the terminal reported the error
@@ -23,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When the session refresh fails because of a server error or a network problem, `advisor` and `auth create-token` report that failure and name the refresh step. Only a refresh token the server rejects (`invalid_grant`), or a credentials file whose auth server URL is missing or fails the HTTPS check, reports "Not signed in"
 - A success response from the OpenAI API that the runner can't parse no longer crashes the command when it runs past 2 KB with a multibyte character across the 2 KB mark. The runner error shows the body cut before that character
 - The reason OpenAI gives when it refuses a request loses its control characters before the CLI prints it, and a line break in it prints as a space
+- The telemetry uploader runs in a process group of its own, so it finishes its send after the command that started it exits. Before, it died with its parent's group: Codex kills that group once a command returns, and a CLI that leads its own terminal session (`ssh -t`, or a terminal or tmux window that runs it directly) hangs it up on exit
+- A batch the telemetry endpoint refuses with a 400 or 422 is resent one event at a time and only the refused event is dropped, so one bad event no longer holds back the events queued behind it. Any other failure, a 401, 403, 404 or 413 included, keeps the batch queued for a later run, and scope events and check events go out as separate streams, so a failure in one doesn't stop the other
+
+### Security
+- Dependencies with published security advisories are replaced or updated: serde_yml and libyml are replaced by serde-saphyr (see Changed), jsonwebtoken moves to 10.4 on its `rust_crypto` backend, and rustls, rustls-webpki, quinn-proto and rand take patched releases
 
 ## [0.9.0] - 2026-10-23
 
