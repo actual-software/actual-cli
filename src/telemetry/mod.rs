@@ -14,4 +14,6 @@ pub mod plan_governance;
 pub mod reporter;
 pub mod scope;
 #[cfg(feature = "telemetry")]
+pub mod sign_in;
+#[cfg(feature = "telemetry")]
 pub mod spool;

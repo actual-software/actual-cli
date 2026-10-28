@@ -57,6 +57,50 @@ pub fn exec() -> Result<(), ActualError> {
     Ok(())
 }
 
+/// Built without telemetry, the uploader reads no sign-in, renews none and
+/// sends nothing. CI never builds this way, so run it with
+/// `cargo test --no-default-features --lib telemetry_flush`.
+#[cfg(all(test, not(feature = "telemetry")))]
+mod without_telemetry {
+    use super::*;
+    use crate::auth::store::{self, StoredCredentials};
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    #[test]
+    fn test_exec_leaves_an_expiring_sign_in_alone() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let mut server = mockito::Server::new();
+        let nothing = server
+            .mock("POST", mockito::Matcher::Any)
+            .expect(0)
+            .create();
+        let _api = EnvGuard::set("ACTUAL_API_URL", &server.url());
+        let endpoint = format!("{}/v1/logs", server.url());
+        let _endpoint = EnvGuard::set("ACTUAL_OTLP_LOGS_ENDPOINT", &endpoint);
+        let creds = StoredCredentials {
+            access_token: "token-a".to_string(),
+            refresh_token: "token-a-refresh".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
+            scope: None,
+            organization_id: "org-a".to_string(),
+            member_id: "member-a".to_string(),
+            email: None,
+            subject: None,
+            auth_url: Some(server.url()),
+        };
+        store::save(&creds).unwrap();
+
+        assert!(exec().is_ok());
+
+        nothing.assert();
+        assert_eq!(store::load().unwrap(), Some(creds));
+    }
+}
+
 #[cfg(all(test, feature = "telemetry"))]
 mod tests {
     use super::*;
@@ -125,7 +169,11 @@ mod tests {
             "grp-1",
             &["adr-1".to_string()],
         );
-        crate::telemetry::otlp::spool(&[record]);
+        let outputs = crate::telemetry::otlp::Outputs {
+            endpoint: None,
+            file: Some(sink.clone()),
+        };
+        crate::telemetry::otlp::spool(&outputs, &[record]);
 
         assert!(exec().is_ok());
 
@@ -170,7 +218,11 @@ mod tests {
             "grp-1",
             &["adr-1".to_string()],
         );
-        crate::telemetry::otlp::spool(&[record]);
+        let outputs = crate::telemetry::otlp::Outputs {
+            endpoint: None,
+            file: Some(sink.clone()),
+        };
+        crate::telemetry::otlp::spool(&outputs, &[record]);
 
         assert!(exec().is_ok());
         let queued = home.path().join("otlp-logs-spool.jsonl").exists();

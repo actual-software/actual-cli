@@ -87,9 +87,9 @@ pub(super) fn report<'a>(
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
     };
-    if otlp::Outputs::resolve(&config).is_none() {
+    let Some(outputs) = otlp::Outputs::resolve(&config) else {
         return;
-    }
+    };
     let adrs = logical_adrs(documents);
     if adrs.is_empty() {
         return;
@@ -104,20 +104,21 @@ pub(super) fn report<'a>(
         .filter(|adr| added.contains(&adr.key))
         .map(|adr| origin.context_added(key.session_id, agent_id, &adr.key, &adr.adr_ids))
         .collect();
-    dispatch(records);
+    dispatch(&outputs, records);
 }
 
-/// Spool the records and start the uploader, waiting on neither. The
-/// `#[cfg(test)]` twin captures them instead, so unit tests neither write the
-/// real spool nor spawn a process; the subprocess integration test runs this.
+/// Spool the records for `outputs` and start the uploader, waiting on neither.
+/// The `#[cfg(test)]` twin captures them instead, so unit tests neither write
+/// the real spool nor spawn a process; the subprocess integration test runs
+/// this.
 #[cfg(not(test))]
-pub(super) fn dispatch(records: Vec<otlp::LogRecord>) {
-    otlp::spool(&records);
+pub(super) fn dispatch(outputs: &otlp::Outputs, records: Vec<otlp::LogRecord>) {
+    otlp::spool(outputs, &records);
     super::rules_scope::spawn_uploader();
 }
 
 #[cfg(test)]
-pub(super) fn dispatch(records: Vec<otlp::LogRecord>) {
+pub(super) fn dispatch(_outputs: &otlp::Outputs, records: Vec<otlp::LogRecord>) {
     tests::CAPTURED.with(|cell| cell.borrow_mut().extend(records));
 }
 

@@ -179,6 +179,14 @@ impl Spool {
         }
         taken
     }
+
+    /// Whether the spool holds no line, read without the lock. A line appended
+    /// just after it answers `true` is sent by the uploader its writer starts.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_none_or(|content| content.trim().is_empty())
+    }
 }
 
 /// `lines`, each followed by a newline.

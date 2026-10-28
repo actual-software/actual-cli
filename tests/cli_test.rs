@@ -2349,6 +2349,19 @@ fn otlp_brief_hook(
     config_yaml: &str,
     agent: Option<&str>,
 ) -> (String, std::time::Duration) {
+    otlp_brief_hook_at(config_dir, repo, config_yaml, agent, None)
+}
+
+/// [`otlp_brief_hook`] with Actual's API at `api`, or at its built-in address
+/// when that is `None`.
+#[cfg(feature = "telemetry")]
+fn otlp_brief_hook_at(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    config_yaml: &str,
+    agent: Option<&str>,
+    api: Option<&str>,
+) -> (String, std::time::Duration) {
     std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
     let mut envelope = serde_json::json!({
         "session_id": "s1",
@@ -2360,8 +2373,13 @@ fn otlp_brief_hook(
     if let Some(agent) = agent {
         envelope["agent_id"] = agent.into();
     }
+    let mut command = cmd();
+    match api {
+        Some(api) => command.env("ACTUAL_API_URL", api),
+        None => command.env_remove("ACTUAL_API_URL"),
+    };
     let started = std::time::Instant::now();
-    let output = cmd()
+    let output = command
         .args([
             "rules",
             "brief",
@@ -2467,6 +2485,67 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
     );
     assert!(!config_dir.path().join("otlp-logs-spool.jsonl").exists());
     assert_eq!(std::fs::read_to_string(&sink).unwrap().lines().count(), 1);
+    mock.assert();
+}
+
+/// Signed in, the detached uploader sends the hook's events to Actual's API
+/// with the sign-in's token, which it reads from the credentials file itself.
+/// The file sink, which gets the same requests, never holds the token.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_brief_hook_events_reach_actual_api_signed_in() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("content-type", "application/x-protobuf")
+        .match_header("authorization", "Bearer cli-sign-in-token")
+        .with_status(200)
+        .expect(1)
+        .create();
+    std::fs::write(
+        config_dir.path().join("credentials.yaml"),
+        "access_token: cli-sign-in-token\nrefresh_token: cli-refresh-token\n\
+         organization_id: org-1\nmember_id: member-1\n",
+    )
+    .unwrap();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_brief_hook_at(
+        config_dir.path(),
+        repo.path(),
+        &config_yaml,
+        None,
+        Some(&server.url()),
+    );
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    let mut delivered = false;
+    for _ in 0..100 {
+        if mock.matched() {
+            delivered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(delivered, "the uploader never delivered a signed request");
+    let mut written = String::new();
+    for _ in 0..50 {
+        written = std::fs::read_to_string(&sink).unwrap_or_default();
+        if !written.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(written.lines().count(), 1, "{written}");
+    assert!(!written.contains("cli-sign-in-token"), "{written}");
+    assert!(!written.contains("actualSignIn"), "{written}");
     mock.assert();
 }
 

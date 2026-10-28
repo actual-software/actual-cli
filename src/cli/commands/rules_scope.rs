@@ -566,6 +566,15 @@ fn spawn_uploader_from(exe: std::io::Result<std::path::PathBuf>) {
     let Ok(exe) = exe else {
         return;
     };
+    let _ = uploader_command(exe).spawn();
+}
+
+/// The uploader's command: the subcommand and nothing else. It inherits this
+/// process's environment unchanged and reads any sign-in it sends from the
+/// credentials file when it sends, so no credential is ever on its command
+/// line or in its environment.
+#[cfg(feature = "telemetry")]
+fn uploader_command(exe: std::path::PathBuf) -> std::process::Command {
     let mut child = std::process::Command::new(exe);
     child
         .arg("__telemetry-flush")
@@ -578,7 +587,7 @@ fn spawn_uploader_from(exe: std::io::Result<std::path::PathBuf>) {
     // uploader would die partway through a send.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut child, 0);
-    let _ = child.spawn();
+    child
 }
 
 /// Dispatch one scope event: persist it best-effort, then kick off delivery.
@@ -1276,6 +1285,20 @@ mod tests {
         let ids: Vec<&str> = ids.split_whitespace().collect();
         assert_eq!(ids.len(), 2, "{ids:?}");
         assert_eq!(ids[0], ids[1], "pid and process group id should match");
+    }
+
+    /// The uploader's command line is the subcommand alone, and it sets no
+    /// variable of its own, so the uploader starts with no credential on its
+    /// command line or in its environment that this process didn't already
+    /// have. It reads the sign-in it sends from the credentials file instead.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_the_uploader_command_carries_no_credential() {
+        let command = uploader_command(std::path::PathBuf::from("actual"));
+
+        let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        assert_eq!(args, ["__telemetry-flush"]);
+        assert_eq!(command.get_envs().count(), 0);
     }
 
     /// Both outcomes of a best-effort spool append are observed without panicking
