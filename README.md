@@ -120,7 +120,7 @@ xcode-select --install
 # Debian/Ubuntu
 sudo apt-get install build-essential
 
-cargo install --git https://github.com/actual-software/actual-cli.git
+cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
 ```
 
 </details>
