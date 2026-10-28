@@ -35,7 +35,7 @@ pub struct Signed {
     pub uploaded_to: Vec<&'static str>,
 }
 
-/// The trusted comment on every release signature. Self-update reads the tag from it.
+/// The trusted comment on every release signature. People checking a download read the tag from it.
 pub fn trusted_comment(timestamp: u64, tag: &str) -> String {
     format!("timestamp:{timestamp}\tfile:{}\ttag:{tag}", sums::FILE_NAME)
 }
