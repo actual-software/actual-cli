@@ -10,7 +10,9 @@ in and on who processes it. This notice is explicit about both:
   organization ids, Actual's backend resolves them back to your account and
   organization — so logged-in telemetry is first-party, identity-linked data,
   **not** anonymous. The raw ids never leave your machine, but hashing alone
-  does not make identity-linked data anonymous.
+  does not make identity-linked data anonymous. OpenTelemetry events sent to
+  Actual's API while you're logged in carry your sign-in's access token, so
+  Actual attributes them to your account and organization too.
 - **Logged-out events are pseudonymous, not anonymous.** A logged-out run sends
   no account credential, but it still carries the installation's persistent
   `distinct_id` — the same id its logged-in runs use, which is not reset on
@@ -241,7 +243,7 @@ and are checked before any repo-identity hashing or `distinct_id` creation,
 not just before the network send: an opted-out run never touches git and
 never writes `~/.actualai/actual/telemetry-id`.
 
-### ADR and check events (OpenTelemetry, off unless you configure an output)
+### ADR and check events (OpenTelemetry, off unless you configure an output; first-party identity-linked when sent to Actual's API while you're signed in)
 
 The CLI can send OpenTelemetry log events about ADRs on four occasions:
 
@@ -325,7 +327,9 @@ on `actual.adr.detected` events, `actual.gate.outcome` on
 sent as an empty string. None of them names you, your organization, your
 repository or this installation, so an event carries the same fields signed in
 or out. Only the token on a signed-in request to Actual's API, described above,
-says whose events they are:
+says whose events they are, and it makes every event in that request
+first-party identity-linked. Sent signed out or to another endpoint, an event
+has only the classes its fields carry below:
 
 | Attribute | What it is | Privacy class |
 |-----------|------------|---------------|
