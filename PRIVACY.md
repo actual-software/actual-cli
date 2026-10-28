@@ -243,9 +243,9 @@ and are checked before any repo-identity hashing or `distinct_id` creation,
 not just before the network send: an opted-out run never touches git and
 never writes `~/.actualai/actual/telemetry-id`.
 
-### ADR and check events (OpenTelemetry, off unless you configure an output; first-party identity-linked when sent to Actual's API while you're signed in)
+### ADR and check events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
 
-The CLI can send OpenTelemetry log events about ADRs on four occasions:
+The CLI sends OpenTelemetry log events about ADRs on four occasions:
 
 - `actual.adr.detected`, with `actual.detection.method` set to `context`, the
   first time any of an ADR's rules is added to an agent's context during a
@@ -287,23 +287,31 @@ each session's agents were given, which ones the gates checked work against and
 blocked on, which of them a human overrode, how each check came out and what
 made a check warn, and how long it took.
 
-**Nothing is sent, or built, unless you configure an output.** Both are unset by
-default:
+**Release builds send these events to Actual's API by default.** They go to
+`/v1/logs` on the address the CLI's other telemetry uses: the config file's
+`api_url`, which is `https://api-service.api.prod.actual.ai` unless you've
+changed it. Any of the three opt-outs below stops them before anything is
+built. A debug build, which is what `cargo build` and `cargo test` make without
+`--release`, sends them only to an endpoint you set, so the CLI's own test runs
+never send them to Actual's API. Two settings change where they go:
 
 - `telemetry.otlp_logs_endpoint` (or the `ACTUAL_OTLP_LOGS_ENDPOINT` env var):
-  an OTLP/HTTP logs URL, used as-is. Events are sent to it as binary protobuf
-  (`Content-Type: application/x-protobuf`). It must use HTTPS unless it's
-  localhost, and the CLI doesn't follow redirects, so events reach that URL and
-  no other. The standard `OTEL_EXPORTER_OTLP_*` variables aren't read.
+  an OTLP/HTTP logs URL used as-is in place of the default. Events are sent to
+  it as binary protobuf (`Content-Type: application/x-protobuf`). It must use
+  HTTPS unless it's localhost, and the CLI doesn't follow redirects, so events
+  reach that URL and no other. A URL that breaks those rules sends them
+  nowhere, never to the default. The standard `OTEL_EXPORTER_OTLP_*` variables
+  aren't read.
 - `telemetry.otlp_file` (or `ACTUAL_OTLP_FILE`): an absolute path on your
-  machine. Each request is appended to it as one line of OTLP/JSON, in a file
-  readable only by the owner. A file that already exists is restricted to its
-  owner before anything is added, and nothing is written to a path that isn't
-  a regular file or whose permissions can't be changed.
+  machine, unset by default. Each request is appended to it as one line of
+  OTLP/JSON, in a file readable only by the owner, and is still sent to the
+  endpoint. A file that already exists is restricted to its owner before
+  anything is added, and nothing is written to a path that isn't a regular
+  file or whose permissions can't be changed.
 
-Set either with `actual config set`, and clear it by setting it to `""`. These
-events don't go to PostHog, and they reach `api-service.api.prod.actual.ai`
-only if you point them there.
+Set either with `actual config set`. Setting the endpoint to `""` returns it to
+the default, so an opt-out is the way to stop these events. They don't go to
+PostHog.
 
 **Signed in, events sent to Actual's API carry your sign-in.** When the
 endpoint has the scheme, host and port of the address `actual advisor` uses
@@ -314,7 +322,9 @@ endpoint has the scheme, host and port of the address `actual advisor` uses
 the organization you signed in to. Events you recorded while signed out, or
 signed in to another account or organization, go in a request of their own
 without the token. A request Actual refuses with a 401 is sent once more without
-it. Any other endpoint, a custom one included, never gets the token.
+it. Any other endpoint, a custom one included, never gets the token. The default
+endpoint is at that address unless the config file's `api_url` or
+`ACTUAL_API_URL` names another one.
 
 Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
@@ -375,9 +385,9 @@ stop these events before anything is built: an opted-out run reads no ids or
 sign-in and writes no spool. Building and sending them reads no installation id
 either. Only the plan-governance events a run also builds need it, so a
 `check-override` run reads it, and creates `telemetry-id` when it's missing,
-while a `rules brief --claude-hook` run never does. Except for signed-in events
-sent to Actual's API, covered next, whoever operates the endpoint you configure
-decides how long it keeps the events.
+while a `rules brief --claude-hook` run never does. What Actual does with the
+events its API receives, signed in or out, is covered next. Whoever operates
+any other endpoint you set decides how long it keeps them.
 
 #### Signed-in events sent to Actual's API
 
@@ -393,6 +403,24 @@ identity-linked data:
 - **Retention & deletion:** they're kept for as long as needed to provide
   product analytics for your account and are deleted, or the link severed, on
   account deletion or a verified deletion request.
+
+#### Signed-out events sent to Actual's API
+
+A request to Actual's API without your sign-in names no account or
+organization, and Actual records its events as signed out. That happens when
+you recorded them while signed out or under another sign-in, and when Actual
+refused the token. The events still carry the fields in the table above, with
+the classes given there:
+
+- **Who can attribute them:** Actual, as the first party, via its authorized
+  backend systems and personnel. The ADR references lead to the repository the
+  ADRs were generated for and to its organization, and a session that also sent
+  a signed-in request links its signed-out events to that account. They don't
+  go to PostHog or any other third-party analytics service.
+- **Purpose:** to measure and improve the CLI's ADR guidance and checks across
+  everyone who uses it.
+- **Retention & deletion:** Actual hasn't set how long it keeps them, and
+  nothing deletes them yet, on a schedule or on request.
 
 ### Project metadata (sent to the Actual API)
 
@@ -437,11 +465,11 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
-| The OTLP logs endpoint you configure (none by default) | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is Actual's API and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is Actual's API and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
@@ -499,8 +527,10 @@ all.
 Signed-in OpenTelemetry events sent to Actual's API are covered above under
 "Signed-in events sent to Actual's API": they're held only by Actual's
 authorized backend systems, are used solely for product analytics, and are
-deleted or de-linked on account deletion or a verified deletion request. Opting
-out of telemetry stops them before they're built.
+deleted or de-linked on account deletion or a verified deletion request.
+Signed-out ones are covered under "Signed-out events sent to Actual's API":
+Actual hasn't set how long it keeps them, and nothing deletes them yet. Opting
+out of telemetry stops both before they're built.
 
 ## Reviewing changes to telemetry identity
 
