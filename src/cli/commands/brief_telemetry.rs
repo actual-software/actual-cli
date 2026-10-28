@@ -16,9 +16,9 @@
 //! only for a key that write added. A missed lock or a failed write therefore
 //! undercounts, and nothing is sent twice.
 //!
-//! **Nothing until configured.** With telemetry opted out or no output set,
-//! [`report`] returns before it reads an id, writes the ledger or spawns
-//! anything.
+//! **Nothing without an output.** With telemetry opted out, or no output
+//! resolved (a release build has its default), [`report`] returns before it
+//! reads an id, writes the ledger or spawns anything.
 //!
 //! `check-override`'s event and the gates' events group ADRs with
 //! [`logical_adrs`] or [`group_headers`] and send with [`dispatch`] too, so
