@@ -17,8 +17,9 @@
 //! tells a pre-emptive override from the override of a real breach. The reason
 //! the human gave is never sent.
 //!
-//! **Nothing until configured.** With telemetry opted out or no output set,
-//! [`report`] returns before it reads the rules, the session or any id.
+//! **Nothing without an output.** With telemetry opted out, or no output
+//! resolved (a release build has its default), [`report`] returns before it
+//! reads the rules, the session or any id.
 
 use std::path::Path;
 

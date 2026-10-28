@@ -39,11 +39,11 @@
 //! still go, with the session id empty.
 //!
 //! **What the hook pays.** The judge's prompt, output and call count are
-//! unchanged. With telemetry opted out or no output set, a round reads the
-//! config and builds nothing. With an output set, every round appends its
-//! records to the spool and starts the detached uploader. A round with no new
-//! ADR reads the ledger once, without its lock; only a new key costs the
-//! locked write.
+//! unchanged. With telemetry opted out, or no output resolved, a round reads
+//! the config and builds nothing. Otherwise, which a release build's default
+//! makes the usual case, every round appends its records to the spool and
+//! starts the detached uploader. A round with no new ADR reads the ledger
+//! once, without its lock; only a new key costs the locked write.
 
 use std::collections::BTreeMap;
 use std::time::{Instant, SystemTime};

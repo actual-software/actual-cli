@@ -2341,7 +2341,8 @@ fn repo_with_v2_rules() -> tempfile::TempDir {
 }
 
 /// Run the read hook on a governed file of `repo` for `session` and `agent`,
-/// opted in with `config_yaml`. Returns the hook's stdout and how long it took.
+/// configured with `config_yaml`. Returns the hook's stdout and how long it
+/// took.
 #[cfg(feature = "telemetry")]
 fn otlp_brief_hook(
     config_dir: &std::path::Path,
@@ -2571,4 +2572,50 @@ fn test_brief_hook_returns_promptly_when_the_endpoint_never_answers() {
         "the hook took {elapsed:?}"
     );
     drop(listener);
+}
+
+/// With no endpoint set, a release build sends the hook's events to
+/// `/v1/logs` on `api_url`, and a debug build, which is what every test run
+/// spawns, only writes them to the file sink. `api_url` is a local server
+/// here, so neither build can reach Actual's API.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_brief_hook_sends_to_the_api_url_by_default_only_from_a_release_build() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let release = !cfg!(debug_assertions);
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("content-type", "application/x-protobuf")
+        .with_status(200)
+        .expect(usize::from(release))
+        .create();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "api_url: {}\ntelemetry:\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_brief_hook(config_dir.path(), repo.path(), &config_yaml, None);
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    let mut written = String::new();
+    for _ in 0..100 {
+        written = std::fs::read_to_string(&sink).unwrap_or_default();
+        if !written.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(written.lines().count(), 1, "{written}");
+    // The uploader appends to the file before it posts, so any post from a
+    // debug build would land within this wait.
+    let wait = std::time::Duration::from_millis(if release { 10_000 } else { 500 });
+    let started = std::time::Instant::now();
+    while started.elapsed() < wait && !(release && mock.matched()) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    mock.assert();
 }

@@ -25,9 +25,13 @@
 //! decodes what the endpoint receives with the official types and checks it
 //! against the file's line.
 //!
-//! **Off until configured.** Nothing is built unless an endpoint or a local
-//! file is set, and only this CLI's own settings are read, never
-//! `OTEL_EXPORTER_OTLP_*`, which a shell or CI job may set for other tools.
+//! **On by default in release builds.** With no endpoint set, a release build
+//! sends to `/v1/logs` on the API address the CLI's other telemetry uses, and
+//! the three telemetry opt-outs stop it. Debug builds and unit tests, which is
+//! what `cargo test` and the coverage job build, send only to an endpoint
+//! someone sets, so the CLI's own tests never post these events to Actual's
+//! API. Only this CLI's own settings are read, never `OTEL_EXPORTER_OTLP_*`,
+//! which a shell or CI job may set for other tools.
 //!
 //! **The hook spools, a detached uploader sends.** The hook appends records to
 //! [`OTLP_LOGS`] and spawns `__telemetry-flush`, whose [`flush`] takes them
@@ -92,6 +96,10 @@ const ENDPOINT_ENV: &str = "ACTUAL_OTLP_LOGS_ENDPOINT";
 /// Overrides `telemetry.otlp_file`.
 const FILE_ENV: &str = "ACTUAL_OTLP_FILE";
 
+/// Whether a run with no endpoint set sends to [`default_endpoint`]: release
+/// builds do, and debug builds and unit tests don't.
+const SENDS_BY_DEFAULT: bool = !cfg!(any(test, debug_assertions));
+
 /// Records per request.
 pub(crate) const MAX_RECORDS_PER_REQUEST: usize = 100;
 
@@ -123,9 +131,17 @@ pub(crate) struct Outputs {
 impl Outputs {
     /// This run's outputs, or `None` when telemetry is opted out or nothing
     /// usable is set. The opt-out is checked first. Each setting is its env
-    /// override when that is non-empty, else the config value, and a value
-    /// that fails validation counts as unset.
+    /// override when that is non-empty, else the config value. An endpoint set
+    /// in neither falls back to [`default_endpoint`] in a release build. A
+    /// value that fails validation, the default included, sends nothing to its
+    /// output, so a broken endpoint never falls back to Actual's API.
     pub(crate) fn resolve(config: &Config) -> Option<Self> {
+        Self::resolve_with(config, SENDS_BY_DEFAULT)
+    }
+
+    /// [`Outputs::resolve`], with `by_default` in place of
+    /// [`SENDS_BY_DEFAULT`].
+    fn resolve_with(config: &Config, by_default: bool) -> Option<Self> {
         if opt_out::is_disabled(config) {
             return None;
         }
@@ -134,12 +150,20 @@ impl Outputs {
             ENDPOINT_ENV,
             telemetry.and_then(|t| t.otlp_logs_endpoint.as_deref()),
         )
+        .or_else(|| by_default.then(|| default_endpoint(config)))
         .filter(|url| validate_otlp_logs_endpoint(url).is_ok());
         let file = setting(FILE_ENV, telemetry.and_then(|t| t.otlp_file.as_deref()))
             .filter(|path| validate_otlp_file(path).is_ok())
             .map(PathBuf::from);
         (endpoint.is_some() || file.is_some()).then_some(Self { endpoint, file })
     }
+}
+
+/// `/v1/logs` on the API address the CLI's other telemetry uses: the config
+/// file's `api_url`, else the built-in one.
+fn default_endpoint(config: &Config) -> String {
+    let api_url = crate::telemetry::spool::resolved_api_url(config);
+    format!("{}/v1/logs", api_url.trim_end_matches('/'))
 }
 
 fn setting(env: &str, configured: Option<&str>) -> Option<String> {
@@ -914,13 +938,90 @@ mod tests {
 
     // ── settings ────────────────────────────────────────────────────────
 
+    /// A unit-test build applies no default, so with nothing set there is no
+    /// output, and no test here reaches Actual's API by leaving one unset.
     #[test]
-    fn test_nothing_set_resolves_to_no_outputs() {
+    fn test_nothing_set_resolves_to_no_outputs_in_a_test_build() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = clear_env();
         assert_eq!(Outputs::resolve(&Config::default()), None);
         assert_eq!(Outputs::resolve(&config(None, None)), None);
         assert_eq!(Outputs::resolve(&config(Some(""), Some(""))), None);
+    }
+
+    /// The endpoint `config` resolves to with the default on, as in a
+    /// release build.
+    fn endpoint_by_default(config: &Config) -> Option<String> {
+        Outputs::resolve_with(config, true).and_then(|outputs| outputs.endpoint)
+    }
+
+    /// With the default on, an endpoint set nowhere, or set empty, is
+    /// `/v1/logs` on the configured `api_url`, and a file sink still gets its
+    /// copy.
+    #[test]
+    fn test_an_unset_endpoint_defaults_to_the_api_url() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let built_in = format!("{}/v1/logs", crate::api::DEFAULT_API_URL);
+        for unset in [
+            Config::default(),
+            config(None, None),
+            config(Some(""), None),
+        ] {
+            assert_eq!(endpoint_by_default(&unset), Some(built_in.clone()));
+        }
+
+        let _empty = EnvGuard::set(ENDPOINT_ENV, "");
+        let mut moved = config(None, Some("/tmp/otlp.jsonl"));
+        moved.api_url = Some("https://api.example.com/".to_string());
+        assert_eq!(
+            Outputs::resolve_with(&moved, true),
+            Some(Outputs {
+                endpoint: Some("https://api.example.com/v1/logs".to_string()),
+                file: Some(PathBuf::from("/tmp/otlp.jsonl")),
+            })
+        );
+        moved.api_url = None;
+        assert_eq!(endpoint_by_default(&moved), Some(built_in));
+    }
+
+    /// A set endpoint, from config or env, wins over the default.
+    #[test]
+    fn test_a_set_endpoint_wins_over_the_default() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let configured = config(Some("https://collector.example.com/v1/logs"), None);
+        assert_eq!(
+            endpoint_by_default(&configured).as_deref(),
+            Some("https://collector.example.com/v1/logs")
+        );
+        let _endpoint = EnvGuard::set(ENDPOINT_ENV, "http://127.0.0.1:4318/v1/logs");
+        assert_eq!(
+            endpoint_by_default(&configured).as_deref(),
+            Some("http://127.0.0.1:4318/v1/logs")
+        );
+    }
+
+    /// An endpoint set to something the rules refuse sends nothing rather
+    /// than falling back to Actual's API, and so does an `api_url` the same
+    /// rules refuse.
+    #[test]
+    fn test_a_refused_endpoint_or_api_url_never_falls_back_to_the_default() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut plain = config(None, None);
+        plain.api_url = Some("http://api.example.com".to_string());
+        assert_eq!(Outputs::resolve_with(&plain, true), None);
+        plain.api_url = Some("http://127.0.0.1:8080".to_string());
+        assert_eq!(
+            endpoint_by_default(&plain).as_deref(),
+            Some("http://127.0.0.1:8080/v1/logs")
+        );
+
+        let refused = config(Some("http://collector.example.com/v1/logs"), None);
+        assert_eq!(Outputs::resolve_with(&refused, true), None);
+        let _endpoint = EnvGuard::set(ENDPOINT_ENV, "http://collector.example.com/v1/logs");
+        assert_eq!(Outputs::resolve_with(&config(None, None), true), None);
     }
 
     #[test]
@@ -987,19 +1088,22 @@ mod tests {
         assert_eq!(outputs.file, Some(PathBuf::from("/tmp/otlp.jsonl")));
     }
 
+    /// Each runtime opt-out stops a set endpoint and the default alike.
     #[test]
     fn test_every_opt_out_resolves_to_no_outputs() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = clear_env();
-        let mut opted_out = config(Some("https://c.example.com/v1/logs"), None);
-        opted_out.telemetry.as_mut().unwrap().enabled = Some(false);
-        assert_eq!(Outputs::resolve(&opted_out), None);
+        for endpoint in [Some("https://c.example.com/v1/logs"), None] {
+            let mut opted_out = config(endpoint, None);
+            opted_out.telemetry.as_mut().unwrap().enabled = Some(false);
+            assert_eq!(Outputs::resolve_with(&opted_out, true), None);
+        }
 
         let _no = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
-        assert_eq!(
-            Outputs::resolve(&config(Some("https://c.example.com/v1/logs"), None)),
-            None
-        );
+        for endpoint in [Some("https://c.example.com/v1/logs"), None] {
+            assert_eq!(Outputs::resolve_with(&config(endpoint, None), true), None);
+        }
+        assert_eq!(Outputs::resolve_with(&Config::default(), true), None);
     }
 
     /// The standard exporter variables configure other tools, never this one.
@@ -1013,6 +1117,10 @@ mod tests {
             "https://other.example.com/v1/logs",
         );
         assert_eq!(Outputs::resolve(&Config::default()), None);
+        assert_eq!(
+            endpoint_by_default(&Config::default()),
+            Some(format!("{}/v1/logs", crate::api::DEFAULT_API_URL))
+        );
     }
 
     // ── the record ──────────────────────────────────────────────────────
