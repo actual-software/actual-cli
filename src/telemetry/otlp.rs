@@ -39,8 +39,8 @@
 //! the endpoint is at the address the advisor uses, the records recorded under
 //! the current sign-in go in a request carrying its access token as the
 //! bearer, and Actual attributes them from the token. The records themselves
-//! stay anonymous. [`crate::telemetry::sign_in`] decides which records the
-//! token covers, and a 401 sends the batch again once, signed out.
+//! gain no identity field. [`crate::telemetry::sign_in`] decides which records
+//! the token covers, and a 401 sends the batch again once, signed out.
 
 use std::future::Future;
 use std::path::PathBuf;
