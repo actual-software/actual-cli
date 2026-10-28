@@ -206,7 +206,7 @@ on first run. All fields are optional — missing fields use sensible defaults.
 | `max_per_framework` | integer | — | Max ADRs per framework |
 | `update_check.enabled` | boolean | `true` | Daily update notice and `actual version --check` (see [UPDATE_CHECK.md](UPDATE_CHECK.md)) |
 | `telemetry.enabled` | boolean | `true` | Enable/disable telemetry (see [PRIVACY.md](../PRIVACY.md)) |
-| `telemetry.otlp_logs_endpoint` | string | — | OTLP/HTTP logs URL for ADR context, use, breach and override events, and check events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only (see [PRIVACY.md](../PRIVACY.md)) |
+| `telemetry.otlp_logs_endpoint` | string | — | OTLP/HTTP logs URL for ADR context, use, breach and override events, and check events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only. When it is Actual's API and you're signed in, requests carry your sign-in (see [PRIVACY.md](../PRIVACY.md)) |
 | `telemetry.otlp_file` | string | — | Absolute path of a local file each ADR and check event request is appended to (see [PRIVACY.md](../PRIVACY.md)) |
 
 ### Example config

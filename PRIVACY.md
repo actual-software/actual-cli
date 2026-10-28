@@ -300,8 +300,19 @@ default:
   a regular file or whose permissions can't be changed.
 
 Set either with `actual config set`, and clear it by setting it to `""`. These
-events don't go to PostHog or to `api-service.api.prod.actual.ai`, only where
-you point them.
+events don't go to PostHog, and they reach `api-service.api.prod.actual.ai`
+only if you point them there.
+
+**Signed in, events sent to Actual's API carry your sign-in.** When the
+endpoint has the scheme, host and port of the address `actual advisor` uses
+(`ACTUAL_API_URL` when it's set, otherwise
+`https://api-service.api.prod.actual.ai`) and you've signed in with
+`actual login`, each request carries your sign-in's access token in its
+`Authorization` header, and Actual attributes its events to your account and to
+the organization you signed in to. Events you recorded while signed out, or
+signed in to another account or organization, go in a request of their own
+without the token. A request Actual refuses with a 401 is sent once more without
+it. Any other endpoint, a custom one included, never gets the token.
 
 Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
@@ -312,8 +323,9 @@ on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.action.outcome`, `actual.action.warn_reasons` and
 `actual.action.duration_ms`. An unknown value is
 sent as an empty string. None of them names you, your organization, your
-repository or this installation, so an event carries the same fields logged in
-or out:
+repository or this installation, so an event carries the same fields signed in
+or out. Only the token on a signed-in request to Actual's API, described above,
+says whose events they are:
 
 | Attribute | What it is | Privacy class |
 |-----------|------------|---------------|
@@ -350,13 +362,17 @@ local spool (`~/.actualai/actual/otlp-logs-spool.jsonl`, readable only by the
 owner, bounded like the scope spool) and starts the same detached uploader,
 which sends them in batches for up to five seconds in all, retries included. A
 batch still being sent when the time runs out is dropped, and the batches it
-hasn't reached stay in the spool for its next run. All three opt-outs below stop
-these events before anything is built: an opted-out run reads no ids and writes
-no spool. Building and sending them reads no installation id either. Only the
-plan-governance events a run also builds need it, so a `check-override` run
-reads it, and creates `telemetry-id` when it's missing, while a
-`rules brief --claude-hook` run never does. Whoever operates the endpoint you
-configure decides how long it keeps the events.
+hasn't reached stay in the spool for its next run. When the endpoint is Actual's
+API, each spooled event also keeps a hash of the sign-in it was recorded under,
+which is never sent, and the uploader reads your sign-in from
+`~/.actualai/actual/credentials.yaml` when it sends, renewing it first when it's
+within a minute of expiring, as `actual advisor` does. All three opt-outs below
+stop these events before anything is built: an opted-out run reads no ids or
+sign-in and writes no spool. Building and sending them reads no installation id
+either. Only the plan-governance events a run also builds need it, so a
+`check-override` run reads it, and creates `telemetry-id` when it's missing,
+while a `rules brief --claude-hook` run never does. Whoever operates the
+endpoint you configure decides how long it keeps the events.
 
 ### Project metadata (sent to the Actual API)
 
@@ -405,7 +421,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
-| The OTLP logs endpoint you configure (none by default) | ADR context, use, breach and override events, and check events | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The OTLP logs endpoint you configure (none by default) | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is Actual's API and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
