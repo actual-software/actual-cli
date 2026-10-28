@@ -2575,9 +2575,9 @@ fn test_brief_hook_returns_promptly_when_the_endpoint_never_answers() {
 }
 
 /// With no endpoint set, a release build sends the hook's events to
-/// `/v1/logs` on `api_url`, and a debug build, which is what every test run
-/// spawns, only writes them to the file sink. `api_url` is a local server
-/// here, so neither build can reach Actual's API.
+/// `/v1/logs` on `api_url`, and a debug build, which is what `cargo test`
+/// spawns without `--release`, only writes them to the file sink. `api_url` is
+/// a local server here, so neither build can reach Actual's API.
 #[cfg(feature = "telemetry")]
 #[test]
 fn test_brief_hook_sends_to_the_api_url_by_default_only_from_a_release_build() {
