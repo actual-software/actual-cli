@@ -408,9 +408,10 @@ identity-linked data:
 
 A request to Actual's API without your sign-in names no account or
 organization, and Actual records its events as signed out. That happens when
-you recorded them while signed out or under another sign-in, and when Actual
-refused the token. The events still carry the fields in the table above, with
-the classes given there:
+you recorded them while signed out or under another sign-in, when you've
+signed out by the time they're sent or your sign-in has expired and can't be
+renewed, and when Actual refused the token. The events still carry the fields
+in the table above, with the classes given there:
 
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. The ADR references lead to the repository the
