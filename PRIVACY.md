@@ -375,8 +375,24 @@ stop these events before anything is built: an opted-out run reads no ids or
 sign-in and writes no spool. Building and sending them reads no installation id
 either. Only the plan-governance events a run also builds need it, so a
 `check-override` run reads it, and creates `telemetry-id` when it's missing,
-while a `rules brief --claude-hook` run never does. Whoever operates the
-endpoint you configure decides how long it keeps the events.
+while a `rules brief --claude-hook` run never does. Except for signed-in events
+sent to Actual's API, covered next, whoever operates the endpoint you configure
+decides how long it keeps the events.
+
+#### Signed-in events sent to Actual's API
+
+The events in a signed-in request to Actual's API are first-party,
+identity-linked data:
+
+- **Who can attribute them:** Actual, as the first party, via its authorized
+  backend systems and personnel. They don't go to PostHog or any other
+  third-party analytics service.
+- **Purpose:** to attribute these events to an account and organization so
+  Actual can measure and improve the CLI's ADR guidance and checks for each
+  customer.
+- **Retention & deletion:** they're kept for as long as needed to provide
+  product analytics for your account and are deleted, or the link severed, on
+  account deletion or a verified deletion request.
 
 ### Project metadata (sent to the Actual API)
 
@@ -479,6 +495,12 @@ identity hashes to raw ids, but the unpeppered repository-derived keys reach
 PostHog recomputable, as described above. Opting out of telemetry (any method
 above) stops these events at the source, so no identity hashes are produced at
 all.
+
+Signed-in OpenTelemetry events sent to Actual's API are covered above under
+"Signed-in events sent to Actual's API": they're held only by Actual's
+authorized backend systems, are used solely for product analytics, and are
+deleted or de-linked on account deletion or a verified deletion request. Opting
+out of telemetry stops them before they're built.
 
 ## Reviewing changes to telemetry identity
 
