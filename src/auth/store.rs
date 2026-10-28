@@ -4,6 +4,13 @@
 //! (`~/.actualai/actual/credentials.yaml`) and are written with `0600`
 //! permissions, mirroring [`crate::config::paths`]. Token material is never
 //! logged: the [`std::fmt::Debug`] impl redacts it.
+//!
+//! Every write of the stored sign-in happens under one exclusive [`Lock`]:
+//! `login`'s save, `logout`'s delete, and a refresh by a command or by the
+//! telemetry uploader. The server takes a refresh token once and revokes it
+//! when it rotates, so two processes refreshing the same sign-in side by side
+//! would leave the slower one signed out. A lock holder reads the sign-in again
+//! once it has the lock and acts on what it finds then.
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +23,10 @@ use crate::error::ActualError;
 /// Filename for the persisted platform credentials, stored alongside the CLI
 /// config under the config-dir convention (`~/.actualai/actual/`).
 const CREDENTIALS_FILENAME: &str = "credentials.yaml";
+
+/// The file [`Lock`] locks, beside the credentials. Nothing is ever written to
+/// it.
+const LOCK_FILENAME: &str = "credentials.lock";
 
 /// Maximum credentials file size. Tokens are small; anything larger is
 /// rejected to avoid loading a pathological file into memory.
@@ -145,9 +156,74 @@ pub fn load_from(path: &Path) -> Result<Option<StoredCredentials>, ActualError> 
     }
 }
 
-/// Persist credentials using the default path, with `0600` permissions.
+/// Persist credentials using the default path, with `0600` permissions, under
+/// [`lock`]. A caller that already holds the lock saves through it instead.
 pub fn save(creds: &StoredCredentials) -> Result<(), ActualError> {
-    save_to(creds, &credentials_path()?)
+    lock()?.save(creds)
+}
+
+/// An exclusive hold on the stored sign-in, released on drop. Its methods read
+/// and write the sign-in at the default path.
+pub struct Lock {
+    // Held only for the advisory lock, which the OS releases when it closes.
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl Lock {
+    /// The stored sign-in, or `None` when there is none.
+    pub fn load(&self) -> Result<Option<StoredCredentials>, ActualError> {
+        load_from(&self.path)
+    }
+
+    /// Replace the stored sign-in with `creds`.
+    pub fn save(&self, creds: &StoredCredentials) -> Result<(), ActualError> {
+        save_to(creds, &self.path)
+    }
+
+    /// Remove the stored sign-in. Idempotent.
+    pub fn delete(&self) -> Result<(), ActualError> {
+        delete_from(&self.path)
+    }
+}
+
+/// Take the lock on the stored sign-in, waiting while another process holds
+/// it.
+pub fn lock() -> Result<Lock, ActualError> {
+    let path = credentials_path()?;
+    let file = open_lock_file(&path)?;
+    file.lock().map_err(lock_error)?;
+    Ok(Lock { _file: file, path })
+}
+
+/// Take the lock on the stored sign-in if nobody holds it, or `None` when
+/// another process does.
+pub fn try_lock() -> Result<Option<Lock>, ActualError> {
+    let path = credentials_path()?;
+    let file = open_lock_file(&path)?;
+    match file.try_lock().map_err(std::io::Error::from) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        held => held
+            .map(|()| Some(Lock { _file: file, path }))
+            .map_err(lock_error),
+    }
+}
+
+/// Open the lock file beside the credentials at `path`, creating it, and the
+/// config directory, when absent. Owner-only on unix.
+fn open_lock_file(path: &Path) -> Result<std::fs::File, ActualError> {
+    let lock_path = path.with_file_name(LOCK_FILENAME);
+    // `credentials_path` always has a parent; the fallback keeps this branch-free.
+    std::fs::create_dir_all(lock_path.parent().unwrap_or(Path::new("."))).map_err(lock_error)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(&lock_path).map_err(lock_error)
+}
+
+fn lock_error(e: std::io::Error) -> ActualError {
+    credentials_error(format!("Failed to lock the stored sign-in: {e}"))
 }
 
 /// Persist credentials to a specific path. Creates parent directories; on unix
@@ -160,11 +236,6 @@ pub fn save_to(creds: &StoredCredentials, path: &Path) -> Result<(), ActualError
     let yaml = crate::yaml::to_string(creds)
         .map_err(|e| credentials_error(format!("Failed to serialize credentials: {e}")))?;
     write_secure(path, &yaml)
-}
-
-/// Delete stored credentials (logout). Idempotent: a missing file is success.
-pub fn delete() -> Result<(), ActualError> {
-    delete_from(&credentials_path()?)
 }
 
 /// Delete credentials at a specific path. Idempotent.
@@ -425,8 +496,111 @@ mod tests {
         assert!(load().unwrap().is_none());
         save(&creds).unwrap();
         assert_eq!(load().unwrap().unwrap(), creds);
-        delete().unwrap();
+        let lock = lock().unwrap();
+        assert_eq!(lock.load().unwrap().unwrap(), creds);
+        lock.delete().unwrap();
+        assert!(lock.load().unwrap().is_none());
+        drop(lock);
         assert!(load().unwrap().is_none());
+    }
+
+    // ── the lock every writer takes ─────────────────────────────────────
+
+    /// The lock is exclusive between handles, as it is between processes:
+    /// while one is held, another can't be taken, and dropping it frees it.
+    #[test]
+    fn test_the_lock_is_exclusive_until_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let held = lock().unwrap();
+        assert!(try_lock().unwrap().is_none());
+        drop(held);
+        let taken = try_lock().unwrap().expect("a free lock is taken");
+        let creds = sample();
+        taken.save(&creds).unwrap();
+        assert_eq!(taken.load().unwrap(), Some(creds));
+    }
+
+    /// `save` waits for a sign-in someone else is writing, then lands after
+    /// them, so a sign-in saved during a refresh survives it.
+    #[test]
+    fn test_save_waits_for_the_lock() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let mut earlier = sample();
+        earlier.organization_id = "org-before".to_string();
+        let mut later = sample();
+        later.organization_id = "org-after".to_string();
+
+        let held = lock().unwrap();
+        let saver = std::thread::spawn({
+            let later = later.clone();
+            move || save(&later)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!saver.is_finished(), "save went ahead without the lock");
+        held.save(&earlier).unwrap();
+        drop(held);
+        saver.join().unwrap().unwrap();
+
+        assert_eq!(load().unwrap().unwrap().organization_id, "org-after");
+    }
+
+    /// The lock file sits beside the credentials, owner-only, and the config
+    /// directory is created for it on a first sign-in.
+    #[cfg(unix)]
+    #[test]
+    fn test_the_lock_file_is_owner_only_beside_the_credentials() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("fresh");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.to_str().unwrap());
+
+        let _held = lock().unwrap();
+
+        let mode = std::fs::metadata(dir.join(LOCK_FILENAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!dir.join(CREDENTIALS_FILENAME).exists());
+    }
+
+    /// A lock file that can't be opened is an error for both ways of taking
+    /// it, and nothing is written.
+    #[test]
+    fn test_an_unopenable_lock_file_is_an_error() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        std::fs::create_dir(tmp.path().join(LOCK_FILENAME)).unwrap();
+
+        let err = lock().err().expect("a directory can't be locked");
+        assert!(err
+            .to_string()
+            .contains("Failed to lock the stored sign-in"));
+        assert!(try_lock().is_err());
+        assert!(save(&sample()).is_err());
+        assert!(!tmp.path().join(CREDENTIALS_FILENAME).exists());
+    }
+
+    /// A config directory that can't be created is an error too.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_config_dir_that_cant_be_created_is_an_error() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", "/dev/null/actual");
+
+        assert!(lock().is_err());
     }
 
     #[test]

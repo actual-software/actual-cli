@@ -18,6 +18,21 @@ use crate::error::{sanitize_server_text, ActualError};
 
 pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
 
+/// The Actual API base URL the signed-in commands use: `flag`, a command's
+/// `--api-url`, when given, then the `ACTUAL_API_URL` env var, else
+/// [`DEFAULT_API_URL`]. An empty env var counts as unset. `advisor` and
+/// `auth create-token` send the sign-in here, and the OTLP uploader sends it
+/// only to an endpoint at this address.
+pub fn resolve_api_url(flag: Option<&str>) -> String {
+    flag.map(str::to_string)
+        .or_else(|| {
+            std::env::var("ACTUAL_API_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_API_URL.to_string())
+}
+
 pub(crate) const USER_AGENT_VALUE: &str =
     concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
@@ -514,6 +529,35 @@ mod tests {
     use crate::api::types::{
         AdvisorJobStatus, AdvisorSink, AdvisorSurface, PlanGovernanceEvent, PlanGovernanceEventName,
     };
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    #[test]
+    fn test_resolve_api_url() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The --api-url flag wins even when ACTUAL_API_URL is set.
+        let g = EnvGuard::set("ACTUAL_API_URL", "http://env:9999");
+        assert_eq!(
+            resolve_api_url(Some("http://localhost:3099")),
+            "http://localhost:3099"
+        );
+        drop(g);
+
+        // No flag → the ACTUAL_API_URL env var is used when present.
+        let g = EnvGuard::set("ACTUAL_API_URL", "http://env:9999");
+        assert_eq!(resolve_api_url(None), "http://env:9999");
+        drop(g);
+
+        // No flag, empty env var → treated as unset, falls back to the default.
+        let g = EnvGuard::set("ACTUAL_API_URL", "");
+        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
+        drop(g);
+
+        // No flag, env unset → the api-service default.
+        let g = EnvGuard::remove("ACTUAL_API_URL");
+        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
+        drop(g);
+    }
 
     /// Helper: create a minimal project with the given languages and frameworks.
     fn make_project(

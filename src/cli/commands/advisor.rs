@@ -8,17 +8,15 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use chrono::{Duration as ChronoDuration, Utc};
-
 use uuid::Uuid;
 
 use crate::api::types::{
     AdvisorJobStatus, AdvisorOutput, AdvisorPoll, AdvisorQueryRequest, AdvisorSink, AdvisorSurface,
     ConnectedRepository,
 };
-use crate::api::{ActualApiClient, DEFAULT_API_URL};
-use crate::auth::oauth;
-use crate::auth::store::{self, StoredCredentials};
+use crate::api::{resolve_api_url, ActualApiClient};
+use crate::auth::refresh::ensure_fresh;
+use crate::auth::store;
 use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::config::sticky;
@@ -61,21 +59,6 @@ fn build_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
         .enable_all()
         .build()
         .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))
-}
-
-/// Resolve the Advisor API base URL: the `--api-url` flag wins, then the
-/// `ACTUAL_API_URL` environment variable, else the api-service default. This
-/// mirrors how `login` honors `ACTUAL_AUTH_URL`, so a single export steers both
-/// the auth and advisor halves against a local stack. An empty env var is
-/// treated as unset.
-fn resolve_api_url(flag: Option<&str>) -> String {
-    flag.map(|s| s.to_string())
-        .or_else(|| {
-            std::env::var("ACTUAL_API_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
 /// A `--repo` value resolved to an id, plus the repo's `owner/name` when it is
@@ -378,21 +361,6 @@ fn org_mismatch_message(
             "actual login  (optionally with --org <org-id>) to refresh your session".to_string(),
         )
     }
-}
-
-/// If the stored access token is expired (or about to be), refresh it with the
-/// rotation primitive and re-persist. A session `oauth::refresh` can't renew
-/// surfaces as `NotLoggedIn`; any other refresh failure keeps its own error.
-async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
-    if creds.refresh_token.is_empty() {
-        return Ok(creds);
-    }
-    if creds.expires_within(Utc::now(), ChronoDuration::seconds(60)) {
-        let refreshed = oauth::refresh(&creds).await?;
-        store::save(&refreshed)?;
-        return Ok(refreshed);
-    }
-    Ok(creds)
 }
 
 /// Terminal outcome of an advisor job.
@@ -761,34 +729,6 @@ mod tests {
             repo: None,
             show_scope: false,
         }
-    }
-
-    #[test]
-    fn test_resolve_api_url() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
-        // The --api-url flag wins even when ACTUAL_API_URL is set.
-        let g = EnvGuard::set("ACTUAL_API_URL", "http://env:9999");
-        assert_eq!(
-            resolve_api_url(Some("http://localhost:3099")),
-            "http://localhost:3099"
-        );
-        drop(g);
-
-        // No flag → the ACTUAL_API_URL env var is used when present.
-        let g = EnvGuard::set("ACTUAL_API_URL", "http://env:9999");
-        assert_eq!(resolve_api_url(None), "http://env:9999");
-        drop(g);
-
-        // No flag, empty env var → treated as unset, falls back to the default.
-        let g = EnvGuard::set("ACTUAL_API_URL", "");
-        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
-        drop(g);
-
-        // No flag, env unset → the api-service default.
-        let g = EnvGuard::remove("ACTUAL_API_URL");
-        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
-        drop(g);
     }
 
     #[test]
@@ -1262,95 +1202,6 @@ mod tests {
             next_delay(None, Duration::from_secs(2)),
             Duration::from_secs(2)
         );
-    }
-
-    // --- transparent refresh-on-expiry ---
-
-    #[tokio::test]
-    async fn test_ensure_fresh_no_refresh_token_returns_unchanged() {
-        let mut c = test_creds();
-        c.refresh_token = String::new();
-        let out = ensure_fresh(c.clone()).await.unwrap();
-        assert_eq!(out.access_token, c.access_token);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_not_expired_returns_unchanged() {
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() + ChronoDuration::hours(1));
-        let out = ensure_fresh(c).await.unwrap();
-        assert_eq!(out.access_token, "tok");
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_expired_refreshes_and_persists() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-
-        let mut server = mockito::Server::new_async().await;
-        let _m = server
-            .mock("POST", "/api/oauth/token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"access_token":"new-at","token_type":"Bearer","expires_in":3600,"refresh_token":"new-rt"}"#,
-            )
-            .create_async()
-            .await;
-
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1)); // expired
-        c.auth_url = Some(server.url());
-
-        let out = ensure_fresh(c).await.unwrap();
-        assert_eq!(out.access_token, "new-at");
-        // Rotated creds were re-persisted.
-        assert_eq!(store::load().unwrap().unwrap().access_token, "new-at");
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_unreachable_auth_server_is_not_signed_out() {
-        // Expired + unreachable auth server: the refresh never got an answer,
-        // so the error names the refresh step rather than claiming a sign-out.
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
-        c.auth_url = Some("http://127.0.0.1:1".to_string());
-        let err = ensure_fresh(c).await.unwrap_err();
-        assert!(
-            matches!(err, ActualError::ApiError(ref m) if m.starts_with("Token refresh request failed")),
-            "got: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_missing_auth_url_is_not_logged_in() {
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
-        c.auth_url = None;
-        let err = ensure_fresh(c).await.unwrap_err();
-        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
-        assert_eq!(err.exit_code(), 2);
-        assert_eq!(err.hint().as_deref(), Some("actual login"));
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_rejected_refresh_token_is_not_logged_in() {
-        let mut server = mockito::Server::new_async().await;
-        let _m = server
-            .mock("POST", "/api/oauth/token")
-            .with_status(400)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"error":"invalid_grant"}"#)
-            .create_async()
-            .await;
-
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
-        c.auth_url = Some(server.url());
-        let err = ensure_fresh(c).await.unwrap_err();
-        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
     }
 
     // --- explicit repo scoping ---
