@@ -124,9 +124,9 @@ pub(super) fn report(
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
     };
-    if otlp::Outputs::resolve(&config).is_none() {
+    let Some(outputs) = otlp::Outputs::resolve(&config) else {
         return;
-    }
+    };
     let origin = otlp::Origin::resolve();
     let session_id = action.session_id.unwrap_or_default();
     let action_type = action_type(action.kind);
@@ -152,7 +152,7 @@ pub(super) fn report(
         &warn_reasons,
         action.started.instant.elapsed(),
     ));
-    brief_telemetry::dispatch(all);
+    brief_telemetry::dispatch(&outputs, all);
 }
 
 /// [`report`] for a hook round, with the round's ADR records.
@@ -375,7 +375,11 @@ pub(super) mod tests {
             .iter()
             .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
             .collect();
-        brief_telemetry::dispatch(adr_records(&run, &headers(), verdicts, &blocking));
+        let outputs = otlp::Outputs {
+            endpoint: None,
+            file: None,
+        };
+        brief_telemetry::dispatch(&outputs, adr_records(&run, &headers(), verdicts, &blocking));
     }
 
     /// The records reported since the last call as (event, gate, ADR ref, ADR

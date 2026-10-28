@@ -34,9 +34,9 @@ pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
     };
-    if otlp::Outputs::resolve(&config).is_none() {
+    let Some(outputs) = otlp::Outputs::resolve(&config) else {
         return;
-    }
+    };
     let documents = crate::rules::read_rule_sources_in(rules_dir)
         .map(|sources| crate::rules::parse_rule_sources(sources).documents)
         .unwrap_or_default();
@@ -52,7 +52,7 @@ pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
             origin.overridden(session_id, &adr.key, &adr.adr_ids, denied_gates)
         })
         .collect();
-    brief_telemetry::dispatch(records);
+    brief_telemetry::dispatch(&outputs, records);
 }
 
 /// The logical ADRs among the files `keys` name, each with the gates, plan
