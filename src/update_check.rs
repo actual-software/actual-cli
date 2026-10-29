@@ -139,7 +139,7 @@ pub fn applies_to(command: &Command) -> bool {
         | Command::Auth(_)
         | Command::Login(_)
         | Command::Logout
-        | Command::Whoami
+        | Command::Whoami(_)
         | Command::Advisor(_)
         | Command::Config(_)
         | Command::Runners

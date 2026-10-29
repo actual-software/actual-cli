@@ -190,6 +190,20 @@ fn test_status_shows_config() {
         .stdout(predicate::str::contains("CLAUDE.md Files"));
 }
 
+/// The exit code a script reads to tell a lapsed sign-in (2) from an outage (3).
+#[test]
+fn test_whoami_check_signed_out_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["whoami", "--check"])
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Not signed in to Actual AI"))
+        .stderr(predicate::str::contains("actual login"));
+}
+
 #[test]
 fn test_auth_binary_not_found() {
     cmd()
