@@ -52,7 +52,9 @@ pub(super) fn report(
     let Some(session_id) = run.session_id.filter(|id| !id.is_empty()) else {
         return;
     };
-    let config = crate::config::paths::load().unwrap_or_default();
+    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+        return;
+    };
     if otlp::Outputs::resolve(&config).is_none() {
         return;
     }
@@ -493,5 +495,44 @@ pub(super) mod tests {
             assert!(!home.join("brief-ledger").exists());
             assert!(!home.join("telemetry-id").exists());
         });
+    }
+
+    /// How many records one blocking round builds with `config` in the config
+    /// file, and whether it wrote the ledger. `ACTUAL_OTLP_FILE` names an
+    /// output, so the config alone decides whether anything is sent.
+    fn report_one_blocking_round_under(config: &str) -> (usize, bool) {
+        let mut outcome = (0, false);
+        with_config(config, |home| {
+            let sink = home.join("otlp.jsonl");
+            let _file = EnvGuard::set("ACTUAL_OTLP_FILE", sink.to_str().unwrap());
+            round(
+                home,
+                ArtifactKind::Plan,
+                Some("s1"),
+                &[judged("rotation", Verdict::Conflicting)],
+            );
+            outcome = (take_captured().len(), home.join("brief-ledger").exists());
+        });
+        outcome
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: nothing
+    /// is built, and the ledger is never written.
+    #[test]
+    fn test_a_round_sends_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            report_one_blocking_round_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            (0, false)
+        );
+    }
+
+    /// The positive control: a config that loads sends the round's used and
+    /// breached events.
+    #[test]
+    fn test_a_round_sends_when_the_config_loads() {
+        assert_eq!(
+            report_one_blocking_round_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            (2, true)
+        );
     }
 }
