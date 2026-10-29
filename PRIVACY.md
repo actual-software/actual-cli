@@ -12,8 +12,8 @@ in and on who processes it. This notice is explicit about both:
   **not** anonymous. The raw ids never leave your machine, but hashing alone
   does not make identity-linked data anonymous. OpenTelemetry events sent to
   the API address `actual advisor` uses while you're logged in carry your
-  sign-in's access token, so Actual attributes them to your account and
-  organization too.
+  sign-in's access token, so Actual can tie them to the organization you signed
+  in to.
 - **Logged-out events are pseudonymous, not anonymous.** A logged-out run sends
   no account credential, but it still carries the installation's persistent
   `distinct_id` — the same id its logged-in runs use, which is not reset on
@@ -319,13 +319,13 @@ endpoint has the scheme, host and port of the address `actual advisor` uses
 (`ACTUAL_API_URL` when it's set, otherwise
 `https://api-service.api.prod.actual.ai`) and you've signed in with
 `actual login`, each request carries your sign-in's access token in its
-`Authorization` header, and Actual attributes its events to your account and to
-the organization you signed in to. Events you recorded while signed out, or
-signed in to another account or organization, go in a request of their own
-without the token. A request Actual refuses with a 401 is sent once more without
-it. Any other endpoint, a custom one included, never gets the token. The default
-endpoint is at that address unless the config file's `api_url` or
-`ACTUAL_API_URL` names another one.
+`Authorization` header, and Actual can tie its events to the organization you
+signed in to. Events you recorded while signed out, or signed in to another
+account or organization, go in a request of their own without the token. A
+request Actual refuses with a 401 is sent once more without it. Any other
+endpoint, a custom one included, never gets the token. The default endpoint is
+at that address unless the config file's `api_url` or `ACTUAL_API_URL` names
+another one.
 
 Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
@@ -400,12 +400,11 @@ identity-linked data:
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. They don't go to PostHog or any other
   third-party analytics service.
-- **Purpose:** to attribute these events to an account and organization so
-  Actual can measure and improve the CLI's ADR guidance and checks for each
-  customer.
+- **Purpose:** to tie these events to an organization so Actual can measure and
+  improve the CLI's ADR guidance and checks for each customer.
 - **Retention & deletion:** Actual keeps them for 365 days and then deletes
-  them. Before then, they're deleted, or the link severed, on account deletion
-  or a verified deletion request.
+  them. Before then, they're deleted, or the link severed, when the organization
+  is deleted or on a verified deletion request for it.
 
 #### Signed-out events sent to Actual's API
 
@@ -421,8 +420,9 @@ table above, with the classes given there:
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. The ADR references lead to the repository the
   ADRs were generated for and to its organization, and a session that also sent
-  a signed-in request links its signed-out events to that account. They don't
-  go to PostHog or any other third-party analytics service.
+  a signed-in request links its signed-out events to that request's
+  organization. They don't go to PostHog or any other third-party analytics
+  service.
 - **Purpose:** to measure and improve the CLI's ADR guidance and checks across
   everyone who uses it.
 - **Retention & deletion:** Actual keeps them for 365 days and then deletes
@@ -533,10 +533,11 @@ all.
 Signed-in OpenTelemetry events sent to Actual's API are covered above under
 "Signed-in events sent to Actual's API": they're held only by Actual's
 authorized backend systems, are used solely for product analytics, are kept for
-365 days and then deleted, and are deleted or de-linked sooner on account
-deletion or a verified deletion request. Signed-out ones are covered under
-"Signed-out events sent to Actual's API": Actual keeps them for 365 days and
-then deletes them. Opting out of telemetry stops both before they're built.
+365 days and then deleted, and are deleted or de-linked sooner when the
+organization is deleted or on a verified deletion request for it. Signed-out
+ones are covered under "Signed-out events sent to Actual's API": Actual keeps
+them for 365 days and then deletes them. Opting out of telemetry stops both
+before they're built.
 
 ## Reviewing changes to telemetry identity
 
