@@ -31,7 +31,9 @@ use crate::telemetry::otlp;
 /// Report the override of `keys` that `check-override` just recorded for
 /// `session_id`. Best-effort and silent, like the override's other events.
 pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
-    let config = crate::config::paths::load().unwrap_or_default();
+    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+        return;
+    };
     if otlp::Outputs::resolve(&config).is_none() {
         return;
     }
@@ -363,5 +365,38 @@ pub(super) mod tests {
             assert!(take_captured().is_empty());
             assert!(!home.join("telemetry-id").exists());
         });
+    }
+
+    /// How many records `report` builds for one overridden rule with `config`
+    /// in the config file. `ACTUAL_OTLP_FILE` names an output, so the config
+    /// alone decides whether anything is sent.
+    fn report_one_override_under(config: &str) -> usize {
+        let mut built = 0;
+        with_rules(config, |home, rules| {
+            let sink = home.join("otlp.jsonl");
+            let _file = EnvGuard::set("ACTUAL_OTLP_FILE", sink.to_str().unwrap());
+            report(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
+            built = take_captured().len();
+        });
+        built
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: nothing
+    /// is built.
+    #[test]
+    fn test_report_sends_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            report_one_override_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            0
+        );
+    }
+
+    /// The positive control: a config that loads sends the override.
+    #[test]
+    fn test_report_sends_when_the_config_loads() {
+        assert_eq!(
+            report_one_override_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            1
+        );
     }
 }
