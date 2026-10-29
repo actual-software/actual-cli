@@ -386,10 +386,11 @@ within a minute of expiring, as `actual advisor` does. All three opt-outs below
 stop these events before anything is built: an opted-out run reads no ids or
 sign-in and writes no spool. Building and sending them reads no installation id
 either. Only the plan-governance events a run also builds need it, so a
-`check-override` run reads it, and creates `telemetry-id` when it's missing,
-while a `rules brief --claude-hook` run never does. What Actual does with the
-events its API receives, signed in or out, is covered next. Whoever operates
-any other endpoint you set decides how long it keeps them.
+`plan-check`, `impl-check` or `check-override` run reads it, and creates
+`telemetry-id` when it's missing, while a `rules brief --claude-hook` run never
+does. What Actual does with the events its API receives, signed in or out, is
+covered next. Whoever operates any other endpoint you set decides how long it
+keeps them.
 
 #### Signed-in events sent to Actual's API
 
