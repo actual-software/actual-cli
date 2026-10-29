@@ -13,10 +13,10 @@
 //! time just before the pipeline that calls the judge, and builds both action
 //! records once it has a verdict, so the started record carries the real start
 //! and the two share one spool write and one uploader start. The action
-//! events go wherever the plan-governance `check_started` and `check_completed`
-//! events go, and with the same outcome, so a run that never reaches a verdict
-//! sends neither. Every caller reports them before it hands those to the
-//! spool, so the completed record times the check alone.
+//! events are sent on the same runs as the plan-governance `check_started`
+//! and `check_completed` events, and with the same outcome, so a run that
+//! never reaches a verdict sends neither. Every caller reports them before it
+//! hands those to the spool, so the completed record times the check alone.
 //!
 //! **Used means checked against.** A round uses an ADR when the judge returns
 //! a verdict for any of its rules, whatever the verdict, so a blocking verdict

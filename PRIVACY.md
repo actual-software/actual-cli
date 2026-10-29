@@ -279,9 +279,9 @@ ran the command:
 - `actual.action.completed`, once the check has its verdict, with its outcome,
   what made a `warn` one, and how long it took.
 
-They go wherever the run's plan-governance `check_started` and
-`check_completed` events go, with the same outcome. A run outside a Claude Code
-hook sends them with no session or agent.
+They're sent on the same runs as the plan-governance `check_started` and
+`check_completed` events, with the same outcome, but only to the outputs
+below. A run outside a Claude Code hook sends them with no session or agent.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
