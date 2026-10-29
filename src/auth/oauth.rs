@@ -489,6 +489,43 @@ fn apply_refresh(old: &StoredCredentials, token: TokenResponse) -> StoredCredent
     }
 }
 
+/// Ask the auth server that issued `creds` whether its access token still
+/// works, through the `/whoami` lookup that finishes a sign-in.
+///
+/// The server answers 401 for a token it no longer accepts (expired, revoked,
+/// or issued before a sign-out of that member), which comes back as
+/// [`ActualError::NotLoggedIn`], as does a session [`refresh`] couldn't renew
+/// either: no stored auth server URL, or one [`build_http_client`] refuses. A
+/// server that can't be reached, fails, or answers without an identity keeps
+/// its own error, since signing in again won't fix it.
+pub async fn verify(creds: &StoredCredentials) -> Result<(), ActualError> {
+    let Some(base_url) = creds.auth_url.as_deref() else {
+        return Err(ActualError::NotLoggedIn);
+    };
+    let base_url = base_url.trim_end_matches('/');
+    let http = match build_http_client(base_url) {
+        Err(ActualError::ConfigError(_)) => return Err(ActualError::NotLoggedIn),
+        built => built?,
+    };
+    let response = http
+        .get(format!("{base_url}/whoami"))
+        .bearer_auth(&creds.access_token)
+        .send()
+        .await
+        .map_err(|e| ActualError::ApiError(format!("whoami request failed: {e}")))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(ActualError::NotLoggedIn);
+    }
+    if !response.status().is_success() {
+        return Err(auth_error("whoami failed", response).await);
+    }
+    response
+        .json::<WhoamiResponse>()
+        .await
+        .map_err(|e| ActualError::ApiError(format!("Failed to parse whoami response: {e}")))?;
+    Ok(())
+}
+
 /// Best-effort server-side revocation (RFC 7009) of the session's refresh
 /// token. Returns `Ok(())` with nothing to do if no auth URL is stored.
 pub async fn revoke(creds: &StoredCredentials) -> Result<(), ActualError> {
@@ -1135,6 +1172,140 @@ mod tests {
         let creds = creds_with_auth(None, "r");
         // Nothing to revoke against; should succeed silently.
         revoke(&creds).await.unwrap();
+    }
+
+    const WHOAMI_BODY: &str = r#"{"sub":"mock-user-0001","organization_id":"mock-org-0001","member_id":"mock-member-0001","scope":"openid"}"#;
+
+    #[tokio::test]
+    async fn test_verify_sends_the_access_token_to_whoami() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/whoami")
+            .match_header("authorization", "Bearer old-access")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(WHOAMI_BODY)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // A trailing slash on the stored URL still reaches `/whoami`.
+        let creds = creds_with_auth(Some(format!("{}/", server.url())), "r");
+        verify(&creds).await.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_a_token_the_server_refuses_is_not_logged_in() {
+        let mut server = mockito::Server::new_async().await;
+        let _whoami = server
+            .mock("GET", "/whoami")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_token","error_description":"Access token is invalid or expired"}"#)
+            .create_async()
+            .await;
+
+        let err = verify(&creds_with_auth(Some(server.url()), "r"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_verify_missing_or_refused_auth_url_is_not_logged_in() {
+        for auth_url in [None, Some("http://auth.example.com".to_string())] {
+            let err = verify(&creds_with_auth(auth_url.clone(), "r"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ActualError::NotLoggedIn),
+                "{auth_url:?}: got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_in_an_auth_server_outage_is_not_signed_out() {
+        let mut server = mockito::Server::new_async().await;
+        let _whoami = server
+            .mock("GET", "/whoami")
+            .with_status(503)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"temporarily_unavailable"}"#)
+            .create_async()
+            .await;
+
+        let err = verify(&creds_with_auth(Some(server.url()), "r"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m == "whoami failed (HTTP 503 Service Unavailable): temporarily_unavailable"),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_with_an_unreachable_auth_server_is_not_signed_out() {
+        let creds = creds_with_auth(Some("http://127.0.0.1:1".to_string()), "r");
+        let err = verify(&creds).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.starts_with("whoami request failed")),
+            "got: {err:?}"
+        );
+    }
+
+    /// The token goes only to the server that issued it: a redirect to another
+    /// host arrives there without it, so that host can't confirm the sign-in.
+    #[tokio::test]
+    async fn test_verify_never_carries_the_token_to_another_host() {
+        let mut other = mockito::Server::new_async().await;
+        let without_token = other
+            .mock("GET", "/whoami")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_request"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut issuer = mockito::Server::new_async().await;
+        let _redirect = issuer
+            .mock("GET", "/whoami")
+            .with_status(307)
+            .with_header("location", &format!("{}/whoami", other.url()))
+            .create_async()
+            .await;
+
+        let err = verify(&creds_with_auth(Some(issuer.url()), "r"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+        without_token.assert_async().await;
+    }
+
+    /// A 200 that isn't the identity, such as a proxy's page, confirms nothing.
+    #[tokio::test]
+    async fn test_verify_an_answer_without_an_identity_is_not_a_pass() {
+        let mut server = mockito::Server::new_async().await;
+        let _whoami = server
+            .mock("GET", "/whoami")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>Sign in</html>")
+            .create_async()
+            .await;
+
+        let err = verify(&creds_with_auth(Some(server.url()), "r"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m)
+                if m.starts_with("Failed to parse whoami response")),
+            "got: {err:?}"
+        );
     }
 
     #[tokio::test]
