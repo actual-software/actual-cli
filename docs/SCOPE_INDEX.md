@@ -197,6 +197,24 @@ Precision at the status-quo cap is the number to read: **0.80 against 0.64**. Of
 five rule files an agent is allowed to open, the index wastes one and the
 filename scan wastes nearly two.
 
+A case that expects nothing is not scored by either aggregate: an empty
+selection is perfect there, and a non-empty one only dents micro precision. What
+matters is whether the selector said anything at all, so each selector also
+reports a **false-injection rate**, the share of cases with an empty `expected`
+that were given any rule. It is `null` in the JSON when the set has no such
+case, because a set that cannot measure it has not measured zero.
+
+```bash
+cargo run -- rules eval --golden tests/fixtures/scope_corpus/golden_ungoverned.json --repo tests/fixtures/scope_corpus --limit 5
+```
+
+**Fixture corpus** — 5 plans nothing governs, cap 5:
+
+| selector | given a rule anyway |
+|---|---|
+| scope index | 3 of 5 |
+| filename scan | 2 of 5 |
+
 ## Honest limits
 
 - **The fixture corpus is synthetic**, written to reproduce the shapes of the

@@ -584,6 +584,7 @@ mod tests {
                 limit: 5,
                 ablate: Vec::new(),
                 rank: false,
+                full_corpus: false,
                 candidates: crate::rules::scope::DEFAULT_CANDIDATES,
                 runner: None,
                 model: None,

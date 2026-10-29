@@ -131,6 +131,40 @@ pooled precision never falls. Both follow from the design — stage 2 only remov
 and promotes, it never adds — and the tests exist so a later change cannot
 quietly break them.
 
+### The full-corpus arm
+
+`--full-corpus` scores the alternative the two stages are measured against: a
+model shown every indexed document, with no prefilter, asked which govern the
+change. It answers whether selection needs a lexical stage at all. It is a
+measurement, not a shipped path, and it costs one runner call per case, each
+carrying the whole rule set.
+
+It describes the change in stage 2's words and asks for the same verdicts, so
+the two arms differ only where the comparison needs them to:
+
+- **Every document is listed**, so stage 1's recall is not its ceiling.
+- **The model names only the rules that apply.** A rule it leaves out is not
+  selected. Stage 2 pads a partial answer with unjudged candidates; padding
+  here would score stage 1's answer under this arm's name.
+- **Nothing is an answer.** Stage 2 treats an empty rank as a failure and falls
+  back to the prefilter. Here an empty answer stands, and the false-injection
+  rate (see [SCOPE_INDEX.md](SCOPE_INDEX.md#measurements)) is what it is
+  measured on.
+- **A path-only case is still judged**, because the hook this would serve
+  usually knows only the file.
+- **A failed call scores empty and is counted.** The summary line ends
+  `failed N`, and the case's JSON carries a `failure` reason, so a run that
+  mostly failed cannot pass for one that mostly abstained. A two-stage case
+  that degraded to the prefilter is marked the same way.
+
+Within a verdict, stage 1's order still breaks ties, which decides only what is
+cut when more rules apply than the cap allows.
+
+The same fake ranker bounds this arm's plumbing in the same test file: it finds
+every expected rule the cap has room for, and it abstains on every plan in
+`golden_ungoverned.json`, where the two-stage selector still injects the
+prefilter's answer.
+
 ## Cost
 
 Stage 1 is sub-millisecond against a built index. Stage 2 is a single model
@@ -205,15 +239,15 @@ actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N]
                               [--candidates N] [--no-rank] [--runner NAME]
                               [--model NAME] [--explain] [--json]
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]...
-                                [--rank] [--candidates N] [--runner NAME]
-                                [--model NAME] [--json]
+                                [--rank] [--full-corpus] [--candidates N]
+                                [--runner NAME] [--model NAME] [--json]
 ```
 
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan — and skips stage 2 because it ranks against plan prose.
 
-`--runner` and `--model` steer stage 2 only, and both fall back to the same
-config fields `actual adr-bot` uses.
+`--runner` and `--model` steer stage 2, and the full-corpus arm in `rules eval`,
+and both fall back to the same config fields `actual adr-bot` uses.
 
 Which of them widens the search and which narrows it follows one rule: a loose
 preference yields a list, a named backend is a pin.

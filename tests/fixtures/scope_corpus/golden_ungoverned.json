@@ -1,0 +1,32 @@
+[
+  {
+    "name": "readme-typo",
+    "plan": "Fix a spelling mistake in the README's installation section.",
+    "paths": ["README.md"],
+    "expected": []
+  },
+  {
+    "name": "changelog-entry",
+    "plan": "Add the 2.3.0 release notes to the changelog.",
+    "paths": ["CHANGELOG.md"],
+    "expected": []
+  },
+  {
+    "name": "license-year",
+    "plan": "Update the copyright year in the license file.",
+    "paths": ["LICENSE"],
+    "expected": []
+  },
+  {
+    "name": "editorconfig",
+    "plan": "Add an editorconfig that sets two-space indentation for Markdown.",
+    "paths": [".editorconfig"],
+    "expected": []
+  },
+  {
+    "name": "contributor-list",
+    "plan": "Add a new contributor's name to the contributors list.",
+    "paths": ["CONTRIBUTORS.md"],
+    "expected": []
+  }
+]

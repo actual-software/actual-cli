@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use actual_cli::rules::scope::{
     baseline,
-    eval::{CaseResult, EvaluationReport, GoldenCase, Scores},
+    eval::{CaseResult, EvaluationReport, GoldenCase},
     index::{Query, ScopeIndex, Weights},
 };
 use actual_cli::rules::{load_rule_set, rules_dir};
@@ -71,12 +71,7 @@ fn evaluate(
                 "{name} returned more than the cap on case {}",
                 case.name
             );
-            CaseResult {
-                name: case.name.clone(),
-                scores: Scores::measure(&selected, &case.expected),
-                selected,
-                expected: case.expected.clone(),
-            }
+            CaseResult::new(case.name.clone(), selected, case.expected.clone())
         })
         .collect();
     EvaluationReport::new(name, results)

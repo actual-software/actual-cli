@@ -28,10 +28,11 @@ use std::sync::Mutex;
 use actual_cli::error::ActualError;
 use actual_cli::rules::load_rule_set;
 use actual_cli::rules::scope::{
+    corpus,
     index::{Query, ScopeIndex},
     rank::{self, Verdict},
     select::{self, Selection, Stage, Stage2},
-    GoldenCase, Scores,
+    CaseResult, EvaluationReport, GoldenCase, Scores,
 };
 use actual_cli::runner::StructuredRunner;
 
@@ -51,6 +52,12 @@ fn build_index() -> ScopeIndex {
 fn golden_cases() -> Vec<GoldenCase> {
     let text = std::fs::read_to_string(corpus_root().join("golden.json")).unwrap();
     serde_json::from_str(&text).expect("golden set parses")
+}
+
+/// Plans nothing in the fixture corpus governs, for the false-injection rate.
+fn ungoverned_cases() -> Vec<GoldenCase> {
+    let text = std::fs::read_to_string(corpus_root().join("golden_ungoverned.json")).unwrap();
+    serde_json::from_str(&text).expect("ungoverned set parses")
 }
 
 /// A plan from the golden set, by name.
@@ -474,5 +481,92 @@ fn the_ranked_selector_scores_at_least_as_well_as_the_prefilter() {
     assert!(
         ranked_precision >= prefilter_precision,
         "pooled precision fell: {ranked_precision:.2} against {prefilter_precision:.2}"
+    );
+}
+
+// ── the full-corpus arm ──────────────────────────────────────────────────
+
+fn slugs(selection: &Selection) -> Vec<String> {
+    selection.selected.iter().map(|r| r.slug.clone()).collect()
+}
+
+fn judge_corpus(index: &ScopeIndex, case: &GoldenCase, limit: usize) -> Vec<String> {
+    let runner = FakeRunner::oracle(&case.expected);
+    block_on(corpus::select(
+        index,
+        &query(case),
+        limit,
+        &runner,
+        None,
+        None,
+    ))
+    .expect("an oracle answer is well formed")
+}
+
+/// The full-corpus arm sees every document, so a perfectly calibrated model
+/// finds every expected rule the cap has room for, including any stage 1
+/// never retrieved. Stage 2 cannot: its recall is the prefilter's. This is the
+/// handicap the arm exists to remove, asserted so a change to the candidate
+/// list cannot quietly put it back.
+#[test]
+fn the_full_corpus_arm_is_not_bounded_by_stage_one_recall() {
+    let index = build_index();
+    const LIMIT: usize = 5;
+
+    let (mut corpus_hits, mut ranked_hits, mut reachable) = (0usize, 0usize, 0usize);
+    for case in golden_cases() {
+        let picked = judge_corpus(&index, &case, LIMIT);
+        let scores = Scores::measure(&picked, &case.expected);
+        assert_eq!(scores.false_positives, 0, "case `{}`", case.name);
+        assert_eq!(
+            scores.true_positives,
+            case.expected.len().min(LIMIT),
+            "case `{}`: an expected rule was missed with every document listed",
+            case.name
+        );
+
+        let ranked = run(&index, &case, LIMIT, &FakeRunner::oracle(&case.expected));
+        ranked_hits += Scores::measure(&slugs(&ranked), &case.expected).true_positives;
+        corpus_hits += scores.true_positives;
+        reachable += case.expected.len().min(LIMIT);
+    }
+    assert_eq!(corpus_hits, reachable);
+    assert!(corpus_hits >= ranked_hits);
+}
+
+/// On plans nothing governs, the full-corpus arm can say nothing and the
+/// two-stage selector cannot: a rank that keeps nothing falls back to the
+/// prefilter. The false-injection rate is what separates them, so it is
+/// measured here through the same report `rules eval` prints.
+#[test]
+fn only_the_full_corpus_arm_can_abstain_on_a_plan_nothing_governs() {
+    let index = build_index();
+    const LIMIT: usize = 5;
+    let cases = ungoverned_cases();
+    assert!(!cases.is_empty());
+
+    let mut corpus_results = Vec::new();
+    let mut ranked_results = Vec::new();
+    for case in &cases {
+        let picked = judge_corpus(&index, case, LIMIT);
+        corpus_results.push(CaseResult::new(case.name.clone(), picked, Vec::new()));
+        let ranked = run(&index, case, LIMIT, &FakeRunner::oracle(&case.expected));
+        ranked_results.push(CaseResult::new(
+            case.name.clone(),
+            slugs(&ranked),
+            Vec::new(),
+        ));
+    }
+
+    let corpus_report = EvaluationReport::new(corpus::SELECTOR, corpus_results);
+    assert_eq!(corpus_report.false_injection.ungoverned_cases, cases.len());
+    assert_eq!(corpus_report.false_injection.rate, Some(0.0));
+
+    // Stage 1 matches some of these plans lexically, and a perfect ranker
+    // rejecting all of it still leaves the prefilter's answer standing.
+    let ranked_report = EvaluationReport::new("two-stage", ranked_results);
+    assert!(
+        ranked_report.false_injection.injected > 0,
+        "two-stage abstained everywhere; the fixture no longer shows the difference"
     );
 }

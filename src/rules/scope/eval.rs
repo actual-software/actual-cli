@@ -15,6 +15,14 @@
 //! number. **Macro** averages the per-case scores, so every plan counts the
 //! same; it is the "how well does a typical plan do" number. Quoting only one
 //! of them hides the shape of the failure.
+//!
+//! A case that expects nothing is a different question again, and neither
+//! aggregate answers it: an empty selection scores perfectly there, and a
+//! non-empty one only costs micro precision a little. What matters for such a
+//! case is whether the selector said anything at all, because every rule it
+//! returns is context injected into a change nothing governs. That is the
+//! **false-injection rate**, reported beside the aggregates rather than folded
+//! into them.
 
 use std::collections::BTreeSet;
 
@@ -106,6 +114,35 @@ pub struct EvaluationReport {
     pub macro_precision: f64,
     pub macro_recall: f64,
     pub macro_f1: f64,
+    /// How often a case that expects nothing was given something anyway.
+    pub false_injection: FalseInjection,
+}
+
+/// The cases nothing governs, and how many of them the selector returned
+/// rules for anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FalseInjection {
+    /// Cases whose `expected` is empty.
+    pub ungoverned_cases: usize,
+    /// Of those, the cases with a non-empty selection.
+    pub injected: usize,
+    /// `injected / ungoverned_cases`, or `None` when the set has no
+    /// ungoverned case. Not 0.0: a set that cannot measure this has not
+    /// measured a perfect score.
+    pub rate: Option<f64>,
+}
+
+impl FalseInjection {
+    fn over(cases: &[CaseResult]) -> Self {
+        let ungoverned = cases.iter().filter(|case| case.expected.is_empty());
+        let ungoverned_cases = ungoverned.clone().count();
+        let injected = ungoverned.filter(|case| !case.selected.is_empty()).count();
+        Self {
+            ungoverned_cases,
+            injected,
+            rate: (ungoverned_cases > 0).then(|| injected as f64 / ungoverned_cases as f64),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +151,30 @@ pub struct CaseResult {
     pub selected: Vec<String>,
     pub expected: Vec<String>,
     pub scores: Scores,
+    /// Why the selector being measured did not produce this selection itself,
+    /// when it did not: a rank that degraded to the prefilter, or a model
+    /// call that failed and left nothing. Absent when it ran as intended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+impl CaseResult {
+    /// Score `selected` against `expected` for the case called `name`.
+    pub fn new(name: impl Into<String>, selected: Vec<String>, expected: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            scores: Scores::measure(&selected, &expected),
+            selected,
+            expected,
+            failure: None,
+        }
+    }
+
+    /// Record why this selection is not the measured selector's own.
+    pub fn with_failure(mut self, reason: impl Into<String>) -> Self {
+        self.failure = Some(reason.into());
+        self
+    }
 }
 
 impl EvaluationReport {
@@ -136,8 +197,17 @@ impl EvaluationReport {
             macro_precision: precision / n,
             macro_recall: recall / n,
             macro_f1: f1 / n,
+            false_injection: FalseInjection::over(&cases),
             cases,
         }
+    }
+
+    /// Cases the selector did not answer itself; see [`CaseResult::failure`].
+    pub fn failures(&self) -> usize {
+        self.cases
+            .iter()
+            .filter(|case| case.failure.is_some())
+            .count()
     }
 
     /// Cases where nothing expected was found — the failures worth reading
@@ -150,9 +220,11 @@ impl EvaluationReport {
             .collect()
     }
 
-    /// A single line: `scope-index  micro P 0.82 R 0.91 F1 0.86  macro F1 0.88`.
+    /// A single line: `scope-index  micro P 0.82 R 0.91 F1 0.86  macro F1 0.88`,
+    /// then the false-injection count when the set has an ungoverned case and
+    /// the failure count when any case failed.
     pub fn summary_line(&self) -> String {
-        format!(
+        let mut line = format!(
             "{:<14} micro P {:.2} R {:.2} F1 {:.2}  macro P {:.2} R {:.2} F1 {:.2}",
             self.selector,
             self.micro.precision,
@@ -161,7 +233,19 @@ impl EvaluationReport {
             self.macro_precision,
             self.macro_recall,
             self.macro_f1,
-        )
+        );
+        let injection = &self.false_injection;
+        if injection.ungoverned_cases > 0 {
+            line.push_str(&format!(
+                "  false injection {}/{}",
+                injection.injected, injection.ungoverned_cases
+            ));
+        }
+        let failures = self.failures();
+        if failures > 0 {
+            line.push_str(&format!("  failed {failures}"));
+        }
+        line
     }
 }
 
@@ -171,14 +255,11 @@ mod tests {
 
     /// Helper: a case result with the given selection and expectation.
     fn case(name: &str, selected: &[&str], expected: &[&str]) -> CaseResult {
-        let selected: Vec<String> = selected.iter().map(|s| s.to_string()).collect();
-        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-        CaseResult {
-            name: name.to_string(),
-            scores: Scores::measure(&selected, &expected),
-            selected,
-            expected,
-        }
+        CaseResult::new(
+            name,
+            selected.iter().map(|s| s.to_string()).collect(),
+            expected.iter().map(|s| s.to_string()).collect(),
+        )
     }
 
     // ── Scores ───────────────────────────────────────────────────────────
@@ -319,6 +400,58 @@ mod tests {
         assert!(line.starts_with("scope-index"));
         assert!(line.contains("micro P 1.00 R 1.00 F1 1.00"));
         assert!(line.contains("macro P 1.00 R 1.00 F1 1.00"));
+    }
+
+    // ── false injection ──────────────────────────────────────────────────
+
+    /// Only cases that expect nothing count, and any selection at all on one
+    /// is an injection, however small.
+    #[test]
+    fn test_false_injection_counts_ungoverned_cases_given_anything() {
+        let report = EvaluationReport::new(
+            "test",
+            vec![
+                case("governed", &["a"], &["a"]),
+                case("quiet", &[], &[]),
+                case("noisy", &["x"], &[]),
+                case("noisier", &["x", "y"], &[]),
+            ],
+        );
+        let injection = report.false_injection;
+        assert_eq!(injection.ungoverned_cases, 3);
+        assert_eq!(injection.injected, 2);
+        assert_eq!(injection.rate, Some(2.0 / 3.0));
+        assert!(report.summary_line().ends_with("  false injection 2/3"));
+    }
+
+    /// A set with no ungoverned case cannot measure the rate, which is not
+    /// the same as measuring zero.
+    #[test]
+    fn test_false_injection_is_unmeasured_without_an_ungoverned_case() {
+        let report = EvaluationReport::new("test", vec![case("governed", &["a"], &["a"])]);
+        assert_eq!(report.false_injection.ungoverned_cases, 0);
+        assert_eq!(report.false_injection.rate, None);
+        assert!(!report.summary_line().contains("false injection"));
+        let value = serde_json::to_value(&report).unwrap();
+        assert!(value["false_injection"]["rate"].is_null());
+    }
+
+    // ── failures ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_failures_are_counted_and_named_in_the_summary() {
+        let report = EvaluationReport::new(
+            "test",
+            vec![
+                case("ran", &["a"], &["a"]),
+                case("fell-back", &["a"], &["a"]).with_failure("rank failed"),
+            ],
+        );
+        assert_eq!(report.failures(), 1);
+        assert!(report.summary_line().ends_with("  failed 1"));
+        let value = serde_json::to_value(&report).unwrap();
+        assert!(value["cases"][0].get("failure").is_none());
+        assert_eq!(value["cases"][1]["failure"], "rank failed");
     }
 
     // ── golden case shape ────────────────────────────────────────────────
