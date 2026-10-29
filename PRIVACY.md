@@ -315,9 +315,11 @@ detached uploader, which sends them in batches for up to five seconds in all,
 retries included. A batch still being sent when the time runs out is dropped,
 and the batches it hasn't reached stay in the spool for its next run. All three
 opt-outs below stop these events before anything is built: an opted-out run
-reads no ids and writes no spool. A run that sends them reads no installation id
-either, so this path never creates `telemetry-id`. Whoever operates the endpoint
-you configure decides how long it keeps the events.
+reads no ids and writes no spool. Building and sending them reads no
+installation id either. Only the plan-governance events a run also builds need
+it, so a `check-override` run reads it, and creates `telemetry-id` when it's
+missing, while a `rules brief --claude-hook` run never does. Whoever operates
+the endpoint you configure decides how long it keeps the events.
 
 ### Project metadata (sent to the Actual API)
 
