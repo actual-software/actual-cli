@@ -77,7 +77,9 @@ pub(super) fn report<'a>(
     agent_id: Option<&str>,
     documents: impl IntoIterator<Item = &'a RuleDocument>,
 ) {
-    let config = crate::config::paths::load().unwrap_or_default();
+    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+        return;
+    };
     if otlp::Outputs::resolve(&config).is_none() {
         return;
     }
@@ -327,6 +329,45 @@ pub(super) mod tests {
             assert!(!ledger.exists());
             assert!(!home.join("telemetry-id").exists());
         });
+    }
+
+    /// How many records `report` builds for one new ADR with `config` in the
+    /// config file, and whether it wrote the ledger. `ACTUAL_OTLP_FILE` names
+    /// an output, so the config alone decides whether anything is sent.
+    fn report_one_adr_under(config: &str) -> (usize, bool) {
+        let mut outcome = (0, false);
+        with_config(config, |home| {
+            let sink = home.join("otlp.jsonl");
+            let _file = EnvGuard::set("ACTUAL_OTLP_FILE", sink.to_str().unwrap());
+            let ledger = home.join("brief-ledger");
+            report(
+                &ledger,
+                &ledger_key("s1"),
+                None,
+                &[document(Some("adr-1"), None)],
+            );
+            outcome = (take_captured().len(), ledger.exists());
+        });
+        outcome
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: nothing
+    /// is built, and the ledger is never written.
+    #[test]
+    fn test_report_sends_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            report_one_adr_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            (0, false)
+        );
+    }
+
+    /// The positive control: a config that loads sends the ADR.
+    #[test]
+    fn test_report_sends_when_the_config_loads() {
+        assert_eq!(
+            report_one_adr_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            (1, true)
+        );
     }
 
     /// Rule files without a v2 header have no id to send, so they send

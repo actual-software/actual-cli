@@ -16,8 +16,8 @@
 //! failed, or opted-out send simply leaves events queued for the next run, and
 //! an event the proxy refuses on its own is dropped (see
 //! [`crate::telemetry::spool::flush`]). OTLP records leave their spool
-//! before they are sent, so a failed send drops them; an opted-out run leaves
-//! them queued.
+//! before they are sent, so a failed send drops them; an opted-out run, or one
+//! whose config file can't load, leaves both spools queued.
 
 use crate::error::ActualError;
 
@@ -26,7 +26,9 @@ use crate::error::ActualError;
 /// and this process exists only to try.
 #[cfg(feature = "telemetry")]
 pub fn exec() -> Result<(), ActualError> {
-    let cfg = crate::config::paths::load().unwrap_or_default();
+    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
+        return Ok(());
+    };
     // The opt-out gates and the empty-spool short-circuits live inside each
     // `flush`; this owns only the runtime the blocking sends need.
     let api_url = crate::telemetry::spool::resolved_api_url(&cfg);
@@ -58,7 +60,9 @@ pub fn exec() -> Result<(), ActualError> {
 #[cfg(all(test, feature = "telemetry"))]
 mod tests {
     use super::*;
-    use crate::testutil::{EnvGuard, ENV_MUTEX};
+    use crate::testutil::{
+        EnvGuard, ENV_MUTEX, LOADABLE_TELEMETRY_ON, UNLOADABLE_TELEMETRY_OPT_OUT,
+    };
     use tempfile::tempdir;
 
     /// The flush command drains a spooled event through the proxy and exits Ok.
@@ -138,5 +142,55 @@ mod tests {
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         assert!(exec().is_ok());
+    }
+
+    /// Spool one OTLP record, run once with `config` in the config file and
+    /// `ACTUAL_OTLP_FILE` naming a local sink, and return what reached the sink
+    /// and whether the record is still queued. The test uses the OTLP spool
+    /// because its output can be a file. Through the scope spool, an uploader
+    /// that ignored a config it couldn't load would post to the production API.
+    fn drain_one_record_under(config: &str) -> (Option<String>, bool) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _guards: Vec<EnvGuard> = [
+            "ACTUAL_CONFIG",
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        let sink = home.path().join("otlp.jsonl");
+        let _sink = EnvGuard::set("ACTUAL_OTLP_FILE", sink.to_str().unwrap());
+        std::fs::write(home.path().join("config.yaml"), config).unwrap();
+        let record = crate::telemetry::otlp::Origin::resolve().context_added(
+            "s1",
+            None,
+            "grp-1",
+            &["adr-1".to_string()],
+        );
+        crate::telemetry::otlp::spool(&[record]);
+
+        assert!(exec().is_ok());
+        let queued = home.path().join("otlp-logs-spool.jsonl").exists();
+        (std::fs::read_to_string(&sink).ok(), queued)
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: nothing
+    /// is sent, and the record stays queued.
+    #[test]
+    fn test_exec_drains_nothing_when_the_config_cannot_load() {
+        let (sent, queued) = drain_one_record_under(UNLOADABLE_TELEMETRY_OPT_OUT);
+        assert_eq!(sent, None);
+        assert!(queued);
+    }
+
+    /// The positive control: a config that loads lets the record through.
+    #[test]
+    fn test_exec_drains_the_record_when_the_config_loads() {
+        let (sent, queued) = drain_one_record_under(LOADABLE_TELEMETRY_ON);
+        assert_eq!(sent.map(|body| body.lines().count()), Some(1));
+        assert!(!queued);
     }
 }

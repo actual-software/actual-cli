@@ -77,6 +77,17 @@ impl Drop for EnvGuard {
     }
 }
 
+/// A config file holding `telemetry.enabled: false` beside an invalid value.
+/// The whole file fails to load, the opt-out with it, so a telemetry sender
+/// must treat it as opted out.
+#[cfg(feature = "telemetry")]
+pub const UNLOADABLE_TELEMETRY_OPT_OUT: &str = "telemetry:\n  enabled: false\nbatch_size: lots\n";
+
+/// The positive control for [`UNLOADABLE_TELEMETRY_OPT_OUT`]: the same
+/// unrelated key with a valid value, which loads with telemetry on.
+#[cfg(feature = "telemetry")]
+pub const LOADABLE_TELEMETRY_ON: &str = "batch_size: 10\n";
+
 /// Two v2 rule documents with one file stem (`same-stem.md`) in different
 /// directories, each a distinct decision with its own `adr_id`,
 /// `candidate_group_id` and root, so only the path tells them apart. Discovery
