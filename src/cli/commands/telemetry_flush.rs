@@ -29,8 +29,8 @@ pub fn exec() -> Result<(), ActualError> {
     let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
         return Ok(());
     };
-    // The opt-out gates and the empty-spool short-circuits live inside each
-    // `flush`; this owns only the runtime the blocking sends need.
+    // Each `flush` also checks the opt-out and skips an empty spool; this owns
+    // the runtime the blocking sends need.
     let api_url = crate::telemetry::spool::resolved_api_url(&cfg);
     if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
