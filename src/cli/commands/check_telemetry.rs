@@ -91,7 +91,9 @@ pub(super) fn report(
     decision: PlanGovernanceDecision,
     records: Vec<otlp::LogRecord>,
 ) {
-    let config = crate::config::paths::load().unwrap_or_default();
+    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+        return;
+    };
     if otlp::Outputs::resolve(&config).is_none() {
         return;
     }
@@ -848,5 +850,43 @@ pub(super) mod tests {
 
             assert!(take_captured().is_empty());
         });
+    }
+
+    /// How many action records one run's report builds with `config` in the
+    /// config file. `ACTUAL_OTLP_FILE` names an output, so the config alone
+    /// decides whether anything is sent.
+    fn report_one_run_under(config: &str) -> usize {
+        let mut built = 0;
+        with_config(config, |home| {
+            let sink = home.join("otlp.jsonl");
+            let _file = EnvGuard::set("ACTUAL_OTLP_FILE", sink.to_str().unwrap());
+            report(
+                &hook_action(SystemTime::now()),
+                PlanGovernanceDecision::Allow,
+                Vec::new(),
+            );
+            built = take_captured().len();
+        });
+        built
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: no
+    /// action record is built.
+    #[test]
+    fn test_a_run_reports_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            report_one_run_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            0
+        );
+    }
+
+    /// The positive control: a config that loads sends the started and
+    /// completed records.
+    #[test]
+    fn test_a_run_reports_when_the_config_loads() {
+        assert_eq!(
+            report_one_run_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            2
+        );
     }
 }
