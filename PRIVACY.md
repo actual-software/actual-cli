@@ -11,8 +11,9 @@ in and on who processes it. This notice is explicit about both:
   organization — so logged-in telemetry is first-party, identity-linked data,
   **not** anonymous. The raw ids never leave your machine, but hashing alone
   does not make identity-linked data anonymous. OpenTelemetry events sent to
-  Actual's API while you're logged in carry your sign-in's access token, so
-  Actual attributes them to your account and organization too.
+  the API address `actual advisor` uses while you're logged in carry your
+  sign-in's access token, so Actual attributes them to your account and
+  organization too.
 - **Logged-out events are pseudonymous, not anonymous.** A logged-out run sends
   no account credential, but it still carries the installation's persistent
   `distinct_id` — the same id its logged-in runs use, which is not reset on
@@ -376,9 +377,10 @@ local spool (`~/.actualai/actual/otlp-logs-spool.jsonl`, readable only by the
 owner, bounded like the scope spool) and starts the same detached uploader,
 which sends them in batches for up to five seconds in all, retries included. A
 batch still being sent when the time runs out is dropped, and the batches it
-hasn't reached stay in the spool for its next run. When the endpoint is Actual's
-API, each spooled event also keeps a hash of the sign-in it was recorded under,
-which is never sent, and the uploader reads your sign-in from
+hasn't reached stay in the spool for its next run. When the endpoint is at
+the address `actual advisor` uses, each spooled event also keeps a hash of
+the sign-in it was recorded under, which is never sent, and the uploader
+reads your sign-in from
 `~/.actualai/actual/credentials.yaml` when it sends, renewing it first when it's
 within a minute of expiring, as `actual advisor` does. All three opt-outs below
 stop these events before anything is built: an opted-out run reads no ids or
@@ -410,8 +412,10 @@ A request to Actual's API without your sign-in names no account or
 organization, and Actual records its events as signed out. That happens when
 you recorded them while signed out or under another sign-in, when you've
 signed out by the time they're sent or your sign-in has expired and can't be
-renewed, and when Actual refused the token. The events still carry the fields
-in the table above, with the classes given there:
+renewed, when Actual refused the token, and when the endpoint isn't at the
+address `actual advisor` uses, as when the config file's `api_url` or
+`ACTUAL_API_URL` names another one. The events still carry the fields in the
+table above, with the classes given there:
 
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. The ADR references lead to the repository the
@@ -470,7 +474,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
-| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is Actual's API and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
