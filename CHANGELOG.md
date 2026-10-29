@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `rules brief --claude-hook` can send an OpenTelemetry log event, `actual.adr.detected`, the first time any of an ADR's rules enters an agent's context during a Claude Code session. Rule files without a v2 header send nothing. The event goes only to an output you configure: an OTLP/HTTP logs URL in `telemetry.otlp_logs_endpoint` or `ACTUAL_OTLP_LOGS_ENDPOINT` (HTTPS, or plain HTTP to localhost, with no redirects followed), or an absolute file path in `telemetry.otlp_file` or `ACTUAL_OTLP_FILE`. Both are unset by default, so nothing is built or sent. It names the ADR by its ids, which Actual can map back to your repository and its organization, and carries Claude Code's session and subagent ids and random event and run ids, but no rule text, plan text, file paths, raw account identifiers, identity hashes or installation id. Events wait in an owner-only local spool until the background uploader delivers them. `ACTUAL_NO_TELEMETRY`, `telemetry.enabled: false` and a build without the `telemetry` feature each stop the event before it's built. Whoever operates the endpoint decides how long it keeps the events; see `PRIVACY.md` for every attribute and its privacy class
 
+### Fixed
+- A config file the CLI can't read or parse turns telemetry off. Before, one invalid value anywhere in the file, such as `batch_size: lots`, sent `plan-check`, `impl-check`, `check-override` and `rules select` back to the default settings, which have telemetry on, so their events went out even when the same file set `telemetry.enabled: false`. The background uploader made the same fallback, and now sends nothing while the file can't load, leaving queued events in place. The ADR context event above follows the same rule. `ACTUAL_NO_TELEMETRY` was never affected
+
 ## [0.10.0] - 2026-10-28
 
 ### Added

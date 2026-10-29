@@ -502,10 +502,9 @@ fn emit_scope_telemetry(
 ) {
     use crate::telemetry::scope::{new_scope_run_id, ScopeMetrics};
 
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    if crate::telemetry::opt_out::is_disabled(&cfg) {
+    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
-    }
+    };
 
     let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let commit = crate::analysis::cache::get_git_head(root).unwrap_or_default();
@@ -1400,6 +1399,52 @@ mod tests {
         assert!(props.scope_run_id.is_some());
         assert!(props.rules_scanned.is_some());
         assert!(props.stage2_status.is_some());
+    }
+
+    /// How many scope events one `rules select` run hands off with `config` in
+    /// the config file, and whether it wrote a telemetry id.
+    #[cfg(feature = "telemetry")]
+    fn scope_events_under(config: &str) -> (usize, bool) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _tel_on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        std::fs::write(home.path().join("config.yaml"), config).unwrap();
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 1.0)
+        });
+        (events.len(), home.path().join("telemetry-id").exists())
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: no
+    /// event is built, and no telemetry id is written.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_sends_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            scope_events_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            (0, false)
+        );
+    }
+
+    /// The positive control: a config that loads sends the scope event.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_sends_when_the_config_loads() {
+        assert_eq!(
+            scope_events_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            (1, true)
+        );
     }
 
     /// Privacy regression at the command layer: an event built over a plan that

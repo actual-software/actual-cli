@@ -830,7 +830,7 @@ fn spool_governance_events(
 /// `violations` — never a rule's span, statement, or reason text; see
 /// `PRIVACY.md`.
 ///
-/// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
+/// Checks `opt_out::load_if_enabled` first, before any repo-identity hashing or
 /// `distinct_id()` — an opted-out user must not have a persistent telemetry
 /// id written to disk (or git subprocesses spawned) just because a check
 /// ran; the uploader's own opt-out check is too late for that, since by
@@ -848,10 +848,9 @@ pub(super) fn send_governance_events(
 ) {
     use crate::telemetry::plan_governance::EventContext;
 
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    if crate::telemetry::opt_out::is_disabled(&cfg) {
+    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
-    }
+    };
 
     let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
@@ -891,7 +890,7 @@ pub(super) fn send_governance_events(
 /// `governance_session::key`), validated against the rule corpus by
 /// [`validate_override_rules`] before this is ever called.
 ///
-/// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
+/// Checks `opt_out::load_if_enabled` first, before any repo-identity hashing or
 /// `distinct_id()` — see `send_governance_events`'s doc comment for why
 /// that ordering matters.
 #[cfg(feature = "telemetry")]
@@ -902,10 +901,9 @@ fn send_override_events(root: &Path, keys: &[String], reason: &str) {
     };
     use crate::telemetry::plan_governance::{distinct_id, reason_summary};
 
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    if crate::telemetry::opt_out::is_disabled(&cfg) {
+    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
-    }
+    };
 
     let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
@@ -4226,5 +4224,96 @@ pub(crate) mod tests {
         assert!(message.contains("were not found"), "message was: {message}");
         assert!(message.contains("doc::R-A-998"), "message was: {message}");
         assert!(message.contains("doc::R-A-999"), "message was: {message}");
+    }
+
+    /// How many events one plan-check run hands off with `config` in the
+    /// config file, and whether it wrote a telemetry id.
+    #[cfg(feature = "telemetry")]
+    fn governance_events_under(config: &str) -> (usize, bool) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _tel_on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        std::fs::write(home.path().join("config.yaml"), config).unwrap();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let events = with_captured_plan_governance_events(|| {
+            send_governance_events(
+                "plan-check",
+                repo.path(),
+                std::time::Instant::now(),
+                crate::api::types::PlanGovernanceDecision::Allow,
+                0,
+                &[],
+                None,
+            );
+        });
+        (events.len(), home.path().join("telemetry-id").exists())
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: no
+    /// event is built, and no telemetry id is written.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_send_governance_events_sends_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            governance_events_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            (0, false)
+        );
+    }
+
+    /// The positive control: a config that loads sends started and completed.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_send_governance_events_sends_when_the_config_loads() {
+        assert_eq!(
+            governance_events_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            (2, true)
+        );
+    }
+
+    /// How many events one `check-override` call hands off with `config` in
+    /// the config file, and whether it wrote a telemetry id.
+    #[cfg(feature = "telemetry")]
+    fn override_events_under(config: &str) -> (usize, bool) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _tel_on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        std::fs::write(home.path().join("config.yaml"), config).unwrap();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-config-1".to_string(),
+            rules: vec![governance_session::key("doc", "R-A-001")],
+            reason: "reviewed and accepted".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+
+        let events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+        (events.len(), home.path().join("telemetry-id").exists())
+    }
+
+    /// `telemetry.enabled: false` in a config file that doesn't load: the
+    /// command still succeeds, but no event is built and no telemetry id is
+    /// written.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_sends_nothing_when_the_config_cannot_load() {
+        assert_eq!(
+            override_events_under(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT),
+            (0, false)
+        );
+    }
+
+    /// The positive control: a config that loads sends one event per rule.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_sends_when_the_config_loads() {
+        assert_eq!(
+            override_events_under(crate::testutil::LOADABLE_TELEMETRY_ON),
+            (1, true)
+        );
     }
 }
