@@ -133,6 +133,8 @@ Each event includes a subset of these properties:
 | `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
 | `reason_len` | `check-override` only: the character length of the override reason |
 | `reason_hash` | `check-override` only: a one-way SHA-256 of the override reason (peppered server-side before PostHog) -- lets identical reasons group without exposing the text |
+| `override_source` | `check-override` only: how the override was issued -- `terminal` or `session_prompt` (typed as `/override` in the Claude Code session) |
+| `override_gate` | `check-override` only: which gate had denied the rule -- `plan`, `impl`, or `both` (absent if neither had) |
 | `scope_run_id` | `rules select` only: a random per-run correlation id (not derived from any data) |
 | `rules_scanned` / `stage1_candidates` / `selected` | `rules select` only: counts of rules scanned, stage-1 candidates, and rules finally selected -- numbers only |
 | `stage2_invoked` / `stage2_status` | `rules select` only: whether the LLM rank ran, and its status/degradation (`applied`/`not-needed`/`unavailable`/…) |
@@ -191,7 +193,8 @@ known repository.
 real check's completion so overrides are cleanly separable and override rate has
 an unambiguous denominator. **The override reason is customer free text and is
 never sent raw** -- only `reason_category`, `reason_len`, and a one-way
-`reason_hash` (see above) leave the machine.
+`reason_hash` (see above) leave the machine. A reason is optional; without
+one, `reason_category` is `empty` and no hash is sent.
 
 Each event also carries a `distinct_id`: a random, opaque identifier
 generated once on first use and stored locally

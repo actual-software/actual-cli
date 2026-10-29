@@ -200,10 +200,44 @@ pub struct TurnStart {
 pub struct Override {
     /// `"{doc_slug}::{rule_id}"`.
     pub key: String,
-    pub reason: String,
+    /// Optional: an override is a decision, and a stated reason is
+    /// encouraged but not required. Files written before reasons became
+    /// optional always carry a string, which still loads.
+    #[serde(default)]
+    pub reason: Option<String>,
     pub at: DateTime<Utc>,
     /// The round this override was recorded during, for the audit trail.
     pub round: u32,
+    /// How the override was issued. Defaults to [`OverrideSource::Terminal`]
+    /// for entries written before provenance was recorded.
+    #[serde(default)]
+    pub source: OverrideSource,
+    /// Which gate(s) had denied the rule when it was overridden: `"plan"`,
+    /// `"impl"`, or `"both"`. `None` when neither loop had denied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
+}
+
+/// How an explicit override reached the CLI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverrideSource {
+    /// A human ran `actual check-override` from an ordinary terminal.
+    #[default]
+    Terminal,
+    /// A human typed `/override` as a prompt in the Claude Code session and
+    /// the `UserPromptSubmit` hook recorded it. The agent cannot produce a
+    /// `UserPromptSubmit` event, so this is still a human decision.
+    SessionPrompt,
+}
+
+impl OverrideSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverrideSource::Terminal => "terminal",
+            OverrideSource::SessionPrompt => "session_prompt",
+        }
+    }
 }
 
 impl GovernanceSession {
@@ -453,9 +487,16 @@ struct AuditEntry {
     /// [`AuditKind::RoundLimit`]. Empty for [`AuditKind::PartialCoverage`],
     /// which is not about any one rule — see `judged`/`total` instead.
     key: String,
-    reason: String,
+    /// `None` for an [`AuditKind::Override`] issued without a reason.
+    reason: Option<String>,
     round: u32,
     kind: AuditKind,
+    /// Provenance of an [`AuditKind::Override`]; absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<OverrideSource>,
+    /// Gate(s) that had denied the rule; see [`Override::gate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate: Option<String>,
     /// How many candidate rules were actually judged this round. Present
     /// only for [`AuditKind::PartialCoverage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,35 +528,73 @@ fn append_audit(entry: &AuditEntry) {
     let _ = crate::config::paths::append_secure(&path, line.as_bytes());
 }
 
-/// Record an explicit, human-issued override: mark `keys` settled for
-/// `(session_id, rules_dir)` and append one audit-log entry per key. Loads-
-/// and-stores the session itself, so the caller does not need to separately
-/// `load`/`store`.
+/// Record an explicit, human-issued override from a terminal. See
+/// [`record_override_with`]. Test convenience; production callers pass a source.
+#[cfg(test)]
 pub fn record_override(
     session_id: &str,
     rules_dir: &std::path::Path,
     keys: &[String],
     reason: &str,
 ) {
+    let reason = Some(reason).filter(|r| !r.trim().is_empty());
+    record_override_with(
+        session_id,
+        rules_dir,
+        keys,
+        reason,
+        OverrideSource::Terminal,
+    );
+}
+
+/// Which gate(s) have denied `key` in `session`: `"plan"`, `"impl"`, `"both"`.
+pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<String> {
+    let plan = session.plan.deny_counts.contains_key(key);
+    let diff = session.diff.deny_counts.contains_key(key);
+    match (plan, diff) {
+        (true, true) => Some("both".to_string()),
+        (true, false) => Some("plan".to_string()),
+        (false, true) => Some("impl".to_string()),
+        (false, false) => None,
+    }
+}
+
+/// Record an explicit, human-issued override: mark `keys` settled for
+/// `(session_id, rules_dir)` and append one audit-log entry per key, noting
+/// how it was issued (`source`) and which gate had denied the rule. Loads-
+/// and-stores the session itself, so the caller does not need to separately
+/// `load`/`store`.
+pub fn record_override_with(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    keys: &[String],
+    reason: Option<&str>,
+    source: OverrideSource,
+) {
     let mut session = load(session_id, rules_dir);
     let at = Utc::now();
     let rules_dir_str = rules_dir.display().to_string();
     let round = session.effort_rounds();
     for key in keys {
+        let gate = denying_gate(&session, key);
         session.overrides.push(Override {
             key: key.clone(),
-            reason: reason.to_string(),
+            reason: reason.map(str::to_string),
             at,
             round,
+            source,
+            gate: gate.clone(),
         });
         append_audit(&AuditEntry {
             at,
             session_id: session_id.to_string(),
             rules_dir: rules_dir_str.clone(),
             key: key.clone(),
-            reason: reason.to_string(),
+            reason: reason.map(str::to_string),
             round,
             kind: AuditKind::Override,
+            source: Some(source),
+            gate,
             judged: None,
             total: None,
         });
@@ -541,9 +620,11 @@ pub fn record_round_limit(
             session_id: session_id.to_string(),
             rules_dir: rules_dir_str.clone(),
             key: key.clone(),
-            reason: reason.to_string(),
+            reason: Some(reason.to_string()),
             round,
             kind: AuditKind::RoundLimit,
+            source: None,
+            gate: None,
             judged: None,
             total: None,
         });
@@ -571,12 +652,14 @@ pub fn record_partial_coverage(
         session_id: session_id.to_string(),
         rules_dir: rules_dir.display().to_string(),
         key: String::new(),
-        reason: format!(
+        reason: Some(format!(
             "only {judged} of {total} applicable rules were judged this round; the rest were \
              not evaluated"
-        ),
+        )),
         round,
         kind: AuditKind::PartialCoverage,
+        source: None,
+        gate: None,
         judged: Some(judged),
         total: Some(total),
     });
@@ -808,9 +891,11 @@ mod tests {
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
             key: key("doc", "R-over"),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: Utc::now(),
             round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
         });
 
         assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v1"));
@@ -836,9 +921,11 @@ mod tests {
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
             key: key("doc", "R-over"),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: Utc::now(),
             round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
         });
 
         assert!(!session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v2"));
@@ -1006,9 +1093,11 @@ mod tests {
 
         session.overrides.push(Override {
             key: key.clone(),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: Utc::now(),
             round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
         });
         assert!(session.excludes(ArtifactKind::Plan, &key, "other-plan"));
         assert!(session.excludes(ArtifactKind::Diff, &key, "other-diff"));

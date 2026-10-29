@@ -1389,8 +1389,12 @@ pub struct PlanCheckOverrideArgs {
     /// directory, same as `plan-check` itself) naming *which* governed
     /// context to override. Run this from the same repo the denial came
     /// from and the defaults already match.
-    #[arg(long, value_name = "SESSION_ID")]
-    pub session: String,
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        required_unless_present = "claude_hook"
+    )]
+    pub session: Option<String>,
 
     /// A rule to override, as `<doc-slug>::<rule-id>` (also as printed in the
     /// deny message's suggested override command). Repeatable — one override
@@ -1399,16 +1403,26 @@ pub struct PlanCheckOverrideArgs {
     #[arg(
         long = "rule",
         value_name = "DOC_SLUG::RULE_ID",
-        required = true,
+        required_unless_present = "claude_hook",
         num_args = 1..,
         value_parser = parse_rule_key
     )]
     pub rules: Vec<String>,
 
-    /// Why this rule is being overridden. Required: an override with no
-    /// stated reason defeats the point of recording one.
+    /// Why this rule is being overridden. Optional but encouraged; an
+    /// override without one is still recorded (with its source and the gate
+    /// that denied it).
     #[arg(long, value_name = "TEXT")]
-    pub reason: String,
+    pub reason: Option<String>,
+
+    /// Hook mode, for the `UserPromptSubmit` hook: read the hook envelope on
+    /// stdin and, if the user's prompt is `/override <rule-id|all> [reason]`,
+    /// record that override. Takes no other input, does not require a
+    /// terminal (the prompt arriving as a `UserPromptSubmit` event is the
+    /// evidence of a human — an agent cannot emit one), and never fails: an
+    /// unrecognized or unresolvable prompt records nothing.
+    #[arg(long)]
+    pub claude_hook: bool,
 
     /// Repository root to resolve the rules directory against. Defaults to
     /// the current directory — run this from the repo the denial came from,

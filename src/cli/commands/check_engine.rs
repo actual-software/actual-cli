@@ -895,7 +895,13 @@ pub(super) fn send_governance_events(
 /// `distinct_id()` — see `send_governance_events`'s doc comment for why
 /// that ordering matters.
 #[cfg(feature = "telemetry")]
-fn send_override_events(root: &Path, keys: &[String], reason: &str) {
+fn send_override_events(
+    root: &Path,
+    keys: &[String],
+    reason: &str,
+    source: governance_session::OverrideSource,
+    gates: &[Option<String>],
+) {
     use crate::api::types::{
         PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
         PlanGovernanceEventProperties,
@@ -920,7 +926,8 @@ fn send_override_events(root: &Path, keys: &[String], reason: &str) {
 
     let events: Vec<PlanGovernanceEvent> = keys
         .iter()
-        .map(|key| {
+        .enumerate()
+        .map(|(i, key)| {
             let (rule_source, rule_id) = key.split_once("::").unwrap_or((key.as_str(), ""));
             let mut properties = PlanGovernanceEventProperties {
                 cli_version: Some(cli_version.clone()),
@@ -934,6 +941,8 @@ fn send_override_events(root: &Path, keys: &[String], reason: &str) {
                 reason_category: Some(reason_category),
                 reason_len: Some(reason_len),
                 reason_hash: reason_hash.clone(),
+                override_source: Some(source.as_str().to_string()),
+                override_gate: gates.get(i).cloned().flatten(),
                 ..Default::default()
             };
             identity.apply_to(&mut properties);
@@ -1060,6 +1069,14 @@ fn running_under_claude_code() -> bool {
 /// that does not depend on the real terminal lives in [`exec_override_impl`],
 /// which is also exercised directly.
 pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
+    if args.claude_hook {
+        let mut raw = String::new();
+        let _ = std::io::stdin().read_to_string(&mut raw);
+        if let Some(out) = exec_override_hook_with(args, &raw) {
+            println!("{out}");
+        }
+        return Ok(());
+    }
     // Deliberately a single-line if/else expression, not an early-return
     // guard clause: no test anywhere (in-process or subprocess) can ever
     // give this process a real terminal, so the success branch here can
@@ -1144,6 +1161,178 @@ fn validate_override_rules(rules_dir: &Path, keys: &[String]) -> Result<(), Actu
     )))
 }
 
+/// The gate that had denied each of `keys` (see
+/// [`governance_session::denying_gate`]), read before the override is recorded.
+fn override_gates(session_id: &str, rules_dir: &Path, keys: &[String]) -> Vec<Option<String>> {
+    let session = governance_session::load(session_id, rules_dir);
+    keys.iter()
+        .map(|k| governance_session::denying_gate(&session, k))
+        .collect()
+}
+
+/// Every `<doc-slug>::<rule-id>` the corpus under `rules_dir` defines.
+fn corpus_rule_keys(rules_dir: &Path) -> Result<Vec<String>, ActualError> {
+    let report = crate::rules::parse_rule_sources(crate::rules::read_rule_sources_in(rules_dir)?);
+    Ok(report
+        .documents
+        .iter()
+        .flat_map(|doc| {
+            let slug = doc.slug().unwrap_or("<unnamed>").to_string();
+            doc.rules
+                .iter()
+                .map(move |rule| governance_session::key(&slug, &rule.id))
+        })
+        .collect())
+}
+
+/// What a user-typed `/override` prompt asked for.
+#[derive(Debug, PartialEq, Eq)]
+struct OverridePrompt {
+    /// A bare rule id, a full `<doc-slug>::<rule-id>`, or `all`.
+    target: String,
+    reason: Option<String>,
+}
+
+/// Parse `/override <rule-id|all> [reason...]` (also the plugin-namespaced
+/// `/<plugin>:override`). `None` when the prompt is not an override command at
+/// all; `Some` with an empty `target` when it is but names nothing.
+fn parse_override_prompt(prompt: &str) -> Option<OverridePrompt> {
+    let trimmed = prompt.trim();
+    let (command, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((c, r)) => (c, r.trim()),
+        None => (trimmed, ""),
+    };
+    let name = command.strip_prefix('/')?;
+    if name != "override" && !name.ends_with(":override") {
+        return None;
+    }
+    let (target, reason) = match rest.split_once(char::is_whitespace) {
+        Some((t, r)) => (t, r.trim()),
+        None => (rest, ""),
+    };
+    Some(OverridePrompt {
+        target: target.to_string(),
+        reason: Some(reason.to_string()).filter(|r| !r.is_empty()),
+    })
+}
+
+/// Resolve an `/override` target to full rule keys: `all` is every rule either
+/// gate has denied in this session that is not already overridden; otherwise
+/// the target is matched (exactly) against denied rules first, then the whole
+/// corpus, by bare rule id or full key. Ambiguity or no match is an `Err`
+/// message for the user — never a guess.
+fn resolve_override_target(
+    session: &GovernanceSession,
+    rules_dir: &Path,
+    target: &str,
+) -> Result<Vec<String>, String> {
+    let mut denied: Vec<String> = session
+        .plan
+        .deny_counts
+        .keys()
+        .chain(session.diff.deny_counts.keys())
+        .filter(|k| !session.overrides.iter().any(|o| &o.key == *k))
+        .cloned()
+        .collect();
+    denied.sort();
+    denied.dedup();
+    if target.eq_ignore_ascii_case("all") {
+        return if denied.is_empty() {
+            Err("no denied rules to override in this session".to_string())
+        } else {
+            Ok(denied)
+        };
+    }
+    let matches = |k: &String| k == target || k.rsplit("::").next() == Some(target);
+    let hits: Vec<String> = denied.iter().filter(|k| matches(k)).cloned().collect();
+    let hits = if hits.is_empty() {
+        let mut all = corpus_rule_keys(rules_dir).map_err(|e| e.to_string())?;
+        all.sort();
+        all.dedup();
+        all.into_iter().filter(|k| matches(k)).collect()
+    } else {
+        hits
+    };
+    match hits.len() {
+        0 => Err(format!("no rule matching '{target}' was found")),
+        1 => Ok(hits),
+        _ => Err(format!(
+            "'{target}' is ambiguous ({}); use the full <doc-slug>::<rule-id>",
+            hits.join(", ")
+        )),
+    }
+}
+
+/// `check-override --claude-hook`: the testable core. Returns the hook's JSON
+/// stdout, or `None` to emit nothing. Acts only on a `UserPromptSubmit`
+/// envelope carrying a `session_id` and an `/override` prompt — the one event
+/// type an agent cannot produce. Any other input (including every
+/// `PreToolUse`/`Stop` shaped envelope) records nothing and prints nothing.
+fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<String> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct Env {
+        session_id: Option<String>,
+        hook_event_name: Option<String>,
+        prompt: Option<String>,
+    }
+    let env: Env = serde_json::from_str(raw).ok()?;
+    if env.hook_event_name.as_deref() != Some("UserPromptSubmit") {
+        return None;
+    }
+    let session_id = env.session_id.filter(|s| !s.is_empty())?;
+    let parsed = parse_override_prompt(env.prompt.as_deref()?)?;
+    let say = |msg: String| {
+        Some(
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": msg,
+            }})
+            .to_string(),
+        )
+    };
+    if parsed.target.is_empty() {
+        return say(
+            "The user typed /override without naming a rule. Nothing was overridden. Tell them \
+             the syntax: /override <rule-id|all> [reason]."
+                .to_string(),
+        );
+    }
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    let session = governance_session::load(&session_id, &rules_dir);
+    let keys = match resolve_override_target(&session, &rules_dir, &parsed.target) {
+        Ok(keys) => keys,
+        Err(msg) => {
+            return say(format!(
+                "The user asked to override '{}' but nothing was overridden: {msg}.",
+                parsed.target
+            ))
+        }
+    };
+    if let Err(e) = validate_override_rules(&rules_dir, &keys) {
+        return say(format!("Nothing was overridden: {e}"));
+    }
+    let source = governance_session::OverrideSource::SessionPrompt;
+    let reason = parsed.reason.as_deref();
+    let gates = override_gates(&session_id, &rules_dir, &keys);
+    governance_session::record_override_with(&session_id, &rules_dir, &keys, reason, source);
+    #[cfg(feature = "telemetry")]
+    send_override_events(&root, &keys, reason.unwrap_or(""), source, &gates);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = gates;
+    say(format!(
+        "The user overrode {} via /override (reason: {}). These rules will no longer block \
+         plan-check or impl-check this session. Retry the blocked action. Do not run or type \
+         /override yourself.",
+        keys.join(", "),
+        reason.unwrap_or("none given"),
+    ))
+}
+
 /// The testable core of `actual check-override`: a human explicitly
 /// clearing one or more rules for a specific session. Validates every named
 /// rule against the corpus first (see [`validate_override_rules`]) and
@@ -1161,14 +1350,22 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     validate_override_rules(&rules_dir, &args.rules)?;
-    governance_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
+    let session_id = args.session.as_deref().ok_or_else(|| {
+        ActualError::ConfigError("--session is required unless --claude-hook is given".to_string())
+    })?;
+    let reason = args.reason.as_deref().filter(|r| !r.trim().is_empty());
+    let source = governance_session::OverrideSource::Terminal;
+    let gates = override_gates(session_id, &rules_dir, &args.rules);
+    governance_session::record_override_with(session_id, &rules_dir, &args.rules, reason, source);
     #[cfg(feature = "telemetry")]
-    send_override_events(&root, &args.rules, &args.reason);
+    send_override_events(&root, &args.rules, reason.unwrap_or(""), source, &gates);
+    #[cfg(not(feature = "telemetry"))]
+    let _ = gates;
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
-    panel = panel.kv("Session", &args.session);
+    panel = panel.kv("Session", session_id);
     panel = panel.kv("Rules dir", &rules_dir.display().to_string());
-    panel = panel.kv("Reason", &args.reason);
+    panel = panel.kv("Reason", reason.unwrap_or("(none given)"));
     for rule in &args.rules {
         panel = panel.kv("Rule", rule);
     }
@@ -1259,11 +1456,10 @@ pub(super) fn hook_deny_reason(
     }
     if let Some(session_id) = session_id {
         lines.push(format!(
-            "{} Session: {session_id}. A human \
-             reviewing this — not the agent — can override a specific rule explicitly by \
-             running `actual check-override` from an interactive terminal (see `actual \
-             check-override --help` for the exact flags); that command refuses to run \
-             non-interactively.",
+            "{} Session: {session_id}. Only the user can override a rule — the agent must not \
+             try. Tell the user they can type `/override <rule-id> [reason]` (or `/override \
+             all`) as a message in this session, or run `actual check-override` from an \
+             ordinary terminal (see `actual check-override --help`).",
             copy.revised
         ));
     }
@@ -1600,7 +1796,9 @@ pub(super) fn override_reminder(session: &GovernanceSession) -> Option<String> {
         .map(|o| {
             format!(
                 "{}: manually overridden ({}) at {}; not re-checked.",
-                o.key, o.reason, o.at
+                o.key,
+                o.reason.as_deref().unwrap_or("no reason given"),
+                o.at
             )
         })
         .collect();
@@ -3336,15 +3534,19 @@ pub(crate) mod tests {
         let mut session = GovernanceSession::default();
         session.overrides.push(governance_session::Override {
             key: governance_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: chrono::Utc::now(),
             round: 1,
+            source: Default::default(),
+            gate: None,
         });
         session.overrides.push(governance_session::Override {
             key: governance_session::key("cross-cutting-token-signing-1c57", "R-A-002"),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: chrono::Utc::now(),
             round: 1,
+            source: Default::default(),
+            gate: None,
         });
 
         let outcome = run_pipeline(
@@ -3374,9 +3576,11 @@ pub(crate) mod tests {
         let mut session = GovernanceSession::default();
         session.overrides.push(governance_session::Override {
             key: governance_session::key("doc", "R-001"),
-            reason: "reviewed and accepted".to_string(),
+            reason: Some("reviewed and accepted".to_string()),
             at: chrono::Utc::now(),
             round: 1,
+            source: Default::default(),
+            gate: None,
         });
         let reminder = override_reminder(&session).unwrap();
         assert!(reminder.contains("doc::R-001"));
@@ -3402,9 +3606,11 @@ pub(crate) mod tests {
         let mut session = GovernanceSession::default();
         session.overrides.push(governance_session::Override {
             key: governance_session::key("doc", "R-002"),
-            reason: "reviewed and accepted".to_string(),
+            reason: Some("reviewed and accepted".to_string()),
             at: chrono::Utc::now(),
             round: 1,
+            source: Default::default(),
+            gate: None,
         });
         let message = with_override_reminder("DECISION R-A-001: conflicts".to_string(), &session);
         assert!(message.starts_with("DECISION R-A-001: conflicts\n"));
@@ -3677,18 +3883,166 @@ pub(crate) mod tests {
         let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-1".to_string(),
+            session: Some("sess-cli-1".to_string()),
             rules: vec![governance_session::key("doc", "R-A-001")],
-            reason: "reviewed and accepted".to_string(),
+            reason: Some("reviewed and accepted".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
         assert!(exec_override_impl(&args).is_ok());
 
         let rules_dir = crate::rules::rules_dir(repo.path());
         let session = governance_session::load("sess-cli-1", &rules_dir);
         assert_eq!(session.overrides.len(), 1);
-        assert_eq!(session.overrides[0].reason, "reviewed and accepted");
+        assert_eq!(
+            session.overrides[0].reason.as_deref(),
+            Some("reviewed and accepted")
+        );
+    }
+
+    fn hook_args(repo: &Path) -> PlanCheckOverrideArgs {
+        PlanCheckOverrideArgs {
+            session: None,
+            rules: vec![],
+            reason: None,
+            repo: Some(repo.to_path_buf()),
+            rules_dir: None,
+            claude_hook: true,
+        }
+    }
+
+    fn prompt_env(event: &str, session: &str, prompt: &str) -> String {
+        serde_json::json!({"hook_event_name": event, "session_id": session, "prompt": prompt})
+            .to_string()
+    }
+
+    #[test]
+    fn test_parse_override_prompt() {
+        assert_eq!(parse_override_prompt("hello"), None);
+        assert_eq!(parse_override_prompt("/overrides R-1"), None);
+        assert_eq!(
+            parse_override_prompt("/override R-A-001 it is fine, really"),
+            Some(OverridePrompt {
+                target: "R-A-001".into(),
+                reason: Some("it is fine, really".into())
+            })
+        );
+        assert_eq!(
+            parse_override_prompt("  /actual:override all "),
+            Some(OverridePrompt {
+                target: "all".into(),
+                reason: None
+            })
+        );
+        assert_eq!(
+            parse_override_prompt("/override").unwrap().target,
+            String::new()
+        );
+    }
+
+    /// The in-session path: a `UserPromptSubmit` `/override` for a rule the
+    /// gate denied is recorded without a terminal or a reason, tagged
+    /// `session_prompt` with the denying gate, in both session and audit log.
+    #[test]
+    fn test_override_hook_records_denied_rule_without_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let k = governance_session::key("doc", "R-A-001");
+        let mut session = governance_session::load("sess-h1", &rules_dir);
+        session.plan.record_denial(&k);
+        governance_session::store("sess-h1", &rules_dir, &session);
+
+        let out = exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-h1", "/override R-A-001"),
+        )
+        .expect("hook output");
+        assert!(
+            out.contains("UserPromptSubmit") && out.contains(&k),
+            "{out}"
+        );
+
+        let session = governance_session::load("sess-h1", &rules_dir);
+        assert_eq!(session.overrides.len(), 1);
+        assert_eq!(session.overrides[0].reason, None);
+        assert_eq!(
+            session.overrides[0].source,
+            governance_session::OverrideSource::SessionPrompt
+        );
+        assert_eq!(session.overrides[0].gate.as_deref(), Some("plan"));
+        let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap()).unwrap();
+        assert!(log.contains("\"source\":\"session_prompt\""), "{log}");
+        assert!(log.contains("\"gate\":\"plan\""), "{log}");
+        assert!(log.contains("\"reason\":null"), "{log}");
+    }
+
+    #[test]
+    fn test_override_hook_all_and_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let mut session = governance_session::load("sess-h2", &rules_dir);
+        session
+            .plan
+            .record_denial(&governance_session::key("doc", "R-A-001"));
+        session
+            .diff
+            .record_denial(&governance_session::key("doc", "R-A-002"));
+        governance_session::store("sess-h2", &rules_dir, &session);
+
+        exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-h2", "/override all team approved"),
+        )
+        .unwrap();
+        let session = governance_session::load("sess-h2", &rules_dir);
+        assert_eq!(session.overrides.len(), 2);
+        assert!(session
+            .overrides
+            .iter()
+            .all(|o| o.reason.as_deref() == Some("team approved")));
+    }
+
+    /// Anything but a `UserPromptSubmit` `/override` records nothing --
+    /// specifically the tool-event shapes an agent's own actions produce.
+    #[test]
+    fn test_override_hook_ignores_non_prompt_events_and_unknown_rules() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let args = hook_args(repo.path());
+        for event in ["PreToolUse", "Stop", "PostToolUse"] {
+            assert_eq!(
+                exec_override_hook_with(&args, &prompt_env(event, "s", "/override R-A-001")),
+                None
+            );
+        }
+        assert_eq!(exec_override_hook_with(&args, "not json"), None);
+        assert_eq!(
+            exec_override_hook_with(&args, &prompt_env("UserPromptSubmit", "s", "just chatting")),
+            None
+        );
+        let out = exec_override_hook_with(
+            &args,
+            &prompt_env("UserPromptSubmit", "s", "/override NOPE-1"),
+        )
+        .unwrap();
+        assert!(out.contains("nothing was overridden"), "{out}");
+        let out =
+            exec_override_hook_with(&args, &prompt_env("UserPromptSubmit", "s", "/override all"))
+                .unwrap();
+        assert!(out.contains("no denied rules"), "{out}");
+        assert!(governance_session::load("s", &rules_dir)
+            .overrides
+            .is_empty());
     }
 
     /// AK-678: an override emits one `check_completed`-shaped event per
@@ -3705,14 +4059,15 @@ pub(crate) mod tests {
         let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-telemetry-1".to_string(),
+            session: Some("sess-cli-telemetry-1".to_string()),
             rules: vec![
                 governance_session::key("doc", "R-A-001"),
                 governance_session::key("doc", "R-A-002"),
             ],
-            reason: "reviewed and accepted".to_string(),
+            reason: Some("reviewed and accepted".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
 
         let events =
@@ -3789,11 +4144,12 @@ pub(crate) mod tests {
         let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-auth-override-1".to_string(),
+            session: Some("sess-auth-override-1".to_string()),
             rules: vec![governance_session::key("doc", "R-A-001")],
-            reason: "false positive: validated in middleware".to_string(),
+            reason: Some("false positive: validated in middleware".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
 
         let events =
@@ -3941,11 +4297,12 @@ pub(crate) mod tests {
             .map(|n| governance_session::key("doc", &format!("R-A-{n:03}")))
             .collect();
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-chunking-1".to_string(),
+            session: Some("sess-cli-chunking-1".to_string()),
             rules,
-            reason: "bulk reviewed".to_string(),
+            reason: Some("bulk reviewed".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
 
         let events =
@@ -3978,11 +4335,12 @@ pub(crate) mod tests {
         let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-opt-out-1".to_string(),
+            session: Some("sess-cli-opt-out-1".to_string()),
             rules: vec![governance_session::key("doc", "R-A-001")],
-            reason: "reviewed and accepted".to_string(),
+            reason: Some("reviewed and accepted".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
 
         let events =
@@ -4010,11 +4368,12 @@ pub(crate) mod tests {
         std::fs::write(rules_dir.path().join("doc.md"), OAUTH_DOC).unwrap();
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-2".to_string(),
+            session: Some("sess-cli-2".to_string()),
             rules: vec![governance_session::key("doc", "R-A-001")],
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             repo: None,
             rules_dir: Some(rules_dir.path().to_path_buf()),
+            claude_hook: false,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -4034,11 +4393,12 @@ pub(crate) mod tests {
         let rules_dir = crate::rules::rules_dir(repo.path());
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-unknown-rule".to_string(),
+            session: Some("sess-cli-unknown-rule".to_string()),
             rules: vec![governance_session::key("doc", "R-A-999")],
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("R-A-999"));
@@ -4063,11 +4423,12 @@ pub(crate) mod tests {
         let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-unknown-doc".to_string(),
+            session: Some("sess-cli-unknown-doc".to_string()),
             rules: vec![governance_session::key("no-such-doc", "R-A-001")],
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("no-such-doc::R-A-001"));
@@ -4084,11 +4445,12 @@ pub(crate) mod tests {
         let missing = tempdir().unwrap().path().join("does-not-exist");
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-missing-dir".to_string(),
+            session: Some("sess-cli-missing-dir".to_string()),
             rules: vec![governance_session::key("doc", "R-A-001")],
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             repo: None,
             rules_dir: Some(missing),
+            claude_hook: false,
         };
         assert!(exec_override_impl(&args).is_err());
     }
@@ -4106,14 +4468,15 @@ pub(crate) mod tests {
         let rules_dir = crate::rules::rules_dir(repo.path());
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-partial".to_string(),
+            session: Some("sess-cli-partial".to_string()),
             rules: vec![
                 governance_session::key("doc", "R-A-001"),
                 governance_session::key("doc", "R-A-999"),
             ],
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
         assert!(exec_override_impl(&args).is_err());
         assert_eq!(
@@ -4134,14 +4497,15 @@ pub(crate) mod tests {
         let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
-            session: "sess-cli-multi-unknown".to_string(),
+            session: Some("sess-cli-multi-unknown".to_string()),
             rules: vec![
                 governance_session::key("doc", "R-A-998"),
                 governance_session::key("doc", "R-A-999"),
             ],
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
+            claude_hook: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         let message = err.to_string();
