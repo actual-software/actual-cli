@@ -402,9 +402,9 @@ identity-linked data:
   third-party analytics service.
 - **Purpose:** to tie these events to an organization so Actual can measure and
   improve the CLI's ADR guidance and checks for each customer.
-- **Retention & deletion:** Actual keeps them for 365 days and then deletes
-  them. Before then, they're deleted, or the link severed, when the organization
-  is deleted or on a verified deletion request for it.
+- **Retention & deletion:** they're kept for as long as needed to provide
+  product analytics for the organization, and are deleted, or the link severed,
+  when the organization is deleted or on a verified deletion request for it.
 
 #### Signed-out events sent to Actual's API
 
@@ -425,8 +425,9 @@ table above, with the classes given there:
   service.
 - **Purpose:** to measure and improve the CLI's ADR guidance and checks across
   everyone who uses it.
-- **Retention & deletion:** Actual keeps them for 365 days and then deletes
-  them. A deletion request doesn't remove them sooner.
+- **Retention & deletion:** they're kept for as long as needed for that purpose.
+  They aren't stored with an account or organization, so a deletion request
+  can't remove them.
 
 ### Project metadata (sent to the Actual API)
 
@@ -532,12 +533,12 @@ all.
 
 Signed-in OpenTelemetry events sent to Actual's API are covered above under
 "Signed-in events sent to Actual's API": they're held only by Actual's
-authorized backend systems, are used solely for product analytics, are kept for
-365 days and then deleted, and are deleted or de-linked sooner when the
-organization is deleted or on a verified deletion request for it. Signed-out
-ones are covered under "Signed-out events sent to Actual's API": Actual keeps
-them for 365 days and then deletes them. Opting out of telemetry stops both
-before they're built.
+authorized backend systems, are used solely for product analytics, and are
+deleted or de-linked when the organization is deleted or on a verified deletion
+request for it. Signed-out ones are covered under "Signed-out events sent to
+Actual's API": they aren't stored with an account or organization, so a deletion
+request can't remove them. Opting out of telemetry stops both before they're
+built.
 
 ## Reviewing changes to telemetry identity
 
