@@ -111,7 +111,7 @@ pub struct EventContext {
     pub repo_url_hash: Option<String>,
     /// Identity + timestamp envelope: hashed user/org ids when logged in, a
     /// synthetic fallback org id when logged out, and a hashed repo id when a
-    /// sticky-scope pin persists. Never carries raw identifiers.
+    /// repository pin persists. Never carries raw identifiers.
     pub identity: IdentityEnvelope,
     /// `--claude-hook` revision-loop position `(round_index, round_total)`, set
     /// only on the hook path; `None` for direct/CLI runs, which have no loop.
