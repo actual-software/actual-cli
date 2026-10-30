@@ -389,7 +389,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     } else {
         // On a `codex-cli` retry this row is the only sign the prompts changed route.
         if let Some(rd) = runner_display {
-            pipeline.println_if_tui(&format!("  {:<9} {}", "Runner", rd.runner_name));
+            pipeline.set_prompt_row(format!("  {:<9} {}", "Runner", rd.runner_name));
         }
         confirm_or_change_loop(&mut analysis, &mut pipeline, term)?;
     }
