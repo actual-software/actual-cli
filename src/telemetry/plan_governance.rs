@@ -109,8 +109,9 @@ pub struct EventContext {
     pub command: String,
     pub repo_hash: Option<String>,
     pub repo_url_hash: Option<String>,
-    /// Identity + timestamp envelope (hashed user/org/repo ids, or a synthetic
-    /// fallback org id when logged out). Never carries raw identifiers.
+    /// Identity + timestamp envelope: hashed user/org ids when logged in, a
+    /// synthetic fallback org id when logged out, and a hashed repo id when a
+    /// sticky-scope pin persists. Never carries raw identifiers.
     pub identity: IdentityEnvelope,
     /// `--claude-hook` revision-loop position `(round_index, round_total)`, set
     /// only on the hook path; `None` for direct/CLI runs, which have no loop.
@@ -139,7 +140,8 @@ impl EventContext {
         self
     }
 
-    /// Attach the hashed identity envelope (user/org/repo hashes or fallback org).
+    /// Attach the hashed identity envelope (user/org hashes or fallback org,
+    /// plus the repo hash when known).
     pub fn with_identity(mut self, identity: IdentityEnvelope) -> Self {
         self.identity = identity;
         self

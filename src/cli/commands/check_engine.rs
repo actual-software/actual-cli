@@ -787,9 +787,9 @@ fn repo_identity_hashes(root: &Path) -> (String, String) {
 ///
 /// Reads only local sources — stored OAuth credentials and a config sticky-scope
 /// pin — so it never adds a network call on the hook path. When logged in, the
-/// user/org (and repo, if a sticky pin records the connected-repo id) ids are
-/// hashed; otherwise only a synthetic fallback org id (from the repo slug) is set.
-/// Never carries a raw identifier.
+/// user/org ids are hashed; otherwise a synthetic fallback org id (from the repo
+/// slug) is set. Either way the connected-repo id is hashed if a sticky pin
+/// records it. Never carries a raw identifier.
 #[cfg(feature = "telemetry")]
 fn identity_envelope(
     cfg: &crate::config::types::Config,
