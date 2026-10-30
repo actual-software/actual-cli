@@ -206,7 +206,7 @@ on first run. All fields are optional — missing fields use sensible defaults.
 | `max_per_framework` | integer | — | Max ADRs per framework |
 | `update_check.enabled` | boolean | `true` | Daily update notice and `actual version --check` (see [UPDATE_CHECK.md](UPDATE_CHECK.md)) |
 | `telemetry.enabled` | boolean | `true` | Set to `false` to stop every telemetry event (see [PRIVACY.md](../PRIVACY.md)) |
-| `telemetry.otlp_logs_endpoint` | string | `/v1/logs` on `api_url` | OTLP/HTTP logs URL for ADR context, use, breach and override events, and check events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only. Unset, release builds send to the default and debug builds send nothing; the telemetry opt-outs stop both. When it is at the address `actual advisor` uses (`ACTUAL_API_URL` when it's set, otherwise `https://api-service.api.prod.actual.ai`) and you're signed in, requests carry your sign-in (see [PRIVACY.md](../PRIVACY.md)) |
+| `telemetry.otlp_logs_endpoint` | string | `/v1/logs` on `api_url` | OTLP/HTTP logs URL for ADR context, use, breach and override events, and check events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only. Unset, release builds send to the default and debug builds send nothing; turning telemetry off stops both. When it is at the address `actual advisor` uses (`ACTUAL_API_URL` when it's set, otherwise `https://api-service.api.prod.actual.ai`) and you're signed in, requests carry your sign-in (see [PRIVACY.md](../PRIVACY.md)) |
 | `telemetry.otlp_file` | string | — | Absolute path of a local file each ADR and check event request is appended to (see [PRIVACY.md](../PRIVACY.md)) |
 
 ### Example config
