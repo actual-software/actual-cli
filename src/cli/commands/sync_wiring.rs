@@ -1662,10 +1662,14 @@ mod tests {
         let _g = EnvGuard::remove("OPENAI_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("cfg.yaml");
+        let args = SyncArgs {
+            api_url: Some("http://127.0.0.1:9".to_string()),
+            ..make_sync_args(None)
+        };
         let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
         let result = codex_cli_fallback_if_model_error(
             Err(model_error()),
-            &make_sync_args(None),
+            &args,
             None,
             Some("sk-config-fallback-key"),
             std::time::Duration::from_secs(60),
