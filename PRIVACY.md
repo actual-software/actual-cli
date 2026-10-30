@@ -32,6 +32,12 @@ in and on who processes it. This notice is explicit about both:
   someone with access to the analytics data could correlate events to a known
   repository (and a repository under a personal account names its owner).
 
+**One setting turns telemetry off.** `actual config set telemetry.enabled false`
+stops every telemetry event in this notice: the counters, the plan-governance
+events that reach PostHog through Actual's proxy, and the ADR and check events.
+You don't need a second switch for any of them. It covers telemetry, not every
+network request: "How to opt out of telemetry" below says what it leaves running.
+
 This document describes exactly what data is collected, its privacy class, where
 it goes, who can attribute it to you, how long it is kept, and how to opt out.
 
@@ -244,11 +250,11 @@ hashed ids, `distinct_id`, `insert_id` -- never plan text, rule text, file
 paths, or any raw identifier. It is bounded in size (the oldest entries are
 dropped once it is full) and is never written for an opted-out run.
 
-All three telemetry opt-outs described below disable plan-governance events
-identically -- they share the exact same opt-out check as the sync counters,
-and are checked before any repo-identity hashing or `distinct_id` creation,
-not just before the network send: an opted-out run never touches git and
-never writes `~/.actualai/actual/telemetry-id`.
+The one setting under "How to opt out of telemetry" stops plan-governance events
+too -- they share the exact same opt-out check as the sync counters, and it runs
+before any repo-identity hashing or `distinct_id` creation, not just before the
+network send: an opted-out run never touches git for telemetry and never writes
+`~/.actualai/actual/telemetry-id`.
 
 ### ADR and check events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
 
@@ -297,10 +303,10 @@ made a check warn, and how long it took.
 **Release builds send these events to Actual's API by default.** They go to
 `/v1/logs` on the address the CLI's other telemetry uses: the config file's
 `api_url`, which is `https://api-service.api.prod.actual.ai` unless you've
-changed it. Any of the three opt-outs below stops them before anything is
-built. A debug build, which is what `cargo build` and `cargo test` make without
-`--release`, sends them only to an endpoint you set, so the CLI's own test runs
-never send them to Actual's API. Two settings change where they go:
+changed it. Turning telemetry off stops them before anything is built. A debug
+build, which is what `cargo build` and `cargo test` make without `--release`,
+sends them only to an endpoint you set, so the CLI's own test runs never send
+them to Actual's API. Two settings change where they go:
 
 - `telemetry.otlp_logs_endpoint` (or the `ACTUAL_OTLP_LOGS_ENDPOINT` env var):
   an OTLP/HTTP logs URL used as-is in place of the default. Events are sent to
@@ -317,8 +323,8 @@ never send them to Actual's API. Two settings change where they go:
   file or whose permissions can't be changed.
 
 Set either with `actual config set`. Setting the endpoint to `""` returns it to
-the default, so an opt-out is the way to stop these events. They don't go to
-PostHog.
+the default, so turning telemetry off is the way to stop these events. They
+don't go to PostHog.
 
 **Signed in, events sent to Actual's API carry your sign-in.** When the
 endpoint has the scheme, host and port of the address `actual advisor` uses
@@ -389,8 +395,8 @@ the address `actual advisor` uses, each spooled event also keeps a hash of
 the sign-in it was recorded under, which is never sent, and the uploader
 reads your sign-in from
 `~/.actualai/actual/credentials.yaml` when it sends, renewing it first when it's
-within a minute of expiring, as `actual advisor` does. All three opt-outs below
-stop these events before anything is built: an opted-out run reads no ids or
+within a minute of expiring, as `actual advisor` does. Turning telemetry off
+stops these events before anything is built: an opted-out run reads no ids or
 sign-in and writes no spool. Building and sending them reads no installation id
 either. Only the plan-governance events a run also builds need it, so a
 `plan-check`, `impl-check` or `check-override` run reads it, and creates
@@ -464,7 +470,8 @@ To find the repository, the CLI can fetch your organization's connected
 repositories from the API and compare your `origin` remote with that list on
 your machine, so the remote's URL isn't sent. The request goes to
 `https://api-service.api.prod.actual.ai` unless `--api-url` or `ACTUAL_API_URL`
-names another address. It isn't telemetry, so the opt-outs below don't stop it.
+names another address. It isn't telemetry, so turning telemetry off doesn't stop
+it.
 
 ### LLM tailoring (sent to your configured AI provider)
 
@@ -542,8 +549,8 @@ A `plan-check` or `impl-check` you run yourself can make that `rules select`
 call first, with the diff standing in for the plan on `impl-check`. The hook
 paths never make it, `--no-rank` skips it, and so does `rules select --by-adr`.
 `rules eval --rank` can make it for each case in the file you give it. No prompt
-goes out when no rule applies or no runner is available. The telemetry opt-outs
-below don't stop any of these calls.
+goes out when no rule applies or no runner is available. Turning telemetry off
+doesn't stop any of these calls.
 
 `actual check-override` keeps the reason you give in two files on your machine:
 the session's record under `~/.actualai/actual/plan-check-sessions/` and
@@ -575,7 +582,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
-| `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. The telemetry opt-outs below don't stop it | HTTPS |
+| `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
 | Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, plan or diff text + rule text for `plan-check`, `impl-check` and `rules select`, and, for `actual models`, a request for the model list that holds only your API key | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`, and for `actual models`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
 | The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
@@ -586,33 +593,41 @@ non-HTTPS API URLs.
 
 ## How to opt out of telemetry
 
-There are three independent ways to disable telemetry:
+One setting turns telemetry off:
 
-### 1. Environment variable (recommended)
+```bash
+actual config set telemetry.enabled false
+```
+
+It writes `telemetry.enabled: false` to `~/.actualai/actual/config.yaml`, so it
+lasts across shells and applies to every run that reads that file, including
+the `--claude-hook` paths Claude Code runs for you.
+
+**This one setting stops every telemetry event**: the counters, the
+plan-governance events that reach PostHog through Actual's proxy, and the ADR
+and check events, whether they go to Actual's API or to an endpoint or file you
+set. You don't need a second switch for any of them.
+
+Events an earlier run left queued in the local spools stay on your machine,
+unsent, while telemetry is off, and the uploader sends them if you turn it back
+on. An upload already running when you change the setting finishes.
+
+The setting covers telemetry, not every network request. The update check has
+its own switch (see "Update check" above). The requests that do the work you
+asked for still go out, such as `actual adr-bot`'s match request and
+`semgrep-core` download, `actual advisor` questions, sign-in, and prompts to your
+AI provider.
+
+For CI and one-off runs, set `ACTUAL_NO_TELEMETRY` instead. It has the same
+effect on the process it's set for and the commands that process starts, and any
+non-empty value works:
 
 ```bash
 export ACTUAL_NO_TELEMETRY=1
 ```
 
-Any non-empty value disables telemetry. Add this to your shell profile for
-a permanent opt-out.
-
-### 2. Config file
-
-Add to `~/.actualai/actual/config.yaml`:
-
-```yaml
-telemetry:
-  enabled: false
-```
-
-### 3. Compile-time
-
-Build from source without the telemetry feature:
-
-```bash
-cargo build --release --no-default-features
-```
+If you build from source, `cargo build --release --no-default-features` leaves
+telemetry out of the binary.
 
 ## Data retention
 
@@ -629,9 +644,8 @@ held only by Actual's authorized backend systems, are used solely for product
 analytics, and are deleted or de-linked on account deletion or a verified
 deletion request. Peppering prevents PostHog from reversing the account/org/repo
 identity hashes to raw ids, but the unpeppered repository-derived keys reach
-PostHog recomputable, as described above. Opting out of telemetry (any method
-above) stops these events at the source, so no identity hashes are produced at
-all.
+PostHog recomputable, as described above. Opting out of telemetry stops these
+events at the source, so no identity hashes are produced at all.
 
 Signed-in OpenTelemetry events sent to Actual's API are covered above under
 "Signed-in events sent to Actual's API": they're held only by Actual's

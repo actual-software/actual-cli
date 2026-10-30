@@ -27,7 +27,7 @@
 //!
 //! **On by default in release builds.** With no endpoint set, a release build
 //! sends to `/v1/logs` on the API address the CLI's other telemetry uses, and
-//! the three telemetry opt-outs stop it. Debug builds and unit tests, which is
+//! turning telemetry off stops it. Debug builds and unit tests, which is
 //! what `cargo test` and the coverage job build, send only to an endpoint
 //! someone sets, so the CLI's own tests never post these events to Actual's
 //! API. Only this CLI's own settings are read, never `OTEL_EXPORTER_OTLP_*`,

@@ -851,8 +851,8 @@ fn spool_governance_events(
 /// `distinct_id()` — an opted-out user must not have a persistent telemetry
 /// id written to disk (or git subprocesses spawned) just because a check
 /// ran; the uploader's own opt-out check is too late for that, since by
-/// then the id file already exists. See `PRIVACY.md`'s "three independent
-/// ways to disable telemetry."
+/// then the id file already exists. See `PRIVACY.md`'s "How to opt out of
+/// telemetry."
 #[cfg(feature = "telemetry")]
 pub(super) fn send_governance_events(
     command: &str,
