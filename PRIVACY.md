@@ -9,11 +9,11 @@ in and on who processes it. This notice is explicit about both:
   Because the CLI computes them deterministically from your account and
   organization ids, Actual's backend resolves them back to your account and
   organization — so logged-in telemetry is first-party, identity-linked data,
-  **not** anonymous. The raw ids never leave your machine, but hashing alone
-  does not make identity-linked data anonymous. OpenTelemetry events sent to
-  the API address `actual advisor` uses while you're logged in carry your
-  sign-in's access token, so Actual can tie them to the organization you signed
-  in to.
+  **not** anonymous. Plan-governance events never carry the raw ids, but
+  hashing alone does not make identity-linked data anonymous. OpenTelemetry
+  events sent to the API address `actual advisor` uses while you're logged in
+  carry your sign-in's access token, which names your account as well as the
+  organization you signed in to, so Actual can tie them to that organization.
 - **Logged-out events are pseudonymous, not anonymous.** A logged-out run sends
   no account credential, but it still carries the installation's persistent
   `distinct_id` — the same id its logged-in runs use, which is not reset on
@@ -71,7 +71,7 @@ Telemetry does not include raw usernames, email addresses, IP addresses, file
 contents, file paths, or source code. When you are logged in, plan-governance
 events include one-way identity hashes that let Actual, as the first party,
 attribute activity to your Actual account, organization, and connected
-repository; the raw identifiers are never sent by the CLI, but these hashes are
+repository; the events never carry the raw identifiers, but these hashes are
 **identity-linked, not anonymous** — see "First-party identity data" below. When
 you are not logged in, no account credential is included, but the event still
 carries the installation's persistent `distinct_id` and may carry
@@ -129,8 +129,8 @@ Each event includes a subset of these properties:
 | `repo_hash` | Same one-way SHA-256 as the sync counters above -- a plain hash of the repo URL + commit, **not** peppered, so recomputable by anyone who knows the repository |
 | `repo_url_hash` | Same one-way SHA-256 as the sync counters above -- a plain hash of the repo URL, **not** peppered, so recomputable by anyone who knows the repository |
 | `datetime_utc` | RFC3339 UTC timestamp of the event |
-| `user_id_hash` | One-way SHA-256 of `"user:"+<user id>`, only when logged in -- the raw user id is **never** sent; peppered server-side before PostHog |
-| `org_id_hash` | One-way SHA-256 of `"org:"+<organization id>`, only when logged in -- the raw org id is **never** sent; peppered server-side before PostHog |
+| `user_id_hash` | One-way SHA-256 of `"user:"+<user id>`, only when logged in -- the event **never** carries the raw user id; peppered server-side before PostHog |
+| `org_id_hash` | One-way SHA-256 of `"org:"+<organization id>`, only when logged in -- the event **never** carries the raw org id; peppered server-side before PostHog |
 | `repo_id_hash` | One-way SHA-256 of `"repo:"+<connected-repo id>`, sent whenever that id is known locally -- **including logged-out runs where a repository pin persists**; the raw id is **never** sent; peppered server-side before PostHog |
 | `org_id` | A synthetic, repo-derived org identifier (a UUID from the repo slug), sent **only when not logged in**, so logged-out runs still have an org-shaped grouping key -- derived deterministically from the repo slug and **not** peppered, so recomputable from the repository |
 | `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
@@ -151,10 +151,9 @@ coarse allow/warn/block verdict.
 The `user_id_hash` and `org_id_hash` fields are present only when you are logged
 in; `repo_id_hash` is present whenever a connected-repo id is known locally,
 which can include logged-out runs where a repository pin persists. All three are
-one-way SHA-256 digests of Actual-internal ids: the raw ids never leave your
-machine, so the CLI payload on its own does not contain them. They let Actual
-group metrics by account, organization, and repository without putting those ids
-in the payload.
+one-way SHA-256 digests of Actual-internal ids, so these events never carry the
+raw ids. They let Actual group metrics by account, organization, and repository
+without putting those ids in the payload.
 
 These hashes are **first-party, identity-linked data — not anonymous**. Because
 the CLI computes them deterministically, Actual's backend can match a hash to
@@ -319,8 +318,9 @@ endpoint has the scheme, host and port of the address `actual advisor` uses
 (`ACTUAL_API_URL` when it's set, otherwise
 `https://api-service.api.prod.actual.ai`) and you've signed in with
 `actual login`, each request carries your sign-in's access token in its
-`Authorization` header, and Actual can tie its events to the organization you
-signed in to. Events you recorded while signed out, or signed in to another
+`Authorization` header. The token names your account as well as the organization
+you signed in to, and Actual ties its events to that organization. Events you
+recorded while signed out, or signed in to another
 account or organization, go in a request of their own without the token. A
 request Actual refuses with a 401 is sent once more without it. Any other
 endpoint, a custom one included, never gets the token. The default endpoint is
@@ -369,8 +369,8 @@ release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
 override was recorded, or when a check started or completed), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
-**No rule text, plan or diff text, override reasons, file paths, raw account
-identifiers, identity hashes or installation id are sent.**
+**No event carries rule text, plan or diff text, override reasons, file paths,
+raw account identifiers, identity hashes or installation id.**
 
 None of these runs contacts the endpoint itself. Each writes its events to a
 local spool (`~/.actualai/actual/otlp-logs-spool.jsonl`, readable only by the
