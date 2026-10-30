@@ -38,7 +38,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Auth(args) => cli::commands::auth::exec(args),
         Command::Login(args) => cli::commands::login::exec(args),
         Command::Logout => cli::commands::logout::exec(),
-        Command::Whoami => cli::commands::whoami::exec(),
+        Command::Whoami(args) => cli::commands::whoami::exec(args),
         Command::Advisor(args) => cli::commands::advisor::exec(args),
         Command::MintToken(args) => cli::commands::mint_token::exec(args),
         Command::Config(args) => cli::commands::config::exec(args),

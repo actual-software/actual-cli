@@ -195,7 +195,7 @@ Ask your agent to "sign me in to Actual AI." The skill runs `actual login`, whic
 <details>
 <summary><strong>Direct CLI</strong></summary>
 
-`actual whoami` shows the signed-in account, organization, and scopes, and `actual logout` signs you out. For CI and headless agents, see [Agent authentication](docs/AGENT_AUTH.md): `actual auth create-token` mints a scoped access token from an existing session, and `actual mint-token` signs one from a service-account key when there is no human to sign in.
+`actual whoami` shows the signed-in account, organization, and scopes, and `actual logout` signs you out. `actual whoami --check` asks the server whether that sign-in still works, renewing it first when it is about to expire; it exits 2 when you need to sign in again and 3 when the server can't be reached. For CI and headless agents, see [Agent authentication](docs/AGENT_AUTH.md): `actual auth create-token` mints a scoped access token from an existing session, and `actual mint-token` signs one from a service-account key when there is no human to sign in.
 
 </details>
 
