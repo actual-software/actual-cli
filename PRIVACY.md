@@ -53,7 +53,7 @@ Each metric includes these tags:
 
 | Tag | Description |
 |-----|-------------|
-| `repo_hash` | SHA-256 hash of `(repo_url + commit_hash)` -- the raw URL and commit are **never** sent |
+| `repo_hash` | SHA-256 hash of `(repo_url + commit_hash)` -- the counter **never** carries the raw URL or commit |
 | `repo_url_hash` | SHA-256 hash of the normalized repo URL alone -- stable across commits, used to count unique repos |
 | `source` | Always `"actual-cli"` |
 | `version` | CLI version string (e.g. `"0.1.2"`) |
@@ -65,7 +65,7 @@ The `cli.sync.adrs_recommended` metric also includes:
 | `adr_ids` | Comma-separated list of ADR IDs that were matched for this repo (e.g. `"adr-001,adr-002"`) |
 
 ADR IDs are internal Actual AI identifiers and are not sensitive. Repository identity
-remains one-way hashed -- raw URLs are never sent.
+remains one-way hashed -- counters never carry raw URLs.
 
 Telemetry does not include raw usernames, email addresses, IP addresses, file
 contents, file paths, or source code. When you are logged in, plan-governance
@@ -142,9 +142,9 @@ Each event includes a subset of these properties:
 | `cache_hit` | `rules select` only: whether the scope index came from cache |
 | `runner` | `rules select` only: the rank runner label when stage 2 ran |
 
-**No plan text, diff content, matched rule file paths, or conflicting
-plan/diff spans are ever sent** -- only the rule's internal id/slug and a
-coarse allow/warn/block verdict.
+**Plan-governance events never carry plan text, diff content, matched rule file
+paths, or conflicting plan/diff spans** -- only the rule's internal id/slug and
+a coarse allow/warn/block verdict.
 
 #### First-party identity data (logged-in runs)
 
@@ -191,9 +191,9 @@ known repository.
 `actual check-override` reports a cleared rule by sending a dedicated
 `plan_governance_rule_override` event (one per cleared rule), distinct from a
 real check's completion so overrides are cleanly separable and override rate has
-an unambiguous denominator. **The override reason is customer free text and is
-never sent raw** -- only `reason_category`, `reason_len`, and a one-way
-`reason_hash` (see above) leave the machine.
+an unambiguous denominator. **The override reason is customer free text, and
+the event never carries it raw** -- only `reason_category`, `reason_len`, and a
+one-way `reason_hash` (see above).
 
 Each event also carries a `distinct_id`: a random, opaque identifier
 generated once on first use and stored locally
@@ -440,8 +440,8 @@ When fetching ADRs, the CLI sends a match request containing:
 | `languages` | Detected programming languages (e.g. `["typescript", "python"]`) |
 | `frameworks` | Detected frameworks with categories (e.g. `[{"name": "nextjs", "category": "web-framework"}]`) |
 
-This metadata is used to match relevant ADRs to your project. **No source
-code, file contents, or repository URLs are sent to the Actual API.**
+This metadata is used to match relevant ADRs to your project. **The request
+carries no source code, file contents, or repository URLs.**
 
 ### LLM tailoring (sent to your configured AI provider)
 

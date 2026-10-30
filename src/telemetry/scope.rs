@@ -7,7 +7,7 @@
 //! It routes through the same `/plan-governance/record` PostHog proxy path as the
 //! governance events (not the warehouse counters), and carries a random
 //! `scope_run_id` so a selection can later be joined to the governance decision it
-//! produced. Only counts, enums, ids and hashes leave the machine — never rule
+//! produced. The event carries only counts, enums, ids and hashes — never rule
 //! text, plan text, or file paths (see `PRIVACY.md`).
 
 use crate::api::types::{

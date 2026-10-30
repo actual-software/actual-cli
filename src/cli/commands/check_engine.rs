@@ -929,8 +929,8 @@ fn send_override_events(root: &Path, keys: &[String], reason: &str) {
     let id = distinct_id();
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
-    // The reason is customer free text: only its length bucket, length, and a
-    // one-way hash are sent -- never the text itself (see `PRIVACY.md`).
+    // The reason is customer free text: events carry only its length bucket,
+    // length, and a one-way hash -- never the text itself (see `PRIVACY.md`).
     let (reason_category, reason_len, reason_hash) = reason_summary(reason);
 
     let events: Vec<PlanGovernanceEvent> = keys
@@ -4311,7 +4311,7 @@ pub(crate) mod tests {
     /// With an OTLP output configured, an override also sends one
     /// `actual.gate.evaluated` record per ADR it names, with the outcome
     /// `overridden` and the gate that had denied it. A file without a v2
-    /// header sends nothing, and the reason is never sent.
+    /// header sends nothing, and no record carries the reason.
     #[cfg(feature = "telemetry")]
     #[test]
     fn test_exec_override_impl_sends_an_otlp_event_per_overridden_adr() {

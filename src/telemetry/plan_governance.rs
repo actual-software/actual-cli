@@ -3,8 +3,8 @@
 //! (AK-679), which forwards them to PostHog. Every property sent here stays
 //! inside the shape sprintreview's `PlanGovernanceEventProperties` schema
 //! already enforces — rule ids/slugs, enums, counts, hashed identifiers.
-//! Plan text, matched rule file paths, and conflicting plan spans are never
-//! sent; see `PRIVACY.md`'s "Plan-governance events" section.
+//! These events never carry plan text, matched rule file paths, or
+//! conflicting plan spans; see `PRIVACY.md`'s "Plan-governance events" section.
 
 use std::time::Duration;
 
@@ -234,9 +234,9 @@ pub fn new_insert_id() -> String {
 
 /// A privacy-preserving summary of an override reason: its length bucket, its
 /// character length, and an unsalted SHA-256 of the text. **The reason text
-/// itself is never returned or sent** — only these summaries, so identical
-/// reasons can be grouped without exporting customer decision text (see
-/// `PRIVACY.md`). Returns `hash = None` for an empty reason.
+/// itself is never returned, and events never carry it** — only these
+/// summaries, so identical reasons can be grouped without exporting customer
+/// decision text (see `PRIVACY.md`). Returns `hash = None` for an empty reason.
 pub fn reason_summary(
     reason: &str,
 ) -> (
