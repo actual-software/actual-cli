@@ -1026,6 +1026,80 @@ fn test_rules_select_sends_a_scope_event_to_the_configured_api() {
     recorded.assert();
 }
 
+// ── plan-check: what the codex-cli runner hands `codex` ─────────────────────
+//
+// A pipe into `actual` reaches `codex` only if the child inherits stdin, and
+// a `--lib` test can't feed its own stdin, so this runs the compiled binary.
+// A fake `codex` records what it was given and accepts any flag, which is why
+// this pins what the CLI asks for and not that a real Codex accepts it.
+
+#[cfg(unix)]
+#[test]
+fn test_plan_check_codex_runner_is_read_only_and_keeps_stdin_out_of_codex() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let check = GovernedPlanCheck::new("http://127.0.0.1:9");
+    let scratch = tempfile::tempdir().unwrap();
+    let (argv, stdin) = (
+        scratch.path().join("argv.txt"),
+        scratch.path().join("stdin.txt"),
+    );
+    let verdicts = r#"{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}"#;
+    let fake_codex = scratch.path().join("fake-codex.sh");
+    std::fs::write(
+        &fake_codex,
+        format!(
+            r#"#!/bin/sh
+cat > "{stdin}"
+NEXT_IS_OUTPUT=false
+for arg in "$@"; do
+    echo "$arg" >> "{argv}"
+    if $NEXT_IS_OUTPUT; then
+        echo '{verdicts}' > "$arg"
+        NEXT_IS_OUTPUT=false
+    elif [ "$arg" = "--output-last-message" ]; then
+        NEXT_IS_OUTPUT=true
+    fi
+done
+"#,
+            stdin = stdin.display(),
+            argv = argv.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = cmd()
+        .args([
+            "plan-check",
+            "--repo",
+            check.repo.path().to_str().unwrap(),
+            "--no-rank",
+            "--runner",
+            "codex-cli",
+            "--json",
+            GovernedPlanCheck::PLAN,
+        ])
+        .env("ACTUAL_CONFIG_DIR", check.config_dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_NO_TELEMETRY", "1")
+        .env("CODEX_BINARY", &fake_codex)
+        .env("OPENAI_API_KEY", "sk-test")
+        .write_stdin("text piped to actual")
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["status"], "conforming", "{report}");
+    let args = std::fs::read_to_string(&argv).unwrap();
+    assert!(args.starts_with("exec\n--sandbox\nread-only\n"), "{args}");
+    assert_eq!(std::fs::read_to_string(&stdin).unwrap(), "");
+}
+
 // ── plan-check-override: the interactive-terminal gate ──────────────────
 //
 // `exec_override` refuses unless stdin is a real terminal *and*
