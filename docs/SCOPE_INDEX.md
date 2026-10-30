@@ -368,7 +368,8 @@ Every write holds a lock from its read to its rename, so concurrent hook runs
 lose neither the file nor each other's decisions, and a run that cannot take
 the lock within a short wait skips its write. Damaged or older-format state
 reads as an empty session, which can only lower the count. Files untouched for
-a week are pruned, and nothing in the record leaves the machine.
+a week are pruned. The record itself stays on the machine, though the
+OpenTelemetry events in [PRIVACY.md](../PRIVACY.md) name the same ADRs.
 
 The record also notes the folders the session worked in. A folder is the
 directory a file sits in, named from the repository root, with `.` for the root

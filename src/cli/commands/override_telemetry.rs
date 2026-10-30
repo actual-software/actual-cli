@@ -14,8 +14,8 @@
 //! `planning` or `implementation`, whose loop in this session had denied one
 //! of the rules the record's ADR was overridden for, read from the deny counts
 //! the gates keep. Empty means the human overrode before any denial, which
-//! tells a pre-emptive override from the override of a real breach. The reason
-//! the human gave is never sent.
+//! tells a pre-emptive override from the override of a real breach. The record
+//! never carries the reason the human gave.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved (a release build has its default), [`report`] returns before it
