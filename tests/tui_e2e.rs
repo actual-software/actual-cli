@@ -239,13 +239,32 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         let fake_codex = create_fake_codex_with_model_error(env.dir.path());
 
+        // A short terminal and a few projects, so the summary fills the pane and
+        // the row only shows if it sits below the summary.
+        let root = env.dir.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        for i in 0..3 {
+            let package = root.join(format!("packages/pkg{i}"));
+            std::fs::create_dir_all(package.join("src")).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                format!(r#"{{"name":"pkg{i}"}}"#),
+            )
+            .unwrap();
+            std::fs::write(package.join("src/index.ts"), "export const a = 1;\n").unwrap();
+        }
+
         let cmd = format!(
             "{} adr-bot --runner codex-cli --api-url {}",
             actual_binary_path(),
             env.api_url
         );
         let mut session = TuiSession::new(&cmd)
-            .size(120, 40)
+            .size(120, 14)
             .timeout(Duration::from_secs(30))
             .env("CODEX_BINARY", fake_codex.to_str().unwrap())
             .env("OPENAI_API_KEY", "sk-test")
