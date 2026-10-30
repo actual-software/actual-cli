@@ -37,7 +37,7 @@ it goes, who can attribute it to you, how long it is kept, and how to opt out.
 
 ## What data is collected
 
-### Telemetry counters (anonymous)
+### Telemetry counters (pseudonymous)
 
 On each successful run of `actual adr-bot`, the CLI sends counter metrics:
 
@@ -66,6 +66,12 @@ The `cli.sync.adrs_recommended` metric also includes:
 
 ADR IDs are internal Actual AI identifiers and are not sensitive. Repository identity
 remains one-way hashed -- counters never carry raw URLs.
+
+Counters carry no account identity, but they are **pseudonymous, not
+anonymous**: `repo_url_hash` is a stable key that links a repository's counters
+to each other, anyone who knows the repository can recompute it, and
+plan-governance events carry the same hash beside `user_id_hash` when you are
+logged in.
 
 Telemetry does not include raw usernames, email addresses, IP addresses, file
 contents, file paths, or source code. When you are logged in, plan-governance
@@ -641,7 +647,11 @@ how identifiers are hashed, peppered, or mapped — must re-check this notice
 before it ships. The pull-request template carries the checklist; at minimum:
 
 - Every new or changed field is listed above with an explicit privacy class
-  (**anonymous**, or **first-party identity-linked**).
+  (**anonymous**, **pseudonymous**, or **first-party identity-linked**).
+  Pseudonymous means the field carries no account identity, but a stable key
+  such as an installation id or a repository hash can link events to each other,
+  to a known repository, or, once that installation has sent a logged-in event,
+  to an account.
 - No field Actual can attribute to an account is described as "anonymous" or as
   carrying "no PII"; hashing alone is never treated as anonymization.
 - For any identity-linked field, this notice states who can attribute it, the
