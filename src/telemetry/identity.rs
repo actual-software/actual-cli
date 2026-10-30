@@ -7,7 +7,7 @@ use crate::auth::store::StoredCredentials;
 // `9b2e8f1a-3c4d-5e6f-8a9b-0c1d2e3f4a5b`. That value is kept here only as a
 // historical record of what produced that existing data — we do NOT reuse it.
 // Going forward, `fallback_org_id` derives the id from our own SHA-256 hash (see
-// below), so new anonymous runs never fall back to the old namespace scheme.
+// below), so new logged-out runs never fall back to the old namespace scheme.
 
 /// Domain-separated, **unsalted** SHA-256 of a raw identifier, as 64-char
 /// lowercase hex. `domain` is a fixed, non-secret label (`"user"`, `"org"`,
@@ -57,7 +57,7 @@ pub fn repo_slug(repo_url: &str) -> String {
 ///
 /// Derived from our own `SHA-256("slug:"+slug)` (via [`hash_identifier`]) with the
 /// version/variant bits stamped to UUID v5 form, so the same repo always maps to
-/// the same fallback org across anonymous installs. Depends only on the slug
+/// the same fallback org across logged-out installs. Depends only on the slug
 /// (never on `distinct_id`), so two developers on the same repo share one fallback
 /// org id. This is the current scheme; the older UUIDv5-namespace scheme is not
 /// reused (see the legacy note above).
@@ -77,9 +77,10 @@ pub fn fallback_org_id(slug: &str) -> String {
 /// scope event so metrics can be sliced by user, org, and repo.
 ///
 /// Authenticated runs carry domain-separated hashes of the real ids (never the
-/// raw ids). Unauthenticated runs carry only a synthetic `org_id` derived from
-/// the repo slug; the existing anonymous keys (`distinct_id`, `repo_hash`,
-/// `repo_url_hash`) continue to ride alongside on the event.
+/// raw ids). Unauthenticated runs carry a synthetic `org_id` derived from the
+/// repo slug, plus `repo_id_hash` when a sticky-scope pin persists; the
+/// existing pseudonymous keys (`distinct_id`, `repo_hash`, `repo_url_hash`)
+/// continue to ride alongside on the event.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IdentityEnvelope {
     /// `SHA-256("user:"+subject)` when authenticated.
@@ -149,7 +150,7 @@ impl IdentityEnvelope {
     /// Resolve the envelope from local state alone: stored OAuth credentials and
     /// a config sticky-scope pin (for the connected-repo id). `repo_url` is the
     /// git remote URL, used both to look up the sticky pin and to derive the
-    /// anonymous fallback org id. Never touches the network.
+    /// logged-out fallback org id. Never touches the network.
     ///
     /// The single local-only identity lookup shared by every plan-governance /
     /// scope emitter, so no event type can bypass the envelope.

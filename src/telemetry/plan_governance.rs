@@ -1,10 +1,11 @@
-//! Plan-governance telemetry (AK-678): emits anonymous events describing
-//! `plan-check` outcomes to the `/plan-governance/record` proxy route
-//! (AK-679), which forwards them to PostHog. Every property sent here stays
-//! inside the shape sprintreview's `PlanGovernanceEventProperties` schema
-//! already enforces — rule ids/slugs, enums, counts, hashed identifiers.
-//! These events never carry plan text, matched rule file paths, or
-//! conflicting plan spans; see `PRIVACY.md`'s "Plan-governance events" section.
+//! Plan-governance telemetry: emits events describing `plan-check` outcomes to
+//! the `/plan-governance/record` proxy route, which forwards them to PostHog.
+//! Events are pseudonymous when logged out and first-party identity-linked
+//! when logged in. Every property sent here stays inside the shape
+//! sprintreview's `PlanGovernanceEventProperties` schema already enforces —
+//! rule ids/slugs, enums, counts, hashed identifiers. These events never carry
+//! plan text, matched rule file paths, or conflicting plan spans; see
+//! `PRIVACY.md`'s "Plan-governance events" section.
 
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ use crate::telemetry::opt_out;
 use crate::telemetry::reporter::SERVICE_KEY;
 
 /// Filename under the config dir (sibling to `plan-check-overrides.log`)
-/// holding this installation's persisted anonymous telemetry id.
+/// holding this installation's persisted telemetry id.
 const DISTINCT_ID_FILE: &str = "telemetry-id";
 
 /// A short, dedicated send timeout — deliberately much shorter than
@@ -45,10 +46,13 @@ pub const MAX_EVENTS_PER_BATCH: usize = 100;
 ///
 /// Never derived from a username, email, hostname, MAC address, or any
 /// other identifying material — purely a random token, the same category as
-/// a PostHog/Sentry anonymous device id. Best-effort like every other file
-/// under the config dir: an unreadable or unwritable config dir degrades to
-/// a fresh random id for this process only (never blocks, never errors)
-/// rather than disabling telemetry entirely.
+/// a PostHog/Sentry device id. It survives logout, so once an installation
+/// has sent a logged-in event Actual can attribute its logged-out events to
+/// the same account; see `PRIVACY.md`.
+///
+/// Best-effort like every other file under the config dir: an unreadable or
+/// unwritable config dir degrades to a fresh random id for this process only
+/// (never blocks, never errors) rather than disabling telemetry entirely.
 ///
 /// Validates that the file's contents parse as a UUID before trusting them
 /// — a truncated write, manual edit, or filesystem corruption could leave
@@ -98,7 +102,7 @@ pub fn rule_decision(verdict: Verdict, blocked: bool) -> PlanGovernanceDecision 
     }
 }
 
-/// Shared, non-identifying context stamped onto every event in a batch.
+/// Shared context stamped onto every event in a batch.
 pub struct EventContext {
     pub distinct_id: String,
     pub cli_version: String,
@@ -106,7 +110,7 @@ pub struct EventContext {
     pub repo_hash: Option<String>,
     pub repo_url_hash: Option<String>,
     /// Identity + timestamp envelope (hashed user/org/repo ids, or a synthetic
-    /// fallback org id when anonymous). Never carries raw identifiers.
+    /// fallback org id when logged out). Never carries raw identifiers.
     pub identity: IdentityEnvelope,
     /// `--claude-hook` revision-loop position `(round_index, round_total)`, set
     /// only on the hook path; `None` for direct/CLI runs, which have no loop.

@@ -100,7 +100,7 @@ mod tests {
         }
     }
 
-    /// An anonymous envelope: no identity hashes, synthetic repo-derived org id.
+    /// A logged-out envelope: no identity hashes, synthetic repo-derived org id.
     fn anonymous_identity() -> IdentityEnvelope {
         IdentityEnvelope {
             user_id_hash: None,
@@ -197,7 +197,7 @@ mod tests {
             .to_event()
             .properties
             .unwrap();
-        // Anonymous: no identity hashes, but the synthetic org id + datetime are set.
+        // Logged out: no identity hashes, but the synthetic org id + datetime are set.
         assert_eq!(props.user_id_hash, None);
         assert_eq!(props.org_id_hash, None);
         assert_eq!(props.repo_id_hash, None);

@@ -528,7 +528,7 @@ fn emit_scope_telemetry(
         runner: run.runner.clone(),
         repo_hash: Some(repo_hash),
         repo_url_hash: Some(repo_url_hash),
-        // Same local-only identity/timestamp envelope every governance event carries.
+        // Same hashed identity/timestamp envelope every other governance event carries.
         identity: crate::telemetry::identity::IdentityEnvelope::resolve(&cfg, &repo_url),
     };
 

@@ -72,7 +72,7 @@ src/
 ├── generation/    # Output file generation (CLAUDE.md, AGENTS.md, etc.)
 ├── runner/        # AI provider runners (Anthropic, OpenAI, Claude Code, etc.)
 ├── tailoring/     # ADR tailoring via LLM
-├── telemetry/     # Anonymous usage metrics
+├── telemetry/     # Usage telemetry (see PRIVACY.md)
 ├── main.rs        # Entry point
 ├── lib.rs         # Library root
 ├── error.rs       # Error types

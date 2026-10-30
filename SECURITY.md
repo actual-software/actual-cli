@@ -44,8 +44,9 @@ The following are **out of scope**:
 - All API communication uses HTTPS. Non-HTTPS URLs are rejected for
   non-localhost endpoints.
 - The telemetry service key embedded in the binary is a write-only token
-  scoped to submitting anonymous counters. It does not grant read or
-  admin access.
+  scoped to submitting telemetry through the CLI's ingest routes: usage
+  counters and plan-governance events. It does not grant read or admin
+  access.
 
 ## Supported Versions
 
