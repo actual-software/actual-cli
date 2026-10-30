@@ -467,7 +467,13 @@ runner: the one you set with `--runner` or the `runner` config key, or else one
 it detects on your machine. `anthropic-api` and `openai-api` post them to that
 provider's API. `claude-cli`, `codex-cli` and `cursor-cli` hand them to the
 `claude`, `codex` or `cursor-agent` tool on your machine, which sends them
-according to its own settings. None of this passes through Actual's servers.
+according to its own settings. `codex-cli` has one exception: if `codex` exits
+normally with no answer and an error that reads like a model problem, such as
+`model not found` or `does not exist`, and an OpenAI API key is set
+(`OPENAI_API_KEY` or the `openai_api_key` config key), the CLI retries through
+`openai-api` without asking you again. That runner posts the prompts straight
+to OpenAI's API under that key, whatever `codex` is set to use. None of this
+passes through Actual's servers.
 Refer to your AI provider's privacy policy for how they handle this data:
 
 - [Anthropic Usage Policy](https://www.anthropic.com/policies)
@@ -511,9 +517,9 @@ prompt alone.
 or a diff follows the rules that apply to it, and `actual rules select` can ask
 it to rank rules against a plan. They use the same runners as tailoring, so
 their prompts reach the provider the same way and don't pass through Actual's
-servers. Claude Code runs both checks through their `--claude-hook` paths, so
-with those hooks installed this text goes out as you work, without anyone typing
-a command.
+servers. Only tailoring makes the `codex-cli` retry. Claude Code runs both
+checks through their `--claude-hook` paths, so with those hooks installed this
+text goes out as you work, without anyone typing a command.
 
 | Command | What the prompt holds |
 |---------|-----------------------|
@@ -563,7 +569,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
-| Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, and plan or diff text + rule text for `plan-check`, `impl-check` and `rules select` | HTTPS for the API runners; the tool's own connection for `claude`, `codex` and `cursor-agent` |
+| Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, and plan or diff text + rule text for `plan-check`, `impl-check` and `rules select` | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
 | The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
