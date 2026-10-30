@@ -37,7 +37,7 @@ it goes, who can attribute it to you, how long it is kept, and how to opt out.
 
 ## What data is collected
 
-### Telemetry counters (anonymous)
+### Telemetry counters (pseudonymous)
 
 On each successful run of `actual adr-bot`, the CLI sends counter metrics:
 
@@ -66,6 +66,12 @@ The `cli.sync.adrs_recommended` metric also includes:
 
 ADR IDs are internal Actual AI identifiers and are not sensitive. Repository identity
 remains one-way hashed -- counters never carry raw URLs.
+
+Counters carry no account identity, but they are **pseudonymous, not
+anonymous**: `repo_url_hash` is a stable key that links a repository's counters
+to each other, anyone who knows the repository can recompute it, and
+plan-governance events carry the same hash beside `user_id_hash` when you are
+logged in.
 
 Telemetry does not include raw usernames, email addresses, IP addresses, file
 contents, file paths, or source code. When you are logged in, plan-governance
@@ -144,7 +150,8 @@ Each event includes a subset of these properties:
 
 **Plan-governance events never carry plan text, diff content, matched rule file
 paths, or conflicting plan/diff spans** -- only the rule's internal id/slug and
-a coarse allow/warn/block verdict.
+a coarse allow/warn/block verdict. The check itself does send plan and diff text
+to your AI provider: see "Plan and diff checks" below.
 
 #### First-party identity data (logged-in runs)
 
@@ -436,23 +443,116 @@ When fetching ADRs, the CLI sends a match request containing:
 | Field | Description |
 |-------|-------------|
 | `path` | Relative path of each detected project (e.g. `"."`, `"packages/api"`) |
-| `name` | Project directory name |
+| `name` | The package name in the project's `package.json`, `Cargo.toml` or `pyproject.toml`, or the last segment of the module path in its `go.mod`, not counting a major-version suffix such as `/v2`. The directory name is the fallback when none of those gives one |
 | `languages` | Detected programming languages (e.g. `["typescript", "python"]`) |
 | `frameworks` | Detected frameworks with categories (e.g. `[{"name": "nextjs", "category": "web-framework"}]`) |
+| `canonical_ir` | What the CLI's built-in analysis rules found in the project: `ir_hash`, a SHA-256 hash of the full result; `taxonomy_version`; and `facets`, each with a category (`facet_slot`), the ids of the rules that matched (`rule_ids`) and a `confidence` score. The request leaves out the matched values and the files they came from |
+| `options` | The ADR filters you've set in the config file, if any: `categories` (from `include_categories`), `exclude_categories`, `include_general` and `max_per_framework`. One per request, where the fields above repeat per project |
 
 This metadata is used to match relevant ADRs to your project. **The request
 carries no source code or repository URLs.**
 
+### Advisor questions (sent to the Actual API)
+
+`actual advisor` sends your question to Actual's API exactly as you typed it, so
+anything you put in it goes too. The request also carries your sign-in's access
+token, the raw id of your organization or of the one you named with `--org`,
+and, when the question is scoped to a connected repository, that repository's
+raw id. These are the ids themselves, not the hashes telemetry uses.
+
+To find the repository, the CLI can fetch your organization's connected
+repositories from the API and compare your `origin` remote with that list on
+your machine, so the remote's URL isn't sent. The request goes to
+`https://api-service.api.prod.actual.ai` unless `--api-url` or `ACTUAL_API_URL`
+names another address. It isn't telemetry, so the opt-outs below don't stop it.
+
 ### LLM tailoring (sent to your configured AI provider)
 
-During the tailoring step, ADR content and a bundled summary of your
-repository structure are sent to your configured AI provider (Anthropic,
-OpenAI, or a local runner). This data is sent directly to the provider's
-API -- it does not pass through Actual servers. Refer to your AI provider's
-privacy policy for how they handle this data:
+During the tailoring step of `actual adr-bot`, the CLI sends prompts through a
+runner: the one you set with `--runner` or the `runner` config key, or else one
+it detects on your machine. `anthropic-api` and `openai-api` post them to that
+provider's API. `claude-cli`, `codex-cli` and `cursor-cli` hand them to the
+`claude`, `codex` or `cursor-agent` tool on your machine, which sends them
+according to its own settings. `codex-cli` has one exception: if `codex` exits
+normally with no answer and an error that reads like a model problem, such as
+`model not found` or `does not exist`, and an OpenAI API key is set
+(`OPENAI_API_KEY` or the `openai_api_key` config key), the CLI retries through
+`openai-api` without asking you again. That runner posts the prompts straight
+to OpenAI's API under that key, whatever `codex` is set to use. None of this
+passes through Actual's servers.
+Refer to your AI provider's privacy policy for how they handle this data:
 
 - [Anthropic Usage Policy](https://www.anthropic.com/policies)
 - [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy)
+- [Cursor Privacy Policy](https://cursor.com/privacy)
+
+Each prompt holds:
+
+- The ADRs being tailored.
+- The detected project: its path, name, languages with their line counts,
+  frameworks, package manager and dependency counts.
+- The text of the repository's existing output files (`CLAUDE.md`, `AGENTS.md`
+  or `.cursor/rules/actual-policies.mdc`, whichever you're generating), with no
+  length limit.
+- A file tree of up to 200 file and directory names.
+- The contents of key files: manifests such as `package.json` and `Cargo.toml`
+  and config files such as `tsconfig.json` and `vite.config.ts` in the
+  repository root, plus up to five entrypoints such as `main.rs` or `index.ts`
+  from anywhere in it. Each file is cut at 200 lines, and together they're
+  capped at 32 KB.
+
+Key files go as they are, so a manifest's `repository` field or a `go.mod`
+module path tells the provider where your repository lives. The tree and the key
+files leave out `.env`, `.npmrc`, `.netrc`, private keys and any file with
+`credential` or `secret` in its name. That check reads file names only, so a
+secret inside a file the CLI does send goes with it.
+
+Those limits describe what the CLI puts in a prompt, and an agent can read past
+them. `claude-cli` gives the model file tools including Read, Glob and Grep for
+up to 10 turns, or the `max_turns` you set in the config. `codex-cli` and
+`cursor-cli` run as agents in your repository, and the prompt lets all three
+read files it left out. Whatever they read goes to their provider.
+`anthropic-api` and `openai-api` have no such tools, so their provider gets the
+prompt alone.
+
+`actual adr-bot --no-tailor` skips this step, and no prompt is sent.
+
+### Plan and diff checks (sent to your configured AI provider)
+
+`actual plan-check` and `actual impl-check` ask your AI provider whether a plan
+or a diff follows the rules that apply to it, and `actual rules select` can ask
+it to rank rules against a plan. They use the same runners as tailoring, so
+their prompts reach the provider the same way and don't pass through Actual's
+servers. Only tailoring makes the `codex-cli` retry. Claude Code runs both
+checks through their `--claude-hook` paths, so with those hooks installed this
+text goes out as you work, without anyone typing a command.
+
+| Command | What the prompt holds |
+|---------|-----------------------|
+| `plan-check` | The plan's full text, and each judged rule's document slug, id, level and statement |
+| `impl-check` | The diff's full text, including the whole of any new file git doesn't ignore, and the same rule fields |
+| `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's slug, title, scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
+
+`claude-cli` runs these calls with no tools, and the API runners have no file
+tools. `codex-cli` and `cursor-cli` still run as agents in your repository.
+These prompts don't ask them to open other files, but the CLI doesn't stop them,
+and anything they read goes to their provider.
+
+A `plan-check` or `impl-check` you run yourself can make that `rules select`
+call first, with the diff standing in for the plan on `impl-check`. The hook
+paths never make it, `--no-rank` skips it, and so does `rules select --by-adr`.
+`rules eval --rank` can make it for each case in the file you give it. No prompt
+goes out when no rule applies or no runner is available. The telemetry opt-outs
+below don't stop any of these calls.
+
+`actual check-override` keeps the reason you give in two files on your machine:
+the session's record under `~/.actualai/actual/plan-check-sessions/` and
+`~/.actualai/actual/plan-check-overrides.log`. The reason stays out of every
+prompt above, but it does come back to the agent. Later `--claude-hook` rounds
+in that session that reach a verdict repeat it, word for word, in what they
+return to Claude Code: a round that blocks puts it in the denial the agent
+reads, and a round that lets the plan or diff through shows it as a notice. From
+there it can reach the provider running the agent.
 
 ### Update check (sent to the npm registry)
 
@@ -472,10 +572,10 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check`; no account or repository data | HTTPS |
-| Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
+| Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, and plan or diff text + rule text for `plan-check`, `impl-check` and `rules select` | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
 | The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
@@ -547,7 +647,11 @@ how identifiers are hashed, peppered, or mapped — must re-check this notice
 before it ships. The pull-request template carries the checklist; at minimum:
 
 - Every new or changed field is listed above with an explicit privacy class
-  (**anonymous**, or **first-party identity-linked**).
+  (**anonymous**, **pseudonymous**, or **first-party identity-linked**).
+  Pseudonymous means the field carries no account identity, but a stable key
+  such as an installation id or a repository hash can link events to each other,
+  to a known repository, or, once that installation has sent a logged-in event,
+  to an account.
 - No field Actual can attribute to an account is described as "anonymous" or as
   carrying "no PII"; hashing alone is never treated as anonymization.
 - For any identity-linked field, this notice states who can attribute it, the
