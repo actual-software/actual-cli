@@ -477,9 +477,9 @@ according to its own settings. `codex-cli` has one exception: if `codex` exits
 normally with no answer and an error that reads like a model problem, such as
 `model not found` or `does not exist`, and an OpenAI API key is set
 (`OPENAI_API_KEY` or the `openai_api_key` config key), the CLI retries through
-`openai-api` without asking you again. That runner posts the prompts straight
-to OpenAI's API under that key, whatever `codex` is set to use. None of this
-passes through Actual's servers.
+`openai-api`, asking you again first unless you passed `--force`. That runner
+posts the prompts straight to OpenAI's API under that key, whatever `codex` is
+set to use. None of this passes through Actual's servers.
 Refer to your AI provider's privacy policy for how they handle this data:
 
 - [Anthropic Usage Policy](https://www.anthropic.com/policies)
