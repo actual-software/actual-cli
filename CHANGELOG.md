@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `login`, `logout`, `advisor` and `auth create-token` take a lock on the stored sign-in: `login` to save it, `logout` for the server-side revoke and the local delete, and `advisor` and `auth create-token` to renew an access token that expires within a minute. The telemetry uploader renews a token under the same lock before it sends, so these commands can wait while a background renewal holds it
+- `PRIVACY.md` now covers what `actual advisor` sends to Actual's API, what tailoring, `plan-check`, `impl-check` and `rules select` send to your AI provider, how a recorded override reason comes back to the agent, and the match request's `canonical_ir` and `options` fields and where its `name` comes from. The CLI sends what it sent before; only the notice changed
 
 ### Fixed
 - A config file the CLI can't read or parse turns telemetry off. Before, one invalid value anywhere in the file, such as `batch_size: lots`, sent `plan-check`, `impl-check`, `check-override` and `rules select` back to the default settings, which have telemetry on, so their events went out even when the same file set `telemetry.enabled: false`. The background uploader made the same fallback, and now sends nothing while the file can't load, leaving queued events in place. The OpenTelemetry events above follow the same rule. `ACTUAL_NO_TELEMETRY` was never affected
