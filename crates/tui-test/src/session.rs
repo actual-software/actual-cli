@@ -389,6 +389,13 @@ impl Drop for TuiSession {
                 }
             }
         }
+
+        // The screen's reader only finishes once the process lets go of the
+        // terminal, so a failed `wait_for` would otherwise hang here. `kill`
+        // signals by pid, which is why an exited process is left alone.
+        if self.pty.try_wait().is_none() {
+            let _ = self.pty.kill();
+        }
     }
 }
 
@@ -396,6 +403,22 @@ impl Drop for TuiSession {
 #[cfg(unix)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_drop_ends_a_process_that_is_still_running() {
+        let (dropped, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Not `cat`: dropping the writer sends EOF, which ends it unaided.
+            let session = TuiSession::new("/bin/sleep 60")
+                .spawn()
+                .expect("Failed to spawn sleep");
+            drop(session);
+            let _ = dropped.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("dropping a session should not wait on a live process");
+    }
 
     #[test]
     fn test_builder_defaults() {
