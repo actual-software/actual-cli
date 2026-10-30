@@ -3,8 +3,7 @@
 //! When the uploader's endpoint has the scheme, host and port of the address
 //! `actual advisor` sends the sign-in to ([`crate::api::resolve_api_url`]), the
 //! request carries the stored sign-in's access token as its bearer, so Actual
-//! records a signed-in user's events as theirs and takes the organization from
-//! the token. No other endpoint gets it.
+//! can tie its events to the token's organization. No other endpoint gets it.
 //!
 //! **Records go with the sign-in they were recorded under.** Each record is
 //! spooled with a [`stamp`] of the sign-in in force when it was recorded, and
