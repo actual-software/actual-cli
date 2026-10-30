@@ -437,7 +437,7 @@ When fetching ADRs, the CLI sends a match request containing:
 | Field | Description |
 |-------|-------------|
 | `path` | Relative path of each detected project (e.g. `"."`, `"packages/api"`) |
-| `name` | The package name in the project's `package.json`, `Cargo.toml` or `pyproject.toml`, or the last segment of the module path in its `go.mod`. The directory name is the fallback when none of those gives one |
+| `name` | The package name in the project's `package.json`, `Cargo.toml` or `pyproject.toml`, or the last segment of the module path in its `go.mod`, not counting a major-version suffix such as `/v2`. The directory name is the fallback when none of those gives one |
 | `languages` | Detected programming languages (e.g. `["typescript", "python"]`) |
 | `frameworks` | Detected frameworks with categories (e.g. `[{"name": "nextjs", "category": "web-framework"}]`) |
 | `canonical_ir` | What the CLI's built-in analysis rules found in the project: `ir_hash`, a SHA-256 hash of the full result; `taxonomy_version`; and `facets`, each with a category (`facet_slot`), the ids of the rules that matched (`rule_ids`) and a `confidence` score. The request leaves out the matched values and the files they came from |
@@ -477,8 +477,8 @@ Refer to your AI provider's privacy policy for how they handle this data:
 Each prompt holds:
 
 - The ADRs being tailored.
-- The detected project: its path, name, languages, frameworks, package manager
-  and dependency counts.
+- The detected project: its path, name, languages with their line counts,
+  frameworks, package manager and dependency counts.
 - The text of the repository's existing output files (`CLAUDE.md`, `AGENTS.md`
   or `.cursor/rules/actual-policies.mdc`, whichever you're generating), with no
   length limit.
@@ -491,16 +491,17 @@ Each prompt holds:
 
 Key files go as they are, so a manifest's `repository` field or a `go.mod`
 module path tells the provider where your repository lives. The tree and the key
-files leave out `.env`, `.npmrc`, `.netrc`, private keys and anything with
+files leave out `.env`, `.npmrc`, `.netrc`, private keys and any file with
 `credential` or `secret` in its name. That check reads file names only, so a
 secret inside a file the CLI does send goes with it.
 
 Those limits describe what the CLI puts in a prompt, and an agent can read past
-them. `claude-cli` gives the model its Read, Glob and Grep tools for up to 10
-turns, `codex-cli` and `cursor-cli` run as agents in your repository, and the
-prompt lets all three read files it left out. Whatever they read goes to their
-provider. `anthropic-api` and `openai-api` have no such tools, so their provider
-gets the prompt alone.
+them. `claude-cli` gives the model file tools including Read, Glob and Grep for
+up to 10 turns, or the `max_turns` you set in the config. `codex-cli` and
+`cursor-cli` run as agents in your repository, and the prompt lets all three
+read files it left out. Whatever they read goes to their provider.
+`anthropic-api` and `openai-api` have no such tools, so their provider gets the
+prompt alone.
 
 `actual adr-bot --no-tailor` skips this step, and no prompt is sent.
 
@@ -519,6 +520,11 @@ a command.
 | `plan-check` | The plan's full text, and each judged rule's document slug, id, level and statement |
 | `impl-check` | The diff's full text, including the whole of any new file git doesn't ignore, and the same rule fields |
 | `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's slug, title, scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
+
+`claude-cli` runs these calls with no tools, and the API runners have no file
+tools. `codex-cli` and `cursor-cli` still run as agents in your repository.
+These prompts don't ask them to open other files, but the CLI doesn't stop them,
+and anything they read goes to their provider.
 
 A `plan-check` or `impl-check` you run yourself can make that `rules select`
 call first, with the diff standing in for the plan on `impl-check`. The hook
