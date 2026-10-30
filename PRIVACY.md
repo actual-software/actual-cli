@@ -599,9 +599,15 @@ One setting turns telemetry off:
 actual config set telemetry.enabled false
 ```
 
-It writes `telemetry.enabled: false` to `~/.actualai/actual/config.yaml`, so it
-lasts across shells and applies to every run that reads that file, including
-the `--claude-hook` paths Claude Code runs for you.
+It writes this to `~/.actualai/actual/config.yaml`:
+
+```yaml
+telemetry:
+  enabled: false
+```
+
+The setting lasts across shells and applies to every run that reads that file,
+including the `--claude-hook` paths Claude Code runs for you.
 
 **This one setting stops every telemetry event**: the counters, the
 plan-governance events that reach PostHog through Actual's proxy, and the ADR
@@ -611,6 +617,10 @@ set. You don't need a second switch for any of them.
 Events an earlier run left queued in the local spools stay on your machine,
 unsent, while telemetry is off, and the uploader sends them if you turn it back
 on. An upload already running when you change the setting finishes.
+
+Change the setting when no `actual adr-bot` run is in progress. A run that's
+already going still sends its counters, and the config it saves at the end can
+put the old value back, which leaves telemetry on.
 
 The setting covers telemetry, not every network request. The update check has
 its own switch (see "Update check" above). The requests that do the work you
