@@ -441,7 +441,7 @@ When fetching ADRs, the CLI sends a match request containing:
 | `frameworks` | Detected frameworks with categories (e.g. `[{"name": "nextjs", "category": "web-framework"}]`) |
 
 This metadata is used to match relevant ADRs to your project. **The request
-carries no source code, file contents, or repository URLs.**
+carries no source code or repository URLs.**
 
 ### LLM tailoring (sent to your configured AI provider)
 
