@@ -534,9 +534,10 @@ text goes out as you work, without anyone typing a command.
 | `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's slug, title, scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
 
 `claude-cli` runs these calls with no tools, and the API runners have no file
-tools. `codex-cli` and `cursor-cli` still run as agents in your repository.
-These prompts don't ask them to open other files, but the CLI doesn't stop them,
-and anything they read goes to their provider.
+tools. `codex-cli` and `cursor-cli` still run as agents in your repository,
+`codex-cli` in Codex's read-only sandbox, which stops it changing files but not
+reading them. These prompts don't ask them to open other files, but the CLI
+doesn't stop them, and anything they read goes to their provider.
 
 A `plan-check` or `impl-check` you run yourself can make that `rules select`
 call first, with the diff standing in for the plan on `impl-check`. The hook

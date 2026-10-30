@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `plan-check`, `impl-check` and `rules select` run `codex` in its read-only sandbox, so it can read your repository on those calls but can't change it
+
+### Fixed
+- `--runner codex-cli` works on Codex 0.147.0 and later, which removed the `--full-auto` flag the CLI passed. On those versions every call failed before a prompt left, and `plan-check` and `impl-check` reported `not_checked` with exit 0. Tailoring now passes `--sandbox workspace-write`, which is what the old flag meant
+- `codex` no longer inherits the CLI's stdin. Codex adds piped text to its prompt and waits for the pipe to close, so text piped into `actual` could reach the model, and a pipe left open could stall the run until it timed out
+
 ## [0.11.0] - 2026-10-30
 
 ### Added
