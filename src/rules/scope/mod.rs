@@ -37,6 +37,7 @@
 
 pub mod baseline;
 pub mod cache;
+pub mod corpus;
 pub mod eval;
 pub mod index;
 pub mod rank;
@@ -50,7 +51,7 @@ use crate::rules::{
     parse_rule_sources, read_rule_sources, read_rule_sources_in, rules_dir, RuleSetLoadReport,
 };
 
-pub use eval::{CaseResult, EvaluationReport, GoldenCase, Scores};
+pub use eval::{CaseResult, EvaluationReport, FalseInjection, GoldenCase, Scores};
 pub use index::{Field, GlobMatch, IndexedDocument, Match, Query, ScopeIndex, Weights};
 pub use rank::{Candidate, RankedVerdict, Verdict};
 pub use select::{

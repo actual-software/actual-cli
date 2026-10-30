@@ -1099,15 +1099,22 @@ pub struct RulesEvalArgs {
     #[arg(long)]
     pub rank: bool,
 
+    /// Also score a model judging every rule document with no prefilter: the
+    /// alternative the two stages are measured against. One runner call per
+    /// case, each carrying the whole rule set.
+    #[arg(long)]
+    pub full_corpus: bool,
+
     /// How many candidates the prefilter hands to stage 2 under `--rank`.
     #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
     pub candidates: usize,
 
-    /// Runner to use for `--rank`. Probed automatically when omitted.
+    /// Runner to use for `--rank` and `--full-corpus`. Probed automatically
+    /// when omitted.
     #[arg(long, value_enum)]
     pub runner: Option<RunnerChoice>,
 
-    /// Model for `--rank`, overriding the configured one.
+    /// Model for `--rank` and `--full-corpus`, overriding the configured one.
     #[arg(long)]
     pub model: Option<String>,
 

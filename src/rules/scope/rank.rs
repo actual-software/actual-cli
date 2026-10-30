@@ -208,6 +208,25 @@ pub const RANK_OUTPUT_SCHEMA: &str = r#"{
 /// description — is crossing that boundary and needs a defence at their layer,
 /// not this one.
 pub fn build_prompt(plan: &str, paths: &[String], candidates: &[Candidate]) -> String {
+    let mut out = describe_change(plan, paths, candidates);
+    out.push_str(
+        "\n=== task ===\n\
+         Return one verdict for every candidate above, copying each slug exactly.\n\
+         - `governs`: following this rule would change how the plan is implemented.\n\
+         - `related`: the rule covers the same area but does not constrain this change.\n\
+         - `unrelated`: the rule does not apply.\n\
+         Judge only the candidates listed. Do not name any rule that is not above, \
+         and do not omit one that is.\n\
+         Give a one-sentence reason for each, naming what in the plan the rule applies to.\n",
+    );
+    out
+}
+
+/// The part of a ranker prompt that states the change and lists the rules:
+/// everything but the task. Shared with the full-corpus judge in
+/// [`super::corpus`], so the two ask about the same change in the same words
+/// and differ only in which rules they list and what they ask for.
+pub(super) fn describe_change(plan: &str, paths: &[String], candidates: &[Candidate]) -> String {
     let mut out = String::new();
     out.push_str(
         "A developer is about to make a change. Decide which of this repository's \
@@ -248,17 +267,6 @@ pub fn build_prompt(plan: &str, paths: &[String], candidates: &[Candidate]) -> S
             out.push('\n');
         }
     }
-
-    out.push_str(
-        "\n=== task ===\n\
-         Return one verdict for every candidate above, copying each slug exactly.\n\
-         - `governs`: following this rule would change how the plan is implemented.\n\
-         - `related`: the rule covers the same area but does not constrain this change.\n\
-         - `unrelated`: the rule does not apply.\n\
-         Judge only the candidates listed. Do not name any rule that is not above, \
-         and do not omit one that is.\n\
-         Give a one-sentence reason for each, naming what in the plan the rule applies to.\n",
-    );
     out
 }
 
@@ -362,26 +370,36 @@ pub async fn rank<R: StructuredRunner>(
     max_budget_usd: Option<f64>,
 ) -> Result<Vec<RankedVerdict>, ActualError> {
     let prompt = build_prompt(plan, paths, candidates);
-    // No effort override: unlike `rules::check`'s judge call, stage-2 rank
-    // hasn't been measured against a large candidate set, so there is no
-    // evidence yet that the backend's own default effort is a problem here.
-    let call = runner.run_structured_json(
-        &prompt,
-        RANK_OUTPUT_SCHEMA,
-        model_override,
-        max_budget_usd,
-        None,
-    );
-    let value = tokio::time::timeout(RANK_BUDGET, call)
-        .await
-        .map_err(|_| ActualError::RunnerTimeout {
-            seconds: RANK_BUDGET.as_secs(),
-        })??;
+    let value = call_ranker(runner, &prompt, model_override, max_budget_usd).await?;
     // Not `TailoringValidationError`: this payload has nothing to do with
     // tailoring, and a caller matching on that variant to handle a tailoring
     // failure would catch a rank failure too. The string is what a user sees,
     // via `Stage2::Failed`, but the variant is what code branches on.
     parse_verdicts(&value, candidates).map_err(|e| ActualError::RuleRankInvalid(e.to_string()))
+}
+
+/// One structured call with [`RANK_OUTPUT_SCHEMA`], inside [`RANK_BUDGET`].
+pub(super) async fn call_ranker<R: StructuredRunner>(
+    runner: &R,
+    prompt: &str,
+    model_override: Option<&str>,
+    max_budget_usd: Option<f64>,
+) -> Result<serde_json::Value, ActualError> {
+    // No effort override: unlike `rules::check`'s judge call, stage-2 rank
+    // hasn't been measured against a large candidate set, so there is no
+    // evidence yet that the backend's own default effort is a problem here.
+    let call = runner.run_structured_json(
+        prompt,
+        RANK_OUTPUT_SCHEMA,
+        model_override,
+        max_budget_usd,
+        None,
+    );
+    tokio::time::timeout(RANK_BUDGET, call)
+        .await
+        .map_err(|_| ActualError::RunnerTimeout {
+            seconds: RANK_BUDGET.as_secs(),
+        })?
 }
 
 #[cfg(test)]

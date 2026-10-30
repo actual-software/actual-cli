@@ -25,7 +25,7 @@ use crate::cli::ui::term_size;
 use crate::error::ActualError;
 use crate::rules::scope::{
     self, baseline,
-    eval::{CaseResult, EvaluationReport, GoldenCase, Scores},
+    eval::{CaseResult, EvaluationReport, GoldenCase},
     index::{AdrGroup, Field, Match, Query, ScopeIndex, Weights},
     select::{self, Selection, Stage2},
     IndexSource, ResolvedIndex,
@@ -968,6 +968,9 @@ pub fn exec_eval(args: &RulesEvalArgs) -> Result<(), ActualError> {
     if args.rank {
         comparison.two_stage = Some(evaluate_two_stage(&resolved.index, &cases, args)?);
     }
+    if args.full_corpus {
+        comparison.full_corpus = Some(evaluate_full_corpus(&resolved.index, &cases, args)?);
+    }
 
     if args.json {
         println!("{}", to_json(&comparison));
@@ -1035,6 +1038,10 @@ pub(crate) struct Comparison {
     /// is what CI can afford to run on every commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) two_stage: Option<EvaluationReport>,
+    /// A model judging every document with no prefilter, present only under
+    /// `--full-corpus`: the alternative the two stages are measured against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) full_corpus: Option<EvaluationReport>,
 }
 
 impl Comparison {
@@ -1069,23 +1076,21 @@ pub(crate) fn run_evaluation(
             .into_iter()
             .map(|hit| hit.slug)
             .collect();
-        index_cases.push(CaseResult {
-            name: case.name.clone(),
-            scores: Scores::measure(&selected, &case.expected),
+        index_cases.push(CaseResult::new(
+            case.name.clone(),
             selected,
-            expected: case.expected.clone(),
-        });
+            case.expected.clone(),
+        ));
 
         let scanned: Vec<String> = baseline::select(index, &case.plan, limit)
             .into_iter()
             .map(|hit| hit.slug)
             .collect();
-        scan_cases.push(CaseResult {
-            name: case.name.clone(),
-            scores: Scores::measure(&scanned, &case.expected),
-            selected: scanned,
-            expected: case.expected.clone(),
-        });
+        scan_cases.push(CaseResult::new(
+            case.name.clone(),
+            scanned,
+            case.expected.clone(),
+        ));
     }
 
     Comparison {
@@ -1096,6 +1101,7 @@ pub(crate) fn run_evaluation(
         scope_index: EvaluationReport::new("scope-index", index_cases),
         filename_scan: EvaluationReport::new("filename-scan", scan_cases),
         two_stage: None,
+        full_corpus: None,
     }
 }
 
@@ -1113,14 +1119,7 @@ fn evaluate_two_stage(
     cases: &[GoldenCase],
     args: &RulesEvalArgs,
 ) -> Result<EvaluationReport, ActualError> {
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved = rules_rank::resolve(
-        args.runner.as_ref(),
-        args.model.as_deref(),
-        &cfg,
-        RANK_TIMEOUT_SECS,
-    )
-    .map_err(ActualError::ConfigError)?;
+    let resolved = resolve_eval_runner(args)?;
 
     let mut results = Vec::with_capacity(cases.len());
     for case in cases {
@@ -1137,22 +1136,74 @@ fn evaluate_two_stage(
         // is worth more than no measurement because the ninth timed out, and
         // the reason is recorded on the selection either way.
         let selection = rank_with(&resolved, &prefiltered)?;
-        if let Stage2::Failed { reason } = &selection.stage2 {
-            tracing::warn!(case = %case.name, "rank failed, scoring the prefilter: {reason}");
-        }
         let selected: Vec<String> = selection
             .selected
             .iter()
             .map(|rule| rule.slug.clone())
             .collect();
-        results.push(CaseResult {
-            name: case.name.clone(),
-            scores: Scores::measure(&selected, &case.expected),
-            selected,
-            expected: case.expected.clone(),
-        });
+        let mut result = CaseResult::new(case.name.clone(), selected, case.expected.clone());
+        if let Stage2::Failed { reason } = &selection.stage2 {
+            tracing::warn!(case = %case.name, "rank failed, scoring the prefilter: {reason}");
+            result = result.with_failure(format!("rank failed, scored the prefilter: {reason}"));
+        }
+        results.push(result);
     }
     Ok(EvaluationReport::new("two-stage", results))
+}
+
+/// Score a model judging every indexed document, at the same cap as the other
+/// selectors. See [`scope::corpus`] for how it differs from stage 2.
+///
+/// A case whose call fails is scored as an empty selection and recorded as a
+/// failure, rather than aborting the run or falling back to the prefilter:
+/// there is no prefilter in this arm, and scoring one would credit it with
+/// stage 1's answer. The failure count is printed, so a run that mostly
+/// failed cannot pass for one that mostly abstained.
+fn evaluate_full_corpus(
+    index: &ScopeIndex,
+    cases: &[GoldenCase],
+    args: &RulesEvalArgs,
+) -> Result<EvaluationReport, ActualError> {
+    let resolved = resolve_eval_runner(args)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
+
+    let mut results = Vec::with_capacity(cases.len());
+    for case in cases {
+        let query = Query::new(case.plan.clone()).with_paths(case.paths.clone());
+        let answer = runtime.block_on(scope::corpus::select(
+            index,
+            &query,
+            args.limit,
+            &resolved.runner,
+            resolved.model.as_deref(),
+            resolved.max_budget_usd,
+        ));
+        results.push(match answer {
+            Ok(selected) => CaseResult::new(case.name.clone(), selected, case.expected.clone()),
+            Err(e) => {
+                tracing::warn!(case = %case.name, "full-corpus judgement failed: {e}");
+                CaseResult::new(case.name.clone(), Vec::new(), case.expected.clone())
+                    .with_failure(e.to_string())
+            }
+        });
+    }
+    Ok(EvaluationReport::new(scope::corpus::SELECTOR, results))
+}
+
+/// The runner `--rank` and `--full-corpus` call, resolved as `rules select`
+/// resolves stage 2's.
+fn resolve_eval_runner(args: &RulesEvalArgs) -> Result<ResolvedRunner, ActualError> {
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    rules_rank::resolve(
+        args.runner.as_ref(),
+        args.model.as_deref(),
+        &cfg,
+        RANK_TIMEOUT_SECS,
+    )
+    .map_err(ActualError::ConfigError)
 }
 
 fn render_eval_panel(comparison: &Comparison, width: usize) -> String {
@@ -1175,6 +1226,9 @@ fn render_eval_panel(comparison: &Comparison, width: usize) -> String {
     panel = panel.line(&comparison.filename_scan.summary_line());
     if let Some(two_stage) = &comparison.two_stage {
         panel = panel.line(&two_stage.summary_line());
+    }
+    if let Some(full_corpus) = &comparison.full_corpus {
+        panel = panel.line(&full_corpus.summary_line());
     }
     panel = panel.separator();
     panel = panel.line(&format!(
@@ -2386,6 +2440,124 @@ mod tests {
         assert_eq!(report.cases.len(), 1);
         // The prefilter's answer was scored, so the case still counts.
         assert_eq!(report.cases[0].selected.len(), 1);
+        // And it is recorded as not the ranker's own answer.
+        let failure = report.cases[0].failure.as_deref().expect("recorded");
+        assert!(
+            failure.starts_with("rank failed, scored the prefilter"),
+            "{failure}"
+        );
+        assert_eq!(report.failures(), 1);
+    }
+
+    /// `rules eval --full-corpus` end to end: every document is sent, the
+    /// model's pick is scored, and the panel gains the column.
+    #[test]
+    #[cfg(unix)]
+    fn test_exec_eval_full_corpus_scores_what_the_model_names() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        // The document stage 1 ranks last for this plan, so the arm visibly
+        // does not inherit stage 1's answer.
+        let case = oauth_case();
+        let listed = scope::corpus::candidates(&index, &Query::new(case.plan.clone()));
+        let picked = listed.last().unwrap().slug.clone();
+
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &picked).to_str().unwrap(),
+        );
+
+        let golden_dir = tempdir().unwrap();
+        let args = RulesEvalArgs {
+            full_corpus: true,
+            runner: Some(crate::cli::args::RunnerChoice::ClaudeCli),
+            ..eval_args(root.path(), write_golden(&golden_dir, &[case]))
+        };
+        let cases = load_golden_set(&args.golden).unwrap();
+        let report = evaluate_full_corpus(&index, &cases, &args).unwrap();
+        assert_eq!(report.selector, "full-corpus");
+        assert_eq!(report.cases[0].selected, vec![picked]);
+        assert_eq!(report.failures(), 0);
+
+        let mut comparison = run_evaluation(&index, &cases, 5, 0.0, &Weights::default());
+        comparison.full_corpus = Some(report);
+        let panel = render_eval_panel(&comparison, 110);
+        assert!(panel.contains("full-corpus"), "{panel}");
+
+        assert!(exec_eval(&args).is_ok());
+    }
+
+    /// A case whose call fails is scored empty and recorded as a failure:
+    /// there is no prefilter in this arm to fall back to.
+    #[test]
+    #[cfg(unix)]
+    fn test_evaluate_full_corpus_records_a_failed_case() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let bin = tempdir().unwrap();
+        let script = bin.path().join("fake-claude.sh");
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": {"nonsense": true},
+        })
+        .to_string();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let golden_dir = tempdir().unwrap();
+        let case = oauth_case();
+        let args = RulesEvalArgs {
+            full_corpus: true,
+            runner: Some(crate::cli::args::RunnerChoice::ClaudeCli),
+            ..eval_args(
+                root.path(),
+                write_golden(&golden_dir, std::slice::from_ref(&case)),
+            )
+        };
+        let report = evaluate_full_corpus(&index, &[case], &args).expect("the run survives");
+        assert!(report.cases[0].selected.is_empty());
+        assert!(report.cases[0].failure.is_some());
+        assert!(report.summary_line().contains("failed 1"));
+    }
+
+    /// As for `--rank`, an unresolvable runner is an error, not a silent
+    /// measurement of nothing.
+    #[test]
+    fn test_exec_eval_full_corpus_fails_when_no_runner_resolves() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_key = EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let root = sample();
+        let golden_dir = tempdir().unwrap();
+        let args = RulesEvalArgs {
+            full_corpus: true,
+            runner: Some(crate::cli::args::RunnerChoice::AnthropicApi),
+            ..eval_args(root.path(), write_golden(&golden_dir, &[oauth_case()]))
+        };
+        let err = exec_eval(&args).unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
     }
 
     /// `rules eval --rank` end to end: the ranked column is scored through the
@@ -2956,6 +3128,7 @@ mod tests {
             limit: 5,
             ablate: Vec::new(),
             rank: false,
+            full_corpus: false,
             candidates: scope::DEFAULT_CANDIDATES,
             runner: None,
             model: None,
