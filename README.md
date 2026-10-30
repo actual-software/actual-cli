@@ -120,8 +120,25 @@ xcode-select --install
 # Debian/Ubuntu
 sudo apt-get install build-essential
 
-cargo install --git https://github.com/actual-software/actual-cli.git
+cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
 ```
+
+</details>
+
+<details>
+<summary><strong>Check a downloaded release</strong></summary>
+
+Releases after v0.9.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
+
+```bash
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS.minisig
+curl -fsSL -o actual-release.pub https://raw.githubusercontent.com/actual-software/actual-cli/main/release-keys/primary.pub
+minisign -Vm SHA256SUMS -p actual-release.pub
+shasum -a 256 --check --ignore-missing SHA256SUMS
+```
+
+`minisign` then prints the signed trusted comment, which should name the tag of the release you downloaded, because a signature from an older release still verifies. If it reports a different key id, check against the spare key in [Release signing](docs/RELEASE_SIGNING.md).
 
 </details>
 

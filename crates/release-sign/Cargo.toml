@@ -1,0 +1,27 @@
+[package]
+name = "release-sign"
+version = "0.1.0"
+edition = "2021"
+description = "Signs a published actual-cli release's SHA256SUMS with the org's Cloud KMS key"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "release-sign"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+blake2 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+minisign-verify = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]
+mockito = "1"
+ring = "0.17"

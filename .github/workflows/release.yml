@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - 'v*'
+  # A pull request that changes the release pipeline runs it as a dry run: the
+  # same build, SHA256SUMS and npm packages, all checked, and nothing published.
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'crates/release-sign/**'
+      - 'release-keys/**'
 
 # One run per tag — a single tag push must not spawn duplicate releases.
 concurrency:
@@ -11,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check-stable:
@@ -19,17 +27,37 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       is-stable: ${{ steps.check.outputs.is-stable }}
+      publish: ${{ steps.mode.outputs.publish }}
+      version: ${{ steps.mode.outputs.version }}
     steps:
       - name: Check if stable tag
         id: check
         run: |
           TAG="${{ github.ref_name }}"
-          if echo "$TAG" | grep -qE '-(alpha|beta|rc|test)[.0-9]*$'; then
+          if echo "$TAG" | grep -qE -- '-(alpha|beta|rc|test)[.0-9]*$'; then
             echo "is-stable=false" >> "$GITHUB_OUTPUT"
             echo "Skipping release for pre-release tag: $TAG"
           else
             echo "is-stable=true" >> "$GITHUB_OUTPUT"
             echo "Stable release: $TAG"
+          fi
+
+      - name: Publish or dry run
+        id: mode
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+            {
+              echo "publish=true"
+              echo "version=${GITHUB_REF_NAME#v}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # npm publish --dry-run still refuses a version the registry already
+            # holds, so a dry run packages a version that can never be published.
+            {
+              echo "publish=false"
+              echo "version=0.0.0-dry-run.$GITHUB_RUN_ID"
+            } >> "$GITHUB_OUTPUT"
+            echo "Dry run: everything is built and checked, nothing is published"
           fi
 
   build-macos-arm64:
@@ -243,6 +271,7 @@ jobs:
           targets: aarch64-unknown-linux-gnu
 
       - name: Install cross-compilation tools
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
@@ -271,8 +300,8 @@ jobs:
           name: actual-linux-arm64
           path: target/aarch64-unknown-linux-gnu/release/actual
 
-  package-and-release:
-    name: Package & Release
+  package:
+    name: Package
     needs: [check-stable, build-macos-arm64, build-macos-x64, build-linux-x64, build-linux-arm64]
     if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: ubuntu-latest
@@ -284,7 +313,6 @@ jobs:
 
       - name: Create tarballs
         run: |
-          VERSION="${{ github.ref_name }}"
           mkdir -p tarballs
 
           # Make all binaries executable
@@ -299,45 +327,64 @@ jobs:
           tar -czf tarballs/actual-linux-x64.tar.gz    -C artifacts/actual-linux-x64    actual
           tar -czf tarballs/actual-linux-arm64.tar.gz  -C artifacts/actual-linux-arm64  actual
 
-      - name: Create private GitHub Release
+      # The one SHA256SUMS: both release pages, the Homebrew formula, the npm
+      # check below and the release signature all start from this file.
+      - name: Write SHA256SUMS
+        working-directory: tarballs
+        run: |
+          sha256sum actual-darwin-arm64.tar.gz actual-darwin-x64.tar.gz \
+            actual-linux-x64.tar.gz actual-linux-arm64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: release-assets
+          path: tarballs/
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub Releases
+    needs: [check-stable, package]
+    if: needs.check-stable.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-assets
+          path: dist/
+
+      - name: Check the tarballs against SHA256SUMS
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ github.ref_name }}"
-          gh release create "$VERSION" \
-            --repo "${{ github.repository }}" \
-            --title "$VERSION" \
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            tarballs/*.tar.gz
+            dist/*.tar.gz dist/SHA256SUMS
 
-      - name: Mirror tarballs to public releases repo
+      - name: Mirror to public releases repo
         env:
           GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
-          VERSION="${{ github.ref_name }}"
-          gh release create "$VERSION" \
+          gh release create "$GITHUB_REF_NAME" \
             --repo actual-software/actual-releases \
-            --title "$VERSION" \
-            --notes "Release assets for actual-cli $VERSION. Source: ${{ github.server_url }}/${{ github.repository }}" \
-            tarballs/*.tar.gz
-
-      - name: Compute SHA256s
-        id: sha256
-        run: |
-          echo "darwin_arm64=$(shasum -a 256 tarballs/actual-darwin-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "darwin_x64=$(shasum -a 256 tarballs/actual-darwin-x64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "linux_x64=$(shasum -a 256 tarballs/actual-linux-x64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "linux_arm64=$(shasum -a 256 tarballs/actual-linux-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-
-    outputs:
-      sha256_darwin_arm64: ${{ steps.sha256.outputs.darwin_arm64 }}
-      sha256_darwin_x64: ${{ steps.sha256.outputs.darwin_x64 }}
-      sha256_linux_x64: ${{ steps.sha256.outputs.linux_x64 }}
-      sha256_linux_arm64: ${{ steps.sha256.outputs.linux_arm64 }}
+            --title "$GITHUB_REF_NAME" \
+            --notes "Release assets for actual-cli $GITHUB_REF_NAME. Source: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            dist/*.tar.gz dist/SHA256SUMS
 
   update-homebrew-tap:
     name: Update Homebrew Tap
-    needs: package-and-release
+    needs: [check-stable, github-release]
+    if: needs.check-stable.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tap repo
@@ -345,6 +392,24 @@ jobs:
         with:
           repository: actual-software/homebrew-actual
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/dist
+
+      - name: Read SHA256s from SHA256SUMS
+        id: sha256
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            sha=$(awk -v f="actual-$platform.tar.gz" '$2 == f { print $1 }' "$RUNNER_TEMP/dist/SHA256SUMS")
+            if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::SHA256SUMS has no line for actual-$platform.tar.gz"
+              exit 1
+            fi
+            echo "${platform//-/_}=$sha" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
@@ -357,10 +422,10 @@ jobs:
             template/actual.rb \
             Formula/actual.rb \
             --version "${VERSION#v}" \
-            --sha-darwin-arm64 "${{ needs.package-and-release.outputs.sha256_darwin_arm64 }}" \
-            --sha-darwin-x64   "${{ needs.package-and-release.outputs.sha256_darwin_x64 }}" \
-            --sha-linux-x64    "${{ needs.package-and-release.outputs.sha256_linux_x64 }}" \
-            --sha-linux-arm64  "${{ needs.package-and-release.outputs.sha256_linux_arm64 }}"
+            --sha-darwin-arm64 "${{ steps.sha256.outputs.darwin_arm64 }}" \
+            --sha-darwin-x64   "${{ steps.sha256.outputs.darwin_x64 }}" \
+            --sha-linux-x64    "${{ steps.sha256.outputs.linux_x64 }}" \
+            --sha-linux-arm64  "${{ steps.sha256.outputs.linux_arm64 }}"
 
       - name: Commit and push to tap
         env:
@@ -371,3 +436,176 @@ jobs:
           git add Formula/actual.rb
           git diff --staged --quiet || git commit -m "actual $VERSION"
           git push
+
+  # Builds the five npm packages from the release tarballs and checks them.
+  # It runs on pull requests too, so it holds no id-token: npm exchanges an
+  # OIDC token for a publish token even on `npm publish --dry-run`.
+  npm-packages:
+    name: npm Packages
+    needs: [check-stable, package]
+    if: needs.check-stable.outputs.is-stable == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-stable.outputs.version }}
+    steps:
+      - name: Checkout npm scaffolding
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: actual-software/actual-releases
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        # Pin to npm 11.x: >= 11.5.1 adds OIDC trusted publishing and still supports
+        # Node 20. npm@latest is now npm 12, which requires Node >= 22 and breaks here.
+        run: npm install -g 'npm@^11.5.1'
+
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/dist
+
+      - name: Check the tarballs against SHA256SUMS
+        working-directory: ${{ runner.temp }}/dist
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Sync npm versions
+        run: bash scripts/sync-npm-version.sh "$VERSION"
+
+      - name: Place binaries into platform packages
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            mkdir -p "$RUNNER_TEMP/release-bin/$platform"
+            tar -xzf "$RUNNER_TEMP/dist/actual-$platform.tar.gz" -C "$RUNNER_TEMP/release-bin/$platform"
+            cp "$RUNNER_TEMP/release-bin/$platform/actual" "npm/actual-$platform/bin/actual"
+            chmod +x "npm/actual-$platform/bin/actual"
+          done
+
+      - name: Pack the packages
+        run: |
+          for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64 actual; do
+            mkdir -p "$RUNNER_TEMP/npm-packages/$pkg"
+            (cd "npm/$pkg" && npm pack --pack-destination "$RUNNER_TEMP/npm-packages/$pkg")
+          done
+
+      - name: Compare the packed binaries with the release tarballs
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            unpacked="$RUNNER_TEMP/npm-unpacked/$platform"
+            mkdir -p "$unpacked"
+            tar -xzf "$RUNNER_TEMP/npm-packages/actual-$platform/actualai-actual-$platform-$VERSION.tgz" -C "$unpacked"
+            if ! test -x "$unpacked/package/bin/actual"; then
+              echo "::error::@actualai/actual-$platform packs bin/actual without the executable bit"
+              exit 1
+            fi
+            if ! cmp "$unpacked/package/bin/actual" "$RUNNER_TEMP/release-bin/$platform/actual"; then
+              echo "::error::@actualai/actual-$platform packs a different binary than actual-$platform.tar.gz"
+              exit 1
+            fi
+            echo "@actualai/actual-$platform carries the binary from actual-$platform.tar.gz, byte for byte"
+          done
+
+      - name: npm publish --dry-run
+        if: needs.check-stable.outputs.publish != 'true'
+        run: |
+          for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64 actual; do
+            (cd "npm/$pkg" && npm publish --dry-run --tag dry-run --access public)
+          done
+
+      - name: Upload npm packages
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages/
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish to npm
+    needs: [check-stable, npm-packages]
+    if: needs.check-stable.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # mint the OIDC token for npm trusted publishing
+    env:
+      VERSION: ${{ needs.check-stable.outputs.version }}
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g 'npm@^11.5.1'
+
+      - name: Download npm packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages
+
+      - name: Unpack the checked packages
+        run: |
+          for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64 actual; do
+            mkdir -p "npm/$pkg"
+            tar -xzf "$RUNNER_TEMP/npm-packages/$pkg/actualai-$pkg-$VERSION.tgz" -C "npm/$pkg" --strip-components=1
+          done
+
+      # Auth is via OIDC trusted publishing (id-token: write above) — no NPM_TOKEN.
+      - name: Publish platform packages
+        run: |
+          for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64; do
+            echo "Publishing @actualai/$pkg..."
+            (cd npm/$pkg && npm publish --access public)
+          done
+
+      - name: Publish root package
+        run: |
+          echo "Publishing @actualai/actual..."
+          cd npm/actual && npm publish --access public
+
+  signing-tool:
+    name: Signing Tool
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-cargo-release-sign-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macos-cargo-release-sign-
+
+      - name: Install minisign
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install minisign
+
+      - name: Check formatting
+        run: cargo fmt -p release-sign --check
+
+      - name: Run clippy
+        run: cargo clippy -p release-sign --all-targets -- -D warnings
+
+      - name: Run tests, including the stock minisign check
+        run: cargo test -p release-sign -- --include-ignored
