@@ -78,7 +78,7 @@ pub fn fallback_org_id(slug: &str) -> String {
 ///
 /// Authenticated runs carry domain-separated hashes of the real ids (never the
 /// raw ids). Unauthenticated runs carry a synthetic `org_id` derived from the
-/// repo slug, plus `repo_id_hash` when a sticky-scope pin persists; the
+/// repo slug, plus `repo_id_hash` when a repository pin persists; the
 /// existing pseudonymous keys (`distinct_id`, `repo_hash`, `repo_url_hash`)
 /// continue to ride alongside on the event.
 #[derive(Debug, Clone, Default, PartialEq)]
