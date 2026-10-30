@@ -4050,7 +4050,7 @@ pub(crate) mod tests {
                 Some(crate::api::types::PlanGovernanceReasonCategory::Medium)
             );
             assert!(props.reason_hash.as_deref().is_some_and(|h| h.len() == 64));
-            // The identity envelope is applied to override events too: anonymous
+            // The identity envelope is applied to override events too: logged-out
             // run (no creds) -> datetime_utc set, no user/org identity hashes.
             assert!(
                 props.datetime_utc.as_deref().is_some_and(|s| !s.is_empty()),
@@ -4132,7 +4132,7 @@ pub(crate) mod tests {
 
     /// Every plan/impl-check governance event carries the identity + timestamp
     /// envelope. In an isolated config there are no stored credentials, so the
-    /// run is anonymous: `datetime_utc` is always stamped, and no raw-id hashes
+    /// run is logged out: `datetime_utc` is always stamped, and no raw-id hashes
     /// (and certainly no raw ids) appear.
     #[cfg(feature = "telemetry")]
     #[test]
@@ -4162,7 +4162,7 @@ pub(crate) mod tests {
                 props.datetime_utc.as_deref().is_some_and(|s| !s.is_empty()),
                 "every governance event must carry datetime_utc"
             );
-            // Anonymous run (no creds in the isolated config dir).
+            // Logged-out run (no creds in the isolated config dir).
             assert!(props.user_id_hash.is_none());
             assert!(props.org_id_hash.is_none());
         }
