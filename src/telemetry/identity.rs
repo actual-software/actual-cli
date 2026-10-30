@@ -17,8 +17,8 @@ use crate::auth::store::StoredCredentials;
 /// This is deliberately *not* salted: the value must be reproducible byte-for-byte
 /// by our backend from Supabase's own raw rows so a `hash -> raw` lookup can be
 /// built server-side. Secrecy against enumeration is added by a server-side
-/// pepper (HMAC) in api-service, never on this (open-source) side. The raw id
-/// itself is never sent — only this hash leaves the machine.
+/// pepper (HMAC) in api-service, never on this (open-source) side.
+/// Events carry only this hash, never the raw id.
 pub fn hash_identifier(domain: &str, id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain.as_bytes());

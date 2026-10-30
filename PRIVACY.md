@@ -131,7 +131,7 @@ Each event includes a subset of these properties:
 | `datetime_utc` | RFC3339 UTC timestamp of the event |
 | `user_id_hash` | One-way SHA-256 of `"user:"+<user id>`, only when logged in -- the event **never** carries the raw user id; peppered server-side before PostHog |
 | `org_id_hash` | One-way SHA-256 of `"org:"+<organization id>`, only when logged in -- the event **never** carries the raw org id; peppered server-side before PostHog |
-| `repo_id_hash` | One-way SHA-256 of `"repo:"+<connected-repo id>`, sent whenever that id is known locally -- **including logged-out runs where a repository pin persists**; the raw id is **never** sent; peppered server-side before PostHog |
+| `repo_id_hash` | One-way SHA-256 of `"repo:"+<connected-repo id>`, sent whenever that id is known locally -- **including logged-out runs where a repository pin persists**; the event **never** carries the raw id; peppered server-side before PostHog |
 | `org_id` | A synthetic, repo-derived org identifier (a UUID from the repo slug), sent **only when not logged in**, so logged-out runs still have an org-shaped grouping key -- derived deterministically from the repo slug and **not** peppered, so recomputable from the repository |
 | `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
 | `reason_len` | `check-override` only: the character length of the override reason |
