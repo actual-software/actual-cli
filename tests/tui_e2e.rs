@@ -199,6 +199,82 @@ mod tests {
         );
     }
 
+    /// A `codex` that exits 0 with no answer and a model error, the failure
+    /// that sends `adr-bot` down its `openai-api` retry.
+    fn create_fake_codex_with_model_error(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-codex");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '[ts] ERROR: {\"detail\":\"The model is not supported\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// Answer a prompt the way a person does, some time after it appears. The
+    /// nav poller stays up through the prompt and reads the same queue, so a
+    /// key sent with the first frame gets lost or leaves the poller stuck in a
+    /// read that the next step then waits on.
+    fn answer_prompt(session: &mut TuiSession, key: Key) {
+        std::thread::sleep(Duration::from_millis(500));
+        session.send_key(key).unwrap();
+    }
+
+    /// The fallback's name also passes through the second run's Environment
+    /// step, so this waits for it and the prompt on one screen. Waiting for
+    /// the name alone would pass with the prompt showing neither.
+    #[test]
+    fn test_tui_retry_prompt_names_the_fallback_runner() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-tui-retry",
+            "TUI Retry Rule",
+            &["Name the runner"],
+            &[],
+            &["."],
+        );
+        setup_adr_server(&mut server, &format!("[{}]", adr));
+        let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+        let fake_codex = create_fake_codex_with_model_error(env.dir.path());
+
+        let cmd = format!(
+            "{} adr-bot --runner codex-cli --api-url {}",
+            actual_binary_path(),
+            env.api_url
+        );
+        let mut session = TuiSession::new(&cmd)
+            .size(120, 40)
+            .timeout(Duration::from_secs(30))
+            .env("CODEX_BINARY", fake_codex.to_str().unwrap())
+            .env("OPENAI_API_KEY", "sk-test")
+            // A dead proxy, so a retry that stops asking can't reach OpenAI.
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ACTUAL_CONFIG", env.config_path.to_str().unwrap())
+            .env("NO_COLOR", "1")
+            .workdir(env.dir.path())
+            .spawn()
+            .expect("Failed to spawn actual adr-bot");
+
+        session
+            .wait_for(|screen| {
+                screen.contains("Proceed with sync?") && screen.contains("codex-cli")
+            })
+            .expect("The first prompt should name codex-cli");
+        answer_prompt(&mut session, Key::Enter);
+
+        session
+            .wait_for(|screen| {
+                screen.contains("Proceed with sync?") && screen.contains("openai-api (fallback)")
+            })
+            .expect("The retry's prompt should name the fallback runner");
+        answer_prompt(&mut session, Key::Char('n'));
+
+        // 4 is the exit code for a user-cancelled run.
+        assert_eq!(session.wait_for_exit().expect("Should exit"), 4);
+    }
+
     #[test]
     fn test_tui_sync_no_tailor_shows_skipped() {
         let mut server = mockito::Server::new();

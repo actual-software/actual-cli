@@ -1017,6 +1017,15 @@ impl TuiRenderer {
         }
     }
 
+    /// Repeat a row for the TUI, which shows one step's log at a time.
+    ///
+    /// Plain output scrolls, so a row from an earlier step is still on screen.
+    pub fn println_if_tui(&mut self, line: &str) {
+        if self.is_tui() {
+            self.println(line);
+        }
+    }
+
     /// Push a line to a specific step's log pane, stripping ANSI escape codes.
     ///
     /// All internal log pushes should go through this method (or through
@@ -1979,6 +1988,24 @@ mod tests {
     fn test_println_quiet_mode() {
         let mut r = TuiRenderer::new(true, false);
         r.println("should be ignored");
+        assert_eq!(r.logs[0].len(), 0);
+    }
+
+    #[test]
+    fn test_println_if_tui_logs_to_the_step_the_prompt_draws_in() {
+        let terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "Checking environment");
+        r.start(SyncPhase::Analysis, "Analyzing repository");
+        r.println_if_tui("  Runner    openai-api (fallback)");
+        let shown = r.logs[r.active_step].raw_lines().join("\n");
+        assert!(shown.contains("openai-api (fallback)"), "got: {shown}");
+    }
+
+    #[test]
+    fn test_println_if_tui_leaves_plain_output_alone() {
+        let mut r = TuiRenderer::new(false, true);
+        r.println_if_tui("  Runner    openai-api (fallback)");
         assert_eq!(r.logs[0].len(), 0);
     }
 

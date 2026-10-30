@@ -402,8 +402,8 @@ fn run_codex_cli(
     );
     // Fall back to the OpenAI Responses API when Codex CLI reports a
     // model-level error (e.g. "model is not supported").  This lets
-    // users who have a valid OPENAI_API_KEY transparently retry via
-    // the direct API without manual --runner overrides.
+    // users who have a valid OPENAI_API_KEY retry via the direct API
+    // without a manual --runner override.  Without --force it asks first.
     codex_cli_fallback_if_model_error(
         result,
         args,
