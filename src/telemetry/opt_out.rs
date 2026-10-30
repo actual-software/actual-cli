@@ -6,9 +6,9 @@ use crate::config::types::Config;
 ///
 /// Extracted from `reporter::try_report_metrics` so every telemetry sender
 /// (sync counters, plan-governance events) shares exactly one opt-out check
-/// — see `PRIVACY.md`'s "three independent ways to disable telemetry."
-/// (The third way, compile-time removal of the `telemetry` feature, isn't
-/// representable here since it removes this module entirely.)
+/// — see `PRIVACY.md`'s "How to opt out of telemetry."
+/// (A build without the `telemetry` feature isn't representable here, since
+/// it removes this module entirely.)
 pub fn is_disabled(config: &Config) -> bool {
     if std::env::var("ACTUAL_NO_TELEMETRY")
         .ok()

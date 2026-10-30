@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - For a release binary no package manager owns, the daily update notice and `actual version` name `actual self-update` instead of linking the release page, and for a build from source they name the `cargo install` command that rebuilds it. `actual version --json` is unchanged
 - When `actual adr-bot` retries a failed `codex-cli` run through `openai-api`, it asks `Proceed with sync?` again and shows the per-file review, unless you passed `--force`. Before, the retry skipped both and wrote every generated file unreviewed. That prompt now shows a `Runner` row directly above the question, so the retry's reads `openai-api (fallback)`
 - `plan-check`, `impl-check` and `rules select` run `codex` in its read-only sandbox, so it can read your repository on those calls but can't change it
+- `PRIVACY.md` and the README lead with one setting for turning telemetry off, `actual config set telemetry.enabled false`, and say it stops every telemetry event, including the plan-governance events that reach PostHog. `ACTUAL_NO_TELEMETRY` stays for CI and one-off runs, and what the CLI sends is unchanged
 
 ### Fixed
 - `--runner codex-cli` works on Codex 0.147.0 and later, which removed the `--full-auto` flag the CLI passed. On those versions every call failed before a prompt left, and `plan-check` and `impl-check` reported `not_checked` with exit 0. Tailoring now passes `--sandbox workspace-write`, which is what the old flag meant
