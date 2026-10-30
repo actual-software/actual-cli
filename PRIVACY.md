@@ -403,7 +403,7 @@ identity-linked data:
 - **Purpose:** to tie these events to an organization so Actual can measure and
   improve the CLI's ADR guidance and checks for each customer.
 - **Retention & deletion:** they're kept for as long as needed to provide
-  product analytics for the organization, and are deleted, or the link severed,
+  product analytics for the organization, and are deleted
   when the organization is deleted or on a verified deletion request for it.
 
 #### Signed-out events sent to Actual's API
@@ -534,7 +534,7 @@ all.
 Signed-in OpenTelemetry events sent to Actual's API are covered above under
 "Signed-in events sent to Actual's API": they're held only by Actual's
 authorized backend systems, are used solely for product analytics, and are
-deleted or de-linked when the organization is deleted or on a verified deletion
+deleted when the organization is deleted or on a verified deletion
 request for it. Signed-out ones are covered under "Signed-out events sent to
 Actual's API": they aren't stored with an account or organization, so a deletion
 request can't remove them. Opting out of telemetry stops both before they're
