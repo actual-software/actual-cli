@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- When `actual adr-bot` retries a failed `codex-cli` run through `openai-api`, it asks `Proceed with sync?` again and shows the per-file review, unless you passed `--force`. Before, the retry skipped both and wrote every generated file unreviewed. That prompt now shows a `Runner` row in the default view, so the retry's reads `openai-api (fallback)`
+- When `actual adr-bot` retries a failed `codex-cli` run through `openai-api`, it asks `Proceed with sync?` again and shows the per-file review, unless you passed `--force`. Before, the retry skipped both and wrote every generated file unreviewed. That prompt now shows a `Runner` row directly above the question, so the retry's reads `openai-api (fallback)`
 - `plan-check`, `impl-check` and `rules select` run `codex` in its read-only sandbox, so it can read your repository on those calls but can't change it
 
 ### Fixed

@@ -293,15 +293,19 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
 
 /// Display detected projects and prompt for confirmation using the given terminal.
 ///
-/// Writes the project summary via `term.write_line`, then uses `term.select_one`
-/// to present three options: Accept, Change, and Reject.
+/// Writes the project summary and any `prompt_row` via `term.write_line`, then
+/// uses `term.select_one` to present three options: Accept, Change, and Reject.
 /// Terminal width is detected automatically.
 pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
+    prompt_row: Option<&str>,
     term: &dyn TerminalIO,
 ) -> Result<ConfirmAction, ActualError> {
     let summary = format_project_summary(analysis);
     term.write_line(&summary);
+    if let Some(row) = prompt_row {
+        term.write_line(row);
+    }
 
     let options = vec![
         "Accept \u{2014} proceed with sync".to_string(),
@@ -879,7 +883,7 @@ mod tests {
     fn prompt_accept() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
-        let result = prompt_project_confirmation(&analysis, &term).unwrap();
+        let result = prompt_project_confirmation(&analysis, None, &term).unwrap();
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -887,7 +891,7 @@ mod tests {
     fn prompt_change() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec![]).with_select_one(vec![1]);
-        let result = prompt_project_confirmation(&analysis, &term).unwrap();
+        let result = prompt_project_confirmation(&analysis, None, &term).unwrap();
         assert_eq!(result, ConfirmAction::Change);
     }
 
@@ -895,7 +899,7 @@ mod tests {
     fn prompt_reject() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
-        let result = prompt_project_confirmation(&analysis, &term).unwrap();
+        let result = prompt_project_confirmation(&analysis, None, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -904,7 +908,7 @@ mod tests {
         let analysis = make_single_project_analysis();
         // Any index >= 2 maps to Reject via the `_ =>` arm
         let term = MockTerminal::new(vec![]).with_select_one(vec![99]);
-        let result = prompt_project_confirmation(&analysis, &term).unwrap();
+        let result = prompt_project_confirmation(&analysis, None, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -913,7 +917,7 @@ mod tests {
         let analysis = make_single_project_analysis();
         // Empty select_one results causes select_one to return Err(UserCancelled)
         let term = MockTerminal::new(vec![]).with_select_one(vec![]);
-        let result = prompt_project_confirmation(&analysis, &term);
+        let result = prompt_project_confirmation(&analysis, None, &term);
         assert!(
             result.is_err(),
             "expected Err when terminal select_one is cancelled, got: {result:?}"
@@ -924,7 +928,7 @@ mod tests {
     fn prompt_writes_summary_to_output() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
-        prompt_project_confirmation(&analysis, &term).unwrap();
+        prompt_project_confirmation(&analysis, None, &term).unwrap();
         let output = term.output_text();
         assert!(
             output.contains("my-cli"),
@@ -934,6 +938,15 @@ mod tests {
             output.contains("Single project detected"),
             "expected header in output: {output}"
         );
+    }
+
+    #[test]
+    fn prompt_writes_the_prompt_row_below_the_summary() {
+        let analysis = make_single_project_analysis();
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
+        prompt_project_confirmation(&analysis, Some("  Runner    codex-cli"), &term).unwrap();
+        let output = term.output_text();
+        assert!(output.ends_with("  Runner    codex-cli"), "{output}");
     }
 
     // ── ANSI injection prevention tests ──
