@@ -2386,8 +2386,9 @@ mod tests {
 
     #[test]
     fn test_run_sync_prompt_with_runner_display() {
-        // Exercises the prompt's `Runner` row. That row renders only in the
-        // TUI, which `test_tui_retry_prompt_names_the_fallback_runner` drives.
+        // Plain mode prints the Environment rows to stdout, so `term` holds only
+        // what the prompt wrote. `test_tui_retry_prompt_names_the_fallback_runner`
+        // drives the same row in the TUI.
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         // select_one index 0 = Accept for project confirm
@@ -2411,6 +2412,11 @@ mod tests {
             Some(&rd),
         );
         assert!(result.is_ok(), "accepted run should succeed: {result:?}");
+        let output = term.output_text();
+        assert!(
+            output.contains("  Runner    openai-api (fallback)"),
+            "{output}"
+        );
     }
 
     #[test]

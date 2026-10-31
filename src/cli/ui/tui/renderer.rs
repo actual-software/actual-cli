@@ -1021,11 +1021,11 @@ impl TuiRenderer {
         }
     }
 
-    /// Set a row for the TUI's project prompt to draw below the project summary.
+    /// Set a row for the project prompt to draw below the project summary.
     ///
-    /// The log pane shows one step at a time and keeps its newest lines, so the
-    /// last line above the prompt is the only one a long summary can't push off.
-    /// Plain output scrolls, so a row from an earlier step is still on screen.
+    /// A long summary pushes everything above it out of the TUI's log pane and
+    /// off a plain terminal's screen, so the last line above the prompt is the
+    /// only one sure to be seen.
     pub fn set_prompt_row(&mut self, row: String) {
         self.prompt_row = Some(row);
     }
@@ -1213,7 +1213,9 @@ impl TuiRenderer {
                 self.draw();
                 result
             }
-            Mode::Plain | Mode::Quiet => prompt_project_confirmation(analysis, term),
+            Mode::Plain | Mode::Quiet => {
+                prompt_project_confirmation(analysis, self.prompt_row.as_deref(), term)
+            }
         }
     }
 
