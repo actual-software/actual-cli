@@ -138,7 +138,7 @@ fn codex_cli_fallback_if_model_error(
     subprocess_timeout: Duration,
     root_dir: &std::path::Path,
     cfg_path: &std::path::Path,
-    term: &crate::cli::ui::real_terminal::RealTerminal,
+    term: &dyn crate::cli::ui::terminal::TerminalIO,
 ) -> Result<(), ActualError> {
     match result {
         Err(ref e) if e.is_model_error() => {
@@ -161,12 +161,10 @@ fn codex_cli_fallback_if_model_error(
                             .model_compatibility_warning(&fallback_model),
                     };
                     let api_runner = OpenAiApiRunner::new(key, fallback_model, subprocess_timeout)?;
-                    // Skip confirmation on fallback — user already accepted
-                    // on the initial CodexCli attempt.
-                    let mut fallback_args = args.clone();
-                    fallback_args.force = true;
+                    // Not forced: the prompts now go somewhere the user didn't
+                    // accept, and the failed run never reached the file review.
                     run_sync(
-                        &fallback_args,
+                        args,
                         root_dir,
                         cfg_path,
                         term,
@@ -404,8 +402,8 @@ fn run_codex_cli(
     );
     // Fall back to the OpenAI Responses API when Codex CLI reports a
     // model-level error (e.g. "model is not supported").  This lets
-    // users who have a valid OPENAI_API_KEY transparently retry via
-    // the direct API without manual --runner overrides.
+    // users who have a valid OPENAI_API_KEY retry via the direct API
+    // without a manual --runner override.  Without --force it asks first.
     codex_cli_fallback_if_model_error(
         result,
         args,
@@ -560,6 +558,7 @@ mod tests {
         sync_run_inner,
     };
     use crate::cli::args::{RunnerChoice, SyncArgs};
+    use crate::cli::ui::test_utils::MockTerminal;
     use crate::error::ActualError;
     use crate::runner::auth::ClaudeAuthStatus;
     use crate::runner::probe::resolve_api_key;
@@ -1622,6 +1621,65 @@ mod tests {
         assert!(
             !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
             "API key from env should resolve: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_fallback_asks_again_when_the_user_did_not_pass_force() {
+        // The prompt is the only thing here that can answer UserCancelled, so
+        // that error shows the retry stopped to ask before anything was sent.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::remove("OPENAI_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let args = SyncArgs {
+            force: false,
+            ..make_sync_args(None)
+        };
+        // select_one index 2 = Reject for project confirm
+        let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
+        let result = codex_cli_fallback_if_model_error(
+            Err(model_error()),
+            &args,
+            None,
+            Some("sk-config-fallback-key"),
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &term,
+        );
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "expected the retry to stop at the prompt: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_fallback_keeps_the_force_the_user_passed() {
+        // The same scripted Reject goes unread when `--force` was on the
+        // command line, so this pins the prompt check above from the other side.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::remove("OPENAI_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let args = SyncArgs {
+            api_url: Some("http://127.0.0.1:9".to_string()),
+            ..make_sync_args(None)
+        };
+        let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
+        let result = codex_cli_fallback_if_model_error(
+            Err(model_error()),
+            &args,
+            None,
+            Some("sk-config-fallback-key"),
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &term,
+        );
+        assert!(
+            !matches!(result, Err(ActualError::UserCancelled)),
+            "--force should skip the prompt on the retry too: {result:?}"
         );
     }
 

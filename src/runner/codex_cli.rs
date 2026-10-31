@@ -19,13 +19,13 @@ const CODEX_BINARY_ENV: &str = "CODEX_BINARY";
 /// Production implementation that spawns `codex` as a subprocess.
 ///
 /// Codex CLI (`@openai/codex`) is OpenAI's open-source CLI tool. This runner
-/// invokes it in non-interactive mode using `exec --full-auto`
+/// invokes it in non-interactive mode using `exec --sandbox <mode>`
 /// (analogous to Claude Code's `--print -p`).
 ///
 /// # Invocation
 ///
 /// ```text
-/// codex exec --full-auto \
+/// codex exec --sandbox <workspace-write|read-only> \
 ///     --model <model> \
 ///     --output-last-message <tempfile> \
 ///     "<prompt_with_embedded_schema>"
@@ -142,13 +142,33 @@ fn io_err(context: &str, e: std::io::Error) -> ActualError {
     }
 }
 
+/// The `--sandbox` mode for one Codex call.
+///
+/// Tailoring keeps the write access `--full-auto` gave it before Codex 0.147.0
+/// removed that flag. The check and ranking calls answer from their prompt
+/// alone, so they run read-only.
+#[derive(Clone, Copy)]
+enum CodexSandbox {
+    WorkspaceWrite,
+    ReadOnly,
+}
+
+impl CodexSandbox {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::WorkspaceWrite => "workspace-write",
+            Self::ReadOnly => "read-only",
+        }
+    }
+}
+
 /// Build the argument list for the Codex CLI invocation.
 ///
-/// Produces: `exec --full-auto [--model <model>] --output-last-message <path> <prompt>`
+/// Produces: `exec --sandbox <mode> [--model <model>] --output-last-message <path> <prompt>`
 ///
-/// The `exec` subcommand runs Codex in non-interactive mode.
-/// `--full-auto` is a convenience alias for `-a on-failure --sandbox workspace-write`,
-/// suppressing confirmation prompts while maintaining sandboxed execution.
+/// The `exec` subcommand runs Codex in non-interactive mode, where it never
+/// stops for approval. `--sandbox` goes on every call so that a `sandbox_mode`
+/// in the user's Codex config can't widen it.
 /// `--output-last-message <path>` writes the agent's final response to a file
 /// so we can read structured output after the process exits.
 ///
@@ -170,6 +190,7 @@ fn build_codex_args(
     prompt: &str,
     model: Option<&str>,
     output_path: &std::path::Path,
+    sandbox: CodexSandbox,
 ) -> Result<Vec<String>, ActualError> {
     if let Some(m) = model {
         if !model_name_regex().is_match(m) {
@@ -183,7 +204,11 @@ fn build_codex_args(
             "Invalid prompt: must not start with '-'".to_string(),
         ));
     }
-    let mut args = vec!["exec".to_string(), "--full-auto".to_string()];
+    let mut args = vec![
+        "exec".to_string(),
+        "--sandbox".to_string(),
+        sandbox.as_arg().to_string(),
+    ];
     if let Some(m) = model {
         args.push("--model".to_string());
         args.push(m.to_string());
@@ -228,7 +253,9 @@ async fn run_codex_subprocess<T: serde::de::DeserializeOwned>(
     // on drop, preventing orphaned processes.
     cmd.kill_on_drop(true);
 
-    cmd.stdout(std::process::Stdio::piped())
+    // `codex exec` adds piped stdin to the prompt and waits for it to close.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     // Retry on ETXTBSY, as every other spawn site in this crate does. A binary
@@ -267,10 +294,10 @@ async fn run_codex_subprocess<T: serde::de::DeserializeOwned>(
         stderr: String::new(),
     })?;
 
-    // Codex CLI exits 0 even when the model is unsupported or the request
-    // fails (e.g. ChatGPT account limitations). In that case the output
-    // file is empty and stderr/stdout contains the error details.  Detect
-    // this and surface a useful error message.
+    // An exit 0 with an empty output file still means no answer. Older Codex
+    // releases did that on a failed request, with the error details in
+    // stderr/stdout; 0.134.0 and 0.166.0 exit 1 on an unsupported model and
+    // take the branch above. Detect this and surface a useful error message.
     if raw.trim().is_empty() {
         // Look for model-not-supported errors in stdout (Codex logs errors there)
         let combined = format!("{stdout_text}\n{stderr_text}");
@@ -351,6 +378,7 @@ impl CodexCliRunner {
         &self,
         prompt: &str,
         schema: &str,
+        sandbox: CodexSandbox,
     ) -> Result<T, ActualError> {
         let model = self.model.as_deref();
 
@@ -370,7 +398,7 @@ impl CodexCliRunner {
              conforming to this JSON schema:\n{schema}"
         );
 
-        let args = build_codex_args(&augmented_prompt, model, &output_path)?;
+        let args = build_codex_args(&augmented_prompt, model, &output_path, sandbox)?;
         run_codex_subprocess(
             &self.binary_path,
             self.timeout,
@@ -390,7 +418,8 @@ impl TailoringRunner for CodexCliRunner {
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
-        self.run_structured(prompt, schema).await
+        self.run_structured(prompt, schema, CodexSandbox::WorkspaceWrite)
+            .await
     }
 }
 
@@ -403,7 +432,8 @@ impl crate::runner::structured::StructuredRunner for CodexCliRunner {
         _max_budget_usd: Option<f64>,
         _effort: Option<&str>,
     ) -> Result<serde_json::Value, ActualError> {
-        self.run_structured(prompt, schema).await
+        self.run_structured(prompt, schema, CodexSandbox::ReadOnly)
+            .await
     }
 }
 
@@ -546,6 +576,7 @@ echo '{}' > "$OUTPUT_FILE"
         let captured = std::fs::read_to_string(&prompt_file).unwrap();
         assert!(captured.contains("rank these"), "{captured}");
         assert!(captured.contains(r#""title":"rank""#), "{captured}");
+        assert!(captured.contains("--sandbox\nread-only\n"), "{captured}");
     }
 
     #[tokio::test]
@@ -749,14 +780,18 @@ echo '{json}' > "$OUTPUT_FILE"
 
         let captured = std::fs::read_to_string(&args_file).unwrap();
 
-        // Verify exec subcommand and --full-auto
+        // Verify exec subcommand and the tailoring sandbox
         assert!(
             captured.starts_with("exec\n"),
             "should start with exec subcommand"
         );
         assert!(
-            captured.contains("--full-auto\n"),
-            "--full-auto flag missing"
+            captured.contains("--sandbox\nworkspace-write\n"),
+            "--sandbox workspace-write missing"
+        );
+        assert!(
+            !captured.contains("--full-auto"),
+            "Codex 0.147.0 and later reject --full-auto"
         );
 
         // Verify self.model ("gpt-5") is used, NOT model_override ("haiku")
@@ -839,26 +874,35 @@ echo '{json}' > "$OUTPUT_FILE"
     fn test_build_codex_args_with_model() {
         use std::path::Path;
         let output_path = Path::new("/tmp/codex-output.txt");
-        let args = build_codex_args("my prompt", Some("gpt-5"), output_path).unwrap();
+        let args = build_codex_args(
+            "my prompt",
+            Some("gpt-5"),
+            output_path,
+            CodexSandbox::WorkspaceWrite,
+        )
+        .unwrap();
         assert_eq!(args[0], "exec");
-        assert_eq!(args[1], "--full-auto");
-        assert_eq!(args[2], "--model");
-        assert_eq!(args[3], "gpt-5");
-        assert_eq!(args[4], "--output-last-message");
-        assert_eq!(args[5], "/tmp/codex-output.txt");
-        assert_eq!(args[6], "my prompt");
+        assert_eq!(args[1], "--sandbox");
+        assert_eq!(args[2], "workspace-write");
+        assert_eq!(args[3], "--model");
+        assert_eq!(args[4], "gpt-5");
+        assert_eq!(args[5], "--output-last-message");
+        assert_eq!(args[6], "/tmp/codex-output.txt");
+        assert_eq!(args[7], "my prompt");
     }
 
     #[test]
     fn test_build_codex_args_without_model_uses_codex_default() {
         use std::path::Path;
         let output_path = Path::new("/tmp/codex-output.txt");
-        let args = build_codex_args("my prompt", None, output_path).unwrap();
+        let args =
+            build_codex_args("my prompt", None, output_path, CodexSandbox::ReadOnly).unwrap();
         assert_eq!(args[0], "exec");
-        assert_eq!(args[1], "--full-auto");
-        assert_eq!(args[2], "--output-last-message");
-        assert_eq!(args[3], "/tmp/codex-output.txt");
-        assert_eq!(args[4], "my prompt");
+        assert_eq!(args[1], "--sandbox");
+        assert_eq!(args[2], "read-only");
+        assert_eq!(args[3], "--output-last-message");
+        assert_eq!(args[4], "/tmp/codex-output.txt");
+        assert_eq!(args[5], "my prompt");
         // No --model flag — Codex CLI uses its own default
         assert!(
             !args.iter().any(|a| a == "--model"),
@@ -872,7 +916,13 @@ echo '{json}' > "$OUTPUT_FILE"
     fn test_build_codex_args_rejects_flag_model() {
         use std::path::Path;
         let p = Path::new("/tmp/out.txt");
-        let err = build_codex_args("valid prompt", Some("--dangerous-flag"), p).unwrap_err();
+        let err = build_codex_args(
+            "valid prompt",
+            Some("--dangerous-flag"),
+            p,
+            CodexSandbox::ReadOnly,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ActualError::ConfigError(_)),
             "expected ConfigError, got: {err:?}"
@@ -885,7 +935,13 @@ echo '{json}' > "$OUTPUT_FILE"
     fn test_build_codex_args_rejects_model_with_spaces() {
         use std::path::Path;
         let p = Path::new("/tmp/out.txt");
-        let err = build_codex_args("valid prompt", Some("model with spaces"), p).unwrap_err();
+        let err = build_codex_args(
+            "valid prompt",
+            Some("model with spaces"),
+            p,
+            CodexSandbox::ReadOnly,
+        )
+        .unwrap_err();
         assert!(matches!(err, ActualError::ConfigError(_)));
     }
 
@@ -894,7 +950,8 @@ echo '{json}' > "$OUTPUT_FILE"
         use std::path::Path;
         let p = Path::new("/tmp/out.txt");
         for bad_model in &["model|cmd", "model;cmd", "model$var", "model`cmd`"] {
-            let err = build_codex_args("valid prompt", Some(bad_model), p).unwrap_err();
+            let err = build_codex_args("valid prompt", Some(bad_model), p, CodexSandbox::ReadOnly)
+                .unwrap_err();
             assert!(
                 matches!(err, ActualError::ConfigError(_)),
                 "expected ConfigError for model {bad_model:?}, got: {err:?}"
@@ -906,7 +963,8 @@ echo '{json}' > "$OUTPUT_FILE"
     fn test_build_codex_args_rejects_flag_prompt() {
         use std::path::Path;
         let p = Path::new("/tmp/out.txt");
-        let err = build_codex_args("--bad-flag", Some("gpt-5"), p).unwrap_err();
+        let err =
+            build_codex_args("--bad-flag", Some("gpt-5"), p, CodexSandbox::ReadOnly).unwrap_err();
         assert!(
             matches!(err, ActualError::ConfigError(_)),
             "expected ConfigError, got: {err:?}"
@@ -930,7 +988,7 @@ echo '{json}' > "$OUTPUT_FILE"
         ];
         for model in &valid_models {
             assert!(
-                build_codex_args("prompt", Some(model), p).is_ok(),
+                build_codex_args("prompt", Some(model), p, CodexSandbox::ReadOnly).is_ok(),
                 "expected Ok for model {model:?}"
             );
         }

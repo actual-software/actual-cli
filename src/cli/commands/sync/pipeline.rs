@@ -387,6 +387,10 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             pipeline.println(line);
         }
     } else {
+        // On a `codex-cli` retry this row is the only sign the prompts changed route.
+        if let Some(rd) = runner_display {
+            pipeline.set_prompt_row(format!("  {:<9} {}", "Runner", rd.runner_name));
+        }
         confirm_or_change_loop(&mut analysis, &mut pipeline, term)?;
     }
 
@@ -2377,6 +2381,41 @@ mod tests {
         assert!(
             result.is_ok(),
             "runner_display without warning should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_prompt_with_runner_display() {
+        // Plain mode prints the Environment rows to stdout, so `term` holds only
+        // what the prompt wrote. `test_tui_retry_prompt_names_the_fallback_runner`
+        // drives the same row in the TUI.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        // select_one index 0 = Accept for project confirm
+        let term = MockTerminal::new(vec![])
+            .with_select_one(vec![0])
+            .with_selection(Some(vec![]));
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, false, false, &server.url());
+        let rd = RunnerDisplay {
+            runner_name: "openai-api (fallback)".to_string(),
+            model: "gpt-5.2".to_string(),
+            warning: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            Some(&rd),
+        );
+        assert!(result.is_ok(), "accepted run should succeed: {result:?}");
+        let output = term.output_text();
+        assert!(
+            output.contains("  Runner    openai-api (fallback)"),
+            "{output}"
         );
     }
 

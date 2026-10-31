@@ -477,9 +477,9 @@ according to its own settings. `codex-cli` has one exception: if `codex` exits
 normally with no answer and an error that reads like a model problem, such as
 `model not found` or `does not exist`, and an OpenAI API key is set
 (`OPENAI_API_KEY` or the `openai_api_key` config key), the CLI retries through
-`openai-api` without asking you again. That runner posts the prompts straight
-to OpenAI's API under that key, whatever `codex` is set to use. None of this
-passes through Actual's servers.
+`openai-api`, asking you again first unless you passed `--force`. That runner
+posts the prompts straight to OpenAI's API under that key, whatever `codex` is
+set to use. None of this passes through Actual's servers.
 Refer to your AI provider's privacy policy for how they handle this data:
 
 - [Anthropic Usage Policy](https://www.anthropic.com/policies)
@@ -534,9 +534,10 @@ text goes out as you work, without anyone typing a command.
 | `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's slug, title, scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
 
 `claude-cli` runs these calls with no tools, and the API runners have no file
-tools. `codex-cli` and `cursor-cli` still run as agents in your repository.
-These prompts don't ask them to open other files, but the CLI doesn't stop them,
-and anything they read goes to their provider.
+tools. `codex-cli` and `cursor-cli` still run as agents in your repository,
+`codex-cli` in Codex's read-only sandbox, which stops it changing files but not
+reading them. These prompts don't ask them to open other files, but the CLI
+doesn't stop them, and anything they read goes to their provider.
 
 A `plan-check` or `impl-check` you run yourself can make that `rules select`
 call first, with the diff standing in for the plan on `impl-check`. The hook

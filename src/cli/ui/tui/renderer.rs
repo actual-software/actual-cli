@@ -646,6 +646,8 @@ pub struct TuiRenderer {
     created_at: Instant,
     hint: bool,
     confirm_state: Option<ConfirmState>,
+    /// Row the project prompt draws below the project summary.
+    prompt_row: Option<String>,
     /// State for the inline file multi-select (None when not active).
     file_select_state: Option<FileSelectState>,
     /// State for the inline single-select (None when not active).
@@ -716,6 +718,7 @@ impl TuiRenderer {
             created_at,
             hint: false,
             confirm_state: None,
+            prompt_row: None,
             file_select_state: None,
             single_select_state: None,
             selected_step: None,
@@ -772,6 +775,7 @@ impl TuiRenderer {
             created_at: Instant::now(),
             hint: false,
             confirm_state: None,
+            prompt_row: None,
             file_select_state: None,
             single_select_state: None,
             selected_step: None,
@@ -1017,6 +1021,15 @@ impl TuiRenderer {
         }
     }
 
+    /// Set a row for the project prompt to draw below the project summary.
+    ///
+    /// A long summary pushes everything above it out of the TUI's log pane and
+    /// off a plain terminal's screen, so the last line above the prompt is the
+    /// only one sure to be seen.
+    pub fn set_prompt_row(&mut self, row: String) {
+        self.prompt_row = Some(row);
+    }
+
     /// Push a line to a specific step's log pane, stripping ANSI escape codes.
     ///
     /// All internal log pushes should go through this method (or through
@@ -1185,6 +1198,9 @@ impl TuiRenderer {
                 for line in summary.lines() {
                     self.push_log(self.active_step, line);
                 }
+                if let Some(row) = self.prompt_row.clone() {
+                    self.push_log(self.active_step, &row);
+                }
                 // Set up confirm state
                 self.confirm_state = Some(ConfirmState {
                     question: "Proceed with sync?".to_string(),
@@ -1197,7 +1213,9 @@ impl TuiRenderer {
                 self.draw();
                 result
             }
-            Mode::Plain | Mode::Quiet => prompt_project_confirmation(analysis, term),
+            Mode::Plain | Mode::Quiet => {
+                prompt_project_confirmation(analysis, self.prompt_row.as_deref(), term)
+            }
         }
     }
 
@@ -2735,6 +2753,32 @@ mod tests {
         let result = r.confirm_project_impl(&analysis, &term, &mut source);
         assert!(matches!(result, Ok(ConfirmAction::Accept)));
         assert!(r.confirm_state.is_none(), "confirm state should be cleared");
+    }
+
+    #[test]
+    fn test_confirm_project_tui_draws_the_prompt_row_below_the_summary() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "Checking environment");
+        r.start(SyncPhase::Analysis, "Analyzing repository");
+        r.set_prompt_row("  Runner    openai-api (fallback)".to_string());
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![enter]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Accept)));
+        let lines = r.logs[r.active_step].raw_lines();
+        assert_eq!(
+            lines.last().copied(),
+            Some("  Runner    openai-api (fallback)")
+        );
     }
 
     #[test]
