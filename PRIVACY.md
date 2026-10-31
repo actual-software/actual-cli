@@ -36,7 +36,8 @@ in and on who processes it. This notice is explicit about both:
 stops every telemetry event in this notice: the counters, the plan-governance
 events that reach PostHog through Actual's proxy, and the ADR and check events.
 You don't need a second switch for any of them. It covers telemetry, not every
-network request: "How to opt out of telemetry" below says what it leaves running.
+network request: "How to opt out of telemetry" below says what it leaves running,
+and to change it when no `actual adr-bot` run is in progress.
 
 This document describes exactly what data is collected, its privacy class, where
 it goes, who can attribute it to you, how long it is kept, and how to opt out.
