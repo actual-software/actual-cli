@@ -16,7 +16,7 @@ It makes the same checks [Release signing](RELEASE_SIGNING.md#checking-a-downloa
 2. It downloads `SHA256SUMS` and `SHA256SUMS.minisig` from that version's page on the [actual-releases](https://github.com/actual-software/actual-releases/releases) mirror and checks the signature against the two public keys in [`release-keys/`](../release-keys), which are built into `actual`. The signed comment's `file:` and `tag:` fields must read `SHA256SUMS` and this release's tag exactly, because an older release's signature still verifies.
 3. It downloads the archive for your platform and checks it against the SHA-256 that `SHA256SUMS` lists for it. Only then does it unpack the archive, and what comes out must be a regular file.
 
-A signer adds the signature by hand after the release workflow publishes everything else, so a new release can sit unsigned for a while. `actual self-update` refuses one and asks you to try again later. Releases up to v0.9.0 carry no signature at all.
+A signer adds the signature by hand after the release workflow publishes everything else, so a new release can sit unsigned for a while. `actual self-update` refuses one and asks you to try again later. Releases up to v0.11.0 carry no signature at all.
 
 ```mermaid
 flowchart TD
