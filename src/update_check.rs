@@ -2,8 +2,9 @@
 //!
 //! The running binary's own path names the channel that installed it, so the
 //! notice can print that channel's upgrade command. Homebrew and npm keep
-//! records of the files they installed, so only a copy neither owns is
-//! pointed at `actual self-update`, and the check itself never replaces it.
+//! records of the files they installed, so only a release build neither owns
+//! is pointed at `actual self-update`, and a build from source at cargo. The
+//! check itself never replaces the binary.
 //!
 //! No command waits on the network for the notice. After a command succeeds,
 //! [`after_command`] prints a notice the local cache already holds, and when
@@ -112,10 +113,20 @@ impl Channel {
         }
     }
 
-    /// The command the notice and `actual version` print: the package
-    /// manager's, or `actual self-update` for a copy no package manager owns.
+    /// The command the notice and `actual version` print for this binary.
     pub fn upgrade_hint(self) -> &'static str {
-        self.upgrade_command().unwrap_or(SELF_UPDATE_COMMAND)
+        self.upgrade_hint_for(RELEASE_BUILD)
+    }
+
+    /// The package manager's command, or for a copy no package manager owns,
+    /// `actual self-update` when it's a release build and cargo's when it was
+    /// built from source, which `actual self-update` refuses.
+    fn upgrade_hint_for(self, release_build: bool) -> &'static str {
+        match self.upgrade_command() {
+            Some(command) => command,
+            None if release_build => SELF_UPDATE_COMMAND,
+            None => CARGO_COMMAND,
+        }
     }
 
     /// How `actual version` names the channel.
@@ -620,15 +631,19 @@ mod tests {
             Some("npm install -g @actualai/actual@latest")
         );
         assert_eq!(Channel::Other.upgrade_command(), None);
-        assert_eq!(
-            Channel::Homebrew.upgrade_hint(),
-            "brew upgrade actual-software/actual/actual"
-        );
-        assert_eq!(
-            Channel::Npm.upgrade_hint(),
-            "npm install -g @actualai/actual@latest"
-        );
-        assert_eq!(Channel::Other.upgrade_hint(), "actual self-update");
+        for release_build in [true, false] {
+            assert_eq!(
+                Channel::Homebrew.upgrade_hint_for(release_build),
+                "brew upgrade actual-software/actual/actual"
+            );
+            assert_eq!(
+                Channel::Npm.upgrade_hint_for(release_build),
+                "npm install -g @actualai/actual@latest"
+            );
+        }
+        assert_eq!(Channel::Other.upgrade_hint_for(true), "actual self-update");
+        assert_eq!(Channel::Other.upgrade_hint_for(false), CARGO_COMMAND);
+        assert_eq!(Channel::Other.upgrade_hint(), CARGO_COMMAND);
         assert_eq!(Channel::Homebrew.label(), "Homebrew");
         assert_eq!(Channel::Npm.label(), "npm");
         assert_eq!(Channel::Other.label(), "not Homebrew or npm");
@@ -917,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn after_command_names_self_update_for_a_binary_no_package_manager_owns() {
+    fn after_command_names_cargo_for_a_build_from_source_no_package_manager_owns() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::remove(OPT_OUT_ENV);
         let dir = tempdir().unwrap();
@@ -934,7 +949,7 @@ mod tests {
 
         let (out, refresh) = after(&Config::default(), &path, now, Channel::Other);
         assert!(out.contains("To upgrade, run: "), "{out}");
-        assert!(out.contains("actual self-update"), "{out}");
+        assert!(out.contains(CARGO_COMMAND), "{out}");
         assert!(refresh, "the cached answer is more than a day old");
     }
 

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `actual self-update` replaces a binary downloaded by hand with the latest release. It checks `SHA256SUMS.minisig` against the keys in `release-keys/`, including the tag in its signed comment, and the archive against `SHA256SUMS`, before renaming the new binary over the old one under a lock. A copy installed with Homebrew or npm gets that tool's upgrade command instead, and a build from source, wherever it's installed, gets the `cargo install` command. It won't replace a binary in a directory the user can't write or one another user owns, and won't run as root, under CI, or with update checks turned off. See `docs/SELF_UPDATE.md`
 
 ### Changed
-- For a binary no package manager owns, the daily update notice and `actual version` name `actual self-update` instead of linking the release page. `actual version --json` is unchanged
+- For a release binary no package manager owns, the daily update notice and `actual version` name `actual self-update` instead of linking the release page, and for a build from source they name the `cargo install` command that rebuilds it. `actual version --json` is unchanged
 - When `actual adr-bot` retries a failed `codex-cli` run through `openai-api`, it asks `Proceed with sync?` again and shows the per-file review, unless you passed `--force`. Before, the retry skipped both and wrote every generated file unreviewed. That prompt now shows a `Runner` row directly above the question, so the retry's reads `openai-api (fallback)`
 - `plan-check`, `impl-check` and `rules select` run `codex` in its read-only sandbox, so it can read your repository on those calls but can't change it
 

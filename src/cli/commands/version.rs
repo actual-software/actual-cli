@@ -194,8 +194,8 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Upgrade with:   actual self-update"),
-            "{text}"
+            text.contains(&format!("Upgrade with:   {}", update_check::CARGO_COMMAND)),
+            "a test build is a build from source: {text}"
         );
     }
 
