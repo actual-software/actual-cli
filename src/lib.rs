@@ -263,7 +263,7 @@ mod tests {
         let result = run(Cli::parse_from(["actual", "self-update"]));
         assert!(
             matches!(result, Err(ActualError::SelfUpdateRefused { .. })),
-            "{result:?}"
+            "self-update with update checks off should return SelfUpdateRefused"
         );
     }
 }
