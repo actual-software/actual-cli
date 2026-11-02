@@ -56,6 +56,8 @@ Both Linux binaries link against the runner's glibc, which on `ubuntu-latest` (U
 
 All builds use `cargo build --release` (LTO, stripped, single codegen unit — see `[profile.release]` in `Cargo.toml`).
 
+Each of the four build steps sets `ACTUAL_RELEASE_BUILD=1`, which marks the binary as a release build. [`actual self-update`](SELF_UPDATE.md) replaces only a release build, so a build step that loses the variable ships binaries that refuse to update themselves. A test in `src/update_check.rs` reads this workflow and fails when one does.
+
 ---
 
 ## macOS signing and notarization

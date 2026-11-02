@@ -34,8 +34,20 @@ pub(crate) const REGISTRY_URL: &str = "https://registry.npmjs.org/@actualai/actu
 /// The latest release's page, for downloading a release by hand.
 pub const RELEASE_URL: &str = "https://github.com/actual-software/actual-releases/releases/latest";
 
-/// What upgrades a binary that no package manager owns.
+/// What upgrades a release build that no package manager owns.
 pub const SELF_UPDATE_COMMAND: &str = "actual self-update";
+
+/// Builds actual from source, replacing any copy built that way. It names the
+/// package, since the repository holds another one with a binary and cargo
+/// won't choose between them.
+pub const CARGO_COMMAND: &str =
+    "cargo install -f --git https://github.com/actual-software/actual-cli actual-cli";
+
+/// Whether the release workflow built this binary: its four build steps set
+/// `ACTUAL_RELEASE_BUILD`, and nothing else does. Any other build is one from
+/// source, which may be for a system the release builds don't run on, such as
+/// a Linux with a glibc older than theirs.
+pub const RELEASE_BUILD: bool = option_env!("ACTUAL_RELEASE_BUILD").is_some();
 
 /// The longest one registry lookup may take.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -572,6 +584,29 @@ mod tests {
     #[test]
     fn channel_current_classifies_the_test_binary_as_other() {
         assert_eq!(Channel::current(), Channel::Other);
+    }
+
+    #[test]
+    fn only_the_release_workflow_marks_a_release_build() {
+        const { assert!(!RELEASE_BUILD, "a test build is a build from source") };
+        let workflow = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
+        )
+        .unwrap();
+        let steps: Vec<&str> = workflow.split("\n      - ").collect();
+        for target in [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+        ] {
+            let build = format!("run: cargo build --release --target {target}\n");
+            let step = steps.iter().find(|step| step.contains(&build));
+            assert!(
+                step.is_some_and(|step| step.contains("ACTUAL_RELEASE_BUILD: \"1\"")),
+                "the {target} release build must set ACTUAL_RELEASE_BUILD, or its binary refuses to self-update"
+            );
+        }
     }
 
     #[test]

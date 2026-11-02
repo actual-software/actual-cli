@@ -1,6 +1,6 @@
 # Self-update
 
-`actual self-update` replaces a copy of `actual` you downloaded by hand with the latest release, once the release's signature checks out. A copy installed with Homebrew, npm or `cargo install` gets that tool's upgrade command instead: each keeps a record of the files it installs, and its next upgrade would overwrite a binary replaced behind its back.
+`actual self-update` replaces a copy of `actual` you downloaded by hand with the latest release, once the release's signature checks out. A copy installed with Homebrew or npm gets that tool's upgrade command instead: each keeps a record of the files it installs, and its next upgrade would overwrite a binary replaced behind its back. A copy built from source, wherever it's installed, gets the `cargo install` command, because it may have been built for a system the release builds don't run on, such as a Linux with a glibc older than 2.39.
 
 ```
 $ actual self-update
@@ -20,7 +20,7 @@ A signer adds the signature by hand after the release workflow publishes everyth
 
 ```mermaid
 flowchart TD
-    A["actual self-update"] --> B{"CI, a subprocess, update checks off,<br/>a package manager, or no release build?"}
+    A["actual self-update"] --> B{"CI, a subprocess, update checks off, a package manager,<br/>a build from source, or no release build for this platform?"}
     B -- yes --> R["Refuse, naming how to upgrade instead"]
     B -- no --> C{"npm's latest version<br/>newer than this one?"}
     C -- no --> U["Report this is the latest"]
@@ -45,7 +45,7 @@ A run stopped partway, as by Ctrl-C during the download, leaves its scratch dire
 |---|---|
 | Installed with Homebrew (`/Cellar/actual/` in the binary's path) | `brew upgrade actual-software/actual/actual` |
 | Installed with npm (`/node_modules/@actualai/actual-` in the path) | `npm install -g @actualai/actual@latest` |
-| Built with `cargo install` (`/.cargo/bin/` in the path) | `cargo install -f --git https://github.com/actual-software/actual-cli actual-cli` |
+| Built from source, wherever it's installed: any build the release workflow didn't make, which marks its own with `ACTUAL_RELEASE_BUILD` when it compiles | `cargo install -f --git https://github.com/actual-software/actual-cli actual-cli` |
 | A directory you can't write, such as `/usr/local/bin` after the README's `sudo mv` | A suggestion to move `actual` to a directory you own, such as `~/.local/bin` |
 | A binary another user owns, such as one copied into place with `sudo cp` | A suggestion to install your own copy in a directory you own |
 | Running as root | A suggestion to run it as the user who installed `actual` |
