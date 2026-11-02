@@ -35,10 +35,10 @@ It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installati
 From inside a git repository:
 
 ```bash
-actual login                  # sign in through your browser
+actual login                           # sign in through your browser
 actual advisor "How should we handle database access in a new service?"
-actual adr-bot                # write ADR guidance tailored to this repo into CLAUDE.md
-actual impl-check             # check your working tree against .actual/rules/
+actual plan-check --plan-file plan.md  # check a plan against .actual/rules/
+actual impl-check                      # check your working tree against .actual/rules/
 ```
 
 ## Documentation
