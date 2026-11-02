@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::error::ActualError;
 
+/// The file [`update_at`] locks, beside the config file. Nothing is ever
+/// written to it.
+const LOCK_FILENAME: &str = "config.lock";
+
 fn config_error(msg: impl std::fmt::Display) -> ActualError {
     ActualError::ConfigError(msg.to_string())
 }
@@ -135,6 +139,53 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
     write_config_secure(path, &yaml)?;
 
     Ok(())
+}
+
+/// Apply `change` to the config at the default path. See [`update_at`].
+pub fn update<T>(
+    change: impl FnOnce(&mut Config) -> Result<T, ActualError>,
+) -> Result<T, ActualError> {
+    update_at(&config_path()?, change)
+}
+
+/// Read the config file at `path`, apply `change` and save the result, holding
+/// a lock beside the file from the read to the write.
+///
+/// Every command that changes a setting or a cache writes through here, so
+/// each write starts from what the file holds at that moment and alters only
+/// what `change` sets. A key another command saved after the caller loaded its
+/// own copy survives. An `Err` from `change` writes nothing.
+pub fn update_at<T>(
+    path: &Path,
+    change: impl FnOnce(&mut Config) -> Result<T, ActualError>,
+) -> Result<T, ActualError> {
+    let _lock = lock(path)?;
+    let mut config = load_from(path)?;
+    let value = change(&mut config)?;
+    save_to(&config, path)?;
+    Ok(value)
+}
+
+/// Take the lock beside the config file at `path`, waiting while another
+/// process holds it. The OS releases it when the returned file is closed.
+fn lock(path: &Path) -> Result<std::fs::File, ActualError> {
+    let lock_path = path.with_file_name(LOCK_FILENAME);
+    // `with_file_name` always leaves a parent; the fallback keeps this branch-free.
+    std::fs::create_dir_all(lock_path.parent().unwrap_or(Path::new(".")))
+        .map_err(|e| config_error(format!("Failed to create config directory: {e}")))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let locked = options
+        .open(&lock_path)
+        .and_then(|file| file.lock().map(|()| file));
+    locked.map_err(|e| {
+        config_error(format!(
+            "Failed to write config file: {}: {e}",
+            lock_path.display()
+        ))
+    })
 }
 
 /// Write config content to a file, ensuring it is never world-readable.
@@ -999,6 +1050,158 @@ mod tests {
         assert!(
             err.to_string().contains("not valid UTF-8"),
             "Expected UTF-8 error, got: {err}"
+        );
+    }
+
+    // ── update_at: every write starts from the file, under its lock ──
+
+    #[test]
+    fn test_update_at_keeps_what_another_command_saved() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        let elsewhere = Config {
+            model: Some("opus".to_string()),
+            ..Config::default()
+        };
+        save_to(&elsewhere, &config_file).unwrap();
+
+        let returned = update_at(&config_file, |cfg| {
+            cfg.batch_size = Some(5);
+            Ok(cfg.batch_size)
+        })
+        .unwrap();
+
+        assert_eq!(returned, Some(5));
+        let saved = load_from(&config_file).unwrap();
+        assert_eq!(saved.model.as_deref(), Some("opus"));
+        assert_eq!(saved.batch_size, Some(5));
+    }
+
+    #[test]
+    fn test_update_at_writes_nothing_when_the_change_fails() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        save_to(&Config::default(), &config_file).unwrap();
+        let before = std::fs::read(&config_file).unwrap();
+
+        let err = update_at(&config_file, |cfg| -> Result<(), ActualError> {
+            cfg.model = Some("haiku".to_string());
+            Err(config_error("refused"))
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), config_error("refused").to_string());
+        assert_eq!(std::fs::read(&config_file).unwrap(), before);
+    }
+
+    /// A file that doesn't parse is reported, not replaced.
+    #[test]
+    fn test_update_at_leaves_an_unparseable_file_alone() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::fs::write(&config_file, "{{{{not valid yaml").unwrap();
+
+        let err = update_at(&config_file, |_| Ok(())).unwrap_err();
+
+        assert!(err.to_string().contains("Failed to parse config YAML"));
+        let kept = std::fs::read_to_string(&config_file).unwrap();
+        assert_eq!(kept, "{{{{not valid yaml");
+    }
+
+    /// An update waits while another holds the lock, then reads what that one
+    /// saved before applying its own change.
+    #[test]
+    fn test_update_at_waits_for_the_lock_and_reads_the_file_after_it() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        let held = lock(&config_file).unwrap();
+        let writer = std::thread::spawn({
+            let config_file = config_file.clone();
+            move || {
+                update_at(&config_file, |cfg| {
+                    cfg.batch_size = Some(5);
+                    Ok(())
+                })
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !writer.is_finished(),
+            "the update went ahead without the lock"
+        );
+        let holder = Config {
+            model: Some("opus".to_string()),
+            ..Config::default()
+        };
+        save_to(&holder, &config_file).unwrap();
+        drop(held);
+        writer.join().unwrap().unwrap();
+
+        let saved = load_from(&config_file).unwrap();
+        assert_eq!(saved.model.as_deref(), Some("opus"));
+        assert_eq!(saved.batch_size, Some(5));
+    }
+
+    /// The lock file sits beside the config, whatever the config file is
+    /// called, owner-only, and the directory is made for it.
+    #[cfg(unix)]
+    #[test]
+    fn test_the_lock_file_is_owner_only_beside_the_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("fresh").join("custom.yaml");
+
+        update_at(&config_file, |_| Ok(())).unwrap();
+
+        let lock_file = dir.path().join("fresh").join(LOCK_FILENAME);
+        let mode = std::fs::metadata(lock_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(load_from(&config_file).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn test_an_unopenable_lock_file_is_an_error_and_nothing_is_written() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::fs::create_dir(dir.path().join(LOCK_FILENAME)).unwrap();
+
+        let err = update_at(&config_file, |_| Ok(())).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("Failed to write config file"), "{message}");
+        assert!(message.contains(LOCK_FILENAME), "{message}");
+        assert!(!config_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_update_at_reports_a_config_dir_it_cannot_create() {
+        let path = Path::new("/dev/null/impossible/config.yaml");
+        let err = update_at(path, |_| Ok(())).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Failed to create config directory"));
+    }
+
+    #[test]
+    fn test_update_changes_the_config_at_the_default_path() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let tmp = tempdir().unwrap();
+        let config_file = tmp.path().join("config.yaml");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+
+        update(|cfg| {
+            cfg.model = Some("haiku".to_string());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            load_from(&config_file).unwrap().model.as_deref(),
+            Some("haiku")
         );
     }
 }

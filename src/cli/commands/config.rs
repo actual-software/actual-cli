@@ -91,14 +91,14 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
             Ok(())
         }
         ConfigAction::Set(args) => {
-            let mut cfg = config::paths::load_from(path)?;
-            let warning = if args.repo {
-                set_for_repo(&mut cfg, &args.key, &args.value)?;
-                None
-            } else {
-                config::dotpath::set(&mut cfg, &args.key, &args.value)?
-            };
-            config::paths::save_to(&cfg, path)?;
+            let warning = config::paths::update_at(path, |cfg| {
+                if args.repo {
+                    set_for_repo(cfg, &args.key, &args.value)?;
+                    Ok(None)
+                } else {
+                    config::dotpath::set(cfg, &args.key, &args.value)
+                }
+            })?;
             if let Some(msg) = warning {
                 eprintln!("{msg}");
             }
