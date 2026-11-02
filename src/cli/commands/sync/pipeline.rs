@@ -4459,8 +4459,8 @@ mod tests {
     #[test]
     fn test_store_tailoring_cache_warns_on_disk_write_failure() {
         use std::os::unix::fs::PermissionsExt;
-        // Create a read-only directory so that save_to fails, exercising the
-        // "warning: failed to save tailoring cache" branch.
+        // Create a read-only directory so that the cache write fails, exercising
+        // the "warning: failed to save tailoring cache" branch.
         let dir = tempfile::tempdir().unwrap();
         let ro_dir = dir.path().join("readonly");
         std::fs::create_dir(&ro_dir).unwrap();
@@ -4468,7 +4468,7 @@ mod tests {
 
         let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
 
-        // Make the directory read-only so save_to cannot write
+        // Make the directory read-only so nothing can be written
         std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         // store_tailoring_cache should not panic; it warns and returns

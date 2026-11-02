@@ -154,7 +154,7 @@ pub fn update<T>(
 /// Every command that changes a setting or a cache writes through here, so
 /// each write starts from what the file holds at that moment and alters only
 /// what `change` sets. A key another command saved after the caller loaded its
-/// own copy survives. An `Err` from `change` writes nothing.
+/// own copy survives. An `Err` from `change` saves none of its edits.
 pub fn update_at<T>(
     path: &Path,
     change: impl FnOnce(&mut Config) -> Result<T, ActualError>,
