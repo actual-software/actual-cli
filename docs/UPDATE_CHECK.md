@@ -1,6 +1,6 @@
 # Update check
 
-Once a day, `actual` tells you when a newer release is out and prints the command that upgrades the copy you're running. The check itself never replaces the binary. Homebrew and npm keep track of the files they install, so for their copies the upgrade stays with them; for a copy you downloaded by hand, the notice names [`actual self-update`](SELF_UPDATE.md).
+Once a day, `actual` tells you when a newer release is out and prints the command that upgrades the copy you're running. The check itself never replaces the binary. Homebrew and npm keep track of the files they install, so for their copies the upgrade stays with them; for a copy you downloaded by hand, the notice names [`actual self-update`](SELF_UPDATE.md), and for one built from source, the `cargo install` command that rebuilds it.
 
 ## The notice
 
@@ -11,15 +11,16 @@ actual 0.9.0 is available (you have 0.8.0).
 To upgrade, run: brew upgrade actual-software/actual/actual
 ```
 
-The command depends on how the running binary was installed, which `actual` reads from its own path:
+The command depends on how the running binary was installed, which `actual` reads from its own path, and for any other copy on whether the release workflow built it:
 
 | Installed with | The binary's path contains | Upgrade |
 |---|---|---|
 | Homebrew | `/Cellar/actual/` | `brew upgrade actual-software/actual/actual` |
 | npm | `/node_modules/@actualai/actual-` | `npm install -g @actualai/actual@latest` |
-| Anything else | | [`actual self-update`](SELF_UPDATE.md) |
+| Anything else, from a release | | [`actual self-update`](SELF_UPDATE.md) |
+| Anything else, built from source | | `cargo install -f --git https://github.com/actual-software/actual-cli actual-cli` |
 
-The Homebrew command names the tap in full because a bare `brew upgrade actual` reaches Homebrew's unrelated `actual` cask.
+The Homebrew command names the tap in full because a bare `brew upgrade actual` reaches Homebrew's unrelated `actual` cask. A release build is one the release workflow compiled, which marks it with `ACTUAL_RELEASE_BUILD`; every other build counts as built from source, wherever it's installed.
 
 ## When it runs
 
@@ -81,7 +82,7 @@ A config file that fails to load counts as off as well, because it may be the fi
 | `latest_version` | The latest published version. `null` without `--check`, with the check turned off or a config file that fails to load, or when the registry didn't answer. |
 | `update_available` | Whether `latest_version` is newer than `current_version`. `null` whenever `latest_version` is. |
 | `channel` | `homebrew`, `npm` or `other`. |
-| `upgrade_command` | The upgrade command for `channel`, or `null` for `other`, whose copies upgrade with [`actual self-update`](SELF_UPDATE.md). |
+| `upgrade_command` | The upgrade command for `channel`, or `null` for `other`, whose copies upgrade with [`actual self-update`](SELF_UPDATE.md), or with the `cargo install` command when they were built from source. |
 | `release_url` | The latest release's page, for downloading a release by hand. |
 
 New fields may be added; existing ones keep their names and meanings. A minimum-version check needs only the local facts, so `actual version --json` answers it without a request. A release from before this command existed rejects `version` as an unknown subcommand and exits with status 2.
