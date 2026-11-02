@@ -1,10 +1,10 @@
 //! `actual self-update`: replace a copy of `actual` someone downloaded by
 //! hand with the latest release, once the release's signature checks out.
 //!
-//! Homebrew, npm and cargo keep a record of the files they install, so those
-//! copies get that tool's command instead. It never writes where only an
-//! administrator can, and it never runs under CI, inside a command `actual`
-//! started, or with update checks turned off.
+//! Homebrew and npm keep a record of the files they install, so those copies
+//! get that tool's command instead, and a build from source gets cargo's. It
+//! never writes where only an administrator can, and it never runs under CI,
+//! inside a command `actual` started, or with update checks turned off.
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::release_verify::{self, ReleaseKey, SIGNATURE_FILE, SUMS_FILE};
-use crate::update_check::{self, Channel, Latest, CURRENT_VERSION};
+use crate::update_check::{self, Channel, Latest, CARGO_COMMAND, CURRENT_VERSION};
 
 /// Every release's files are at `<base>/v<version>/<file>`, on the mirror the
 /// manual install and Homebrew download from too.
@@ -21,12 +21,6 @@ const DOWNLOAD_BASE: &str = "https://github.com/actual-software/actual-releases/
 
 /// The one file in each release archive.
 const BINARY: &str = "actual";
-
-/// Builds actual from source, replacing any copy built that way. It names the
-/// package, since the repository holds another one with a binary and cargo
-/// won't choose between them.
-const CARGO_COMMAND: &str =
-    "cargo install -f --git https://github.com/actual-software/actual-cli actual-cli";
 
 const LOCK_FILENAME: &str = "self-update.lock";
 const STAGING_PREFIX: &str = ".actual-self-update-";
@@ -47,6 +41,8 @@ struct Setup<'a> {
     in_subprocess: bool,
     /// The running binary, with symlinks resolved.
     exe: Option<PathBuf>,
+    /// Whether the release workflow built it: [`update_check::RELEASE_BUILD`].
+    release_build: bool,
     os: &'a str,
     arch: &'a str,
     registry_url: &'a str,
@@ -66,6 +62,7 @@ pub fn exec() -> Result<(), ActualError> {
         in_ci: update_check::env_is_set("CI"),
         in_subprocess: update_check::env_is_set(crate::runner::subprocess::SUBPROCESS_MARKER_ENV),
         exe: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
+        release_build: update_check::RELEASE_BUILD,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         registry_url: update_check::REGISTRY_URL,
@@ -90,7 +87,7 @@ fn run(setup: &Setup, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Ac
         .exe
         .clone()
         .ok_or_else(|| failed("Couldn't find the path of the running actual binary.", None))?;
-    check_unmanaged(&exe)?;
+    check_unmanaged(&exe, setup.release_build)?;
     let archive_name = archive_for(setup.os, setup.arch).ok_or_else(|| {
         refused(
             format!(
@@ -194,23 +191,23 @@ fn check_allowed(setup: &Setup) -> Result<(), ActualError> {
     }
 }
 
-/// Homebrew, npm and cargo keep a record of the files they install, and
-/// their next upgrade overwrites a binary replaced behind their back anyway.
-/// A cargo build may also be one made for a system the release builds don't
-/// run on, such as a Linux with a glibc older than theirs.
-fn check_unmanaged(exe: &Path) -> Result<(), ActualError> {
+/// Homebrew and npm keep a record of the files they install, and their next
+/// upgrade overwrites a binary replaced behind their back anyway. A build from
+/// source, wherever it's installed, may be one made for a system the release
+/// builds don't run on, such as a Linux with a glibc older than theirs.
+fn check_unmanaged(exe: &Path, release_build: bool) -> Result<(), ActualError> {
     let channel = Channel::of_executable(exe);
-    let manager = match channel.upgrade_command() {
-        Some(command) => Some((channel.label(), command)),
-        None if exe.to_string_lossy().contains("/.cargo/bin/") => Some(("cargo", CARGO_COMMAND)),
-        None => None,
-    };
-    match manager {
-        Some((name, command)) => Err(refused(
+    match channel.upgrade_command() {
+        Some(command) => Err(refused(
             format!(
-                "This copy of actual was installed with {name}, which keeps track of the files it installs, so it does the upgrade."
+                "This copy of actual was installed with {}, which keeps track of the files it installs, so it does the upgrade.",
+                channel.label()
             ),
             command,
+        )),
+        None if !release_build => Err(refused(
+            "This copy of actual was built from source, and a release build may not run on this system, so it upgrades by rebuilding.",
+            CARGO_COMMAND,
         )),
         None => Ok(()),
     }
@@ -573,6 +570,7 @@ mod tests {
                 in_ci: false,
                 in_subprocess: false,
                 exe: Some(self.exe.clone()),
+                release_build: true,
                 os: "linux",
                 arch: "x86_64",
                 registry_url: &self.registry_url,
@@ -1011,10 +1009,9 @@ mod tests {
     }
 
     #[test]
-    fn gives_homebrew_npm_and_cargo_installs_their_own_command() {
+    fn gives_homebrew_and_npm_installs_their_own_command() {
         let _env = quiet_env();
         for (path, command) in [
-            ("/home/me/.cargo/bin/actual", CARGO_COMMAND),
             (
                 "/opt/homebrew/Cellar/actual/0.9.0/bin/actual",
                 "brew upgrade actual-software/actual/actual",
@@ -1024,11 +1021,35 @@ mod tests {
                 "npm install -g @actualai/actual@latest",
             ),
         ] {
+            for release_build in [true, false] {
+                let err = assert_refused(
+                    |s| {
+                        s.exe = Some(PathBuf::from(path));
+                        s.release_build = release_build;
+                    },
+                    "which keeps track of the files it installs",
+                );
+                assert_eq!(err.hint().as_deref(), Some(command));
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_a_build_from_source_wherever_it_is_installed() {
+        let _env = quiet_env();
+        for path in [
+            "/home/me/.cargo/bin/actual",
+            "/home/me/.local/bin/actual",
+            "/home/me/src/actual-cli/target/release/actual",
+        ] {
             let err = assert_refused(
-                |s| s.exe = Some(PathBuf::from(path)),
-                "which keeps track of the files it installs",
+                |s| {
+                    s.exe = Some(PathBuf::from(path));
+                    s.release_build = false;
+                },
+                "built from source",
             );
-            assert_eq!(err.hint().as_deref(), Some(command));
+            assert_eq!(err.hint().as_deref(), Some(CARGO_COMMAND));
         }
     }
 
