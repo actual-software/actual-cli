@@ -36,7 +36,7 @@ serde-saphyr = { version = "2", default-features = false, features = ["serialize
 serde_yaml = "0.9"
 toml = "1.1"
 regex = "1"
-zip = "2"
+zip = "9.0.5"
 # OTLP log events go out as binary protobuf built with the official messages:
 # no gRPC, no SDK exporter. Only the telemetry feature uses them.
 opentelemetry-proto = { version = "0.33.1", default-features = false, features = [

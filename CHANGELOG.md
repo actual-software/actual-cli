@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--runner codex-cli` works on Codex 0.147.0 and later, which removed the `--full-auto` flag the CLI passed. On those versions every call failed before a prompt left, and `plan-check` and `impl-check` reported `not_checked` with exit 0. Tailoring now passes `--sandbox workspace-write`, which is what the old flag meant
 - `codex` no longer inherits the CLI's stdin. Codex adds piped text to its prompt and waits for the pipe to close, so text piped into `actual` could reach the model, and a pipe left open could stall the run until it timed out
 
+### Security
+- zip moves from 2.4.2 to 9.0.5, which fixes GHSA-m665-v7pm-7grj (critical), GHSA-q7v9-x93c-xqv3 and GHSA-8hxf-qr8p-62x4. The CLI uses zip only to take `semgrep-core` out of the semgrep wheel it downloads, after checking the wheel against a pinned SHA-256
+
 ## [0.11.0] - 2026-10-30
 
 ### Added
