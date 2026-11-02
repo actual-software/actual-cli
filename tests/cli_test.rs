@@ -162,6 +162,26 @@ fn test_self_update_refuses_with_update_checks_off() {
     assert!(!dir.path().join("update-check.yaml").exists());
 }
 
+/// cargo builds the test binary without `ACTUAL_RELEASE_BUILD`.
+#[test]
+fn test_self_update_refuses_a_build_from_source() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .arg("self-update")
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("CI")
+        .env_remove("ACTUAL_CLI_SUBPROCESS")
+        .env_remove("ACTUAL_NO_UPDATE_CHECK")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("built from source"))
+        .stderr(predicate::str::contains(
+            "cargo install -f --git https://github.com/actual-software/actual-cli",
+        ));
+    assert!(!dir.path().join("self-update.lock").exists());
+}
+
 /// With stderr piped, as under an agent's tool call or a script, a command
 /// neither prints the notice nor starts a lookup, even with a newer version
 /// cached and the last lookup days old.
