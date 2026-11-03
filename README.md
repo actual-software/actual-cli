@@ -28,7 +28,7 @@ Most teams install the [Actual.ai Skill](https://github.com/actual-software/actu
 npm install -g @actualai/actual
 ```
 
-It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installation) covers Homebrew, prebuilt binaries and building from source.
+It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installation) covers Homebrew, prebuilt binaries and building from source. [`actual self-update`](docs/SELF_UPDATE.md) upgrades a prebuilt binary you downloaded by hand.
 
 ## Examples
 
