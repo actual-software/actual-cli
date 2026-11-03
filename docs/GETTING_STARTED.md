@@ -36,6 +36,8 @@ xattr -dr com.apple.quarantine /usr/local/bin/actual
 
 Verify it works: `actual --version`
 
+`actual self-update` upgrades a binary installed this way after checking the new release's signature, but only in a directory you can write without `sudo`. To use it, put `actual` somewhere you own, such as `~/.local/bin`, instead of `/usr/local/bin`. See [SELF_UPDATE.md](SELF_UPDATE.md).
+
 ### Check a downloaded release
 
 Releases after v0.9.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
