@@ -40,7 +40,7 @@ Verify it works: `actual --version`
 
 ### Check a downloaded release
 
-Releases after v0.9.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
+Releases after v0.11.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
 
 ```bash
 curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
