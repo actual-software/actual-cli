@@ -1,5 +1,6 @@
 //! Best-effort session-end telemetry. The state is session-wide across rule
-//! sets and agents. Its lock and age pruning share the brief ledger's policy.
+//! sets and agents. Checks share the brief ledger's lock wait and age pruning;
+//! ends use a shorter wait to leave time for dispatch before the hook exits.
 
 use crate::error::ActualError;
 
@@ -13,6 +14,11 @@ pub fn exec() -> Result<(), ActualError> {
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "telemetry")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "telemetry")]
+use std::time::Duration;
+
+#[cfg(feature = "telemetry")]
+const END_LOCK_WAIT: Duration = Duration::from_millis(100);
 
 #[cfg(feature = "telemetry")]
 #[derive(Default, Deserialize, Serialize)]
@@ -35,20 +41,19 @@ pub(super) fn record_check(session_id: &str, blocked: bool) {
     if session_id.is_empty() || session_id.len() > 256 {
         return;
     }
-    with_state(session_id, |state| {
-        if !state.ended {
-            state.last_check_blocked = blocked;
-        }
+    with_state(session_id, super::brief_ledger::LOCK_WAIT, |state| {
+        state.last_check_blocked = blocked;
+        state.ended = false;
     });
 }
 
 #[cfg(feature = "telemetry")]
-fn with_state(session_id: &str, change: impl FnOnce(&mut State)) -> Option<State> {
+fn with_state(session_id: &str, wait: Duration, change: impl FnOnce(&mut State)) -> Option<State> {
     let dir = crate::config::paths::config_dir()
         .ok()?
         .join("session-telemetry");
     std::fs::create_dir_all(&dir).ok()?;
-    let _lock = super::brief_ledger::lock(&dir, std::time::Duration::ZERO)?;
+    let _lock = super::brief_ledger::lock(&dir, wait)?;
     let path = dir.join(format!("{:x}.json", Sha256::digest(session_id.as_bytes())));
     let mut state: State = std::fs::read(&path)
         .ok()
@@ -81,7 +86,7 @@ fn report(raw: &str) {
         return;
     };
     let mut fresh = false;
-    let Some(state) = with_state(&envelope.session_id, |state| {
+    let Some(state) = with_state(&envelope.session_id, END_LOCK_WAIT, |state| {
         fresh = !state.ended;
         state.ended = true;
     }) else {
@@ -128,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn end_reports_the_last_completed_check_once_per_session() {
+    fn end_reports_the_last_completed_check_and_reopens_after_a_hook_check() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
@@ -187,8 +192,55 @@ mod tests {
             );
             assert!(!record.to_string().contains("private"));
         }
-        record_check("blocked", false);
-        assert!(with_state("blocked", |_| {}).unwrap().last_check_blocked);
+        check("blocked", false, false);
+        take_captured();
+        report(&envelope("blocked", "logout"));
+        assert!(take_captured().is_empty());
+        check("blocked", true, false);
+        take_captured();
+        report(&envelope("blocked", "logout"));
+        report(&envelope("blocked", "logout"));
+        let resumed = take_captured();
+        assert_eq!(resumed.len(), 1);
+        let attrs = attributes(&resumed[0]);
+        assert_eq!(attrs["actual.session.end_reason"]["stringValue"], "logout");
+        assert_eq!(
+            attrs["actual.session.last_check_blocked"]["boolValue"],
+            false
+        );
+    }
+
+    #[test]
+    fn checks_and_ends_wait_for_a_briefly_contended_lock() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
+        take_captured();
+        record_check("contended", false);
+        let dir = home.path().join("session-telemetry");
+        for check in [true, false] {
+            let held = super::super::brief_ledger::lock(&dir, std::time::Duration::ZERO).unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                drop(held);
+            });
+            if check {
+                record_check("contended", true);
+            } else {
+                report(&envelope("contended", "other"));
+            }
+            release.join().unwrap();
+        }
+        let records = take_captured();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            attributes(&records[0])["actual.session.last_check_blocked"]["boolValue"],
+            true
+        );
     }
 
     #[test]
@@ -227,7 +279,13 @@ mod tests {
         std::fs::remove_file(&dir).unwrap();
         std::fs::create_dir(&dir).unwrap();
         let _held = super::super::brief_ledger::lock(&dir, std::time::Duration::ZERO).unwrap();
+        let start = std::time::Instant::now();
+        record_check("locked", true);
+        assert!(start.elapsed() >= super::super::brief_ledger::LOCK_WAIT);
+        let start = std::time::Instant::now();
         report(&envelope("locked", "other"));
+        assert!(start.elapsed() >= END_LOCK_WAIT);
+        assert!(start.elapsed() < Duration::from_secs(1));
         assert!(take_captured().is_empty());
     }
 }

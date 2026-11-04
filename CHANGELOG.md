@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The companion plugin's `SessionEnd` hook can send `actual.session.ended` with the session id, a coarse end reason and whether the last completed hook check blocked. A later hook check reopens a resumed conversation for its next end; repeated ends without a check are suppressed. Telemetry opt-out stops both the event and its local state. Killed sessions can't send the event, so they still need the inactivity fallback. See `PRIVACY.md`
+
 ## [0.12.0] - 2026-11-04
 
 ### Added
