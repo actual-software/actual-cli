@@ -529,8 +529,15 @@ pub(super) mod tests {
 
     #[test]
     fn lock_retry_accepts_a_release_and_stops_on_other_errors() {
+        use std::cell::Cell;
         let mut attempts = 0;
-        let mut pauses = 0;
+        let clock_reads = Cell::new(0);
+        let pauses = Cell::new(0);
+        let mut elapsed = || {
+            clock_reads.set(clock_reads.get() + 1);
+            Duration::ZERO
+        };
+        let mut pause = || pauses.set(pauses.get() + 1);
         assert!(retry_lock(
             LOCK_WAIT,
             || {
@@ -541,18 +548,19 @@ pub(super) mod tests {
                     Ok(())
                 }
             },
-            || Duration::ZERO,
-            || pauses += 1,
+            &mut elapsed,
+            &mut pause,
         ));
-        assert_eq!((attempts, pauses), (2, 1));
+        assert_eq!((attempts, clock_reads.get(), pauses.get()), (2, 1, 1));
         assert!(!retry_lock(
             LOCK_WAIT,
             || Err(TryLockError::Error(std::io::Error::other(
                 "lock unavailable"
             ))),
-            || panic!("non-contention errors do not read the clock"),
-            || panic!("non-contention errors do not pause"),
+            &mut elapsed,
+            &mut pause,
         ));
+        assert_eq!((clock_reads.get(), pauses.get()), (1, 1));
     }
 
     use tempfile::tempdir;
