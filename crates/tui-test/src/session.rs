@@ -404,6 +404,33 @@ impl Drop for TuiSession {
 mod tests {
     use super::*;
 
+    fn echo_until_drop(text: &str) -> TuiSessionBuilder {
+        // Darwin can discard unread PTY output when the last slave handle closes.
+        let mut builder = TuiSession::new("/bin/sh");
+        builder.args = vec![
+            "-c".into(),
+            "echo \"$1\"; read -r _".into(),
+            "output-fixture".into(),
+            text.into(),
+        ];
+        builder
+    }
+
+    #[test]
+    fn test_output_fixture_keeps_the_writer_alive() {
+        let mut session = echo_until_drop("fixture_lifetime")
+            .timeout(Duration::from_millis(100))
+            .spawn()
+            .unwrap();
+        assert!(matches!(
+            session.wait_for_exit(),
+            Err(TuiTestError::Timeout(_))
+        ));
+        session
+            .wait_for_text_timeout("fixture_lifetime", Duration::from_secs(5))
+            .unwrap();
+    }
+
     #[test]
     fn test_drop_ends_a_process_that_is_still_running() {
         let (dropped, finished) = std::sync::mpsc::channel();
@@ -497,10 +524,7 @@ mod tests {
         // Small delay so cat processes the line
         std::thread::sleep(Duration::from_millis(50));
 
-        // Send Ctrl+D twice at start of line to signal EOF
-        session
-            .send_key(Key::Ctrl('d'))
-            .expect("Failed to send Ctrl+D");
+        // Send Ctrl+D at start of line to signal EOF
         session
             .send_key(Key::Ctrl('d'))
             .expect("Failed to send Ctrl+D");
@@ -668,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_echo_output_captured_on_screen() {
-        let mut session = TuiSession::new("/bin/echo hello_world")
+        let mut session = echo_until_drop("hello_world")
             .timeout(Duration::from_secs(5))
             .spawn()
             .expect("Failed to spawn echo");
@@ -688,12 +712,11 @@ mod tests {
             .wait_for_text("testing 123")
             .expect("Should see typed text");
         session.send_key(Key::Ctrl('d')).unwrap();
-        session.send_key(Key::Ctrl('d')).unwrap();
     }
 
     #[test]
     fn test_get_screen_text() {
-        let mut session = TuiSession::new("/bin/echo screen_text_test")
+        let mut session = echo_until_drop("screen_text_test")
             .timeout(Duration::from_secs(5))
             .spawn()
             .expect("Failed to spawn");
@@ -704,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_screen_contains() {
-        let mut session = TuiSession::new("/bin/echo contains_check")
+        let mut session = echo_until_drop("contains_check")
             .timeout(Duration::from_secs(5))
             .spawn()
             .expect("Failed to spawn");
@@ -715,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_get_screen_snapshot() {
-        let mut session = TuiSession::new("/bin/echo snapshot_test")
+        let mut session = echo_until_drop("snapshot_test")
             .timeout(Duration::from_secs(5))
             .spawn()
             .expect("Failed to spawn");
@@ -727,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_with_predicate() {
-        let mut session = TuiSession::new("/bin/echo predicate_test")
+        let mut session = echo_until_drop("predicate_test")
             .timeout(Duration::from_secs(5))
             .spawn()
             .expect("Failed to spawn");
@@ -758,12 +781,11 @@ mod tests {
         let snap = session.get_screen();
         assert_eq!(snap.size(), (40, 120));
         session.send_key(Key::Ctrl('d')).unwrap();
-        session.send_key(Key::Ctrl('d')).unwrap();
     }
 
     #[test]
     fn test_wait_for_timeout_custom() {
-        let mut session = TuiSession::new("/bin/echo custom_timeout_test")
+        let mut session = echo_until_drop("custom_timeout_test")
             .timeout(Duration::from_secs(30))
             .spawn()
             .expect("Failed to spawn");
@@ -805,7 +827,7 @@ mod tests {
 
     #[test]
     fn test_session_without_capture() {
-        let mut session = TuiSession::new("/bin/echo no_capture")
+        let mut session = echo_until_drop("no_capture")
             .timeout(Duration::from_secs(5))
             .spawn()
             .expect("Failed to spawn");
@@ -864,7 +886,6 @@ mod tests {
 
         // Kill and let drop handle the rest
         session.send_key(Key::Ctrl('d')).unwrap();
-        session.send_key(Key::Ctrl('d')).unwrap();
     }
 
     #[test]
@@ -884,14 +905,13 @@ mod tests {
         assert!(capture_dir.join(&filename).exists());
 
         session.send_key(Key::Ctrl('d')).unwrap();
-        session.send_key(Key::Ctrl('d')).unwrap();
     }
 
     #[test]
     fn test_session_save_captures() {
         let tmp = tempfile::TempDir::new().unwrap();
         let capture_dir = tmp.path().join("captures");
-        let mut session = TuiSession::new("/bin/echo save_test")
+        let mut session = echo_until_drop("save_test")
             .timeout(Duration::from_secs(5))
             .capture_dir(capture_dir.clone())
             .spawn()
@@ -905,7 +925,10 @@ mod tests {
         // Verify it's valid JSON
         let content = std::fs::read_to_string(&path).unwrap();
         let timeline: Timeline = serde_json::from_str(&content).unwrap();
-        assert_eq!(timeline.command, "/bin/echo save_test");
+        assert_eq!(
+            timeline.command,
+            "/bin/sh -c echo \"$1\"; read -r _ output-fixture save_test"
+        );
     }
 
     #[test]
@@ -914,7 +937,7 @@ mod tests {
         let capture_dir = tmp.path().join("drop_captures");
 
         {
-            let mut session = TuiSession::new("/bin/echo drop_test")
+            let mut session = echo_until_drop("drop_test")
                 .timeout(Duration::from_secs(5))
                 .capture_dir(capture_dir.clone())
                 .spawn()
@@ -952,7 +975,7 @@ mod tests {
         let capture_dir = tmp.path().join("already_saved");
 
         {
-            let mut session = TuiSession::new("/bin/echo already_saved_test")
+            let mut session = echo_until_drop("already_saved_test")
                 .timeout(Duration::from_secs(5))
                 .capture_dir(capture_dir.clone())
                 .spawn()
@@ -984,7 +1007,7 @@ mod tests {
                 capture_on_drop: false,
                 ..CaptureConfig::default()
             };
-            let mut session = TuiSession::new("/bin/echo no_save")
+            let mut session = echo_until_drop("no_save")
                 .timeout(Duration::from_secs(5))
                 .capture_config(config)
                 .spawn()
@@ -1013,7 +1036,7 @@ mod tests {
             capture_on_drop: false,
         };
 
-        let mut session = TuiSession::new("/bin/echo auto_capture_test")
+        let mut session = echo_until_drop("auto_capture_test")
             .timeout(Duration::from_secs(5))
             .capture_config(config)
             .spawn()
@@ -1042,7 +1065,7 @@ mod tests {
             ..CaptureConfig::default()
         };
 
-        let mut session = TuiSession::new("/bin/echo no_auto_capture_test")
+        let mut session = echo_until_drop("no_auto_capture_test")
             .timeout(Duration::from_secs(5))
             .capture_config(config)
             .spawn()
@@ -1074,7 +1097,7 @@ mod tests {
             ..CaptureConfig::default()
         };
 
-        let mut session = TuiSession::new("/bin/echo hello world")
+        let mut session = echo_until_drop("hello world")
             .timeout(Duration::from_secs(5))
             .capture_config(config)
             .spawn()
@@ -1083,7 +1106,10 @@ mod tests {
         session.wait_for_text("hello world").unwrap();
 
         let tl = session.timeline().unwrap();
-        assert_eq!(tl.command, "/bin/echo hello world");
+        assert_eq!(
+            tl.command,
+            "/bin/sh -c echo \"$1\"; read -r _ output-fixture hello world"
+        );
         assert_eq!(tl.terminal_size, [80, 24]);
     }
 }

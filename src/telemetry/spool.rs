@@ -1420,26 +1420,28 @@ mod tests {
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
 
-        // More distinct events than the cap, appended from many threads at once.
-        // The lock must serialize each read-modify-write so no append clobbers
-        // another's cap-trim rename: the file stays exactly bounded, every
-        // retained line is a whole parseable event, and no id is duplicated.
         let total = MAX_SPOOL_EVENTS + 20;
-        let handles: Vec<_> = (0..total)
-            .map(|i| {
-                std::thread::spawn(move || {
-                    let _ = append(&sample_event(&format!("run-{i}"), &format!("id-{i}")));
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
+        // Bound open lock files independently of the number of queued events.
+        let workers = 8;
+        let start = std::sync::Barrier::new(workers);
+        std::thread::scope(|scope| {
+            for worker in 0..workers {
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for i in (worker..total).step_by(workers) {
+                        append(&sample_event(&format!("run-{i}"), &format!("id-{i}")))
+                            .expect("every concurrent append must be accepted");
+                    }
+                });
+            }
+        });
 
         let raw = std::fs::read_to_string(home.path().join(SPOOL_FILE)).unwrap();
-        let ids: HashSet<String> = raw
-            .lines()
-            .filter(|l| !l.trim().is_empty())
+        let lines: Vec<_> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), MAX_SPOOL_EVENTS);
+        let ids: HashSet<String> = lines
+            .iter()
             .map(|l| {
                 serde_json::from_str::<PlanGovernanceEvent>(l)
                     .expect("every retained line must be a whole, parseable event")
