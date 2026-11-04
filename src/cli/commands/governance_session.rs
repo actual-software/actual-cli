@@ -106,8 +106,7 @@ const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
 pub(super) const AUDIT_LOG_NAME: &str = "plan-check-overrides.log";
 
 /// A session file older than this is pruned the next time any session is
-/// stored. Bounds disk usage without needing a `SessionEnd` hook, which
-/// Claude Code does not offer here.
+/// stored. Bounds disk usage even when a killed session runs no end hook.
 const SESSION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 /// One artifact kind's revision-loop memory inside a [`GovernanceSession`].

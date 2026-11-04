@@ -127,6 +127,11 @@ pub(super) fn report(
     let Some(outputs) = otlp::Outputs::resolve(&config) else {
         return;
     };
+    if action.hook {
+        if let Some(session_id) = action.session_id.filter(|id| !id.is_empty()) {
+            super::session_end::record_check(session_id, decision == PlanGovernanceDecision::Block);
+        }
+    }
     let origin = otlp::Origin::resolve();
     let session_id = action.session_id.unwrap_or_default();
     let action_type = action_type(action.kind);
