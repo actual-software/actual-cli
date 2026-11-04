@@ -30,7 +30,7 @@
 //! **The unit is the decision (ADR), not the document.** Sibling documents of
 //! one decision restate each other, and the brief already merges them.
 //!
-//! **Pruning.** There is no `SessionEnd` hook to clean up after, so every
+//! **Pruning.** Killed sessions run no end hook, so every
 //! store removes files older than [`SESSION_MAX_AGE`].
 
 use std::collections::BTreeSet;

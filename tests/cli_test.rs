@@ -2759,3 +2759,109 @@ fn test_brief_hook_sends_to_the_api_url_by_default_only_from_a_release_build() {
     }
     mock.assert();
 }
+
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_session_end_delivers_once_with_sign_in_and_respects_opt_out() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("content-type", "application/x-protobuf")
+        .match_header("authorization", "Bearer session-end-test-token")
+        .match_request(|request| {
+            use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+            use opentelemetry_proto::tonic::common::v1::any_value::Value;
+            use prost::Message;
+            let Some(sent) = request
+                .body()
+                .ok()
+                .and_then(|body| ExportLogsServiceRequest::decode(body.as_slice()).ok())
+            else {
+                return false;
+            };
+            let records: Vec<_> = sent
+                .resource_logs
+                .iter()
+                .flat_map(|resource| &resource.scope_logs)
+                .flat_map(|scope| &scope.log_records)
+                .collect();
+            records.len() == 1
+                && records[0].event_name == "actual.session.ended"
+                && [
+                    (
+                        "actual.session.id",
+                        Value::StringValue("session-end-test".into()),
+                    ),
+                    (
+                        "actual.session.end_reason",
+                        Value::StringValue("prompt_input_exit".into()),
+                    ),
+                    ("actual.session.last_check_blocked", Value::BoolValue(false)),
+                ]
+                .iter()
+                .all(|(key, value)| {
+                    records[0].attributes.iter().any(|attr| {
+                        attr.key == *key
+                            && attr.value.as_ref().and_then(|v| v.value.as_ref()) == Some(value)
+                    })
+                })
+        })
+        .with_status(200)
+        .expect(1)
+        .create();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let configuration = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+    std::fs::write(config_dir.path().join("config.yaml"), &configuration).unwrap();
+    std::fs::write(config_dir.path().join("credentials.yaml"),
+        "access_token: session-end-test-token\nrefresh_token: test-refresh-token\norganization_id: test-org\nmember_id: test-member\n").unwrap();
+    let run = |session_id: &str, env_opt_out: bool| {
+        cmd()
+            .arg("__session-ended")
+            .env("ACTUAL_CONFIG_DIR", config_dir.path())
+            .env("ACTUAL_API_URL", server.url())
+            .env("ACTUAL_NO_TELEMETRY", if env_opt_out { "1" } else { "" })
+            .env_remove("ACTUAL_CONFIG")
+            .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
+            .env_remove("ACTUAL_OTLP_FILE")
+            .write_stdin(
+                serde_json::json!({
+                    "session_id": session_id, "hook_event_name": "SessionEnd",
+                    "reason": "prompt_input_exit", "cwd": "/private/repo",
+                    "transcript_path": "/private/transcript"
+                })
+                .to_string(),
+            )
+            .assert()
+            .success()
+            .stdout("")
+            .stderr("");
+    };
+    run("env-disabled", true);
+    assert!(!config_dir.path().join("session-telemetry").exists());
+    std::fs::write(
+        config_dir.path().join("config.yaml"),
+        format!("{configuration}  enabled: false\n"),
+    )
+    .unwrap();
+    run("config-disabled", false);
+    assert!(!config_dir.path().join("session-telemetry").exists());
+    std::fs::write(config_dir.path().join("config.yaml"), &configuration).unwrap();
+    run("session-end-test", false);
+    run("session-end-test", false);
+    for _ in 0..100 {
+        if mock.matched() && std::fs::read_to_string(&sink).is_ok_and(|s| !s.is_empty()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    mock.assert();
+    let written = std::fs::read_to_string(sink).unwrap();
+    assert_eq!(written.lines().count(), 1, "{written}");
+    assert!(!written.contains("session-end-test-token"));
+    assert!(!written.contains("/private/"));
+}

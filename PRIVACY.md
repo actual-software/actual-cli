@@ -257,7 +257,7 @@ before any repo-identity hashing or `distinct_id` creation, not just before the
 network send: an opted-out run never touches git for telemetry and never writes
 `~/.actualai/actual/telemetry-id`.
 
-### ADR and check events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
+### ADR, check and session events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
 
 The CLI sends OpenTelemetry log events about ADRs on four occasions:
 
@@ -295,6 +295,10 @@ ran the command:
 They're sent on the same runs as the plan-governance `check_started` and
 `check_completed` events, with the same outcome, but only to the outputs
 below. A run outside a Claude Code hook sends them with no session or agent.
+
+The plugin's `SessionEnd` hook also sends `actual.session.ended` once per session, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session with no completed check reports `false`. Direct checks do not change that state. A killed process that runs no end hook sends no end event; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
+
+Local session state stores only that boolean and a duplicate-suppression flag, under a filename hashed from the session id. It shares the brief ledger's age pruning policy. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory or free-form end reasons.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
@@ -370,6 +374,8 @@ has only the classes its fields carry below:
 | `actual.gate.outcome` | What the evaluation came to: `breached` when a gate blocked on the ADR's rules, `overridden` when a human overrode them | anonymous |
 | `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | anonymous |
 | `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules earlier in the session, and an empty list when the human overrode before any denial | anonymous |
+| `actual.session.end_reason` | The coarse reason Claude Code ended the session: `clear`, `resume`, `logout`, `prompt_input_exit` or `other` | anonymous |
+| `actual.session.last_check_blocked` | Whether the last completed hook check blocked; `false` when none completed | anonymous |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
 | `actual.action.mode` | How the check ran: `hook` when Claude Code ran it as a hook, `direct` when someone ran the command | anonymous |
 | `actual.action.outcome` | What the check came to, as its plan-governance `check_completed` event records it: `allow`, `warn` or `block` | anonymous |
