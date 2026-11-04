@@ -36,6 +36,36 @@ xattr -dr com.apple.quarantine /usr/local/bin/actual
 
 Verify it works: `actual --version`
 
+`actual self-update` upgrades a binary installed this way after checking the new release's signature, but only in a directory you can write without `sudo`. To use it, put `actual` somewhere you own, such as `~/.local/bin`, instead of `/usr/local/bin`. See [SELF_UPDATE.md](SELF_UPDATE.md).
+
+### Check a downloaded release
+
+Releases after v0.11.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
+
+```bash
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS.minisig
+curl -fsSL -o actual-release.pub https://raw.githubusercontent.com/actual-software/actual-cli/main/release-keys/primary.pub
+minisign -Vm SHA256SUMS -p actual-release.pub
+shasum -a 256 --check --ignore-missing SHA256SUMS
+```
+
+`minisign` then prints the signed trusted comment, which should name the tag of the release you downloaded, because a signature from an older release still verifies. If it reports a different key id, check against the spare key in [Release signing](RELEASE_SIGNING.md).
+
+### Build from source
+
+To build from source you need a C compiler for the tree-sitter native dependencies:
+
+```bash
+# macOS: Xcode command-line tools (usually already installed)
+xcode-select --install
+
+# Debian/Ubuntu
+sudo apt-get install build-essential
+
+cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
+```
+
 ## Prerequisites
 
 You need an AI runner. Pick one:
