@@ -2865,3 +2865,64 @@ fn test_session_end_delivers_once_with_sign_in_and_respects_opt_out() {
     assert!(!written.contains("session-end-test-token"));
     assert!(!written.contains("/private/"));
 }
+
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
+    use sha2::{Digest, Sha256};
+
+    let config = tempfile::tempdir().unwrap();
+    let dir = config.path().join("session-telemetry");
+    std::fs::create_dir(&dir).unwrap();
+    let state = dir.join(format!("{:x}.json", Sha256::digest(b"contended-end")));
+    let pending = r#"{"last_check_blocked":true,"ended":false}"#;
+    std::fs::write(&state, pending).unwrap();
+    let held = std::fs::File::create(dir.join("ledger.lock")).unwrap();
+    held.try_lock().unwrap();
+    let sink = config.path().join("otlp.jsonl");
+    let run = || {
+        cmd()
+            .timeout(std::time::Duration::from_secs(5))
+            .arg("__session-ended")
+            .env("ACTUAL_CONFIG_DIR", config.path())
+            .env("ACTUAL_OTLP_FILE", &sink)
+            .env_remove("ACTUAL_CONFIG")
+            .env_remove("ACTUAL_NO_TELEMETRY")
+            .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
+            .write_stdin(
+                r#"{"session_id":"contended-end","hook_event_name":"SessionEnd","reason":"clear"}"#,
+            )
+            .assert()
+            .success()
+            .stdout("")
+            .stderr("");
+    };
+    run();
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), pending);
+    assert!(!sink.exists());
+    drop(held);
+    run();
+    for _ in 0..100 {
+        if std::fs::read_to_string(&sink).is_ok_and(|s| !s.is_empty()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let written = std::fs::read_to_string(sink).unwrap();
+    assert_eq!(written.lines().count(), 1, "{written}");
+    let request: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+    let records = request["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record["eventName"], "actual.session.ended");
+    assert!(record["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|attribute| {
+            attribute["key"] == "actual.session.last_check_blocked"
+                && attribute["value"]["boolValue"] == true
+        }));
+}
