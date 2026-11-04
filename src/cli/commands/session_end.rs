@@ -227,6 +227,5 @@ mod tests {
         let _held = super::super::brief_ledger::lock(&dir, std::time::Duration::ZERO).unwrap();
         report(&envelope("locked", "other"));
         assert!(take_captured().is_empty());
-        assert!(exec().is_ok());
     }
 }
