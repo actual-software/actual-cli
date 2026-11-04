@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `whoami --check` asks the auth server whether the stored sign-in still works, renewing the access token first when it expires within a minute, under the same lock the other commands renew it with. It exits 2 when the server no longer accepts the sign-in (a sign-out on another machine, a revoke, or a refresh token the server refuses) and 3 when the server can't be reached or fails, so a script can tell a lapsed sign-in from an outage. Plain `whoami` still reads only the local credentials file
 - `actual self-update` replaces a binary downloaded by hand with the latest release. It checks `SHA256SUMS.minisig` against the keys in `release-keys/`, including the tag in its signed comment, and the archive against `SHA256SUMS`, before renaming the new binary over the old one under a lock. A copy installed with Homebrew or npm gets that tool's upgrade command instead, and a build from source, wherever it's installed, gets the `cargo install` command. It won't replace a binary in a directory the user can't write or one another user owns, and won't run as root, under CI, or with update checks turned off. See `docs/SELF_UPDATE.md`
 
 ### Changed
