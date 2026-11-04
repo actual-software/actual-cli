@@ -2,10 +2,12 @@
 
 `actual self-update` replaces a copy of `actual` you downloaded by hand with the latest release, once the release's signature checks out. A copy installed with Homebrew or npm gets that tool's upgrade command instead: each keeps a record of the files it installs, and its next upgrade would overwrite a binary replaced behind its back. A copy built from source, wherever it's installed, gets the `cargo install` command, because it may have been built for a system the release builds don't run on, such as a Linux with a glibc older than 2.39.
 
+For example, updating from v0.12.0 to a later signed release would look like:
+
 ```
 $ actual self-update
-Downloading actual 0.10.0 (actual-darwin-arm64.tar.gz)…
-Updated actual at /Users/me/.local/bin/actual from 0.9.0 to 0.10.0, signed with the primary release key.
+Downloading actual 0.13.0 (actual-darwin-arm64.tar.gz)…
+Updated actual at /Users/me/.local/bin/actual from 0.12.0 to 0.13.0, signed with the primary release key.
 ```
 
 ## How it checks a release
@@ -16,7 +18,7 @@ It makes the same checks [Release signing](RELEASE_SIGNING.md#checking-a-downloa
 2. It downloads `SHA256SUMS` and `SHA256SUMS.minisig` from that version's page on the [actual-releases](https://github.com/actual-software/actual-releases/releases) mirror and checks the signature against the two public keys in [`release-keys/`](../release-keys), which are built into `actual`. The signed comment's `file:` and `tag:` fields must read `SHA256SUMS` and this release's tag exactly, because an older release's signature still verifies.
 3. It downloads the archive for your platform and checks it against the SHA-256 that `SHA256SUMS` lists for it. Only then does it unpack the archive, and what comes out must be a regular file.
 
-A signer adds the signature by hand after the release workflow publishes everything else, so a new release can sit unsigned for a while. `actual self-update` refuses one and asks you to try again later. Releases up to v0.11.0 carry no signature at all.
+A signer adds the signature by hand after the release workflow publishes everything else, so a new release can sit unsigned for a while. `actual self-update` refuses one and asks you to try again later. The workflow publishes `SHA256SUMS` from v0.12.0; releases through v0.11.0 carry neither that file nor a signature.
 
 ```mermaid
 flowchart TD

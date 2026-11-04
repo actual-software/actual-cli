@@ -1,6 +1,8 @@
 # Release signing
 
-Every release carries a `SHA256SUMS` file that lists the four tarballs, plus `SHA256SUMS.minisig`, a signature over it. Both release pages get them: [actual-cli](https://github.com/actual-software/actual-cli/releases) and the [actual-releases](https://github.com/actual-software/actual-releases/releases) mirror. The signing key is an Ed25519 key in Google Cloud KMS that nobody can view or export, and a member of the signing group signs each release by hand once it's out. Nothing in GitHub can sign.
+From v0.12.0, the release workflow publishes `SHA256SUMS`, which lists the four tarballs, on both release pages: [actual-cli](https://github.com/actual-software/actual-cli/releases) and the [actual-releases](https://github.com/actual-software/actual-releases/releases) mirror. A member of the signing group then signs that file by hand and uploads `SHA256SUMS.minisig` to both pages. Until that step finishes, the release isn't signed. Releases through v0.11.0 don't carry either file.
+
+The signing key is an Ed25519 key in Google Cloud KMS that nobody can view or export; the release workflow can't access it.
 
 The public keys live in [`release-keys/`](../release-keys). Releases are signed with `primary.pub`'s key; `spare.pub` takes over if the primary is ever retired.
 
@@ -8,10 +10,10 @@ The public keys live in [`release-keys/`](../release-keys). Releases are signed 
 
 ## Checking a download
 
-You'll need [minisign](https://jedisct1.github.io/minisign/) (`brew install minisign`, or your package manager). Fetch the tarball, `SHA256SUMS`, `SHA256SUMS.minisig` and the public key, then check the signature first and the checksum second:
+You'll need [minisign](https://jedisct1.github.io/minisign/) (`brew install minisign`, or your package manager). Once the chosen release has been published and signed, fetch the tarball, `SHA256SUMS`, `SHA256SUMS.minisig` and the public key, then check the signature first and the checksum second. If the signature isn't available yet, wait for signing to finish. This example uses the first supported version:
 
 ```bash
-TAG=v0.10.0
+TAG=v0.12.0
 base=https://github.com/actual-software/actual-releases/releases/download/$TAG
 for f in SHA256SUMS SHA256SUMS.minisig actual-darwin-arm64.tar.gz; do curl -fsSLO "$base/$f"; done
 curl -fsSL -o actual-release.pub https://raw.githubusercontent.com/actual-software/actual-cli/main/release-keys/primary.pub
@@ -32,7 +34,7 @@ The trusted comment is signed too. On every release signature it has exactly thr
 timestamp:<seconds since the Unix epoch>	file:SHA256SUMS	tag:<tag>
 ```
 
-`tag:` holds the full tag, such as `tag:v0.10.0`. Code that reads the tag back should split the comment on tabs and compare the `tag:` field exactly. Searching it for a version string isn't enough.
+`tag:` holds the full tag, such as `tag:v0.12.0`. Code that reads the tag back should split the comment on tabs and compare the `tag:` field exactly. Searching it for a version string isn't enough.
 
 ## Signing a release
 
@@ -42,7 +44,7 @@ Once the release workflow has published both release pages, one member of the si
 - `gh auth login` with write access to actual-cli and actual-releases, for the uploads.
 
 ```bash
-cargo run -p release-sign -- release v0.10.0 --kms-key "projects/$PROJECT/locations/$LOCATION/keyRings/$KEY_RING/cryptoKeys/release-signing-primary/cryptoKeyVersions/1"
+cargo run -p release-sign -- release v0.12.0 --kms-key "projects/$PROJECT/locations/$LOCATION/keyRings/$KEY_RING/cryptoKeys/release-signing-primary/cryptoKeyVersions/1"
 ```
 
 Maintainers will find the values of `$PROJECT`, `$LOCATION` and `$KEY_RING` in the team's internal docs. `--kms-key` can also come from `RELEASE_SIGN_KMS_KEY`. Before it asks KMS for anything, the tool checks three things:
