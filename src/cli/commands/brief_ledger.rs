@@ -401,7 +401,7 @@ fn update_within(
 /// holds it. `None` when the lock file cannot be opened, the platform has no
 /// file locks, or the wait runs out. The lock is released when the returned
 /// file is dropped.
-fn lock(dir: &Path, wait: Duration) -> Option<File> {
+pub(super) fn lock(dir: &Path, wait: Duration) -> Option<File> {
     let mut options = OpenOptions::new();
     options.create(true).write(true).truncate(false);
     #[cfg(unix)]
@@ -422,7 +422,7 @@ fn lock(dir: &Path, wait: Duration) -> Option<File> {
     }
 }
 
-fn prune_stale(dir: &Path) {
+pub(super) fn prune_stale(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

@@ -196,7 +196,8 @@ pub fn applies_to(command: &Command) -> bool {
         | Command::Version(_)
         | Command::SelfUpdate
         | Command::UpdateCheck
-        | Command::TelemetryFlush => false,
+        | Command::TelemetryFlush
+        | Command::SessionEnded => false,
     }
 }
 
