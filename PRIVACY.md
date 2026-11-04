@@ -296,14 +296,14 @@ They're sent on the same runs as the plan-governance `check_started` and
 `check_completed` events, with the same outcome, but only to the outputs
 below. A run outside a Claude Code hook sends them with no session or agent.
 
-The plugin's `SessionEnd` hook also sends `actual.session.ended` once per session, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session with no completed check reports `false`. Direct checks do not change that state. A killed process that runs no end hook sends no end event; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
+The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
 
-Local session state stores only that boolean and a duplicate-suppression flag, under a filename hashed from the session id. It shares the brief ledger's age pruning policy. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory or free-form end reasons.
+Local session state stores only that boolean and a duplicate-suppression flag, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory or free-form end reasons.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
 blocked on, which of them a human overrode, how each check came out and what
-made a check warn, and how long it took.
+made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
 
 **Release builds send these events to Actual's API by default.** They go to
 `/v1/logs` on the address the CLI's other telemetry uses: the config file's
@@ -352,7 +352,7 @@ on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.gate.denied_types` on override events. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
 `actual.action.outcome`, `actual.action.warn_reasons` and
-`actual.action.duration_ms`. An unknown value is
+`actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`. An unknown value is
 sent as an empty string. None of them names you, your organization, your
 repository or this installation, so an event carries the same fields signed in
 or out. Only the token on a signed-in request to Actual's API, described above,
@@ -387,7 +387,7 @@ can map them back to that repository and its organization. Each event also
 names the CLI, its version, the deployment environment (`production` for
 release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
-override was recorded, or when a check started or completed), and, when the
+override was recorded, when a check started or completed, or when the session ended), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
 **No event carries rule text, plan or diff text, override reasons, file paths,
 raw account identifiers, identity hashes or installation id.**

@@ -1,6 +1,6 @@
 //! ADR telemetry as OpenTelemetry log events in Actual's `actual.*` event
 //! catalog, over OTLP/HTTP with protobuf encoding: ADRs entering an agent's
-//! context and meeting the gates, and the gate checks themselves.
+//! context and meeting the gates, the gate checks themselves, and session ends.
 //!
 //! # Design
 //!
