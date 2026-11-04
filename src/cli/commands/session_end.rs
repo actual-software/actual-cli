@@ -200,6 +200,8 @@ mod tests {
         let _ci = EnvGuard::remove("CI");
         let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
         take_captured();
+        record_check("", true);
+        record_check(&"s".repeat(257), true);
         for raw in [
             "",
             "{}",
