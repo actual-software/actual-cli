@@ -69,7 +69,7 @@ const LEDGER_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How long a write waits for another writer to finish. The hook that writes
 /// runs under a timeout of a few seconds, and the brief it is about to print
 /// matters more than the count.
-const LOCK_WAIT: Duration = Duration::from_millis(500);
+pub(super) const LOCK_WAIT: Duration = Duration::from_millis(500);
 
 /// The pause between attempts while another writer holds the lock.
 const LOCK_RETRY: Duration = Duration::from_millis(5);
