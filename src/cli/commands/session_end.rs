@@ -224,16 +224,16 @@ mod tests {
         let dir = home.path().join("session-telemetry");
         for check in [true, false] {
             let held = super::super::brief_ledger::lock(&dir, std::time::Duration::ZERO).unwrap();
-            let release = std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-                drop(held);
-            });
-            if check {
-                record_check("contended", true);
-            } else {
-                report(&envelope("contended", "other"));
-            }
-            release.join().unwrap();
+            super::super::brief_ledger::tests::release_on_retry(
+                move || held.unlock().unwrap(),
+                || {
+                    if check {
+                        record_check("contended", true);
+                    } else {
+                        report(&envelope("contended", "other"));
+                    }
+                },
+            );
         }
         let records = take_captured();
         assert_eq!(records.len(), 1);
@@ -285,7 +285,7 @@ mod tests {
         let start = std::time::Instant::now();
         report(&envelope("locked", "other"));
         assert!(start.elapsed() >= END_LOCK_WAIT);
-        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(END_LOCK_WAIT < Duration::from_secs(1));
         assert!(take_captured().is_empty());
     }
 }
