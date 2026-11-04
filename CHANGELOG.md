@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-04
+
 ### Added
 - `actual self-update` replaces a binary downloaded by hand with the latest release. It checks `SHA256SUMS.minisig` against the keys in `release-keys/`, including the tag in its signed comment, and the archive against `SHA256SUMS`, before renaming the new binary over the old one under a lock. A copy installed with Homebrew or npm gets that tool's upgrade command instead, and a build from source, wherever it's installed, gets the `cargo install` command. It won't replace a binary in a directory the user can't write or one another user owns, and won't run as root, under CI, or with update checks turned off. See `docs/SELF_UPDATE.md`
 
