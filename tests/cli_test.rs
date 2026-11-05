@@ -2872,6 +2872,15 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
     use sha2::{Digest, Sha256};
 
     let config = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", "Bearer held-lock-test-token")
+        .with_status(200)
+        .expect(1)
+        .create();
+    std::fs::write(config.path().join("credentials.yaml"),
+        "access_token: held-lock-test-token\nrefresh_token: test-refresh-token\norganization_id: test-org\nmember_id: test-member\n").unwrap();
     let dir = config.path().join("session-telemetry");
     std::fs::create_dir(&dir).unwrap();
     let state = dir.join(format!("{:x}.json", Sha256::digest(b"contended-end")));
@@ -2880,15 +2889,20 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
     let held = std::fs::File::create(dir.join("ledger.lock")).unwrap();
     held.try_lock().unwrap();
     let sink = config.path().join("otlp.jsonl");
-    let run = || {
-        cmd()
+    let run =
+        || {
+            cmd()
             .timeout(std::time::Duration::from_secs(5))
             .arg("__session-ended")
+            .env("HOME", config.path())
+            .env("XDG_CONFIG_HOME", config.path().join("config"))
+            .env("XDG_STATE_HOME", config.path().join("state"))
             .env("ACTUAL_CONFIG_DIR", config.path())
+            .env("ACTUAL_API_URL", server.url())
+            .env("ACTUAL_OTLP_LOGS_ENDPOINT", format!("{}/v1/logs", server.url()))
             .env("ACTUAL_OTLP_FILE", &sink)
             .env_remove("ACTUAL_CONFIG")
             .env_remove("ACTUAL_NO_TELEMETRY")
-            .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
             .write_stdin(
                 r#"{"session_id":"contended-end","hook_event_name":"SessionEnd","reason":"clear"}"#,
             )
@@ -2896,19 +2910,21 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
             .success()
             .stdout("")
             .stderr("");
-    };
+        };
     run();
     assert_eq!(std::fs::read_to_string(&state).unwrap(), pending);
     assert!(!sink.exists());
     drop(held);
     run();
     for _ in 0..100 {
-        if std::fs::read_to_string(&sink).is_ok_and(|s| !s.is_empty()) {
+        if mock.matched() && std::fs::read_to_string(&sink).is_ok_and(|s| !s.is_empty()) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    mock.assert();
     let written = std::fs::read_to_string(sink).unwrap();
+    assert!(!written.contains("held-lock-test-token"));
     assert_eq!(written.lines().count(), 1, "{written}");
     let request: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
     let records = request["resourceLogs"][0]["scopeLogs"][0]["logRecords"]

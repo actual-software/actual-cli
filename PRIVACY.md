@@ -34,7 +34,7 @@ in and on who processes it. This notice is explicit about both:
 
 **One setting turns telemetry off.** `actual config set telemetry.enabled false`
 stops every telemetry event in this notice: the counters, the plan-governance
-events that reach PostHog through Actual's proxy, and the ADR and check events.
+events that reach PostHog through Actual's proxy, and the ADR, check and session-end events.
 You don't need a second switch for any of them. It covers telemetry, not every
 network request: "How to opt out of telemetry" below says what it leaves running,
 and to change it when no `actual adr-bot` run is in progress.
@@ -587,15 +587,15 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, and ADR, check and session-end events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check` or `actual self-update`; no account or repository data | HTTPS |
 | `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
 | Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, plan or diff text + rule text for `plan-check`, `impl-check` and `rules select`, and, for `actual models`, a request for the model list that holds only your API key | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`, and for `actual models`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
-| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
-| The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
+| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, check events and session-end events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The local file you configure (none by default) | ADR context, use, breach and override events, check events and session-end events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
 non-HTTPS API URLs.
@@ -619,9 +619,7 @@ The setting lasts across shells and applies to every run that reads that file,
 including the `--claude-hook` paths Claude Code runs for you.
 
 **This one setting stops every telemetry event**: the counters, the
-plan-governance events that reach PostHog through Actual's proxy, and the ADR
-and check events, whether they go to Actual's API or to an endpoint or file you
-set. You don't need a second switch for any of them.
+plan-governance events that reach PostHog through Actual's proxy, and the ADR, check and session-end events, whether they go to Actual's API or to an endpoint or file you set. You don't need a second switch for any of them.
 
 Events an earlier run left queued in the local spools stay on your machine,
 unsent, while telemetry is off, and the uploader sends them if you turn it back
