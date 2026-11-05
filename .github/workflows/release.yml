@@ -464,12 +464,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Upgrade npm (trusted publishing needs >= 11.5.1)
-        # Pin to npm 11.x: >= 11.5.1 adds OIDC trusted publishing and still supports
-        # Node 20. npm@latest is now npm 12, which requires Node >= 22 and breaks here.
+        # Keep packaging and publishing on the npm 11 trusted-publishing range.
         run: npm install -g 'npm@^11.5.1'
 
       - name: Download release assets
@@ -546,7 +545,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Upgrade npm (trusted publishing needs >= 11.5.1)
