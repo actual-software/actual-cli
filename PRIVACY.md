@@ -149,7 +149,7 @@ Each event includes a subset of these properties:
 | `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
 | `reason_len` | `check-override` only: the character length of the override reason |
 | `reason_hash` | `check-override` only: a one-way SHA-256 of the override reason (peppered server-side before PostHog) -- lets identical reasons group without exposing the text |
-| `override_source` | `check-override` only: how the override was issued -- `terminal` or `session_prompt` (typed as `/override` in the Claude Code session) |
+| `override_source` | `check-override` only: how the override was issued -- `terminal` or `session_prompt` (typed as `/actual-cli:override` in the Claude Code session) |
 | `override_gate` | `check-override` only: which gate had denied the rule -- `plan`, `impl`, or `both` (absent if neither had) |
 | `scope_run_id` | `rules select` only: a random per-run correlation id (not derived from any data) |
 | `rules_scanned` / `stage1_candidates` / `selected` | `rules select` only: counts of rules scanned, stage-1 candidates, and rules finally selected -- numbers only |
