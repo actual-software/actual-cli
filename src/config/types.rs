@@ -292,7 +292,7 @@ pub struct TelemetryConfig {
     /// Whether telemetry is enabled (default: true, opt-out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// The OTLP/HTTP logs URL ADR and check events are sent to, used as-is.
+    /// The OTLP/HTTP logs URL ADR, check and session-end events are sent to, used as-is.
     /// Unset, a release build sends them to `/v1/logs` on `api_url`, and a
     /// debug build sends nothing. `ACTUAL_OTLP_LOGS_ENDPOINT` overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

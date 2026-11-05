@@ -127,11 +127,6 @@ pub(super) fn report(
     let Some(outputs) = otlp::Outputs::resolve(&config) else {
         return;
     };
-    if action.hook {
-        if let Some(session_id) = action.session_id.filter(|id| !id.is_empty()) {
-            super::session_end::record_check(session_id, decision == PlanGovernanceDecision::Block);
-        }
-    }
     let origin = otlp::Origin::resolve();
     let session_id = action.session_id.unwrap_or_default();
     let action_type = action_type(action.kind);
@@ -157,6 +152,11 @@ pub(super) fn report(
         &warn_reasons,
         action.started.instant.elapsed(),
     ));
+    if action.hook {
+        if let Some(session_id) = action.session_id.filter(|id| !id.is_empty()) {
+            super::session_end::record_check(session_id, decision == PlanGovernanceDecision::Block);
+        }
+    }
     brief_telemetry::dispatch(&outputs, all);
 }
 
@@ -807,6 +807,43 @@ pub(super) mod tests {
             let took = duration_ms(completed);
             assert!((250..60_000).contains(&took), "{took}");
             assert!(!home.join("telemetry-id").exists());
+        });
+    }
+
+    #[test]
+    fn test_completed_duration_excludes_session_state_lock_wait() {
+        with_config(WITH_FILE, |home| {
+            use sha2::Digest;
+            use std::cell::Cell;
+            use std::rc::Rc;
+
+            let dir = home.join("session-telemetry");
+            std::fs::create_dir(&dir).unwrap();
+            let held = brief_ledger::lock(&dir, std::time::Duration::ZERO).unwrap();
+            let action = hook_action(SystemTime::now());
+            let started = action.started.instant;
+            let before_wait = Rc::new(Cell::new(None));
+            let observed = Rc::clone(&before_wait);
+            brief_ledger::tests::release_on_retry(
+                move || {
+                    observed.set(Some(started.elapsed()));
+                    drop(held);
+                },
+                || report(&action, PlanGovernanceDecision::Block, &[], Vec::new()),
+            );
+
+            let records = take_captured();
+            let completed = records.last().unwrap();
+            assert_eq!(completed["eventName"], otlp::ACTION_COMPLETED);
+            assert!(
+                duration_ms(completed) <= before_wait.get().unwrap().as_millis(),
+                "the check duration includes the session-state lock wait"
+            );
+            let state = dir.join(format!("{:x}.json", sha2::Sha256::digest(b"s1")));
+            let state: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(state).unwrap()).unwrap();
+            assert_eq!(state["last_check_blocked"], true);
+            assert_eq!(state["ended"], false);
         });
     }
 
