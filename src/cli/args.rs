@@ -1424,11 +1424,12 @@ pub struct PlanCheckOverrideArgs {
     pub reason: Option<String>,
 
     /// Hook mode, for the `UserPromptSubmit` hook: read the hook envelope on
-    /// stdin and, if the user's prompt is `/override <rule-id|all> [reason]`,
-    /// record that override. Takes no other input, does not require a
-    /// terminal (the prompt arriving as a `UserPromptSubmit` event is the
-    /// evidence of a human — an agent cannot emit one), and never fails: an
-    /// unrecognized or unresolvable prompt records nothing.
+    /// stdin and, if the user's prompt is `/actual-cli:override <rule-id|all>
+    /// [reason]` (a bare `/override` is accepted too), record that override.
+    /// Takes no other input, does not require a terminal (the prompt arriving
+    /// as a `UserPromptSubmit` event is the evidence of a human — an agent
+    /// cannot emit one), and never fails: an unrecognized or unresolvable
+    /// prompt records nothing.
     #[arg(long)]
     pub claude_hook: bool,
 

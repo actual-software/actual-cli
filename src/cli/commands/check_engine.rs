@@ -1195,6 +1195,13 @@ fn corpus_rule_keys(rules_dir: &Path) -> Result<Vec<String>, ActualError> {
     Ok(report.documents.iter().flat_map(override_keys).collect())
 }
 
+/// The in-session override command as the user must type it. Claude Code
+/// registers a plugin's commands only under `/<plugin>:<command>` and rejects a
+/// bare `/override` as an unknown command before any hook sees it, so every
+/// message that tells the user what to type names the actual-cli plugin's
+/// namespaced form. The parser still accepts the bare form.
+const OVERRIDE_COMMAND: &str = "/actual-cli:override";
+
 /// What a user-typed `/override` prompt asked for.
 #[derive(Debug, PartialEq, Eq)]
 struct OverridePrompt {
@@ -1302,11 +1309,10 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
         )
     };
     if parsed.target.is_empty() {
-        return say(
-            "The user typed /override without naming a rule. Nothing was overridden. Tell them \
-             the syntax: /override <rule-id|all> [reason]."
-                .to_string(),
-        );
+        return say(format!(
+            "The user typed {OVERRIDE_COMMAND} without naming a rule. Nothing was overridden. \
+             Tell them the syntax: {OVERRIDE_COMMAND} <rule-id|all> [reason]."
+        ));
     }
     let root = repo_root(args.repo.as_ref());
     let rules_dir = args
@@ -1337,9 +1343,9 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     #[cfg(not(feature = "telemetry"))]
     let _ = gates;
     say(format!(
-        "The user overrode {} via /override (reason: {}). These rules will no longer block \
-         plan-check or impl-check this session. Retry the blocked action. Do not run or type \
-         /override yourself.",
+        "The user overrode {} via {OVERRIDE_COMMAND} (reason: {}). These rules will no longer \
+         block plan-check or impl-check this session. Retry the blocked action. Do not run or \
+         type {OVERRIDE_COMMAND} yourself.",
         keys.join(", "),
         reason.unwrap_or("none given"),
     ))
@@ -1471,9 +1477,9 @@ pub(super) fn hook_deny_reason(
     if let Some(session_id) = session_id {
         lines.push(format!(
             "{} Session: {session_id}. Only the user can override a rule — the agent must not \
-             try. Tell the user they can type `/override <rule-id> [reason]` (or `/override \
-             all`) as a message in this session, or run `actual check-override` from an \
-             ordinary terminal (see `actual check-override --help`).",
+             try. Tell the user they can type `{OVERRIDE_COMMAND} <rule-id> [reason]` (or \
+             `{OVERRIDE_COMMAND} all`) as a message in this session, or run `actual \
+             check-override` from an ordinary terminal (see `actual check-override --help`).",
             copy.revised
         ));
     }
@@ -2541,6 +2547,13 @@ pub(crate) mod tests {
         assert!(reason.contains("--help"));
         assert!(reason.contains("A revised plan is re-checked automatically"));
         assert!(reason.contains("plan:"));
+        // A bare `/override` is an unknown command in Claude Code; only the
+        // plugin-namespaced form reaches the UserPromptSubmit hook.
+        assert!(
+            reason.contains("`/actual-cli:override <rule-id> [reason]`"),
+            "{reason}"
+        );
+        assert!(!reason.contains("`/override"), "{reason}");
     }
 
     /// On an implementation gate the deny text is the agent's tool result.
@@ -4301,11 +4314,12 @@ pub(crate) mod tests {
             .record_denial(&governance_session::key("doc", "R-A-002"));
         governance_session::store("sess-h2", &rules_dir, &session);
 
-        exec_override_hook_with(
+        let out = exec_override_hook_with(
             &hook_args(repo.path()),
             &prompt_env("UserPromptSubmit", "sess-h2", "/override all team approved"),
         )
         .unwrap();
+        assert!(out.contains("via /actual-cli:override"), "{out}");
         let session = governance_session::load("sess-h2", &rules_dir);
         assert_eq!(session.overrides.len(), 2);
         assert!(session
@@ -4345,6 +4359,15 @@ pub(crate) mod tests {
             exec_override_hook_with(&args, &prompt_env("UserPromptSubmit", "s", "/override all"))
                 .unwrap();
         assert!(out.contains("no denied rules"), "{out}");
+        let out = exec_override_hook_with(
+            &args,
+            &prompt_env("UserPromptSubmit", "s", "/actual-cli:override"),
+        )
+        .unwrap();
+        assert!(
+            out.contains("syntax: /actual-cli:override <rule-id|all> [reason]"),
+            "{out}"
+        );
         assert!(governance_session::load("s", &rules_dir)
             .overrides
             .is_empty());

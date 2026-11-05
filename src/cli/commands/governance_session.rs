@@ -225,7 +225,7 @@ pub enum OverrideSource {
     /// A human ran `actual check-override` from an ordinary terminal.
     #[default]
     Terminal,
-    /// A human typed `/override` as a prompt in the Claude Code session and
+    /// A human typed `/actual-cli:override` as a prompt in the session and
     /// the `UserPromptSubmit` hook recorded it. The agent cannot produce a
     /// `UserPromptSubmit` event, so this is still a human decision.
     SessionPrompt,
