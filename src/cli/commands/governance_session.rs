@@ -157,6 +157,14 @@ impl LoopState {
     pub fn deny_limit_exceeded(&self, key: &str, max_rounds: u32) -> bool {
         self.deny_counts.get(key).is_some_and(|&n| n > max_rounds)
     }
+
+    /// True when `key` has been denied in this loop and its latest judgment
+    /// was not conforming. `deny_counts` only ever grows, but a conforming
+    /// verdict inserts into `cleared` and any other verdict removes from it,
+    /// so a rule denied once and fixed in a later round reads `false` here.
+    pub fn is_blocking(&self, key: &str) -> bool {
+        self.deny_counts.contains_key(key) && !self.cleared.contains_key(key)
+    }
 }
 
 /// One conversation's governance memory for a single `(session_id, rules_dir)`:
@@ -550,10 +558,11 @@ pub fn record_override(
     );
 }
 
-/// Which gate(s) have denied `key` in `session`: `"plan"`, `"impl"`, `"both"`.
+/// Which gate(s) `key` is currently blocking in `session` (see
+/// [`LoopState::is_blocking`]): `"plan"`, `"impl"`, `"both"`.
 pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<String> {
-    let plan = session.plan.deny_counts.contains_key(key);
-    let diff = session.diff.deny_counts.contains_key(key);
+    let plan = session.plan.is_blocking(key);
+    let diff = session.diff.is_blocking(key);
     match (plan, diff) {
         (true, true) => Some("both".to_string()),
         (true, false) => Some("plan".to_string()),
@@ -866,6 +875,36 @@ mod tests {
         );
         assert!(!session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-B"), 3));
         assert!(session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
+    }
+
+    /// `deny_counts` never shrinks, so a rule denied once and cleared in a
+    /// later round must stop reading as blocking -- and start again when a
+    /// later round denies it (which removes the clearance).
+    #[test]
+    fn test_is_blocking_drops_a_rule_cleared_after_its_denial() {
+        let k = key("doc", "R-A");
+        let mut state = LoopState::default();
+        assert!(!state.is_blocking(&k));
+        state.record_denial(&k);
+        assert!(state.is_blocking(&k));
+        state.cleared.insert(k.clone(), "d".to_string());
+        assert!(!state.is_blocking(&k));
+        state.cleared.remove(&k);
+        assert!(state.is_blocking(&k));
+    }
+
+    /// The audit gate names only the gate(s) still blocking the rule.
+    #[test]
+    fn test_denying_gate_skips_a_gate_that_has_since_cleared_the_rule() {
+        let k = key("doc", "R-A");
+        let mut session = GovernanceSession::default();
+        session.record_denial(ArtifactKind::Plan, &k);
+        session.record_denial(ArtifactKind::Diff, &k);
+        assert_eq!(denying_gate(&session, &k).as_deref(), Some("both"));
+        session.plan.cleared.insert(k.clone(), "d".to_string());
+        assert_eq!(denying_gate(&session, &k).as_deref(), Some("impl"));
+        session.diff.cleared.insert(k.clone(), "d".to_string());
+        assert_eq!(denying_gate(&session, &k), None);
     }
 
     #[test]
