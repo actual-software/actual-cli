@@ -86,11 +86,7 @@ fn overridden_adrs(
                 ("implementation", &session.diff),
             ]
             .into_iter()
-            .filter(|(_, state)| {
-                overridden
-                    .iter()
-                    .any(|key| state.deny_counts.get(*key).is_some_and(|&count| count > 0))
-            })
+            .filter(|(_, state)| overridden.iter().any(|key| state.is_blocking(key)))
             .map(|(stage, _)| stage)
             .collect();
             (adr, denied_gates)
@@ -303,6 +299,31 @@ pub(super) mod tests {
             );
 
             report(rules, SESSION, &[rule("rotation", "adr-rotate", 2)]);
+            assert_eq!(
+                reported(),
+                [(
+                    "adr-rotate".to_string(),
+                    json!(["adr-rotate"]),
+                    json!(["implementation"])
+                )]
+            );
+        });
+    }
+
+    /// A gate that denied the rule but has since cleared it is not reported
+    /// as a denial being overridden.
+    #[test]
+    fn test_denied_gates_skip_a_gate_that_has_since_cleared_the_rule() {
+        with_rules(WITH_FILE, |_, rules| {
+            let key = rule("rotation", "adr-rotate", 1);
+            deny(rules, ArtifactKind::Plan, &key);
+            deny(rules, ArtifactKind::Diff, &key);
+            let mut session = governance_session::load(SESSION, rules);
+            session.plan.cleared.insert(key.clone(), "d".to_string());
+            governance_session::store(SESSION, rules, &session);
+
+            report(rules, SESSION, &[key]);
+
             assert_eq!(
                 reported(),
                 [(

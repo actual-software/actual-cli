@@ -1251,20 +1251,24 @@ fn parse_override_prompt(prompt: &str) -> Option<OverridePrompt> {
 }
 
 /// Resolve an `/override` target to full rule keys: `all` is every rule either
-/// gate has denied in this session that is not already overridden; otherwise
-/// the target is matched (exactly) against denied rules first, then the whole
-/// corpus, by bare rule id or full key. Ambiguity or no match is an `Err`
-/// message for the user — never a guess.
+/// gate is currently blocking (see [`governance_session::LoopState::is_blocking`])
+/// that is not already overridden — a rule denied once and since fixed is left
+/// out, since an override would turn it off for the rest of the session.
+/// Otherwise the target is matched (exactly) against blocking rules first, then
+/// the whole corpus, by bare rule id or full key. Ambiguity or no match is an
+/// `Err` message for the user — never a guess.
 fn resolve_override_target(
     session: &GovernanceSession,
     rules_dir: &Path,
     target: &str,
 ) -> Result<Vec<String>, String> {
+    let blocking = |k: &&String| session.plan.is_blocking(k) || session.diff.is_blocking(k);
     let mut denied: Vec<String> = session
         .plan
         .deny_counts
         .keys()
         .chain(session.diff.deny_counts.keys())
+        .filter(blocking)
         .filter(|k| !session.overrides.iter().any(|o| &o.key == *k))
         .cloned()
         .collect();
@@ -1272,7 +1276,7 @@ fn resolve_override_target(
     denied.dedup();
     if target.eq_ignore_ascii_case("all") {
         return if denied.is_empty() {
-            Err("no denied rules to override in this session".to_string())
+            Err("no rules are currently blocking in this session".to_string())
         } else {
             Ok(denied)
         };
@@ -4422,6 +4426,49 @@ pub(crate) mod tests {
             .all(|o| o.reason.as_deref() == Some("team approved")));
     }
 
+    /// `/override all` covers only what is blocking now: a rule denied once
+    /// and cleared in a later round is left on, since an override would turn
+    /// it off for both gates for the rest of the session.
+    #[test]
+    fn test_override_hook_all_skips_a_rule_fixed_since_its_denial() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let fixed = governance_session::key("doc", "R-A-001");
+        let open = governance_session::key("doc", "R-A-002");
+        let mut session = governance_session::load("sess-h3", &rules_dir);
+        session.plan.record_denial(&fixed);
+        session.plan.cleared.insert(fixed.clone(), "d".to_string());
+        session.plan.record_denial(&open);
+        governance_session::store("sess-h3", &rules_dir, &session);
+
+        exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-h3", "/override all"),
+        )
+        .unwrap();
+        let session = governance_session::load("sess-h3", &rules_dir);
+        let keys: Vec<&str> = session.overrides.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, [open.as_str()]);
+
+        // With nothing left blocking, `all` refuses rather than overriding
+        // the fixed rule.
+        let out = exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-h3", "/override all"),
+        )
+        .unwrap();
+        assert!(out.contains("no rules are currently blocking"), "{out}");
+        assert_eq!(
+            governance_session::load("sess-h3", &rules_dir)
+                .overrides
+                .len(),
+            1
+        );
+    }
+
     /// Anything but a `UserPromptSubmit` `/override` records nothing --
     /// specifically the tool-event shapes an agent's own actions produce.
     #[test]
@@ -4452,7 +4499,7 @@ pub(crate) mod tests {
         let out =
             exec_override_hook_with(&args, &prompt_env("UserPromptSubmit", "s", "/override all"))
                 .unwrap();
-        assert!(out.contains("no denied rules"), "{out}");
+        assert!(out.contains("no rules are currently blocking"), "{out}");
         let out = exec_override_hook_with(
             &args,
             &prompt_env("UserPromptSubmit", "s", "/actual-cli:override"),
