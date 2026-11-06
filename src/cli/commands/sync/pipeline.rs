@@ -391,7 +391,14 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         if let Some(rd) = runner_display {
             pipeline.set_prompt_row(format!("  {:<9} {}", "Runner", rd.runner_name));
         }
+        // Stop the nav poller while the prompt is up: both read crossterm's one
+        // key queue, so a key sent as the prompt appears could go to the poller.
+        drop(nav_poller.take());
+        pipeline.set_nav_rx_opt(None);
         confirm_or_change_loop(&mut analysis, &mut pipeline, term)?;
+        let (poller, nav_rx) = super::super::sync_kb_poller::setup_nav_only(pipeline.is_tui());
+        pipeline.set_nav_rx_opt(nav_rx);
+        nav_poller = Some(poller);
     }
 
     // ── Phase 2: fetch + tailor ──
@@ -766,6 +773,12 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     // edits) to avoid unnecessary writes.
     let output = crate::tailoring::minor_change::filter_minor_changes(output, root_dir);
 
+    // Stop the nav poller (if still alive) before the file review and review
+    // mode, so its background thread doesn't compete for crossterm key events
+    // with their key readers.
+    drop(nav_poller.take());
+    pipeline.set_nav_rx_opt(None);
+
     // ── Phase 3: confirm + write (fully implemented) ──
     // pipeline stays alive through confirm+write so output goes into the TUI
     // log pane. It drops naturally at end of run_sync.
@@ -859,12 +872,6 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             tel_rt.block_on(report_metrics(&metrics, &config, &api_url));
         }
     }
-
-    // Stop the nav poller (if still alive) before entering review mode,
-    // so its background thread doesn't compete for crossterm key events
-    // with `wait_for_keypress`'s direct key reader.
-    drop(nav_poller.take());
-    pipeline.set_nav_rx_opt(None);
 
     pipeline.wait_for_keypress();
     Ok(())

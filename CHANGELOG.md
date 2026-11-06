@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PRIVACY.md` and the README lead with one setting for turning telemetry off, `actual config set telemetry.enabled false`, and say it stops every telemetry event, including the plan-governance events that reach PostHog. `ACTUAL_NO_TELEMETRY` stays for CI and one-off runs, and what the CLI sends is unchanged
 
 ### Fixed
+- In the `actual adr-bot` TUI, a key pressed as `Proceed with sync?` or the file review appears now answers that prompt. Before, the reader behind step navigation could take it, so the key was lost or `y` copied the step's log instead, or the prompt got the key and the run froze soon after
 - `--runner codex-cli` works on Codex 0.147.0 and later, which removed the `--full-auto` flag the CLI passed. On those versions every call failed before a prompt left, and `plan-check` and `impl-check` reported `not_checked` with exit 0. Tailoring now passes `--sandbox workspace-write`, which is what the old flag meant
 - `codex` no longer inherits the CLI's stdin. Codex adds piped text to its prompt and waits for the pipe to close, so text piped into `actual` could reach the model, and a pipe left open could stall the run until it timed out
 
