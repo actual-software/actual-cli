@@ -1392,6 +1392,17 @@ pub struct ImplCheckArgs {
 /// made outside the agent's control, and [`crate::cli::commands::governance_session::record_override`]
 /// writes a durable, append-only audit-log entry for every one, so an
 /// override is visible, never silent.
+/// How the user issued an in-session override, for `check-override
+/// --claude-hook --via`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverrideVia {
+    /// Typed `/actual-cli:override` as a message in the session.
+    Prompt,
+    /// Chose an override in the dialog the plugin's mod raises when a gate
+    /// denies.
+    Dialog,
+}
+
 #[derive(Parser, Debug)]
 pub struct PlanCheckOverrideArgs {
     /// The session to override, as named in the deny message. One Claude
@@ -1431,7 +1442,10 @@ pub struct PlanCheckOverrideArgs {
     /// envelope on stdin and, if its prompt is `/actual-cli:override
     /// <rule-id|all> [reason]` (a bare `/override` is accepted too), record
     /// that override. Does not require a terminal, and an unrecognized or
-    /// unresolvable prompt records nothing.
+    /// unresolvable prompt records nothing. Prints hook JSON whose top-level
+    /// `overridden` array lists the keys recorded, or nothing for a prompt
+    /// that is not an override command; docs/CHECK_OVERRIDE_HOOK.md has the
+    /// full contract.
     ///
     /// Refused when this process carries Claude Code's `CLAUDECODE` marker,
     /// which every shell command an agent runs (and every settings hook)
@@ -1445,8 +1459,8 @@ pub struct PlanCheckOverrideArgs {
     /// With `--claude-hook`: how the user issued the override, recorded as its
     /// source — `prompt` (typed as a message, the default) or `dialog` (chosen
     /// in the dialog the mod raises when a gate denies).
-    #[arg(long, value_name = "HOW", value_parser = ["prompt", "dialog"], default_value = "prompt", requires = "claude_hook")]
-    pub via: String,
+    #[arg(long, value_name = "HOW", value_enum, default_value_t = OverrideVia::Prompt, requires = "claude_hook")]
+    pub via: OverrideVia,
 
     /// Repository root to resolve the rules directory against. Defaults to
     /// the current directory — run this from the repo the denial came from,
