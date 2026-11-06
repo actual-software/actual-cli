@@ -130,7 +130,7 @@ cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
 <details>
 <summary><strong>Check a downloaded release</strong></summary>
 
-Releases after v0.9.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
+From v0.12.0, the release workflow publishes `SHA256SUMS`, which lists every archive, on both the [source release page](https://github.com/actual-software/actual-cli/releases) and the [releases mirror](https://github.com/actual-software/actual-releases/releases). A signer adds `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list, by hand after publication. A new release can remain unsigned until that step finishes; if the signature is missing, try again later. Releases through v0.11.0 carry neither file. For a signed release, check the signature first:
 
 ```bash
 curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
@@ -330,7 +330,7 @@ See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill
 
 ## Privacy & Telemetry
 
-The CLI collects minimal telemetry to improve the product, whether the skill manages it for you or you run it directly. No event carries raw ids, source code, or file paths, but your sign-in's access token, which names your account, goes with the OpenTelemetry events sent to Actual. Events sent while you're signed in carry identity-linked one-way hashes; signed-out events are pseudonymous, not anonymous. Turn telemetry off with `ACTUAL_NO_TELEMETRY=1`, the config file, or a compile-time feature flag. See [PRIVACY.md](PRIVACY.md) for who can attribute the data and how long it's kept.
+The CLI collects minimal telemetry to improve the product, whether the skill manages it for you or you run it directly. No event carries raw ids, source code, or file paths, but your sign-in's access token, which names your account, goes with the OpenTelemetry events sent to Actual. Events sent while you're signed in carry identity-linked one-way hashes; signed-out events are pseudonymous, not anonymous. Turn telemetry off with `actual config set telemetry.enabled false` while no `actual adr-bot` run is in progress, since a run that's already going can save the old value back. That one setting stops every telemetry event, including the plan-governance events that reach PostHog; `ACTUAL_NO_TELEMETRY=1` does the same for CI and one-off runs. See [PRIVACY.md](PRIVACY.md) for what the setting leaves running, who can attribute the data and how long it's kept.
 
 Once a day the CLI also asks the npm registry whether a newer version is out, and names the upgrade command for how you installed it. `ACTUAL_NO_UPDATE_CHECK=1` turns that off; see [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
 

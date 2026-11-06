@@ -7,13 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-04
+
 ### Added
+- From v0.12.0, release pages in [actual-cli](https://github.com/actual-software/actual-cli/releases) and [actual-releases](https://github.com/actual-software/actual-releases/releases) include `SHA256SUMS` for the platform archives. A signer adds `SHA256SUMS.minisig` by hand after publication; the release remains unsigned until then. See [Release signing](docs/RELEASE_SIGNING.md#checking-a-download) for verification.
 - `actual self-update` replaces a binary downloaded by hand with the latest release. It checks `SHA256SUMS.minisig` against the keys in `release-keys/`, including the tag in its signed comment, and the archive against `SHA256SUMS`, before renaming the new binary over the old one under a lock. A copy installed with Homebrew or npm gets that tool's upgrade command instead, and a build from source, wherever it's installed, gets the `cargo install` command. It won't replace a binary in a directory the user can't write or one another user owns, and won't run as root, under CI, or with update checks turned off. See `docs/SELF_UPDATE.md`
 
 ### Changed
+- Building from source now requires the package name: `cargo install --git https://github.com/actual-software/actual-cli.git actual-cli`. The workspace also contains the `release-sign` binary package, so the earlier command without `actual-cli` fails with multiple binary packages to choose from.
 - For a release binary no package manager owns, the daily update notice and `actual version` name `actual self-update` instead of linking the release page, and for a build from source they name the `cargo install` command that rebuilds it. `actual version --json` is unchanged
 - When `actual adr-bot` retries a failed `codex-cli` run through `openai-api`, it asks `Proceed with sync?` again and shows the per-file review, unless you passed `--force`. Before, the retry skipped both and wrote every generated file unreviewed. That prompt now shows a `Runner` row directly above the question, so the retry's reads `openai-api (fallback)`
 - `plan-check`, `impl-check` and `rules select` run `codex` in its read-only sandbox, so it can read your repository on those calls but can't change it
+- `PRIVACY.md` and the README lead with one setting for turning telemetry off, `actual config set telemetry.enabled false`, and say it stops every telemetry event, including the plan-governance events that reach PostHog. `ACTUAL_NO_TELEMETRY` stays for CI and one-off runs, and what the CLI sends is unchanged
 
 ### Fixed
 - `--runner codex-cli` works on Codex 0.147.0 and later, which removed the `--full-auto` flag the CLI passed. On those versions every call failed before a prompt left, and `plan-check` and `impl-check` reported `not_checked` with exit 0. Tailoring now passes `--sandbox workspace-write`, which is what the old flag meant
