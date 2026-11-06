@@ -1251,9 +1251,10 @@ fn parse_override_prompt(prompt: &str) -> Option<OverridePrompt> {
 }
 
 /// Resolve an `/override` target to full rule keys: `all` is every rule either
-/// gate is currently blocking (see [`governance_session::LoopState::is_blocking`])
-/// that is not already overridden — a rule denied once and since fixed is left
-/// out, since an override would turn it off for the rest of the session.
+/// gate's latest judged round denied (see [`governance_session::LoopState::blocking`])
+/// that is not already overridden — a rule denied earlier and since fixed or no
+/// longer judged is left out, since an override would turn it off for the rest
+/// of the session.
 /// Otherwise the target is matched (exactly) against blocking rules first, then
 /// the whole corpus, by bare rule id or full key. Ambiguity or no match is an
 /// `Err` message for the user — never a guess.
@@ -1690,7 +1691,7 @@ fn finish_verdicts(
             }
         }
         if judge_ran {
-            state.rounds += 1;
+            state.begin_round();
         }
     }
 
@@ -3939,6 +3940,49 @@ pub(crate) mod tests {
         }
     }
 
+    /// The blocking set is each round's denials, replaced every judged round:
+    /// a rule denied once and absent from the next round's verdicts (dropped
+    /// from selection or past the cap) stops blocking even though it was never
+    /// cleared, and a round where the judge did not run changes nothing.
+    #[test]
+    fn test_finish_hook_replaces_the_blocking_set_each_judged_round() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let a = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+        let b = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+        let run = hook_run(check::ArtifactKind::Plan, Some("s-blk"), rules.path(), 3);
+        let mut session = GovernanceSession::default();
+
+        finish_hook(
+            &run,
+            &mut session,
+            verdicts_outcome(vec![checked("R-A-001", Verdict::Conflicting, "span", "no")]),
+        );
+        assert!(session.plan.is_blocking(&a));
+
+        // Not judged at all this round: no verdict for R-A-001, so no clearance.
+        finish_hook(
+            &run,
+            &mut session,
+            verdicts_outcome(vec![checked("R-A-002", Verdict::Conflicting, "span", "no")]),
+        );
+        assert!(!session.plan.is_blocking(&a));
+        assert!(!session.plan.cleared.contains_key(&a));
+        assert!(session.plan.is_blocking(&b));
+
+        let mut skipped = verdicts_outcome(Vec::new());
+        if let Outcome::Verdicts { runner_label, .. } = &mut skipped {
+            *runner_label = None;
+        }
+        finish_hook(&run, &mut session, skipped);
+        assert!(session.plan.is_blocking(&b));
+
+        let reloaded = governance_session::load("s-blk", rules.path());
+        assert_eq!(reloaded.plan.blocking.iter().collect::<Vec<_>>(), [&b]);
+    }
+
     /// Impl-check's round limit: the same fail-open as plan-check's, driven
     /// by the diff loop's own count, and named for the diff in the audit log.
     #[test]
@@ -4440,7 +4484,8 @@ pub(crate) mod tests {
         let open = governance_session::key("doc", "R-A-002");
         let mut session = governance_session::load("sess-h3", &rules_dir);
         session.plan.record_denial(&fixed);
-        session.plan.cleared.insert(fixed.clone(), "d".to_string());
+        // A later round denies only `open`: `fixed` was cleared or not judged.
+        session.plan.begin_round();
         session.plan.record_denial(&open);
         governance_session::store("sess-h3", &rules_dir, &session);
 

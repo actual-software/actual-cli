@@ -310,16 +310,16 @@ pub(super) mod tests {
         });
     }
 
-    /// A gate that denied the rule but has since cleared it is not reported
-    /// as a denial being overridden.
+    /// A gate that denied the rule in an earlier round, but not its latest,
+    /// is not reported as a denial being overridden.
     #[test]
-    fn test_denied_gates_skip_a_gate_that_has_since_cleared_the_rule() {
+    fn test_denied_gates_skip_a_gate_whose_latest_round_did_not_deny() {
         with_rules(WITH_FILE, |_, rules| {
             let key = rule("rotation", "adr-rotate", 1);
             deny(rules, ArtifactKind::Plan, &key);
             deny(rules, ArtifactKind::Diff, &key);
             let mut session = governance_session::load(SESSION, rules);
-            session.plan.cleared.insert(key.clone(), "d".to_string());
+            session.plan.begin_round();
             governance_session::store(SESSION, rules, &session);
 
             report(rules, SESSION, &[key]);
