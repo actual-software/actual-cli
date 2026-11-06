@@ -225,10 +225,13 @@ pub enum OverrideSource {
     /// A human ran `actual check-override` from an ordinary terminal.
     #[default]
     Terminal,
-    /// A human typed `/actual-cli:override` as a prompt in the session and
-    /// the `UserPromptSubmit` hook recorded it. The agent cannot produce a
-    /// `UserPromptSubmit` event, so this is still a human decision.
+    /// A human typed `/actual-cli:override` as a prompt in the session, and
+    /// the actual-cli plugin's mod recorded it from that prompt, which Claude
+    /// Code stamps as typed at the prompt box.
     SessionPrompt,
+    /// A human chose an override in the dialog the actual-cli plugin's mod
+    /// raises when a gate denies.
+    SessionDialog,
 }
 
 impl OverrideSource {
@@ -236,6 +239,7 @@ impl OverrideSource {
         match self {
             OverrideSource::Terminal => "terminal",
             OverrideSource::SessionPrompt => "session_prompt",
+            OverrideSource::SessionDialog => "session_dialog",
         }
     }
 }
