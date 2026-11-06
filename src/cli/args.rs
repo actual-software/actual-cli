@@ -1427,15 +1427,26 @@ pub struct PlanCheckOverrideArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
-    /// Hook mode, for the `UserPromptSubmit` hook: read the hook envelope on
-    /// stdin and, if the user's prompt is `/actual-cli:override <rule-id|all>
-    /// [reason]` (a bare `/override` is accepted too), record that override.
-    /// Takes no other input, does not require a terminal (the prompt arriving
-    /// as a `UserPromptSubmit` event is the evidence of a human — an agent
-    /// cannot emit one), and never fails: an unrecognized or unresolvable
-    /// prompt records nothing.
+    /// Hook mode, for the actual-cli plugin's mod: read a `UserPromptSubmit`
+    /// envelope on stdin and, if its prompt is `/actual-cli:override
+    /// <rule-id|all> [reason]` (a bare `/override` is accepted too), record
+    /// that override. Does not require a terminal, and an unrecognized or
+    /// unresolvable prompt records nothing.
+    ///
+    /// Refused when this process carries Claude Code's `CLAUDECODE` marker,
+    /// which every shell command an agent runs (and every settings hook)
+    /// inherits and the mod's own spawns do not: the envelope is only JSON on
+    /// stdin, so without this an agent could pipe one in and clear its own
+    /// denial. Like the terminal path's check, this raises the cost of that
+    /// rather than ruling it out.
     #[arg(long)]
     pub claude_hook: bool,
+
+    /// With `--claude-hook`: how the user issued the override, recorded as its
+    /// source — `prompt` (typed as a message, the default) or `dialog` (chosen
+    /// in the dialog the mod raises when a gate denies).
+    #[arg(long, value_name = "HOW", value_parser = ["prompt", "dialog"], default_value = "prompt", requires = "claude_hook")]
+    pub via: String,
 
     /// Repository root to resolve the rules directory against. Defaults to
     /// the current directory — run this from the repo the denial came from,
