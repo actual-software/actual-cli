@@ -100,6 +100,10 @@ const V2_FORMAT_VERSION: u32 = 2;
 /// Subdirectory of the config directory holding per-session state.
 const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
 
+/// The lock file in [`SESSIONS_DIR_NAME`] that serializes every session
+/// write (see [`with_lock`]). Not `.json`, so pruning never removes it.
+const SESSIONS_LOCK_NAME: &str = "sessions.lock";
+
 /// Filename of the append-only override/round-limit audit log, directly
 /// under the config directory (not the sessions subdirectory: it must
 /// outlive any single session's cache entry).
@@ -360,6 +364,70 @@ fn sessions_dir() -> Option<PathBuf> {
         .map(|dir| dir.join(SESSIONS_DIR_NAME))
 }
 
+/// Hold an exclusive lock on the sessions directory while `f` runs, so one
+/// process's load-change-store cannot interleave with another's. Several
+/// processes write one session file: `/override` and `impl-check`'s turn-start
+/// record both run on `UserPromptSubmit`, and check rounds of parallel tool
+/// calls or subagents overlap each other and either of those. Without this,
+/// the last writer's stale copy silently drops the other's change — an
+/// override the user was told was recorded, for one.
+///
+/// One lock for the whole directory rather than one per session: every
+/// critical section is a single small read and write (never a judge call),
+/// and [`store`]'s pruning touches other sessions' files too. Best-effort
+/// like the rest of this module: when the lock cannot be taken, `f` runs
+/// unlocked.
+fn with_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = sessions_dir().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(dir.join(SESSIONS_LOCK_NAME)).ok()?;
+        file.lock().ok()?;
+        Some(file)
+    });
+    f()
+}
+
+/// Load the session for `(session_id, rules_dir)`, apply `change`, and store
+/// the result, all under [`with_lock`], so a concurrent writer's change is
+/// never overwritten by a copy read before it. Returns the session as stored.
+/// Skips the write when `change` changed nothing.
+pub fn update(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    change: impl FnOnce(&mut GovernanceSession),
+) -> GovernanceSession {
+    with_lock(|| {
+        let before = load(session_id, rules_dir);
+        let mut session = before.clone();
+        change(&mut session);
+        if session != before {
+            store_unlocked(session_id, rules_dir, &session);
+        }
+        session
+    })
+}
+
+/// Store a finished check round: replace only `kind`'s loop state on a fresh
+/// copy of the session, under [`with_lock`]. A check hook holds its session
+/// across a judge call that can take seconds; storing that whole copy would
+/// drop any override, turn start or other gate's round written meanwhile.
+/// Two concurrent rounds of the *same* gate still race on that gate's loop
+/// state, and the later one wins — merging their counts is not worth it.
+pub fn store_loop(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    kind: ArtifactKind,
+    state: &LoopState,
+) {
+    update(session_id, rules_dir, |session| {
+        *session.loop_state_mut(kind) = state.clone();
+    });
+}
+
 /// The on-disk key for `(session_id, rules_dir)`: `rules_dir`'s *path* is
 /// hashed in alongside `session_id`, not its content — see the module doc's
 /// "identity" note for why two repos with identical rule text must still
@@ -435,13 +503,20 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
     }
 }
 
-/// Persist `session` for `(session_id, rules_dir)`. Best-effort: a write
-/// failure costs this session's memory, not the hook call.
+/// Persist `session` for `(session_id, rules_dir)`, replacing whatever is on
+/// disk. Best-effort: a write failure costs this session's memory, not the
+/// hook call. Production writers use [`update`] or [`store_loop`] instead, so
+/// they never overwrite a concurrent change; this is for tests seeding state.
 ///
 /// Also opportunistically prunes session files older than [`SESSION_MAX_AGE`]
 /// — bounded by one directory listing, so the cost stays proportional to how
 /// many sessions are actually on disk rather than growing unbounded.
+#[cfg(test)]
 pub fn store(session_id: &str, rules_dir: &std::path::Path, session: &GovernanceSession) {
+    with_lock(|| store_unlocked(session_id, rules_dir, session));
+}
+
+fn store_unlocked(session_id: &str, rules_dir: &std::path::Path, session: &GovernanceSession) {
     let Some(path) = session_path(session_id, rules_dir) else {
         return;
     };
@@ -590,9 +665,9 @@ pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<String> {
 
 /// Record an explicit, human-issued override: mark `keys` settled for
 /// `(session_id, rules_dir)` and append one audit-log entry per key, noting
-/// how it was issued (`source`) and which gate had denied the rule. Loads-
-/// and-stores the session itself, so the caller does not need to separately
-/// `load`/`store`.
+/// how it was issued (`source`) and which gate had denied the rule. Updates
+/// the session itself under [`update`]'s lock, so the caller does not need
+/// to separately `load`/`store`, and a concurrent hook's write cannot drop it.
 pub fn record_override_with(
     session_id: &str,
     rules_dir: &std::path::Path,
@@ -600,12 +675,24 @@ pub fn record_override_with(
     reason: Option<&str>,
     source: OverrideSource,
 ) {
-    let mut session = load(session_id, rules_dir);
+    update(session_id, rules_dir, |session| {
+        record_overrides_in(session, session_id, rules_dir, keys, reason, source)
+    });
+}
+
+fn record_overrides_in(
+    session: &mut GovernanceSession,
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    keys: &[String],
+    reason: Option<&str>,
+    source: OverrideSource,
+) {
     let at = Utc::now();
     let rules_dir_str = rules_dir.display().to_string();
     let round = session.effort_rounds();
     for key in keys {
-        let gate = denying_gate(&session, key);
+        let gate = denying_gate(session, key);
         session.overrides.push(Override {
             key: key.clone(),
             reason: reason.map(str::to_string),
@@ -628,7 +715,6 @@ pub fn record_override_with(
             total: None,
         });
     }
-    store(session_id, rules_dir, &session);
 }
 
 /// Append one round-limit audit-log entry per still-conflicting key. Does
@@ -995,6 +1081,93 @@ mod tests {
 
         assert!(!session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v2"));
         assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-over"), "digest-v2"));
+    }
+
+    /// A check round holds its session across a judge call. Storing that
+    /// stale copy must keep an override and a turn start recorded meanwhile,
+    /// and the other gate's loop state.
+    #[test]
+    fn test_store_loop_keeps_changes_written_since_the_copy_was_loaded() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        let k = key("doc", "R-A");
+        let mut stale = load("session-race", &rd());
+
+        record_override("session-race", &rd(), std::slice::from_ref(&k), "approved");
+        let turn = TurnStart {
+            root: PathBuf::from("/repo"),
+            head: "a".repeat(40),
+        };
+        update("session-race", &rd(), |s| s.turn_start = Some(turn.clone()));
+        update("session-race", &rd(), |s| {
+            s.diff.record_denial(&key("doc", "R-B"));
+        });
+
+        stale.plan.begin_round();
+        stale.plan.record_denial(&k);
+        store_loop("session-race", &rd(), ArtifactKind::Plan, &stale.plan);
+
+        let loaded = load("session-race", &rd());
+        assert_eq!(loaded.overrides.len(), 1);
+        assert_eq!(loaded.overrides[0].key, k);
+        assert_eq!(loaded.turn_start, Some(turn));
+        assert_eq!(loaded.diff.deny_counts.get(&key("doc", "R-B")), Some(&1));
+        assert_eq!(loaded.plan, stale.plan);
+    }
+
+    /// `/override` and the turn-start record both run on `UserPromptSubmit`;
+    /// whichever finishes second must keep the other's change.
+    #[test]
+    fn test_update_keeps_an_override_recorded_by_another_writer() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        record_override("session-turn-race", &rd(), &[key("doc", "R-A")], "ok");
+        update("session-turn-race", &rd(), |s| {
+            s.turn_start = Some(TurnStart {
+                root: PathBuf::from("/repo"),
+                head: "b".repeat(40),
+            });
+        });
+        let loaded = load("session-turn-race", &rd());
+        assert_eq!(loaded.overrides.len(), 1);
+        assert!(loaded.turn_start.is_some());
+    }
+
+    /// An `update` that changes nothing writes nothing -- the turn-start
+    /// record runs on every prompt.
+    #[test]
+    fn test_update_without_a_change_does_not_write() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        update("session-noop", &rd(), |_| {});
+        assert!(!session_path("session-noop", &rd()).unwrap().exists());
+    }
+
+    /// Concurrent writers each add their own override; with the lock, none
+    /// is lost. Each thread opens the lock file itself, so they contend
+    /// exactly as separate processes would.
+    #[test]
+    fn test_concurrent_updates_lose_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        record_override(
+                            "session-concurrent",
+                            &rd(),
+                            &[key("doc", &format!("R-{t}-{i}"))],
+                            "ok",
+                        );
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(load("session-concurrent", &rd()).overrides.len(), 80);
     }
 
     #[test]
