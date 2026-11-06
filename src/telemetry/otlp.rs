@@ -1,6 +1,6 @@
 //! ADR telemetry as OpenTelemetry log events in Actual's `actual.*` event
 //! catalog, over OTLP/HTTP with protobuf encoding: ADRs entering an agent's
-//! context and meeting the gates, and the gate checks themselves.
+//! context and meeting the gates, the gate checks themselves, and session ends.
 //!
 //! # Design
 //!
@@ -76,6 +76,8 @@ pub(crate) const ACTION_STARTED: &str = "actual.action.started";
 
 /// The event the same run sends once it has a verdict.
 pub(crate) const ACTION_COMPLETED: &str = "actual.action.completed";
+
+pub(crate) const SESSION_ENDED: &str = "actual.session.ended";
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 const SCHEMA_VERSION: i64 = 1;
@@ -238,6 +240,7 @@ impl KeyValue {
 #[serde(rename_all = "camelCase")]
 enum AnyValue {
     StringValue(String),
+    BoolValue(bool),
     IntValue(#[serde(with = "decimal")] i64),
     ArrayValue { values: Vec<AnyValue> },
 }
@@ -246,6 +249,7 @@ impl AnyValue {
     fn to_proto(&self) -> common::AnyValue {
         let value = match self {
             Self::StringValue(value) => common::any_value::Value::StringValue(value.clone()),
+            Self::BoolValue(value) => common::any_value::Value::BoolValue(*value),
             Self::IntValue(value) => common::any_value::Value::IntValue(*value),
             Self::ArrayValue { values } => {
                 common::any_value::Value::ArrayValue(common::ArrayValue {
@@ -329,6 +333,23 @@ impl Origin {
                 .ok()
                 .and_then(|value| TraceContext::parse(&value)),
         }
+    }
+
+    pub(crate) fn session_ended(
+        &self,
+        session_id: &str,
+        reason: &str,
+        last_check_blocked: bool,
+    ) -> LogRecord {
+        let mut record = self.record(SESSION_ENDED, session_id, None);
+        record.attributes.extend([
+            text("actual.session.end_reason", Some(reason)),
+            KeyValue {
+                key: "actual.session.last_check_blocked".to_string(),
+                value: AnyValue::BoolValue(last_check_blocked),
+            },
+        ]);
+        record
     }
 
     /// The [`ADR_DETECTED`] record for one logical ADR entering a session's

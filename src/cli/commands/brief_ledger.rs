@@ -69,7 +69,7 @@ const LEDGER_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How long a write waits for another writer to finish. The hook that writes
 /// runs under a timeout of a few seconds, and the brief it is about to print
 /// matters more than the count.
-const LOCK_WAIT: Duration = Duration::from_millis(500);
+pub(super) const LOCK_WAIT: Duration = Duration::from_millis(500);
 
 /// The pause between attempts while another writer holds the lock.
 const LOCK_RETRY: Duration = Duration::from_millis(5);
@@ -401,7 +401,7 @@ fn update_within(
 /// holds it. `None` when the lock file cannot be opened, the platform has no
 /// file locks, or the wait runs out. The lock is released when the returned
 /// file is dropped.
-fn lock(dir: &Path, wait: Duration) -> Option<File> {
+pub(super) fn lock(dir: &Path, wait: Duration) -> Option<File> {
     let mut options = OpenOptions::new();
     options.create(true).write(true).truncate(false);
     #[cfg(unix)]
@@ -410,19 +410,36 @@ fn lock(dir: &Path, wait: Duration) -> Option<File> {
         options.mode(0o600);
     }
     let file = options.open(dir.join(LOCK_FILE_NAME)).ok()?;
-    let deadline = Instant::now() + wait;
+    let started = Instant::now();
+    retry_lock(
+        wait,
+        || file.try_lock(),
+        || started.elapsed(),
+        || {
+            #[cfg(test)]
+            tests::run_retry_hook();
+            std::thread::sleep(LOCK_RETRY);
+        },
+    )
+    .then_some(file)
+}
+
+fn retry_lock(
+    wait: Duration,
+    mut attempt: impl FnMut() -> Result<(), TryLockError>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut pause: impl FnMut(),
+) -> bool {
     loop {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                std::thread::sleep(LOCK_RETRY);
-            }
-            Err(_) => return None,
+        match attempt() {
+            Ok(()) => return true,
+            Err(TryLockError::WouldBlock) if elapsed() < wait => pause(),
+            Err(_) => return false,
         }
     }
 }
 
-fn prune_stale(dir: &Path) {
+pub(super) fn prune_stale(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -450,8 +467,101 @@ fn prune_stale(dir: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    thread_local! {
+        static ON_RETRY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn run_retry_hook() {
+        let hook = ON_RETRY.with(|cell| cell.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(in crate::cli::commands) fn release_on_retry(
+        release: impl FnOnce() + 'static,
+        operation: impl FnOnce(),
+    ) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                ON_RETRY.with(|cell| cell.borrow_mut().take());
+            }
+        }
+        ON_RETRY.with(|cell| assert!(cell.borrow_mut().replace(Box::new(release)).is_none()));
+        let _reset = Reset;
+        operation();
+        ON_RETRY.with(|cell| {
+            assert!(
+                cell.borrow().is_none(),
+                "operation must encounter contention"
+            )
+        });
+    }
+
+    #[test]
+    fn lock_retry_exhausts_its_budget_without_an_extra_pause() {
+        use std::cell::Cell;
+        for wait in [Duration::ZERO, Duration::from_millis(100), LOCK_WAIT] {
+            let elapsed = Cell::new(Duration::ZERO);
+            let attempts = Cell::new(0);
+            assert!(!retry_lock(
+                wait,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(TryLockError::WouldBlock)
+                },
+                || elapsed.get(),
+                || elapsed.set(elapsed.get() + LOCK_RETRY),
+            ));
+            assert_eq!(elapsed.get(), wait);
+            assert_eq!(
+                attempts.get(),
+                wait.as_millis() / LOCK_RETRY.as_millis() + 1
+            );
+        }
+    }
+
+    #[test]
+    fn lock_retry_accepts_a_release_and_stops_on_other_errors() {
+        use std::cell::Cell;
+        let mut attempts = 0;
+        let clock_reads = Cell::new(0);
+        let pauses = Cell::new(0);
+        let mut elapsed = || {
+            clock_reads.set(clock_reads.get() + 1);
+            Duration::ZERO
+        };
+        let mut pause = || pauses.set(pauses.get() + 1);
+        assert!(retry_lock(
+            LOCK_WAIT,
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(TryLockError::WouldBlock)
+                } else {
+                    Ok(())
+                }
+            },
+            &mut elapsed,
+            &mut pause,
+        ));
+        assert_eq!((attempts, clock_reads.get(), pauses.get()), (2, 1, 1));
+        assert!(!retry_lock(
+            LOCK_WAIT,
+            || Err(TryLockError::Error(std::io::Error::other(
+                "lock unavailable"
+            ))),
+            &mut elapsed,
+            &mut pause,
+        ));
+        assert_eq!((clock_reads.get(), pauses.get()), (1, 1));
+    }
 
     use tempfile::tempdir;
 

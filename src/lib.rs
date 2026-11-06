@@ -52,6 +52,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::ImplCheck(args) => cli::commands::impl_check::exec(args),
         Command::Session(args) => cli::commands::session_summary::exec(args),
         Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
+        Command::SessionEnded => cli::commands::session_end::exec(),
         Command::Version(args) => cli::commands::version::exec(args),
         Command::SelfUpdate => cli::commands::self_update::exec(),
         Command::UpdateCheck => cli::commands::version::exec_refresh(),

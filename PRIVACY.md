@@ -34,7 +34,7 @@ in and on who processes it. This notice is explicit about both:
 
 **One setting turns telemetry off.** `actual config set telemetry.enabled false`
 stops every telemetry event in this notice: the counters, the plan-governance
-events that reach PostHog through Actual's proxy, and the ADR and check events.
+events that reach PostHog through Actual's proxy, and the ADR, check and session-end events.
 You don't need a second switch for any of them. It covers telemetry, not every
 network request: "How to opt out of telemetry" below says what it leaves running,
 and to change it when no `actual adr-bot` run is in progress.
@@ -257,7 +257,7 @@ before any repo-identity hashing or `distinct_id` creation, not just before the
 network send: an opted-out run never touches git for telemetry and never writes
 `~/.actualai/actual/telemetry-id`.
 
-### ADR and check events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
+### ADR, check and session events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
 
 The CLI sends OpenTelemetry log events about ADRs on four occasions:
 
@@ -296,10 +296,14 @@ They're sent on the same runs as the plan-governance `check_started` and
 `check_completed` events, with the same outcome, but only to the outputs
 below. A run outside a Claude Code hook sends them with no session or agent.
 
+The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
+
+Local session state stores only that boolean and a duplicate-suppression flag, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory or free-form end reasons.
+
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
 blocked on, which of them a human overrode, how each check came out and what
-made a check warn, and how long it took.
+made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
 
 **Release builds send these events to Actual's API by default.** They go to
 `/v1/logs` on the address the CLI's other telemetry uses: the config file's
@@ -348,7 +352,7 @@ on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.gate.denied_types` on override events. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
 `actual.action.outcome`, `actual.action.warn_reasons` and
-`actual.action.duration_ms`. An unknown value is
+`actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`. An unknown value is
 sent as an empty string. None of them names you, your organization, your
 repository or this installation, so an event carries the same fields signed in
 or out. Only the token on a signed-in request to Actual's API, described above,
@@ -370,6 +374,8 @@ has only the classes its fields carry below:
 | `actual.gate.outcome` | What the evaluation came to: `breached` when a gate blocked on the ADR's rules, `overridden` when a human overrode them | anonymous |
 | `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | anonymous |
 | `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules earlier in the session, and an empty list when the human overrode before any denial | anonymous |
+| `actual.session.end_reason` | The coarse reason Claude Code ended the session: `clear`, `resume`, `logout`, `prompt_input_exit` or `other` | anonymous |
+| `actual.session.last_check_blocked` | Whether the last completed hook check blocked; `false` when none completed | anonymous |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
 | `actual.action.mode` | How the check ran: `hook` when Claude Code ran it as a hook, `direct` when someone ran the command | anonymous |
 | `actual.action.outcome` | What the check came to, as its plan-governance `check_completed` event records it: `allow`, `warn` or `block` | anonymous |
@@ -381,7 +387,7 @@ can map them back to that repository and its organization. Each event also
 names the CLI, its version, the deployment environment (`production` for
 release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
-override was recorded, or when a check started or completed), and, when the
+override was recorded, when a check started or completed, or when the session ended), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
 **No event carries rule text, plan or diff text, override reasons, file paths,
 raw account identifiers, identity hashes or installation id.**
@@ -581,15 +587,15 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, and ADR and check events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, and ADR, check and session-end events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check` or `actual self-update`; no account or repository data | HTTPS |
 | `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
 | Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, plan or diff text + rule text for `plan-check`, `impl-check` and `rules select`, and, for `actual models`, a request for the model list that holds only your API key | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`, and for `actual models`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
-| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, and check events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
-| The local file you configure (none by default) | ADR context, use, breach and override events, and check events, one OTLP/JSON request per line | Local file, readable only by the owner |
+| The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, check events and session-end events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
+| The local file you configure (none by default) | ADR context, use, breach and override events, check events and session-end events, one OTLP/JSON request per line | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
 non-HTTPS API URLs.
@@ -613,9 +619,7 @@ The setting lasts across shells and applies to every run that reads that file,
 including the `--claude-hook` paths Claude Code runs for you.
 
 **This one setting stops every telemetry event**: the counters, the
-plan-governance events that reach PostHog through Actual's proxy, and the ADR
-and check events, whether they go to Actual's API or to an endpoint or file you
-set. You don't need a second switch for any of them.
+plan-governance events that reach PostHog through Actual's proxy, and the ADR, check and session-end events, whether they go to Actual's API or to an endpoint or file you set. You don't need a second switch for any of them.
 
 Events an earlier run left queued in the local spools stay on your machine,
 unsent, while telemetry is off, and the uploader sends them if you turn it back
