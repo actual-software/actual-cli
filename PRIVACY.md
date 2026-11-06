@@ -372,7 +372,7 @@ has only the classes its fields carry below:
 | `actual.detection.method` | How the ADR was detected: `context` when a brief added it to an agent's context, or the gate that judged its rules, `planning` for `plan-check` and `implementation` for `impl-check` | anonymous |
 | `actual.gate.outcome` | What the evaluation came to: `breached` when a gate blocked on the ADR's rules, `overridden` when a human overrode them | anonymous |
 | `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | anonymous |
-| `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules earlier in the session, and an empty list when the human overrode before any denial | anonymous |
+| `actual.gate.denied_types` | Which gates, `planning` and `implementation`, were blocking any of the overridden rules when the human overrode them (the gate's latest check in the session denied it), and an empty list when none was: overridden before any denial, or after a later check stopped denying it | anonymous |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
 | `actual.action.mode` | How the check ran: `hook` when Claude Code ran it as a hook, `direct` when someone ran the command | anonymous |
 | `actual.action.outcome` | What the check came to, as its plan-governance `check_completed` event records it: `allow`, `warn` or `block` | anonymous |

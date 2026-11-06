@@ -1228,7 +1228,8 @@ struct OverridePrompt {
 }
 
 /// Parse `/override <rule-id|all> [reason...]` (also the plugin-namespaced
-/// `/<plugin>:override`). `None` when the prompt is not an override command at
+/// `/actual-cli:override`, and no other plugin's `:override`, which is that
+/// plugin's command, not this one). `None` when the prompt is not an override command at
 /// all; `Some` with an empty `target` when it is but names nothing.
 fn parse_override_prompt(prompt: &str) -> Option<OverridePrompt> {
     let trimmed = prompt.trim();
@@ -1237,7 +1238,7 @@ fn parse_override_prompt(prompt: &str) -> Option<OverridePrompt> {
         None => (trimmed, ""),
     };
     let name = command.strip_prefix('/')?;
-    if name != "override" && !name.ends_with(":override") {
+    if name != "override" && format!("/{name}") != OVERRIDE_COMMAND {
         return None;
     }
     let (target, reason) = match rest.split_once(char::is_whitespace) {
@@ -1366,9 +1367,13 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     send_override_events(&root, &keys, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
     super::override_telemetry::report(&rules_dir, &session_id, &keys);
-    #[cfg(not(feature = "telemetry"))]
-    let _ = gates;
-    let msg = match source {
+    let not_blocking: Vec<&str> = keys
+        .iter()
+        .zip(&gates)
+        .filter(|(_, gate)| gate.is_none())
+        .map(|(key, _)| key.as_str())
+        .collect();
+    let mut msg = match source {
         governance_session::OverrideSource::SessionDialog => format!(
             "The user overrode {} in the override dialog (reason: {}). These rules will no \
              longer block plan-check or impl-check this session.",
@@ -1383,6 +1388,14 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
             reason.unwrap_or("none given"),
         ),
     };
+    if !not_blocking.is_empty() {
+        msg.push_str(&format!(
+            " Tell the user that no gate was blocking {} when it was overridden (no gate's \
+             latest check denied it); the override still turns it off for the rest of this \
+             session.",
+            not_blocking.join(", "),
+        ));
+    }
     // `overridden` is for the mod: the keys actually recorded, so it can tell
     // a dialog choice that landed from one that did not without reading prose.
     Some(
@@ -1627,6 +1640,14 @@ pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, ou
     let copy = artifact_copy(run.kind);
     match outcome {
         Outcome::NothingApplies => {
+            // Nothing applies, so nothing blocks: the previous round's
+            // blocking rules must not stay targets for `/override all`.
+            session.loop_state_mut(run.kind).blocking.clear();
+            if let Some(session_id) = run.session_id {
+                governance_session::update(session_id, run.rules_dir, |s| {
+                    s.loop_state_mut(run.kind).blocking.clear();
+                });
+            }
             emit(plan_check_hook::render_notice(&format!(
                 "No committed rule under .actual/rules/ applies to this {}.",
                 copy.noun
@@ -1692,6 +1713,10 @@ fn finish_verdicts(
         }
         if judge_ran {
             state.begin_round();
+        } else {
+            // Every applicable rule was already cleared or overridden, so
+            // nothing blocks -- not a round, but the gate's latest decision.
+            state.blocking.clear();
         }
     }
 
@@ -3982,15 +4007,62 @@ pub(crate) mod tests {
         assert!(!session.plan.cleared.contains_key(&a));
         assert!(session.plan.is_blocking(&b));
 
-        let mut skipped = verdicts_outcome(Vec::new());
-        if let Outcome::Verdicts { runner_label, .. } = &mut skipped {
-            *runner_label = None;
+        // Nothing was decided: the previous round's blocking set stands.
+        for failed in [
+            Outcome::NoRunner {
+                documents_selected: 1,
+                reason: "none".into(),
+            },
+            Outcome::CheckFailed {
+                documents_selected: 1,
+                reason: "boom".into(),
+            },
+        ] {
+            finish_hook(&run, &mut session, failed);
+            assert!(session.plan.is_blocking(&b));
         }
-        finish_hook(&run, &mut session, skipped);
-        assert!(session.plan.is_blocking(&b));
 
         let reloaded = governance_session::load("s-blk", rules.path());
         assert_eq!(reloaded.plan.blocking.iter().collect::<Vec<_>>(), [&b]);
+    }
+
+    /// When the gate decides nothing blocks without judging -- no rule
+    /// applies, or every applicable one is already settled -- the previous
+    /// round's blocking rules stop being targets for `/override all`, on
+    /// disk as well as in memory.
+    #[test]
+    fn test_finish_hook_empties_the_blocking_set_when_nothing_blocks_unjudged() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let a = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+        let run = hook_run(check::ArtifactKind::Plan, Some("s-empty"), rules.path(), 3);
+        let all_settled = || {
+            let mut outcome = verdicts_outcome(Vec::new());
+            if let Outcome::Verdicts { runner_label, .. } = &mut outcome {
+                *runner_label = None;
+            }
+            outcome
+        };
+
+        for nothing_blocks in [Outcome::NothingApplies, all_settled()] {
+            let mut session = GovernanceSession::default();
+            finish_hook(
+                &run,
+                &mut session,
+                verdicts_outcome(vec![checked("R-A-001", Verdict::Conflicting, "span", "no")]),
+            );
+            assert!(governance_session::load("s-empty", rules.path())
+                .plan
+                .is_blocking(&a));
+
+            finish_hook(&run, &mut session, nothing_blocks);
+            assert!(!session.plan.is_blocking(&a));
+            let reloaded = governance_session::load("s-empty", rules.path());
+            assert!(!reloaded.plan.is_blocking(&a));
+            assert_eq!(reloaded.plan.rounds, 1, "not a judged round");
+        }
     }
 
     /// An override recorded while a check round was judging survives the
@@ -4434,11 +4506,17 @@ pub(crate) mod tests {
             })
         );
         assert_eq!(
-            parse_override_prompt("  /actual:override all "),
+            parse_override_prompt("  /actual-cli:override all "),
             Some(OverridePrompt {
                 target: "all".into(),
                 reason: None
             })
+        );
+        // Another plugin's override command is not ours to capture.
+        assert_eq!(parse_override_prompt("/actual:override all"), None);
+        assert_eq!(
+            parse_override_prompt("/other-plugin:override R-A-001"),
+            None
         );
         assert_eq!(
             parse_override_prompt("/override").unwrap().target,
@@ -4556,6 +4634,48 @@ pub(crate) mod tests {
                 .overrides
                 .len(),
             1
+        );
+    }
+
+    /// Naming a rule no gate is blocking still overrides it -- a pre-emptive
+    /// override is legitimate -- but the reply says it was not blocking, so
+    /// the user knows they turned off a rule that was passing.
+    #[test]
+    fn test_override_hook_says_when_a_named_rule_was_not_blocking() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let denied = governance_session::key("doc", "R-A-001");
+        let passing = governance_session::key("doc", "R-A-002");
+        let mut session = governance_session::load("sess-nb", &rules_dir);
+        session.plan.record_denial(&denied);
+        governance_session::store("sess-nb", &rules_dir, &session);
+
+        let out = exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-nb", "/override R-A-001"),
+        )
+        .unwrap();
+        assert!(!out.contains("no gate was blocking"), "{out}");
+
+        let out = exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-nb", "/override R-A-002"),
+        )
+        .unwrap();
+        assert!(
+            out.contains(&format!(
+                "no gate was blocking {passing} when it was overridden"
+            )),
+            "{out}"
+        );
+        assert_eq!(
+            governance_session::load("sess-nb", &rules_dir)
+                .overrides
+                .len(),
+            2
         );
     }
 

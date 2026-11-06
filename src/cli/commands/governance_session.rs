@@ -144,12 +144,16 @@ pub struct LoopState {
     /// zero and gets its own full budget, no matter how exhausted some other
     /// rule's count already is — see the module doc.
     pub deny_counts: BTreeMap<String, u32>,
-    /// `"{doc_slug}::{rule_id}"` of every rule this loop's latest judged
-    /// round denied — what `/override all` targets. Unlike `deny_counts`,
-    /// this is replaced every round (see [`begin_round`](Self::begin_round)),
-    /// so a rule fixed since, or no longer judged at all (it dropped out of
-    /// selection or past the cap), stops counting. A round the round limit
-    /// let through still records its rules: they were judged conflicting.
+    /// `"{doc_slug}::{rule_id}"` of every rule this loop's latest decision
+    /// denied — what `/override all` targets. Unlike `deny_counts`, this is
+    /// replaced every judged round (see [`begin_round`](Self::begin_round))
+    /// and emptied when the gate finds nothing blocks without judging (no
+    /// rule applies, or every applicable one is already cleared or
+    /// overridden), so a rule fixed since, or no longer judged at all (it
+    /// dropped out of selection or past the cap), stops counting. A round the
+    /// round limit let through still records its rules: they were judged
+    /// conflicting. A fail-open outcome (no runner, a failed judge call)
+    /// leaves it alone: nothing was decided.
     pub blocking: BTreeSet<String>,
 }
 

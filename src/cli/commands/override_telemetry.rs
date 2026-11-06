@@ -10,11 +10,13 @@
 //! same override run twice makes two. A rule file without a v2 header has no
 //! ADR id, so it sends nothing.
 //!
-//! **Which gates had denied it.** `actual.gate.denied_types` names each gate,
-//! `planning` or `implementation`, whose loop in this session had denied one
-//! of the rules the record's ADR was overridden for, read from the deny counts
-//! the gates keep. Empty means the human overrode before any denial, which
-//! tells a pre-emptive override from the override of a real breach. The record
+//! **Which gates it was blocking.** `actual.gate.denied_types` names each
+//! gate, `planning` or `implementation`, whose latest decision in this session
+//! denied one of the rules the record's ADR was overridden for (see
+//! [`LoopState::blocking`](super::governance_session::LoopState::blocking)).
+//! Empty means none of them was blocking when overridden — overridden before
+//! any denial, or after a later round stopped denying it — which tells a
+//! pre-emptive override from the override of a live breach. The record
 //! never carries the reason the human gave.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
@@ -57,7 +59,8 @@ pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
 }
 
 /// The logical ADRs among the files `keys` name, each with the gates, plan
-/// first, whose loop in `session` had denied a rule it was overridden for.
+/// first, whose latest decision in `session` denied a rule it was overridden
+/// for.
 fn overridden_adrs(
     documents: &[RuleDocument],
     keys: &[String],
