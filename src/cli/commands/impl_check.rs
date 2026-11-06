@@ -553,15 +553,15 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
-    let mut session = governance_session::load(session_id, &rules_dir);
     let turn_start = head_commit(&root).map(|head| TurnStart {
         root: checkout_root(&root),
         head,
     });
-    if session.turn_start != turn_start {
+    // Under the session lock, on a fresh copy: `/override` runs on the same
+    // event, and storing a copy loaded before it would drop the override.
+    governance_session::update(session_id, &rules_dir, |session| {
         session.turn_start = turn_start;
-        governance_session::store(session_id, &rules_dir, &session);
-    }
+    });
 }
 
 /// The commit this turn started from, when the session recorded one in this

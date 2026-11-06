@@ -1748,7 +1748,12 @@ fn finish_verdicts(
                     &keys,
                     &message,
                 );
-                governance_session::store(session_id, run.rules_dir, session);
+                governance_session::store_loop(
+                    session_id,
+                    run.rules_dir,
+                    kind,
+                    session.loop_state(kind),
+                );
                 // The audit log keeps the round-limit message on its own,
                 // undecorated -- the override reminder is only appended to
                 // what the human actually sees, same spirit as the
@@ -1778,7 +1783,12 @@ fn finish_verdicts(
                 );
                 return;
             }
-            governance_session::store(session_id, run.rules_dir, session);
+            governance_session::store_loop(
+                session_id,
+                run.rules_dir,
+                kind,
+                session.loop_state(kind),
+            );
         }
         // A deny is not silence, but it is also not the same as "no active
         // override" -- a different rule's conflict must not bury the fact
@@ -1810,7 +1820,7 @@ fn finish_verdicts(
     }
 
     if let Some(session_id) = session_id {
-        governance_session::store(session_id, run.rules_dir, session);
+        governance_session::store_loop(session_id, run.rules_dir, kind, session.loop_state(kind));
     }
 
     // Fully conforming (nothing blocking): the contract is silence — UNLESS
@@ -3981,6 +3991,41 @@ pub(crate) mod tests {
 
         let reloaded = governance_session::load("s-blk", rules.path());
         assert_eq!(reloaded.plan.blocking.iter().collect::<Vec<_>>(), [&b]);
+    }
+
+    /// An override recorded while a check round was judging survives the
+    /// round's store: the hook's copy predates it, and storing that copy
+    /// whole would silently drop it while the user was told "overridden".
+    #[test]
+    fn test_finish_hook_keeps_an_override_recorded_during_the_round() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let other = governance_session::key("doc", "R-Z-001");
+        let mut session = governance_session::load("s-race", rules.path());
+
+        governance_session::record_override_with(
+            "s-race",
+            rules.path(),
+            std::slice::from_ref(&other),
+            None,
+            governance_session::OverrideSource::SessionPrompt,
+        );
+        finish_hook(
+            &hook_run(check::ArtifactKind::Diff, Some("s-race"), rules.path(), 3),
+            &mut session,
+            verdicts_outcome(vec![checked("R-A-002", Verdict::Conflicting, "span", "no")]),
+        );
+
+        let reloaded = governance_session::load("s-race", rules.path());
+        assert_eq!(reloaded.overrides.len(), 1);
+        assert_eq!(reloaded.overrides[0].key, other);
+        assert_eq!(reloaded.diff.rounds, 1);
+        assert!(reloaded.diff.is_blocking(&governance_session::key(
+            "cross-cutting-token-signing-1c57",
+            "R-A-002"
+        )));
     }
 
     /// Impl-check's round limit: the same fail-open as plan-check's, driven
