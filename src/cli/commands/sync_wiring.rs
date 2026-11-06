@@ -569,8 +569,10 @@ mod tests {
     /// Build a minimal `SyncArgs` suitable for unit-testing the preamble.
     ///
     /// `force = true` skips the user-confirmation prompt; `no_tui = true`
-    /// avoids spawning the ratatui TUI.  All other fields are left at their
-    /// defaults.
+    /// avoids spawning the ratatui TUI.  `api_url` is a loopback port nothing
+    /// listens on, so a run that gets past the preamble fails at the ADR fetch
+    /// instead of reaching the production API.  All other fields are left at
+    /// their defaults.
     fn make_sync_args(runner: Option<RunnerChoice>) -> SyncArgs {
         SyncArgs {
             dry_run: false,
@@ -579,7 +581,7 @@ mod tests {
             reset_rejections: false,
             projects: vec![],
             model: None,
-            api_url: None,
+            api_url: Some("http://127.0.0.1:9".to_string()),
             verbose: false,
             no_tailor: false,
             max_budget_usd: None,
@@ -1576,7 +1578,6 @@ mod tests {
     #[test]
     fn test_fallback_model_error_with_config_api_key_attempts_fallback() {
         // Model error + config API key → fallback is attempted (reaches run_sync).
-        // run_sync will fail (no real repo), but we verify it got past key resolution.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("OPENAI_API_KEY");
         let dir = tempfile::tempdir().unwrap();
@@ -1591,12 +1592,12 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        // Fallback was attempted (key resolved, runner created, run_sync called).
-        // Result may be Err from run_sync internals (no real repo), but must NOT be
-        // ApiKeyMissing — that would mean the key was not resolved.
+        // Without a key the original model error comes back (see the test
+        // above), so only the retry reaches the ADR fetch, which fails on the
+        // dead port `make_sync_args` sets.
         assert!(
-            !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
-            "API key was provided — should not get ApiKeyMissing: {result:?}"
+            matches!(result, Err(ActualError::ApiError(_))),
+            "the config key should start the openai-api retry: {result:?}"
         );
     }
 
@@ -1617,10 +1618,10 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        // Fallback was attempted; should not be ApiKeyMissing.
+        // Only the retry reaches the ADR fetch; see the config-key test above.
         assert!(
-            !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
-            "API key from env should resolve: {result:?}"
+            matches!(result, Err(ActualError::ApiError(_))),
+            "the env key should start the openai-api retry: {result:?}"
         );
     }
 
@@ -1662,14 +1663,10 @@ mod tests {
         let _g = EnvGuard::remove("OPENAI_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("cfg.yaml");
-        let args = SyncArgs {
-            api_url: Some("http://127.0.0.1:9".to_string()),
-            ..make_sync_args(None)
-        };
         let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
         let result = codex_cli_fallback_if_model_error(
             Err(model_error()),
-            &args,
+            &make_sync_args(None),
             None,
             Some("sk-config-fallback-key"),
             std::time::Duration::from_secs(60),
