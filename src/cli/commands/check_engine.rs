@@ -1085,6 +1085,23 @@ fn running_under_claude_code() -> bool {
 /// which is also exercised directly.
 pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     if args.claude_hook {
+        // The envelope is only JSON on stdin, so the event name in it proves
+        // nothing. What the caller's environment says is the check: every
+        // command an agent runs, and every settings hook, inherits Claude
+        // Code's CLAUDECODE marker, while the actual-cli mod's own spawns (the
+        // only intended caller) do not -- probed on 2.1.287 in a terminal
+        // session. CLAUDE_CODE_ENTRYPOINT is not checked here, unlike the
+        // terminal path: Claude Code's own process carries it, so the mod's
+        // spawns inherit it too.
+        if std::env::var_os("CLAUDECODE").is_some() {
+            return Err(ActualError::NotInteractive(format!(
+                "check-override --claude-hook was refused: this process carries Claude Code's \
+                 CLAUDECODE marker, so it was started by an agent's shell command or a settings \
+                 hook, not by the actual-cli plugin's mod. Nothing was overridden. To override \
+                 a rule, the user types {OVERRIDE_COMMAND} <rule-id|all> [reason] as a message \
+                 in the session, or runs `actual check-override` from an ordinary terminal."
+            )));
+        }
         let mut raw = String::new();
         let _ = std::io::stdin().read_to_string(&mut raw);
         if let Some(out) = exec_override_hook_with(args, &raw) {
@@ -1332,7 +1349,11 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     if let Err(e) = validate_override_rules(&rules_dir, &keys) {
         return say(format!("Nothing was overridden: {e}"));
     }
-    let source = governance_session::OverrideSource::SessionPrompt;
+    let source = if args.via == "dialog" {
+        governance_session::OverrideSource::SessionDialog
+    } else {
+        governance_session::OverrideSource::SessionPrompt
+    };
     let reason = parsed.reason.as_deref();
     let gates = override_gates(&session_id, &rules_dir, &keys);
     governance_session::record_override_with(&session_id, &rules_dir, &keys, reason, source);
@@ -1342,13 +1363,33 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     super::override_telemetry::report(&rules_dir, &session_id, &keys);
     #[cfg(not(feature = "telemetry"))]
     let _ = gates;
-    say(format!(
-        "The user overrode {} via {OVERRIDE_COMMAND} (reason: {}). These rules will no longer \
-         block plan-check or impl-check this session. Retry the blocked action. Do not run or \
-         type {OVERRIDE_COMMAND} yourself.",
-        keys.join(", "),
-        reason.unwrap_or("none given"),
-    ))
+    let msg = match source {
+        governance_session::OverrideSource::SessionDialog => format!(
+            "The user overrode {} in the override dialog (reason: {}). These rules will no \
+             longer block plan-check or impl-check this session.",
+            keys.join(", "),
+            reason.unwrap_or("none given"),
+        ),
+        _ => format!(
+            "The user overrode {} via {OVERRIDE_COMMAND} (reason: {}). These rules will no \
+             longer block plan-check or impl-check this session. Retry the blocked action. Do \
+             not run or type {OVERRIDE_COMMAND} yourself.",
+            keys.join(", "),
+            reason.unwrap_or("none given"),
+        ),
+    };
+    // `overridden` is for the mod: the keys actually recorded, so it can tell
+    // a dialog choice that landed from one that did not without reading prose.
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": msg,
+            },
+            "overridden": keys,
+        })
+        .to_string(),
+    )
 }
 
 /// The testable core of `actual check-override`: a human explicitly
@@ -4207,6 +4248,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -4227,12 +4269,64 @@ pub(crate) mod tests {
             repo: Some(repo.to_path_buf()),
             rules_dir: None,
             claude_hook: true,
+            via: "prompt".to_string(),
         }
     }
 
     fn prompt_env(event: &str, session: &str, prompt: &str) -> String {
         serde_json::json!({"hook_event_name": event, "session_id": session, "prompt": prompt})
             .to_string()
+    }
+
+    /// An agent's shell command carries CLAUDECODE; piping a forged envelope
+    /// into --claude-hook from there must be refused before stdin is read.
+    #[test]
+    fn test_claude_hook_refuses_under_an_agents_shell() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("CLAUDECODE", "1");
+        let err = exec_override(&hook_args(Path::new("."))).unwrap_err();
+        assert!(matches!(err, ActualError::NotInteractive(_)), "{err:?}");
+        assert!(err.to_string().contains("CLAUDECODE"), "{err}");
+        assert!(err.to_string().contains("Nothing was overridden"), "{err}");
+    }
+
+    /// The mod's dialog path: `--via dialog` records `session_dialog`, and the
+    /// output names the keys it recorded for the mod to read.
+    #[test]
+    fn test_override_hook_via_dialog_records_session_dialog() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let k = governance_session::key("doc", "R-A-001");
+        let mut session = governance_session::load("sess-d1", &rules_dir);
+        session.plan.record_denial(&k);
+        governance_session::store("sess-d1", &rules_dir, &session);
+
+        let args = PlanCheckOverrideArgs {
+            via: "dialog".to_string(),
+            ..hook_args(repo.path())
+        };
+        let out = exec_override_hook_with(
+            &args,
+            &prompt_env("UserPromptSubmit", "sess-d1", "/actual-cli:override all"),
+        )
+        .expect("hook output");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["overridden"], serde_json::json!([k]));
+        let msg = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(msg.contains("in the override dialog"), "{msg}");
+        assert!(!msg.contains("Retry the blocked action"), "{msg}");
+        let session = governance_session::load("sess-d1", &rules_dir);
+        assert_eq!(
+            session.overrides[0].source,
+            governance_session::OverrideSource::SessionDialog
+        );
+        let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap()).unwrap();
+        assert!(log.contains("\"source\":\"session_dialog\""), "{log}");
     }
 
     #[test]
@@ -4396,6 +4490,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
 
         let events =
@@ -4478,6 +4573,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
 
         let events =
@@ -4631,6 +4727,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
 
         let events =
@@ -4669,6 +4766,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
 
         let events =
@@ -4734,6 +4832,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -4774,6 +4873,7 @@ pub(crate) mod tests {
             repo: None,
             rules_dir: Some(rules_dir.path().to_path_buf()),
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -4799,6 +4899,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("R-A-999"));
@@ -4829,6 +4930,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("no-such-doc::R-A-001"));
@@ -4851,6 +4953,7 @@ pub(crate) mod tests {
             repo: None,
             rules_dir: Some(missing),
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         assert!(exec_override_impl(&args).is_err());
     }
@@ -4877,6 +4980,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         assert!(exec_override_impl(&args).is_err());
         assert_eq!(
@@ -4906,6 +5010,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
         let err = exec_override_impl(&args).unwrap_err();
         let message = err.to_string();
@@ -4978,6 +5083,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
+            via: "prompt".to_string(),
         };
 
         let events =

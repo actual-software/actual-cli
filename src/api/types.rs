@@ -332,7 +332,7 @@ pub struct PlanGovernanceEventProperties {
     /// PostHog). Lets identical reasons be grouped without exposing the text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_hash: Option<String>,
-    /// How the override was issued: `terminal` or `session_prompt`.
+    /// How the override was issued: `terminal`, `session_prompt` or `session_dialog`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_source: Option<String>,
     /// Which gate had denied the overridden rule: `plan`, `impl`, or `both`.
