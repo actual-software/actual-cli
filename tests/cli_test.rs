@@ -1216,6 +1216,181 @@ fn test_check_override_refuses_without_a_terminal() {
         .stderr(predicate::str::contains("interactively"));
 }
 
+// ── check-override --claude-hook: the in-session override ──────────────────
+//
+// The plugin's mod spawns `check-override --claude-hook` with a
+// `UserPromptSubmit` envelope on stdin. These drive the compiled binary the
+// same way, so the argument wiring (`--claude-hook`, `--via`, `--repo`) and
+// the JSON contract the mod reads are covered end to end. These tests may
+// themselves run inside Claude Code, so each child's environment is set
+// explicitly rather than inherited.
+
+/// A repo with one rule document, and an isolated config dir for the session
+/// file and audit log.
+fn override_hook_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+    let repo = tempfile::tempdir().unwrap();
+    let rules = repo.path().join(".actual/rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(
+        rules.join("cross-cutting-token-signing-1c57.md"),
+        "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+    )
+    .unwrap();
+    (repo, tempfile::tempdir().unwrap())
+}
+
+/// `check-override --claude-hook` for `repo`, with `config_dir` as its config
+/// directory, telemetry off and Claude Code's marker removed, as the mod's
+/// own spawn has it.
+fn override_hook_cmd(repo: &std::path::Path, config_dir: &std::path::Path) -> Command {
+    let mut command = cmd();
+    command
+        .args(["check-override", "--claude-hook", "--repo"])
+        .arg(repo)
+        .env("ACTUAL_CONFIG_DIR", config_dir)
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("CLAUDECODE")
+        .env("ACTUAL_NO_TELEMETRY", "1");
+    command
+}
+
+fn override_envelope(prompt: &str) -> String {
+    serde_json::json!({
+        "session_id": "sess-bin-1",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": prompt,
+    })
+    .to_string()
+}
+
+/// Every override the session files under `config_dir` record, as
+/// `(key, source)`.
+fn recorded_overrides(config_dir: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(config_dir.join("plan-check-sessions")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .flat_map(|entry| {
+            let raw = std::fs::read_to_string(entry.path()).unwrap();
+            let session: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            session["overrides"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|o| {
+                    (
+                        o["key"].as_str().unwrap().to_string(),
+                        o["source"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn test_check_override_claude_hook_records_a_typed_override() {
+    let (repo, config_dir) = override_hook_fixture();
+    let out = override_hook_cmd(repo.path(), config_dir.path())
+        .write_stdin(override_envelope("/actual-cli:override R-A-001 reviewed"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let key = "cross-cutting-token-signing-1c57::R-A-001";
+    assert_eq!(json["overridden"], serde_json::json!([key]));
+    assert_eq!(
+        json["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    assert!(json["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains(key));
+    assert_eq!(
+        recorded_overrides(config_dir.path()),
+        [(key.to_string(), "session_prompt".to_string())]
+    );
+    let log = std::fs::read_to_string(config_dir.path().join("plan-check-overrides.log")).unwrap();
+    assert!(
+        log.contains(key) && log.contains("\"reason\":\"reviewed\""),
+        "{log}"
+    );
+}
+
+#[test]
+fn test_check_override_claude_hook_via_dialog_records_session_dialog() {
+    let (repo, config_dir) = override_hook_fixture();
+    override_hook_cmd(repo.path(), config_dir.path())
+        .args(["--via", "dialog"])
+        .write_stdin(override_envelope("/actual-cli:override R-A-001"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"overridden\""));
+    assert_eq!(
+        recorded_overrides(config_dir.path()),
+        [(
+            "cross-cutting-token-signing-1c57::R-A-001".to_string(),
+            "session_dialog".to_string()
+        )]
+    );
+}
+
+/// A prompt that is not an override command prints nothing and records
+/// nothing: the mod reads silence as "not ours".
+#[test]
+fn test_check_override_claude_hook_is_silent_for_an_ordinary_prompt() {
+    let (repo, config_dir) = override_hook_fixture();
+    override_hook_cmd(repo.path(), config_dir.path())
+        .write_stdin(override_envelope("please refactor the signer"))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    assert!(recorded_overrides(config_dir.path()).is_empty());
+}
+
+/// An agent's shell carries Claude Code's marker: the same envelope is
+/// refused, and nothing is recorded.
+#[test]
+fn test_check_override_claude_hook_refuses_an_agents_shell() {
+    let (repo, config_dir) = override_hook_fixture();
+    override_hook_cmd(repo.path(), config_dir.path())
+        .env("CLAUDECODE", "1")
+        .write_stdin(override_envelope("/actual-cli:override R-A-001"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Nothing was overridden"));
+    assert!(recorded_overrides(config_dir.path()).is_empty());
+}
+
+/// `--via` takes only the documented values, and only with `--claude-hook`.
+#[test]
+fn test_check_override_via_is_validated() {
+    cmd()
+        .args(["check-override", "--claude-hook", "--via", "terminal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value 'terminal'"));
+    cmd()
+        .args([
+            "check-override",
+            "--session",
+            "s",
+            "--rule",
+            "doc::R-1",
+            "--via",
+            "dialog",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--claude-hook"));
+}
+
 // ── impl-check: a git diff against the same committed rule corpus ──────────
 //
 // `impl-check` (AK-755) reuses `plan-check`'s entire shared pipeline, judging
