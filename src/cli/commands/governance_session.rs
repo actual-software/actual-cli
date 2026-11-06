@@ -72,7 +72,7 @@
 //! override and a round-limit pass, and must outlive the session cache entry
 //! that triggered it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -139,12 +139,29 @@ pub struct LoopState {
     /// zero and gets its own full budget, no matter how exhausted some other
     /// rule's count already is — see the module doc.
     pub deny_counts: BTreeMap<String, u32>,
+    /// `"{doc_slug}::{rule_id}"` of every rule this loop's latest judged
+    /// round denied — what `/override all` targets. Unlike `deny_counts`,
+    /// this is replaced every round (see [`begin_round`](Self::begin_round)),
+    /// so a rule fixed since, or no longer judged at all (it dropped out of
+    /// selection or past the cap), stops counting. A round the round limit
+    /// let through still records its rules: they were judged conflicting.
+    pub blocking: BTreeSet<String>,
 }
 
 impl LoopState {
+    /// Start a completed judge round: count it and forget the previous
+    /// round's blocking rules. Call before this round's
+    /// [`record_denial`](Self::record_denial)s, and never for a fail-open
+    /// outcome, where nothing was judged.
+    pub fn begin_round(&mut self) {
+        self.rounds += 1;
+        self.blocking.clear();
+    }
+
     /// Record one more denial of `key` in this loop and return its new total.
     /// Called exactly once per conflicting rule per round.
     pub fn record_denial(&mut self, key: &str) -> u32 {
+        self.blocking.insert(key.to_string());
         let count = self.deny_counts.entry(key.to_string()).or_insert(0);
         *count += 1;
         *count
@@ -158,12 +175,10 @@ impl LoopState {
         self.deny_counts.get(key).is_some_and(|&n| n > max_rounds)
     }
 
-    /// True when `key` has been denied in this loop and its latest judgment
-    /// was not conforming. `deny_counts` only ever grows, but a conforming
-    /// verdict inserts into `cleared` and any other verdict removes from it,
-    /// so a rule denied once and fixed in a later round reads `false` here.
+    /// True when this loop's latest judged round denied `key` (see
+    /// [`blocking`](Self::blocking)).
     pub fn is_blocking(&self, key: &str) -> bool {
-        self.deny_counts.contains_key(key) && !self.cleared.contains_key(key)
+        self.blocking.contains(key)
     }
 }
 
@@ -412,6 +427,7 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             rounds: v2.rounds,
             cleared: v2.cleared,
             deny_counts: v2.deny_counts,
+            blocking: BTreeSet::new(),
         },
         diff: LoopState::default(),
         turn_start: None,
@@ -877,33 +893,39 @@ mod tests {
         assert!(session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
     }
 
-    /// `deny_counts` never shrinks, so a rule denied once and cleared in a
-    /// later round must stop reading as blocking -- and start again when a
-    /// later round denies it (which removes the clearance).
+    /// `deny_counts` never shrinks, so a rule denied once must stop reading
+    /// as blocking after any later round that does not deny it -- whether
+    /// that round cleared it or never judged it -- and start again when a
+    /// later round denies it.
     #[test]
-    fn test_is_blocking_drops_a_rule_cleared_after_its_denial() {
+    fn test_is_blocking_tracks_only_the_latest_round() {
         let k = key("doc", "R-A");
         let mut state = LoopState::default();
         assert!(!state.is_blocking(&k));
+        state.begin_round();
         state.record_denial(&k);
         assert!(state.is_blocking(&k));
-        state.cleared.insert(k.clone(), "d".to_string());
+        state.begin_round();
         assert!(!state.is_blocking(&k));
-        state.cleared.remove(&k);
+        assert_eq!(state.deny_counts.get(&k), Some(&1));
+        assert_eq!(state.rounds, 2);
+        state.begin_round();
+        state.record_denial(&k);
         assert!(state.is_blocking(&k));
     }
 
-    /// The audit gate names only the gate(s) still blocking the rule.
+    /// The audit gate names only the gate(s) whose latest round denied the
+    /// rule.
     #[test]
-    fn test_denying_gate_skips_a_gate_that_has_since_cleared_the_rule() {
+    fn test_denying_gate_skips_a_gate_whose_latest_round_did_not_deny() {
         let k = key("doc", "R-A");
         let mut session = GovernanceSession::default();
         session.record_denial(ArtifactKind::Plan, &k);
         session.record_denial(ArtifactKind::Diff, &k);
         assert_eq!(denying_gate(&session, &k).as_deref(), Some("both"));
-        session.plan.cleared.insert(k.clone(), "d".to_string());
+        session.plan.begin_round();
         assert_eq!(denying_gate(&session, &k).as_deref(), Some("impl"));
-        session.diff.cleared.insert(k.clone(), "d".to_string());
+        session.diff.begin_round();
         assert_eq!(denying_gate(&session, &k), None);
     }
 
