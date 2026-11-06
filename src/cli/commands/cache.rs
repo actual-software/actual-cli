@@ -17,12 +17,12 @@ fn run_with_resolver(
 fn run_with_path(args: &CacheArgs, path: &std::path::Path) -> Result<(), ActualError> {
     match &args.action {
         CacheAction::Clear => {
-            let mut cfg = config::paths::load_from(path)?;
-
-            let had_analysis = cfg.cached_analysis.take().is_some();
-            let had_tailoring = cfg.cached_tailoring.take().is_some();
-
-            config::paths::save_to(&cfg, path)?;
+            let (had_analysis, had_tailoring) = config::paths::update_at(path, |cfg| {
+                Ok((
+                    cfg.cached_analysis.take().is_some(),
+                    cfg.cached_tailoring.take().is_some(),
+                ))
+            })?;
 
             match (had_analysis, had_tailoring) {
                 (false, false) => println!("No cache entries to clear."),

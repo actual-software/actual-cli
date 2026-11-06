@@ -423,9 +423,10 @@ fn apply_remembered(scope: &StickyScope) -> Option<String> {
 /// Load the config, apply `mutate`, and save it back (best-effort persistence of
 /// a scope change).
 fn update_config(mutate: impl FnOnce(&mut crate::config::Config)) -> Result<(), ActualError> {
-    let mut config = crate::config::paths::load()?;
-    mutate(&mut config);
-    crate::config::paths::save(&config)
+    crate::config::paths::update(|config| {
+        mutate(config);
+        Ok(())
+    })
 }
 
 /// Decide the repo id to scope the query on, applying and persisting any scope

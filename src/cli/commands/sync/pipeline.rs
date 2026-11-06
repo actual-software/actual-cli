@@ -16,7 +16,7 @@ use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::cli::ui::tui::renderer::TuiRenderer;
-use crate::config::paths::{load_from, save_to};
+use crate::config::paths::{load_from, update_at};
 use crate::config::rejections::{clear_rejections, get_rejections};
 use crate::config::types::{DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
@@ -396,14 +396,15 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
 
     // ── Phase 2: fetch + tailor ──
 
-    // 2a. Reload config from disk (to pick up any external changes) and handle --reset-rejections.
+    // 2a. Handle --reset-rejections, then reload config from disk (to pick up any external changes).
     // Note: config was already loaded above for the Environment step; reload here for freshness.
-    let mut config = load_from(cfg_path)?;
     let repo_key = compute_repo_key(root_dir);
 
     if args.reset_rejections {
-        clear_rejections(&mut config, &repo_key);
-        save_to(&config, cfg_path)?;
+        update_at(cfg_path, |config| {
+            clear_rejections(config, &repo_key);
+            Ok(())
+        })?;
         pipeline.suspend(|| {
             eprintln!(
                 "{} Cleared ADR rejection memory for this repository",
@@ -412,6 +413,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         });
     }
 
+    let config = load_from(cfg_path)?;
     let rejected_ids = get_rejections(&config, &repo_key);
 
     // 2b. Fetch ADRs from API with retry
@@ -579,13 +581,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     } else if args.no_tailor {
         pipeline.skip(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
         let out = raw_adrs_to_output(&v1_adrs, &output_format);
-        store_tailoring_cache(
-            &mut config,
-            cfg_path,
-            tailoring_cache_key.as_deref(),
-            root_dir,
-            &out,
-        );
+        store_tailoring_cache(cfg_path, tailoring_cache_key.as_deref(), root_dir, &out);
         out
     } else {
         let project_count = analysis.projects.len();
@@ -686,13 +682,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                     }
                 }
 
-                store_tailoring_cache(
-                    &mut config,
-                    cfg_path,
-                    tailoring_cache_key.as_deref(),
-                    root_dir,
-                    &output,
-                );
+                store_tailoring_cache(cfg_path, tailoring_cache_key.as_deref(), root_dir, &output);
                 output
             }
             Err(e) => {
@@ -1416,6 +1406,7 @@ mod tests {
     use crate::cli::commands::handle_result;
     use crate::cli::ui::test_utils::MockTerminal;
     use crate::cli::ui::tui::renderer::TuiRenderer;
+    use crate::config::paths::save_to;
     use crate::error::ActualError;
     use crate::generation::markers;
     use crate::generation::writer::{WriteAction, WriteResult};
@@ -4418,18 +4409,12 @@ mod tests {
     fn test_store_tailoring_cache_stores_result() {
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
-        let mut config = crate::config::Config::default();
-        save_to(&config, &cfg_path).unwrap();
+        save_to(&crate::config::Config::default(), &cfg_path).unwrap();
 
         let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
-        store_tailoring_cache(
-            &mut config,
-            &cfg_path,
-            Some("test-cache-key"),
-            dir.path(),
-            &output,
-        );
+        store_tailoring_cache(&cfg_path, Some("test-cache-key"), dir.path(), &output);
 
+        let config = load_from(&cfg_path).unwrap();
         assert!(config.cached_tailoring.is_some());
         let cached = config.cached_tailoring.as_ref().unwrap();
         assert_eq!(cached.cache_key, "test-cache-key");
@@ -4444,14 +4429,13 @@ mod tests {
     fn test_store_tailoring_cache_skips_when_no_key() {
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
-        let mut config = crate::config::Config::default();
-        save_to(&config, &cfg_path).unwrap();
+        save_to(&crate::config::Config::default(), &cfg_path).unwrap();
 
         let output = make_output(vec![]);
-        store_tailoring_cache(&mut config, &cfg_path, None, dir.path(), &output);
+        store_tailoring_cache(&cfg_path, None, dir.path(), &output);
 
         assert!(
-            config.cached_tailoring.is_none(),
+            load_from(&cfg_path).unwrap().cached_tailoring.is_none(),
             "should not store cache when key is None"
         );
     }
@@ -4460,17 +4444,10 @@ mod tests {
     fn test_store_tailoring_cache_persists_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
-        let mut config = crate::config::Config::default();
-        save_to(&config, &cfg_path).unwrap();
+        save_to(&crate::config::Config::default(), &cfg_path).unwrap();
 
         let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
-        store_tailoring_cache(
-            &mut config,
-            &cfg_path,
-            Some("disk-test-key"),
-            dir.path(),
-            &output,
-        );
+        store_tailoring_cache(&cfg_path, Some("disk-test-key"), dir.path(), &output);
 
         // Reload from disk and verify
         let loaded = load_from(&cfg_path).unwrap();
@@ -4482,33 +4459,22 @@ mod tests {
     #[test]
     fn test_store_tailoring_cache_warns_on_disk_write_failure() {
         use std::os::unix::fs::PermissionsExt;
-        // Create a read-only directory so that save_to fails, exercising the
-        // "warning: failed to save tailoring cache" branch.
+        // Create a read-only directory so that the cache write fails, exercising
+        // the "warning: failed to save tailoring cache" branch.
         let dir = tempfile::tempdir().unwrap();
         let ro_dir = dir.path().join("readonly");
         std::fs::create_dir(&ro_dir).unwrap();
         let cfg_path = ro_dir.join("config.yaml");
 
-        let mut config = crate::config::Config::default();
         let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
 
-        // Make the directory read-only so save_to cannot write
+        // Make the directory read-only so nothing can be written
         std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         // store_tailoring_cache should not panic; it warns and returns
-        store_tailoring_cache(
-            &mut config,
-            &cfg_path,
-            Some("warn-test-key"),
-            dir.path(),
-            &output,
-        );
+        store_tailoring_cache(&cfg_path, Some("warn-test-key"), dir.path(), &output);
 
-        // In-memory cache is still populated even though disk write failed
-        assert!(
-            config.cached_tailoring.is_some(),
-            "in-memory cache should be set even if disk write failed"
-        );
+        assert!(!cfg_path.exists(), "nothing could be written");
 
         // Restore permissions for cleanup
         std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -4529,21 +4495,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
-        let mut config = crate::config::Config::default();
 
-        store_tailoring_cache(
-            &mut config,
-            &cfg_path,
-            Some("size-test-key"),
-            dir.path(),
-            &output,
-        );
+        store_tailoring_cache(&cfg_path, Some("size-test-key"), dir.path(), &output);
 
         // Cache should NOT be stored because it exceeds the size limit
-        assert!(
-            config.cached_tailoring.is_none(),
-            "oversized output should not be cached"
-        );
+        assert!(!cfg_path.exists(), "oversized output should not be cached");
     }
 
     // ── Tailoring cache round-trip test ──
@@ -4813,6 +4769,84 @@ mod tests {
             second_time > first_time,
             "force should update cache timestamp: {first_time} vs {second_time}"
         );
+    }
+
+    // ── A setting changed while a run works survives the run ──
+
+    /// `actual config set telemetry.enabled false`, as a user would type it in
+    /// another terminal, against the file `ACTUAL_CONFIG` names.
+    fn turn_telemetry_off() -> Result<(), ActualError> {
+        use crate::cli::args::{ConfigAction, ConfigArgs, ConfigSetArgs};
+        crate::cli::commands::config::exec(&ConfigArgs {
+            action: ConfigAction::Set(ConfigSetArgs {
+                key: "telemetry.enabled".to_string(),
+                value: "false".to_string(),
+                repo: false,
+            }),
+        })
+    }
+
+    /// Turns telemetry off while it tailors.
+    struct TelemetryOffDuringTailoring;
+
+    impl TailoringRunner for TelemetryOffDuringTailoring {
+        async fn run_tailoring(
+            &self,
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+        ) -> Result<TailoringOutput, ActualError> {
+            turn_telemetry_off()?;
+            Ok(serde_json::from_str(VALID_TAILORING_JSON)?)
+        }
+    }
+
+    /// One forced sync of a fresh git repo whose config file is the one
+    /// `ACTUAL_CONFIG` names, then that file as the run left it.
+    fn config_after_sync(
+        server: &mockito::ServerGuard,
+        no_tailor: bool,
+        runner: &impl TailoringRunner,
+    ) -> crate::config::Config {
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let cfg_path = dir.path().join("config.yaml");
+        save_to(&crate::config::Config::default(), &cfg_path).unwrap();
+        let _config = crate::testutil::EnvGuard::set("ACTUAL_CONFIG", cfg_path.to_str().unwrap());
+        let args = make_sync_args(false, false, true, no_tailor, &server.url());
+        let term = MockTerminal::new(vec![]);
+        run_sync(&args, dir.path(), &cfg_path, &term, runner, None, None).unwrap();
+        load_from(&cfg_path).unwrap()
+    }
+
+    #[test]
+    fn test_a_setting_changed_during_tailoring_survives_the_run() {
+        let server = mock_api_server_with_adrs();
+        let saved = config_after_sync(&server, false, &TelemetryOffDuringTailoring);
+        assert!(saved.cached_tailoring.is_some(), "the run cached nothing");
+        assert!(saved.cached_analysis.is_some(), "the run cached nothing");
+        assert_eq!(saved.telemetry.and_then(|t| t.enabled), Some(false));
+    }
+
+    #[test]
+    fn test_a_setting_changed_during_the_fetch_survives_a_no_tailor_run() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body_from_request(|_| {
+                turn_telemetry_off().unwrap();
+                ADR_MATCH_RESPONSE.into()
+            })
+            .create();
+        let saved = config_after_sync(&server, true, &MockRunner::new(VALID_ANALYSIS_JSON));
+        assert!(saved.cached_tailoring.is_some(), "the run cached nothing");
+        assert_eq!(saved.telemetry.and_then(|t| t.enabled), Some(false));
     }
 
     // ── tailoring_cache_skip_msg unit tests ──

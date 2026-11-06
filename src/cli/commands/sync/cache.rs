@@ -2,7 +2,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::config::paths::{load_from, save_to};
+use crate::config::paths::{load_from, update_at};
 use crate::config::types::{CachedTailoring, CACHE_MAX_SIZE_BYTES};
 use crate::tailoring::types::TailoringOutput;
 
@@ -77,7 +77,6 @@ pub(crate) fn compute_repo_key_with_timeout(
 /// Disk persistence failures are silently ignored because the cache
 /// is an optimisation — a write failure should never abort a sync.
 pub(crate) fn store_tailoring_cache(
-    config: &mut crate::config::types::Config,
     cfg_path: &Path,
     cache_key: Option<&str>,
     root_dir: &Path,
@@ -86,13 +85,12 @@ pub(crate) fn store_tailoring_cache(
     let size_result = crate::yaml::to_string(output)
         .map(|s| s.len())
         .map_err(|e| e.to_string());
-    store_tailoring_cache_inner(config, cfg_path, cache_key, root_dir, output, size_result);
+    store_tailoring_cache_inner(cfg_path, cache_key, root_dir, output, size_result);
 }
 
 /// Inner implementation that accepts a pre-computed serialized-size result,
 /// enabling tests to simulate serialization failures.
 fn store_tailoring_cache_inner(
-    config: &mut crate::config::types::Config,
     cfg_path: &Path,
     cache_key: Option<&str>,
     root_dir: &Path,
@@ -122,15 +120,17 @@ fn store_tailoring_cache_inner(
         return;
     }
 
-    config.cached_tailoring = Some(CachedTailoring {
+    let cached = CachedTailoring {
         cache_key: key.to_string(),
         repo_path: root_dir.to_string_lossy().to_string(),
         tailoring: output.clone(),
         tailored_at: chrono::Utc::now(),
+    };
+    let saved = update_at(cfg_path, |config| {
+        config.cached_tailoring = Some(cached);
+        Ok(())
     });
-    // Best-effort persist: if disk write fails, the in-memory cache is
-    // still populated for subsequent operations in this process.
-    if let Err(e) = save_to(config, cfg_path) {
+    if let Err(e) = saved {
         tracing::warn!("failed to save tailoring cache: {e}");
     }
 }
@@ -294,14 +294,12 @@ mod tests {
     fn test_store_tailoring_cache_inner_skips_on_serialization_failure() {
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
-        let mut config = crate::config::Config::default();
-        save_to(&config, &cfg_path).unwrap();
+        crate::config::paths::save_to(&crate::config::Config::default(), &cfg_path).unwrap();
 
         let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
 
         // Simulate serialization failure by passing Err
         store_tailoring_cache_inner(
-            &mut config,
             &cfg_path,
             Some("fail-test-key"),
             dir.path(),
@@ -311,7 +309,7 @@ mod tests {
 
         // Cache should NOT be stored because serialization "failed"
         assert!(
-            config.cached_tailoring.is_none(),
+            load_from(&cfg_path).unwrap().cached_tailoring.is_none(),
             "cache should not be stored when serialization fails"
         );
     }
