@@ -243,10 +243,32 @@ pub struct Override {
     /// for entries written before provenance was recorded.
     #[serde(default)]
     pub source: OverrideSource,
-    /// Which gate(s) had denied the rule when it was overridden: `"plan"`,
-    /// `"impl"`, or `"both"`. `None` when neither loop had denied it.
+    /// Which gate(s) were blocking the rule when it was overridden. `None`
+    /// when neither was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<String>,
+    pub gate: Option<OverrideGate>,
+}
+
+/// Which gate(s) were blocking a rule when it was overridden (see
+/// [`denying_gate`]). Stored as `"plan"`, `"impl"` or `"both"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverrideGate {
+    Plan,
+    Impl,
+    Both,
+}
+
+impl OverrideGate {
+    // Only telemetry events carry these names.
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverrideGate::Plan => "plan",
+            OverrideGate::Impl => "impl",
+            OverrideGate::Both => "both",
+        }
+    }
 }
 
 /// How an explicit override reached the CLI.
@@ -266,6 +288,8 @@ pub enum OverrideSource {
 }
 
 impl OverrideSource {
+    // Only telemetry events carry these names.
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
     pub fn as_str(self) -> &'static str {
         match self {
             OverrideSource::Terminal => "terminal",
@@ -603,7 +627,7 @@ struct AuditEntry {
     source: Option<OverrideSource>,
     /// Gate(s) that had denied the rule; see [`Override::gate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    gate: Option<String>,
+    gate: Option<OverrideGate>,
     /// How many candidate rules were actually judged this round. Present
     /// only for [`AuditKind::PartialCoverage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,7 +669,7 @@ pub fn record_override(
     reason: &str,
 ) {
     let reason = Some(reason).filter(|r| !r.trim().is_empty());
-    record_override_with(
+    let _ = record_override_with(
         session_id,
         rules_dir,
         keys,
@@ -656,32 +680,36 @@ pub fn record_override(
 
 /// Which gate(s) `key` is currently blocking in `session` (see
 /// [`LoopState::is_blocking`]): `"plan"`, `"impl"`, `"both"`.
-pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<String> {
+pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGate> {
     let plan = session.plan.is_blocking(key);
     let diff = session.diff.is_blocking(key);
     match (plan, diff) {
-        (true, true) => Some("both".to_string()),
-        (true, false) => Some("plan".to_string()),
-        (false, true) => Some("impl".to_string()),
+        (true, true) => Some(OverrideGate::Both),
+        (true, false) => Some(OverrideGate::Plan),
+        (false, true) => Some(OverrideGate::Impl),
         (false, false) => None,
     }
 }
 
 /// Record an explicit, human-issued override: mark `keys` settled for
 /// `(session_id, rules_dir)` and append one audit-log entry per key, noting
-/// how it was issued (`source`) and which gate had denied the rule. Updates
+/// how it was issued (`source`) and which gate was blocking the rule. Updates
 /// the session itself under [`update`]'s lock, so the caller does not need
 /// to separately `load`/`store`, and a concurrent hook's write cannot drop it.
+/// Returns that gate for each of `keys`, read from the same locked copy the
+/// override was recorded on, for the caller's events and reply.
 pub fn record_override_with(
     session_id: &str,
     rules_dir: &std::path::Path,
     keys: &[String],
     reason: Option<&str>,
     source: OverrideSource,
-) {
+) -> Vec<Option<OverrideGate>> {
+    let mut gates = Vec::new();
     update(session_id, rules_dir, |session| {
-        record_overrides_in(session, session_id, rules_dir, keys, reason, source)
+        gates = record_overrides_in(session, session_id, rules_dir, keys, reason, source);
     });
+    gates
 }
 
 fn record_overrides_in(
@@ -691,19 +719,21 @@ fn record_overrides_in(
     keys: &[String],
     reason: Option<&str>,
     source: OverrideSource,
-) {
+) -> Vec<Option<OverrideGate>> {
     let at = Utc::now();
     let rules_dir_str = rules_dir.display().to_string();
     let round = session.effort_rounds();
+    let mut gates = Vec::with_capacity(keys.len());
     for key in keys {
         let gate = denying_gate(session, key);
+        gates.push(gate);
         session.overrides.push(Override {
             key: key.clone(),
             reason: reason.map(str::to_string),
             at,
             round,
             source,
-            gate: gate.clone(),
+            gate,
         });
         append_audit(&AuditEntry {
             at,
@@ -719,6 +749,7 @@ fn record_overrides_in(
             total: None,
         });
     }
+    gates
 }
 
 /// Append one round-limit audit-log entry per still-conflicting key. Does
@@ -1013,9 +1044,9 @@ mod tests {
         let mut session = GovernanceSession::default();
         session.record_denial(ArtifactKind::Plan, &k);
         session.record_denial(ArtifactKind::Diff, &k);
-        assert_eq!(denying_gate(&session, &k).as_deref(), Some("both"));
+        assert_eq!(denying_gate(&session, &k), Some(OverrideGate::Both));
         session.plan.begin_round();
-        assert_eq!(denying_gate(&session, &k).as_deref(), Some("impl"));
+        assert_eq!(denying_gate(&session, &k), Some(OverrideGate::Impl));
         session.diff.begin_round();
         assert_eq!(denying_gate(&session, &k), None);
     }

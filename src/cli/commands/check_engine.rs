@@ -18,7 +18,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::cli::args::{PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice};
+use crate::cli::args::{OverrideVia, PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice};
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
@@ -916,7 +916,7 @@ fn send_override_events(
     keys: &[String],
     reason: &str,
     source: governance_session::OverrideSource,
-    gates: &[Option<String>],
+    gates: &[Option<governance_session::OverrideGate>],
 ) {
     use crate::api::types::{
         PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
@@ -957,7 +957,11 @@ fn send_override_events(
                 reason_len: Some(reason_len),
                 reason_hash: reason_hash.clone(),
                 override_source: Some(source.as_str().to_string()),
-                override_gate: gates.get(i).cloned().flatten(),
+                override_gate: gates
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .map(|gate| gate.as_str().to_string()),
                 ..Default::default()
             };
             identity.apply_to(&mut properties);
@@ -1197,15 +1201,6 @@ pub(super) fn override_keys(
         .map(move |rule| governance_session::key(&slug, &rule.id))
 }
 
-/// The gate that had denied each of `keys` (see
-/// [`governance_session::denying_gate`]), read before the override is recorded.
-fn override_gates(session_id: &str, rules_dir: &Path, keys: &[String]) -> Vec<Option<String>> {
-    let session = governance_session::load(session_id, rules_dir);
-    keys.iter()
-        .map(|k| governance_session::denying_gate(&session, k))
-        .collect()
-}
-
 /// Every `<doc-slug>::<rule-id>` the corpus under `rules_dir` defines.
 fn corpus_rule_keys(rules_dir: &Path) -> Result<Vec<String>, ActualError> {
     let report = crate::rules::parse_rule_sources(crate::rules::read_rule_sources_in(rules_dir)?);
@@ -1355,14 +1350,13 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     if let Err(e) = validate_override_rules(&rules_dir, &keys) {
         return say(format!("Nothing was overridden: {e}"));
     }
-    let source = if args.via == "dialog" {
-        governance_session::OverrideSource::SessionDialog
-    } else {
-        governance_session::OverrideSource::SessionPrompt
+    let source = match args.via {
+        OverrideVia::Prompt => governance_session::OverrideSource::SessionPrompt,
+        OverrideVia::Dialog => governance_session::OverrideSource::SessionDialog,
     };
     let reason = parsed.reason.as_deref();
-    let gates = override_gates(&session_id, &rules_dir, &keys);
-    governance_session::record_override_with(&session_id, &rules_dir, &keys, reason, source);
+    let gates =
+        governance_session::record_override_with(&session_id, &rules_dir, &keys, reason, source);
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &keys, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
@@ -1432,14 +1426,19 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     })?;
     let reason = args.reason.as_deref().filter(|r| !r.trim().is_empty());
     let source = governance_session::OverrideSource::Terminal;
-    let gates = override_gates(session_id, &rules_dir, &args.rules);
-    governance_session::record_override_with(session_id, &rules_dir, &args.rules, reason, source);
+    // The gates only feed telemetry here.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let gates = governance_session::record_override_with(
+        session_id,
+        &rules_dir,
+        &args.rules,
+        reason,
+        source,
+    );
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &args.rules, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
     super::override_telemetry::report(&rules_dir, session_id, &args.rules);
-    #[cfg(not(feature = "telemetry"))]
-    let _ = gates;
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", session_id);
@@ -4413,7 +4412,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -4434,7 +4433,7 @@ pub(crate) mod tests {
             repo: Some(repo.to_path_buf()),
             rules_dir: None,
             claude_hook: true,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         }
     }
 
@@ -4470,7 +4469,7 @@ pub(crate) mod tests {
         governance_session::store("sess-d1", &rules_dir, &session);
 
         let args = PlanCheckOverrideArgs {
-            via: "dialog".to_string(),
+            via: OverrideVia::Dialog,
             ..hook_args(repo.path())
         };
         let out = exec_override_hook_with(
@@ -4556,7 +4555,10 @@ pub(crate) mod tests {
             session.overrides[0].source,
             governance_session::OverrideSource::SessionPrompt
         );
-        assert_eq!(session.overrides[0].gate.as_deref(), Some("plan"));
+        assert_eq!(
+            session.overrides[0].gate,
+            Some(governance_session::OverrideGate::Plan)
+        );
         let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"source\":\"session_prompt\""), "{log}");
         assert!(log.contains("\"gate\":\"plan\""), "{log}");
@@ -4747,7 +4749,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
 
         let events =
@@ -4830,7 +4832,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
 
         let events =
@@ -4984,7 +4986,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
 
         let events =
@@ -5023,7 +5025,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
 
         let events =
@@ -5089,7 +5091,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -5130,7 +5132,7 @@ pub(crate) mod tests {
             repo: None,
             rules_dir: Some(rules_dir.path().to_path_buf()),
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -5156,7 +5158,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("R-A-999"));
@@ -5187,7 +5189,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("no-such-doc::R-A-001"));
@@ -5210,7 +5212,7 @@ pub(crate) mod tests {
             repo: None,
             rules_dir: Some(missing),
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         assert!(exec_override_impl(&args).is_err());
     }
@@ -5237,7 +5239,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         assert!(exec_override_impl(&args).is_err());
         assert_eq!(
@@ -5267,7 +5269,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
         let err = exec_override_impl(&args).unwrap_err();
         let message = err.to_string();
@@ -5340,7 +5342,7 @@ pub(crate) mod tests {
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
             claude_hook: false,
-            via: "prompt".to_string(),
+            via: OverrideVia::Prompt,
         };
 
         let events =
