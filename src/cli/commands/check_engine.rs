@@ -4681,6 +4681,60 @@ pub(crate) mod tests {
         );
     }
 
+    /// A bare rule id that two documents define is ambiguous: nothing is
+    /// overridden, and the reply names both full keys to choose from.
+    #[test]
+    fn test_override_hook_refuses_an_ambiguous_bare_rule_id() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC), ("other.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+
+        let out = exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-amb", "/override R-A-001"),
+        )
+        .unwrap();
+        assert!(out.contains("'R-A-001' is ambiguous"), "{out}");
+        assert!(
+            out.contains("doc::R-A-001") && out.contains("other::R-A-001"),
+            "{out}"
+        );
+        assert!(!out.contains("\"overridden\""), "{out}");
+        assert!(governance_session::load("sess-amb", &rules_dir)
+            .overrides
+            .is_empty());
+    }
+
+    /// A rule a gate denied whose document has since been removed resolves
+    /// from the session but not the corpus: nothing is overridden, rather than
+    /// recording a key no gate will ever match again.
+    #[test]
+    fn test_override_hook_refuses_a_denied_rule_gone_from_the_corpus() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let gone = governance_session::key("removed", "R-GONE-001");
+        let mut session = governance_session::load("sess-gone", &rules_dir);
+        session.plan.record_denial(&gone);
+        governance_session::store("sess-gone", &rules_dir, &session);
+
+        let out = exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-gone", "/override R-GONE-001"),
+        )
+        .unwrap();
+        assert!(out.contains("Nothing was overridden"), "{out}");
+        assert!(out.contains("R-GONE-001"), "{out}");
+        assert!(!out.contains("\"overridden\""), "{out}");
+        assert!(governance_session::load("sess-gone", &rules_dir)
+            .overrides
+            .is_empty());
+    }
+
     /// Anything but a `UserPromptSubmit` `/override` records nothing --
     /// specifically the tool-event shapes an agent's own actions produce.
     #[test]
@@ -5170,6 +5224,30 @@ pub(crate) mod tests {
             governance_session::load("sess-cli-unknown-rule", &rules_dir),
             GovernanceSession::default()
         );
+    }
+
+    /// Clap requires `--session` unless `--claude-hook` is given, but the
+    /// terminal path still refuses without one rather than recording an
+    /// override against no session.
+    #[test]
+    fn test_exec_override_impl_requires_a_session() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let args = PlanCheckOverrideArgs {
+            session: None,
+            rules: vec![governance_session::key("doc", "R-A-001")],
+            reason: None,
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+            claude_hook: false,
+            via: OverrideVia::Prompt,
+        };
+        let err = exec_override_impl(&args).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)), "{err:?}");
+        assert!(err.to_string().contains("--session is required"), "{err}");
     }
 
     /// Same as the unknown-rule case, but the document slug itself is wrong
