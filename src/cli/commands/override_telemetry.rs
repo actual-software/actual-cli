@@ -10,11 +10,13 @@
 //! same override run twice makes two. A rule file without a v2 header has no
 //! ADR id, so it sends nothing.
 //!
-//! **Which gates had denied it.** `actual.gate.denied_types` names each gate,
-//! `planning` or `implementation`, whose loop in this session had denied one
-//! of the rules the record's ADR was overridden for, read from the deny counts
-//! the gates keep. Empty means the human overrode before any denial, which
-//! tells a pre-emptive override from the override of a real breach. The record
+//! **Which gates it was blocking.** `actual.gate.denied_types` names each
+//! gate, `planning` or `implementation`, whose latest decision in this session
+//! denied one of the rules the record's ADR was overridden for (see
+//! [`LoopState::blocking`](super::governance_session::LoopState::blocking)).
+//! Empty means none of them was blocking when overridden — overridden before
+//! any denial, or after a later round stopped denying it — which tells a
+//! pre-emptive override from the override of a live breach. The record
 //! never carries the reason the human gave.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
@@ -57,7 +59,8 @@ pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
 }
 
 /// The logical ADRs among the files `keys` name, each with the gates, plan
-/// first, whose loop in `session` had denied a rule it was overridden for.
+/// first, whose latest decision in `session` denied a rule it was overridden
+/// for.
 fn overridden_adrs(
     documents: &[RuleDocument],
     keys: &[String],
@@ -86,11 +89,7 @@ fn overridden_adrs(
                 ("implementation", &session.diff),
             ]
             .into_iter()
-            .filter(|(_, state)| {
-                overridden
-                    .iter()
-                    .any(|key| state.deny_counts.get(*key).is_some_and(|&count| count > 0))
-            })
+            .filter(|(_, state)| overridden.iter().any(|key| state.is_blocking(key)))
             .map(|(stage, _)| stage)
             .collect();
             (adr, denied_gates)
@@ -303,6 +302,31 @@ pub(super) mod tests {
             );
 
             report(rules, SESSION, &[rule("rotation", "adr-rotate", 2)]);
+            assert_eq!(
+                reported(),
+                [(
+                    "adr-rotate".to_string(),
+                    json!(["adr-rotate"]),
+                    json!(["implementation"])
+                )]
+            );
+        });
+    }
+
+    /// A gate that denied the rule in an earlier round, but not its latest,
+    /// is not reported as a denial being overridden.
+    #[test]
+    fn test_denied_gates_skip_a_gate_whose_latest_round_did_not_deny() {
+        with_rules(WITH_FILE, |_, rules| {
+            let key = rule("rotation", "adr-rotate", 1);
+            deny(rules, ArtifactKind::Plan, &key);
+            deny(rules, ArtifactKind::Diff, &key);
+            let mut session = governance_session::load(SESSION, rules);
+            session.plan.begin_round();
+            governance_session::store(SESSION, rules, &session);
+
+            report(rules, SESSION, &[key]);
+
             assert_eq!(
                 reported(),
                 [(

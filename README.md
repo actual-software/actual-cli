@@ -263,11 +263,13 @@ actual status                                  # check managed markers and stale
 
 In Claude Code, the skill checks your agent's work against the rule documents committed in `.actual/rules/`. When your agent leaves plan mode, the skill runs `actual plan-check` on the plan before you see the approval dialog. At the end of every turn, it runs `actual impl-check` on the changes. A conflict goes back to the agent with the rule and the reason, and the turn continues until it's fixed.
 
-Governance never gets in the way of unrelated work. Infrastructure failures fail open, and an unresolved rule stops blocking after three denied rounds per session. To clear a denied rule for the rest of the session, run this from an interactive terminal:
+Governance never gets in the way of unrelated work. Infrastructure failures fail open, and an unresolved rule stops blocking after three denied rounds per session. To clear a denied rule for the rest of the session, type this as a message in the session, or pick the rule in the dialog that opens when a gate denies:
 
-```bash
-actual check-override --session <id> --rule <doc-slug>::<rule-id> --reason "..."
 ```
+/actual-cli:override <rule-id> [reason]
+```
+
+`/actual-cli:override all` clears every rule a gate is blocking now. You can also run `actual check-override --session <id> --rule <doc-slug>::<rule-id>` from an ordinary terminal, outside Claude Code, with an optional `--reason "..."`. An override applies to both gates for the rest of the session.
 
 Every round and override is recorded in `~/.actualai/actual/plan-check-overrides.log`. Governance relies on Claude Code hooks, which the skill installs.
 

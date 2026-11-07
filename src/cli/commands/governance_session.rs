@@ -72,7 +72,7 @@
 //! override and a round-limit pass, and must outlive the session cache entry
 //! that triggered it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -99,6 +99,10 @@ const V2_FORMAT_VERSION: u32 = 2;
 
 /// Subdirectory of the config directory holding per-session state.
 const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
+
+/// The lock file in [`SESSIONS_DIR_NAME`] that serializes every session
+/// write (see [`with_lock`]). Not `.json`, so pruning never removes it.
+const SESSIONS_LOCK_NAME: &str = "sessions.lock";
 
 /// Filename of the append-only override/round-limit audit log, directly
 /// under the config directory (not the sessions subdirectory: it must
@@ -140,12 +144,33 @@ pub struct LoopState {
     /// zero and gets its own full budget, no matter how exhausted some other
     /// rule's count already is — see the module doc.
     pub deny_counts: BTreeMap<String, u32>,
+    /// `"{doc_slug}::{rule_id}"` of every rule this loop's latest decision
+    /// denied — what `/override all` targets. Unlike `deny_counts`, this is
+    /// replaced every judged round (see [`begin_round`](Self::begin_round))
+    /// and emptied when the gate finds nothing blocks without judging (no
+    /// rule applies, or every applicable one is already cleared or
+    /// overridden), so a rule fixed since, or no longer judged at all (it
+    /// dropped out of selection or past the cap), stops counting. A round the
+    /// round limit let through still records its rules: they were judged
+    /// conflicting. A fail-open outcome (no runner, a failed judge call)
+    /// leaves it alone: nothing was decided.
+    pub blocking: BTreeSet<String>,
 }
 
 impl LoopState {
+    /// Start a completed judge round: count it and forget the previous
+    /// round's blocking rules. Call before this round's
+    /// [`record_denial`](Self::record_denial)s, and never for a fail-open
+    /// outcome, where nothing was judged.
+    pub fn begin_round(&mut self) {
+        self.rounds += 1;
+        self.blocking.clear();
+    }
+
     /// Record one more denial of `key` in this loop and return its new total.
     /// Called exactly once per conflicting rule per round.
     pub fn record_denial(&mut self, key: &str) -> u32 {
+        self.blocking.insert(key.to_string());
         let count = self.deny_counts.entry(key.to_string()).or_insert(0);
         *count += 1;
         *count
@@ -157,6 +182,12 @@ impl LoopState {
     /// other rule's count stands.
     pub fn deny_limit_exceeded(&self, key: &str, max_rounds: u32) -> bool {
         self.deny_counts.get(key).is_some_and(|&n| n > max_rounds)
+    }
+
+    /// True when this loop's latest judged round denied `key` (see
+    /// [`blocking`](Self::blocking)).
+    pub fn is_blocking(&self, key: &str) -> bool {
+        self.blocking.contains(key)
     }
 }
 
@@ -200,10 +231,72 @@ pub struct TurnStart {
 pub struct Override {
     /// `"{doc_slug}::{rule_id}"`.
     pub key: String,
-    pub reason: String,
+    /// Optional: an override is a decision, and a stated reason is
+    /// encouraged but not required. Files written before reasons became
+    /// optional always carry a string, which still loads.
+    #[serde(default)]
+    pub reason: Option<String>,
     pub at: DateTime<Utc>,
     /// The round this override was recorded during, for the audit trail.
     pub round: u32,
+    /// How the override was issued. Defaults to [`OverrideSource::Terminal`]
+    /// for entries written before provenance was recorded.
+    #[serde(default)]
+    pub source: OverrideSource,
+    /// Which gate(s) were blocking the rule when it was overridden. `None`
+    /// when neither was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<OverrideGate>,
+}
+
+/// Which gate(s) were blocking a rule when it was overridden (see
+/// [`denying_gate`]). Stored as `"plan"`, `"impl"` or `"both"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverrideGate {
+    Plan,
+    Impl,
+    Both,
+}
+
+impl OverrideGate {
+    // Only telemetry events carry these names.
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverrideGate::Plan => "plan",
+            OverrideGate::Impl => "impl",
+            OverrideGate::Both => "both",
+        }
+    }
+}
+
+/// How an explicit override reached the CLI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverrideSource {
+    /// A human ran `actual check-override` from an ordinary terminal.
+    #[default]
+    Terminal,
+    /// A human typed `/actual-cli:override` as a prompt in the session, and
+    /// the actual-cli plugin's mod recorded it from that prompt, which Claude
+    /// Code stamps as typed at the prompt box.
+    SessionPrompt,
+    /// A human chose an override in the dialog the actual-cli plugin's mod
+    /// raises when a gate denies.
+    SessionDialog,
+}
+
+impl OverrideSource {
+    // Only telemetry events carry these names.
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverrideSource::Terminal => "terminal",
+            OverrideSource::SessionPrompt => "session_prompt",
+            OverrideSource::SessionDialog => "session_dialog",
+        }
+    }
 }
 
 impl GovernanceSession {
@@ -299,6 +392,70 @@ fn sessions_dir() -> Option<PathBuf> {
         .map(|dir| dir.join(SESSIONS_DIR_NAME))
 }
 
+/// Hold an exclusive lock on the sessions directory while `f` runs, so one
+/// process's load-change-store cannot interleave with another's. Several
+/// processes write one session file: `/override` and `impl-check`'s turn-start
+/// record both run on `UserPromptSubmit`, and check rounds of parallel tool
+/// calls or subagents overlap each other and either of those. Without this,
+/// the last writer's stale copy silently drops the other's change — an
+/// override the user was told was recorded, for one.
+///
+/// One lock for the whole directory rather than one per session: every
+/// critical section is a single small read and write (never a judge call),
+/// and [`store`]'s pruning touches other sessions' files too. Best-effort
+/// like the rest of this module: when the lock cannot be taken, `f` runs
+/// unlocked.
+fn with_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = sessions_dir().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(dir.join(SESSIONS_LOCK_NAME)).ok()?;
+        file.lock().ok()?;
+        Some(file)
+    });
+    f()
+}
+
+/// Load the session for `(session_id, rules_dir)`, apply `change`, and store
+/// the result, all under [`with_lock`], so a concurrent writer's change is
+/// never overwritten by a copy read before it. Returns the session as stored.
+/// Skips the write when `change` changed nothing.
+pub fn update(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    change: impl FnOnce(&mut GovernanceSession),
+) -> GovernanceSession {
+    with_lock(|| {
+        let before = load(session_id, rules_dir);
+        let mut session = before.clone();
+        change(&mut session);
+        if session != before {
+            store_unlocked(session_id, rules_dir, &session);
+        }
+        session
+    })
+}
+
+/// Store a finished check round: replace only `kind`'s loop state on a fresh
+/// copy of the session, under [`with_lock`]. A check hook holds its session
+/// across a judge call that can take seconds; storing that whole copy would
+/// drop any override, turn start or other gate's round written meanwhile.
+/// Two concurrent rounds of the *same* gate still race on that gate's loop
+/// state, and the later one wins — merging their counts is not worth it.
+pub fn store_loop(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    kind: ArtifactKind,
+    state: &LoopState,
+) {
+    update(session_id, rules_dir, |session| {
+        *session.loop_state_mut(kind) = state.clone();
+    });
+}
+
 /// The on-disk key for `(session_id, rules_dir)`: `rules_dir`'s *path* is
 /// hashed in alongside `session_id`, not its content — see the module doc's
 /// "identity" note for why two repos with identical rule text must still
@@ -367,19 +524,27 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             rounds: v2.rounds,
             cleared: v2.cleared,
             deny_counts: v2.deny_counts,
+            blocking: BTreeSet::new(),
         },
         diff: LoopState::default(),
         turn_start: None,
     }
 }
 
-/// Persist `session` for `(session_id, rules_dir)`. Best-effort: a write
-/// failure costs this session's memory, not the hook call.
+/// Persist `session` for `(session_id, rules_dir)`, replacing whatever is on
+/// disk. Best-effort: a write failure costs this session's memory, not the
+/// hook call. Production writers use [`update`] or [`store_loop`] instead, so
+/// they never overwrite a concurrent change; this is for tests seeding state.
 ///
 /// Also opportunistically prunes session files older than [`SESSION_MAX_AGE`]
 /// — bounded by one directory listing, so the cost stays proportional to how
 /// many sessions are actually on disk rather than growing unbounded.
+#[cfg(test)]
 pub fn store(session_id: &str, rules_dir: &std::path::Path, session: &GovernanceSession) {
+    with_lock(|| store_unlocked(session_id, rules_dir, session));
+}
+
+fn store_unlocked(session_id: &str, rules_dir: &std::path::Path, session: &GovernanceSession) {
     let Some(path) = session_path(session_id, rules_dir) else {
         return;
     };
@@ -453,9 +618,16 @@ struct AuditEntry {
     /// [`AuditKind::RoundLimit`]. Empty for [`AuditKind::PartialCoverage`],
     /// which is not about any one rule — see `judged`/`total` instead.
     key: String,
-    reason: String,
+    /// `None` for an [`AuditKind::Override`] issued without a reason.
+    reason: Option<String>,
     round: u32,
     kind: AuditKind,
+    /// Provenance of an [`AuditKind::Override`]; absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<OverrideSource>,
+    /// Gate(s) that had denied the rule; see [`Override::gate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate: Option<OverrideGate>,
     /// How many candidate rules were actually judged this round. Present
     /// only for [`AuditKind::PartialCoverage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,40 +659,97 @@ fn append_audit(entry: &AuditEntry) {
     let _ = crate::config::paths::append_secure(&path, line.as_bytes());
 }
 
-/// Record an explicit, human-issued override: mark `keys` settled for
-/// `(session_id, rules_dir)` and append one audit-log entry per key. Loads-
-/// and-stores the session itself, so the caller does not need to separately
-/// `load`/`store`.
+/// Record an explicit, human-issued override from a terminal. See
+/// [`record_override_with`]. Test convenience; production callers pass a source.
+#[cfg(test)]
 pub fn record_override(
     session_id: &str,
     rules_dir: &std::path::Path,
     keys: &[String],
     reason: &str,
 ) {
-    let mut session = load(session_id, rules_dir);
+    let reason = Some(reason).filter(|r| !r.trim().is_empty());
+    let _ = record_override_with(
+        session_id,
+        rules_dir,
+        keys,
+        reason,
+        OverrideSource::Terminal,
+    );
+}
+
+/// Which gate(s) `key` is currently blocking in `session` (see
+/// [`LoopState::is_blocking`]): `"plan"`, `"impl"`, `"both"`.
+pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGate> {
+    let plan = session.plan.is_blocking(key);
+    let diff = session.diff.is_blocking(key);
+    match (plan, diff) {
+        (true, true) => Some(OverrideGate::Both),
+        (true, false) => Some(OverrideGate::Plan),
+        (false, true) => Some(OverrideGate::Impl),
+        (false, false) => None,
+    }
+}
+
+/// Record an explicit, human-issued override: mark `keys` settled for
+/// `(session_id, rules_dir)` and append one audit-log entry per key, noting
+/// how it was issued (`source`) and which gate was blocking the rule. Updates
+/// the session itself under [`update`]'s lock, so the caller does not need
+/// to separately `load`/`store`, and a concurrent hook's write cannot drop it.
+/// Returns that gate for each of `keys`, read from the same locked copy the
+/// override was recorded on, for the caller's events and reply.
+pub fn record_override_with(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    keys: &[String],
+    reason: Option<&str>,
+    source: OverrideSource,
+) -> Vec<Option<OverrideGate>> {
+    let mut gates = Vec::new();
+    update(session_id, rules_dir, |session| {
+        gates = record_overrides_in(session, session_id, rules_dir, keys, reason, source);
+    });
+    gates
+}
+
+fn record_overrides_in(
+    session: &mut GovernanceSession,
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    keys: &[String],
+    reason: Option<&str>,
+    source: OverrideSource,
+) -> Vec<Option<OverrideGate>> {
     let at = Utc::now();
     let rules_dir_str = rules_dir.display().to_string();
     let round = session.effort_rounds();
+    let mut gates = Vec::with_capacity(keys.len());
     for key in keys {
+        let gate = denying_gate(session, key);
+        gates.push(gate);
         session.overrides.push(Override {
             key: key.clone(),
-            reason: reason.to_string(),
+            reason: reason.map(str::to_string),
             at,
             round,
+            source,
+            gate,
         });
         append_audit(&AuditEntry {
             at,
             session_id: session_id.to_string(),
             rules_dir: rules_dir_str.clone(),
             key: key.clone(),
-            reason: reason.to_string(),
+            reason: reason.map(str::to_string),
             round,
             kind: AuditKind::Override,
+            source: Some(source),
+            gate,
             judged: None,
             total: None,
         });
     }
-    store(session_id, rules_dir, &session);
+    gates
 }
 
 /// Append one round-limit audit-log entry per still-conflicting key. Does
@@ -541,9 +770,11 @@ pub fn record_round_limit(
             session_id: session_id.to_string(),
             rules_dir: rules_dir_str.clone(),
             key: key.clone(),
-            reason: reason.to_string(),
+            reason: Some(reason.to_string()),
             round,
             kind: AuditKind::RoundLimit,
+            source: None,
+            gate: None,
             judged: None,
             total: None,
         });
@@ -571,12 +802,14 @@ pub fn record_partial_coverage(
         session_id: session_id.to_string(),
         rules_dir: rules_dir.display().to_string(),
         key: String::new(),
-        reason: format!(
+        reason: Some(format!(
             "only {judged} of {total} applicable rules were judged this round; the rest were \
              not evaluated"
-        ),
+        )),
         round,
         kind: AuditKind::PartialCoverage,
+        source: None,
+        gate: None,
         judged: Some(judged),
         total: Some(total),
     });
@@ -782,6 +1015,42 @@ mod tests {
         assert!(session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
     }
 
+    /// `deny_counts` never shrinks, so a rule denied once must stop reading
+    /// as blocking after any later round that does not deny it -- whether
+    /// that round cleared it or never judged it -- and start again when a
+    /// later round denies it.
+    #[test]
+    fn test_is_blocking_tracks_only_the_latest_round() {
+        let k = key("doc", "R-A");
+        let mut state = LoopState::default();
+        assert!(!state.is_blocking(&k));
+        state.begin_round();
+        state.record_denial(&k);
+        assert!(state.is_blocking(&k));
+        state.begin_round();
+        assert!(!state.is_blocking(&k));
+        assert_eq!(state.deny_counts.get(&k), Some(&1));
+        assert_eq!(state.rounds, 2);
+        state.begin_round();
+        state.record_denial(&k);
+        assert!(state.is_blocking(&k));
+    }
+
+    /// The audit gate names only the gate(s) whose latest round denied the
+    /// rule.
+    #[test]
+    fn test_denying_gate_skips_a_gate_whose_latest_round_did_not_deny() {
+        let k = key("doc", "R-A");
+        let mut session = GovernanceSession::default();
+        session.record_denial(ArtifactKind::Plan, &k);
+        session.record_denial(ArtifactKind::Diff, &k);
+        assert_eq!(denying_gate(&session, &k), Some(OverrideGate::Both));
+        session.plan.begin_round();
+        assert_eq!(denying_gate(&session, &k), Some(OverrideGate::Impl));
+        session.diff.begin_round();
+        assert_eq!(denying_gate(&session, &k), None);
+    }
+
     #[test]
     fn test_deny_limit_exceeded_false_for_a_never_denied_key() {
         let session = GovernanceSession::default();
@@ -808,9 +1077,11 @@ mod tests {
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
             key: key("doc", "R-over"),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: Utc::now(),
             round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
         });
 
         assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v1"));
@@ -836,13 +1107,102 @@ mod tests {
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
             key: key("doc", "R-over"),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: Utc::now(),
             round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
         });
 
         assert!(!session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v2"));
         assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-over"), "digest-v2"));
+    }
+
+    /// A check round holds its session across a judge call. Storing that
+    /// stale copy must keep an override and a turn start recorded meanwhile,
+    /// and the other gate's loop state.
+    #[test]
+    fn test_store_loop_keeps_changes_written_since_the_copy_was_loaded() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        let k = key("doc", "R-A");
+        let mut stale = load("session-race", &rd());
+
+        record_override("session-race", &rd(), std::slice::from_ref(&k), "approved");
+        let turn = TurnStart {
+            root: PathBuf::from("/repo"),
+            head: "a".repeat(40),
+        };
+        update("session-race", &rd(), |s| s.turn_start = Some(turn.clone()));
+        update("session-race", &rd(), |s| {
+            s.diff.record_denial(&key("doc", "R-B"));
+        });
+
+        stale.plan.begin_round();
+        stale.plan.record_denial(&k);
+        store_loop("session-race", &rd(), ArtifactKind::Plan, &stale.plan);
+
+        let loaded = load("session-race", &rd());
+        assert_eq!(loaded.overrides.len(), 1);
+        assert_eq!(loaded.overrides[0].key, k);
+        assert_eq!(loaded.turn_start, Some(turn));
+        assert_eq!(loaded.diff.deny_counts.get(&key("doc", "R-B")), Some(&1));
+        assert_eq!(loaded.plan, stale.plan);
+    }
+
+    /// `/override` and the turn-start record both run on `UserPromptSubmit`;
+    /// whichever finishes second must keep the other's change.
+    #[test]
+    fn test_update_keeps_an_override_recorded_by_another_writer() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        record_override("session-turn-race", &rd(), &[key("doc", "R-A")], "ok");
+        update("session-turn-race", &rd(), |s| {
+            s.turn_start = Some(TurnStart {
+                root: PathBuf::from("/repo"),
+                head: "b".repeat(40),
+            });
+        });
+        let loaded = load("session-turn-race", &rd());
+        assert_eq!(loaded.overrides.len(), 1);
+        assert!(loaded.turn_start.is_some());
+    }
+
+    /// An `update` that changes nothing writes nothing -- the turn-start
+    /// record runs on every prompt.
+    #[test]
+    fn test_update_without_a_change_does_not_write() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        update("session-noop", &rd(), |_| {});
+        assert!(!session_path("session-noop", &rd()).unwrap().exists());
+    }
+
+    /// Concurrent writers each add their own override; with the lock, none
+    /// is lost. Each thread opens the lock file itself, so they contend
+    /// exactly as separate processes would.
+    #[test]
+    fn test_concurrent_updates_lose_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        record_override(
+                            "session-concurrent",
+                            &rd(),
+                            &[key("doc", &format!("R-{t}-{i}"))],
+                            "ok",
+                        );
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(load("session-concurrent", &rd()).overrides.len(), 80);
     }
 
     #[test]
@@ -1006,9 +1366,11 @@ mod tests {
 
         session.overrides.push(Override {
             key: key.clone(),
-            reason: "reviewed".to_string(),
+            reason: Some("reviewed".to_string()),
             at: Utc::now(),
             round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
         });
         assert!(session.excludes(ArtifactKind::Plan, &key, "other-plan"));
         assert!(session.excludes(ArtifactKind::Diff, &key, "other-diff"));
