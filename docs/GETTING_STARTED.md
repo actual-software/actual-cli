@@ -40,7 +40,7 @@ Verify it works: `actual --version`
 
 ### Check a downloaded release
 
-Releases after v0.11.0 carry `SHA256SUMS`, which lists every archive, and `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list. Check the signature first:
+From v0.12.0, the release workflow publishes `SHA256SUMS`, which lists every archive, on both the [source release page](https://github.com/actual-software/actual-cli/releases) and the [releases mirror](https://github.com/actual-software/actual-releases/releases). A signer adds `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list, by hand after publication. A new release can remain unsigned until that step finishes; if the signature is missing, try again later. Releases through v0.11.0 carry neither file. For a signed release, check the signature first:
 
 ```bash
 curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
