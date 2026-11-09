@@ -18,7 +18,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::cli::args::{OverrideVia, PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice};
+use crate::cli::args::{
+    OverrideGateArg, OverrideVia, PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice,
+};
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
@@ -1246,20 +1248,15 @@ fn parse_override_prompt(prompt: &str) -> Option<OverridePrompt> {
     })
 }
 
-/// Resolve an `/override` target to full rule keys: `all` is every rule either
-/// gate's latest judged round denied (see [`governance_session::LoopState::blocking`])
-/// that is not already overridden — a rule denied earlier and since fixed or no
-/// longer judged is left out, since an override would turn it off for the rest
-/// of the session.
-/// Otherwise the target is matched (exactly) against blocking rules first, then
-/// the whole corpus, by bare rule id or full key. Ambiguity or no match is an
-/// `Err` message for the user — never a guess.
-fn resolve_override_target(
-    session: &GovernanceSession,
-    rules_dir: &Path,
-    target: &str,
-) -> Result<Vec<String>, String> {
-    let blocking = |k: &&String| session.plan.is_blocking(k) || session.diff.is_blocking(k);
+/// The rules `gate` is blocking now, sorted: every rule its latest judged round
+/// denied (see [`governance_session::LoopState::blocking`]) that is not already
+/// overridden. With no gate, either gate's.
+fn blocking_keys(session: &GovernanceSession, gate: Option<OverrideGateArg>) -> Vec<String> {
+    let blocking = |k: &&String| match gate {
+        Some(OverrideGateArg::Plan) => session.plan.is_blocking(k),
+        Some(OverrideGateArg::Impl) => session.diff.is_blocking(k),
+        None => session.plan.is_blocking(k) || session.diff.is_blocking(k),
+    };
     let mut denied: Vec<String> = session
         .plan
         .deny_counts
@@ -1271,9 +1268,37 @@ fn resolve_override_target(
         .collect();
     denied.sort();
     denied.dedup();
+    denied
+}
+
+/// Resolve an `/override` target to full rule keys: `all` is every rule `gate`
+/// is blocking now ([`blocking_keys`]; either gate's when `gate` is `None`) — a
+/// rule denied earlier and since fixed or no longer judged is left out, since
+/// an override would turn it off for the rest of the session, and so is a rule
+/// only the other gate is denying, which the user answering this gate's denial
+/// was never shown.
+/// Otherwise the target is matched (exactly) against those blocking rules
+/// first, then the whole corpus, by bare rule id or full key. Ambiguity or no
+/// match is an `Err` message for the user — never a guess.
+fn resolve_override_target(
+    session: &GovernanceSession,
+    rules_dir: &Path,
+    target: &str,
+    gate: Option<OverrideGateArg>,
+) -> Result<Vec<String>, String> {
+    let denied = blocking_keys(session, gate);
     if target.eq_ignore_ascii_case("all") {
         return if denied.is_empty() {
-            Err("no rules are currently blocking in this session".to_string())
+            Err(match gate {
+                Some(OverrideGateArg::Plan) => {
+                    "no rules are currently blocking the plan in this session"
+                }
+                Some(OverrideGateArg::Impl) => {
+                    "no rules are currently blocking the changes in this session"
+                }
+                None => "no rules are currently blocking in this session",
+            }
+            .to_string())
         } else {
             Ok(denied)
         };
@@ -1316,6 +1341,19 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
         return None;
     }
     let session_id = env.session_id.filter(|s| !s.is_empty())?;
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    if args.list_blocking {
+        // Read-only: what the mod's dialog lists, from the same set `all`
+        // with this `--gate` would record.
+        let session = governance_session::load(&session_id, &rules_dir);
+        return Some(
+            serde_json::json!({ "blocking": blocking_keys(&session, args.gate) }).to_string(),
+        );
+    }
     let parsed = parse_override_prompt(env.prompt.as_deref()?)?;
     let say = |msg: String| {
         Some(
@@ -1332,13 +1370,8 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
              Tell them the syntax: {OVERRIDE_COMMAND} <rule-id|all> [reason]."
         ));
     }
-    let root = repo_root(args.repo.as_ref());
-    let rules_dir = args
-        .rules_dir
-        .clone()
-        .unwrap_or_else(|| crate::rules::rules_dir(&root));
     let session = governance_session::load(&session_id, &rules_dir);
-    let keys = match resolve_override_target(&session, &rules_dir, &parsed.target) {
+    let keys = match resolve_override_target(&session, &rules_dir, &parsed.target, args.gate) {
         Ok(keys) => keys,
         Err(msg) => {
             return say(format!(
@@ -4413,6 +4446,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -4434,6 +4469,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: true,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         }
     }
 
@@ -4470,6 +4507,8 @@ pub(crate) mod tests {
 
         let args = PlanCheckOverrideArgs {
             via: OverrideVia::Dialog,
+            gate: None,
+            list_blocking: false,
             ..hook_args(repo.path())
         };
         let out = exec_override_hook_with(
@@ -4639,6 +4678,111 @@ pub(crate) mod tests {
         );
     }
 
+    /// With `--gate`, `all` covers only that gate's blocking rules: the
+    /// mod's dialog answers one gate's denial, and a rule only the other gate
+    /// is denying was never shown to the user who chose "Override all".
+    #[test]
+    fn test_override_hook_all_with_a_gate_covers_only_that_gate() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let plan_only = governance_session::key("doc", "R-A-001");
+        let impl_only = governance_session::key("doc", "R-A-002");
+        let mut session = governance_session::load("sess-g1", &rules_dir);
+        session.plan.record_denial(&plan_only);
+        session.diff.record_denial(&impl_only);
+        governance_session::store("sess-g1", &rules_dir, &session);
+
+        let plan = PlanCheckOverrideArgs {
+            via: OverrideVia::Dialog,
+            gate: Some(OverrideGateArg::Plan),
+            ..hook_args(repo.path())
+        };
+        let out = exec_override_hook_with(
+            &plan,
+            &prompt_env("UserPromptSubmit", "sess-g1", "/actual-cli:override all"),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["overridden"], serde_json::json!([plan_only]));
+
+        // Nothing left blocking the plan: `all` refuses rather than reach
+        // into the other gate.
+        let out = exec_override_hook_with(
+            &plan,
+            &prompt_env("UserPromptSubmit", "sess-g1", "/actual-cli:override all"),
+        )
+        .unwrap();
+        assert!(
+            out.contains("no rules are currently blocking the plan"),
+            "{out}"
+        );
+
+        let out = exec_override_hook_with(
+            &PlanCheckOverrideArgs {
+                gate: Some(OverrideGateArg::Impl),
+                ..plan
+            },
+            &prompt_env("UserPromptSubmit", "sess-g1", "/actual-cli:override all"),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["overridden"], serde_json::json!([impl_only]));
+    }
+
+    /// `--list-blocking` prints the gate's blocking keys, the same set `all`
+    /// with that gate records, and records nothing. No prompt is needed.
+    #[test]
+    fn test_override_hook_list_blocking_reads_one_gate_and_records_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let plan_only = governance_session::key("doc", "R-A-001");
+        let impl_only = governance_session::key("doc", "R-A-002");
+        let mut session = governance_session::load("sess-l1", &rules_dir);
+        session.plan.record_denial(&plan_only);
+        session.diff.record_denial(&impl_only);
+        governance_session::store("sess-l1", &rules_dir, &session);
+
+        let list = |gate| {
+            let args = PlanCheckOverrideArgs {
+                gate: Some(gate),
+                list_blocking: true,
+                ..hook_args(repo.path())
+            };
+            let env =
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "sess-l1"});
+            let out = exec_override_hook_with(&args, &env.to_string()).expect("hook output");
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()
+        };
+        assert_eq!(
+            list(OverrideGateArg::Plan),
+            serde_json::json!({"blocking": [plan_only]})
+        );
+        assert_eq!(
+            list(OverrideGateArg::Impl),
+            serde_json::json!({"blocking": [impl_only]})
+        );
+        assert!(governance_session::load("sess-l1", &rules_dir)
+            .overrides
+            .is_empty());
+
+        // An overridden rule is no longer listed.
+        exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env("UserPromptSubmit", "sess-l1", "/override R-A-001"),
+        )
+        .unwrap();
+        assert_eq!(
+            list(OverrideGateArg::Plan),
+            serde_json::json!({"blocking": []})
+        );
+    }
+
     /// Naming a rule no gate is blocking still overrides it -- a pre-emptive
     /// override is legitimate -- but the reply says it was not blocking, so
     /// the user knows they turned off a rule that was passing.
@@ -4804,6 +4948,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
 
         let events =
@@ -4887,6 +5033,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
 
         let events =
@@ -5041,6 +5189,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
 
         let events =
@@ -5080,6 +5230,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
 
         let events =
@@ -5146,6 +5298,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -5187,6 +5341,8 @@ pub(crate) mod tests {
             rules_dir: Some(rules_dir.path().to_path_buf()),
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         assert!(exec_override_impl(&args).is_ok());
 
@@ -5213,6 +5369,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("R-A-999"));
@@ -5244,6 +5402,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(matches!(err, ActualError::ConfigError(_)), "{err:?}");
@@ -5268,6 +5428,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         assert!(err.to_string().contains("no-such-doc::R-A-001"));
@@ -5291,6 +5453,8 @@ pub(crate) mod tests {
             rules_dir: Some(missing),
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         assert!(exec_override_impl(&args).is_err());
     }
@@ -5318,6 +5482,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         assert!(exec_override_impl(&args).is_err());
         assert_eq!(
@@ -5348,6 +5514,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
         let err = exec_override_impl(&args).unwrap_err();
         let message = err.to_string();
@@ -5421,6 +5589,8 @@ pub(crate) mod tests {
             rules_dir: None,
             claude_hook: false,
             via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
         };
 
         let events =
