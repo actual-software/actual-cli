@@ -10,14 +10,23 @@
 //! same override run twice makes two. A rule file without a v2 header has no
 //! ADR id, so it sends nothing.
 //!
-//! **Which gates it was blocking.** `actual.gate.denied_types` names each
-//! gate, `planning` or `implementation`, whose latest decision in this session
-//! denied one of the rules the record's ADR was overridden for (see
+//! **Which gates had denied it.** `actual.gate.denied_types` names each gate,
+//! `planning` or `implementation`, whose loop in this session had denied one
+//! of the rules the record's ADR was overridden for at any point, read from
+//! the deny counts the gates keep. Empty means the human overrode before any
+//! denial. Its meaning is unchanged since 0.11.0, so stored records read the
+//! same across versions.
+//!
+//! **Which gates it was blocking.** `actual.override.blocking_types` names
+//! the gates whose latest decision denied one of those rules (see
 //! [`LoopState::blocking`](super::governance_session::LoopState::blocking)).
-//! Empty means none of them was blocking when overridden — overridden before
-//! any denial, or after a later round stopped denying it — which tells a
-//! pre-emptive override from the override of a live breach. The record
-//! never carries the reason the human gave.
+//! Empty means none was blocking when overridden — overridden before any
+//! denial, or after a later round stopped denying it — which tells a
+//! pre-emptive override from the override of a live breach.
+//!
+//! **How it was issued.** `actual.override.source` is `terminal`,
+//! `session_prompt` or `session_dialog`. The record never carries the reason
+//! the human gave.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved (a release build has its default), [`report`] returns before it
@@ -27,13 +36,14 @@ use std::path::Path;
 
 use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::override_keys;
-use super::governance_session::{self, GovernanceSession};
+use super::governance_session::{self, GovernanceSession, LoopState, OverrideSource};
 use crate::rules::types::RuleDocument;
 use crate::telemetry::otlp;
 
 /// Report the override of `keys` that `check-override` just recorded for
-/// `session_id`. Best-effort and silent, like the override's other events.
-pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
+/// `session_id`, issued via `source`. Best-effort and silent, like the
+/// override's other events.
+pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String], source: OverrideSource) {
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
     };
@@ -51,21 +61,34 @@ pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String]) {
     let origin = otlp::Origin::resolve();
     let records = adrs
         .iter()
-        .map(|(adr, denied_gates)| {
-            origin.overridden(session_id, &adr.key, &adr.adr_ids, denied_gates)
+        .map(|(adr, gates)| {
+            let gates = otlp::OverriddenGates {
+                denied: &gates.denied,
+                blocking: &gates.blocking,
+            };
+            origin.overridden(session_id, &adr.key, &adr.adr_ids, gates, source.as_str())
         })
         .collect();
     brief_telemetry::dispatch(&outputs, records);
 }
 
-/// The logical ADRs among the files `keys` name, each with the gates, plan
-/// first, whose latest decision in `session` denied a rule it was overridden
-/// for.
+/// The gates, planning first, an override record names.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Gates {
+    /// Gates whose loop in the session had denied an overridden rule.
+    denied: Vec<&'static str>,
+    /// Gates whose latest decision denied an overridden rule.
+    blocking: Vec<&'static str>,
+}
+
+/// The logical ADRs among the files `keys` name, each with the gates in
+/// `session` that had denied, and that were blocking, a rule it was
+/// overridden for.
 fn overridden_adrs(
     documents: &[RuleDocument],
     keys: &[String],
     session: &GovernanceSession,
-) -> Vec<(BriefedAdr, Vec<&'static str>)> {
+) -> Vec<(BriefedAdr, Gates)> {
     let named: Vec<(&RuleDocument, Vec<String>)> = documents
         .iter()
         .map(|document| {
@@ -84,15 +107,21 @@ fn overridden_adrs(
                 .filter(|(document, _)| adr_key(document).as_deref() == Some(adr.key.as_str()))
                 .flat_map(|(_, named)| named)
                 .collect();
-            let denied_gates = [
-                ("planning", &session.plan),
-                ("implementation", &session.diff),
-            ]
-            .into_iter()
-            .filter(|(_, state)| overridden.iter().any(|key| state.is_blocking(key)))
-            .map(|(stage, _)| stage)
-            .collect();
-            (adr, denied_gates)
+            let stages = |hit: fn(&LoopState, &str) -> bool| -> Vec<&'static str> {
+                [
+                    ("planning", &session.plan),
+                    ("implementation", &session.diff),
+                ]
+                .into_iter()
+                .filter(|(_, state)| overridden.iter().any(|key| hit(state, key)))
+                .map(|(stage, _)| stage)
+                .collect()
+            };
+            let gates = Gates {
+                denied: stages(|state, key| state.deny_counts.get(key).is_some_and(|&n| n > 0)),
+                blocking: stages(LoopState::is_blocking),
+            };
+            (adr, gates)
         })
         .collect()
 }
@@ -165,6 +194,11 @@ pub(super) mod tests {
         governance_session::key(slug, &format!("R-{adr_id}-{n}"))
     }
 
+    /// [`report`] for an override issued from a terminal.
+    fn report_from_terminal(rules: &Path, session_id: &str, keys: &[String]) {
+        report(rules, session_id, keys, OverrideSource::Terminal);
+    }
+
     fn deny(rules: &Path, kind: ArtifactKind, key: &str) {
         let mut session = governance_session::load(SESSION, rules);
         session.record_denial(kind, key);
@@ -172,8 +206,13 @@ pub(super) mod tests {
     }
 
     /// The records reported since the last call as (ADR ref, ADR ids, denied
-    /// gates), sorted by ref.
-    fn reported() -> Vec<(String, serde_json::Value, serde_json::Value)> {
+    /// gates, blocking gates), sorted by ref. Each was issued from a terminal.
+    fn reported() -> Vec<(
+        String,
+        serde_json::Value,
+        serde_json::Value,
+        serde_json::Value,
+    )> {
         let mut reported: Vec<_> = take_captured()
             .iter()
             .map(|record| {
@@ -181,6 +220,7 @@ pub(super) mod tests {
                 assert_eq!(attribute(record, "actual.gate.outcome"), "overridden");
                 assert_eq!(attribute(record, "actual.session.id"), SESSION);
                 assert_eq!(attribute(record, "actual.agent.id"), "");
+                assert_eq!(attribute(record, "actual.override.source"), "terminal");
                 (
                     attribute(record, "actual.adr.ref")
                         .as_str()
@@ -188,6 +228,7 @@ pub(super) mod tests {
                         .to_string(),
                     attribute(record, "actual.adr.ids"),
                     attribute(record, "actual.gate.denied_types"),
+                    attribute(record, "actual.override.blocking_types"),
                 )
             })
             .collect();
@@ -201,7 +242,7 @@ pub(super) mod tests {
     #[test]
     fn test_one_record_per_adr_listing_each_named_file() {
         with_rules(WITH_FILE, |_, rules| {
-            report(
+            report_from_terminal(
                 rules,
                 SESSION,
                 &[
@@ -214,10 +255,16 @@ pub(super) mod tests {
             assert_eq!(
                 reported(),
                 [
-                    ("adr-rotate".to_string(), json!(["adr-rotate"]), json!([])),
+                    (
+                        "adr-rotate".to_string(),
+                        json!(["adr-rotate"]),
+                        json!([]),
+                        json!([])
+                    ),
                     (
                         "grp-sign".to_string(),
                         json!(["adr-sign-1", "adr-sign-2"]),
+                        json!([]),
                         json!([])
                     ),
                 ]
@@ -234,10 +281,15 @@ pub(super) mod tests {
                 rule("signing-a1", "adr-sign-1", 1),
                 rule("signing-a1", "adr-sign-1", 2),
             ];
-            report(rules, SESSION, &keys);
-            report(rules, SESSION, &keys);
+            report_from_terminal(rules, SESSION, &keys);
+            report_from_terminal(rules, SESSION, &keys);
 
-            let expected = ("grp-sign".to_string(), json!(["adr-sign-1"]), json!([]));
+            let expected = (
+                "grp-sign".to_string(),
+                json!(["adr-sign-1"]),
+                json!([]),
+                json!([]),
+            );
             assert_eq!(reported(), [expected.clone(), expected]);
         });
     }
@@ -247,7 +299,7 @@ pub(super) mod tests {
     #[test]
     fn test_files_without_a_v2_header_send_nothing() {
         with_rules(WITH_FILE, |home, rules| {
-            report(
+            report_from_terminal(
                 rules,
                 SESSION,
                 &[governance_session::key("legacy", "R-B-001")],
@@ -258,8 +310,9 @@ pub(super) mod tests {
         });
     }
 
-    /// Each record names the gates, planning first, that had denied one of the
-    /// rules its ADR was overridden for, and only those rules.
+    /// Each record names the gates, planning first, that had denied, and that
+    /// are blocking, one of the rules its ADR was overridden for, and only
+    /// those rules.
     #[test]
     fn test_denied_gates_name_each_gate_that_denied_an_overridden_rule() {
         with_rules(WITH_FILE, |_, rules| {
@@ -279,7 +332,7 @@ pub(super) mod tests {
                 &rule("rotation", "adr-rotate", 2),
             );
 
-            report(
+            report_from_terminal(
                 rules,
                 SESSION,
                 &[
@@ -292,21 +345,28 @@ pub(super) mod tests {
             assert_eq!(
                 reported(),
                 [
-                    ("adr-rotate".to_string(), json!(["adr-rotate"]), json!([])),
+                    (
+                        "adr-rotate".to_string(),
+                        json!(["adr-rotate"]),
+                        json!([]),
+                        json!([])
+                    ),
                     (
                         "grp-sign".to_string(),
                         json!(["adr-sign-1", "adr-sign-2"]),
+                        json!(["planning", "implementation"]),
                         json!(["planning", "implementation"])
                     ),
                 ]
             );
 
-            report(rules, SESSION, &[rule("rotation", "adr-rotate", 2)]);
+            report_from_terminal(rules, SESSION, &[rule("rotation", "adr-rotate", 2)]);
             assert_eq!(
                 reported(),
                 [(
                     "adr-rotate".to_string(),
                     json!(["adr-rotate"]),
+                    json!(["implementation"]),
                     json!(["implementation"])
                 )]
             );
@@ -314,9 +374,10 @@ pub(super) mod tests {
     }
 
     /// A gate that denied the rule in an earlier round, but not its latest,
-    /// is not reported as a denial being overridden.
+    /// still counts as having denied it (`actual.gate.denied_types` keeps its
+    /// 0.11.0 meaning) but is not reported as blocking.
     #[test]
-    fn test_denied_gates_skip_a_gate_whose_latest_round_did_not_deny() {
+    fn test_blocking_gates_skip_a_gate_whose_latest_round_did_not_deny() {
         with_rules(WITH_FILE, |_, rules| {
             let key = rule("rotation", "adr-rotate", 1);
             deny(rules, ArtifactKind::Plan, &key);
@@ -325,13 +386,14 @@ pub(super) mod tests {
             session.plan.begin_round();
             governance_session::store(SESSION, rules, &session);
 
-            report(rules, SESSION, &[key]);
+            report_from_terminal(rules, SESSION, &[key]);
 
             assert_eq!(
                 reported(),
                 [(
                     "adr-rotate".to_string(),
                     json!(["adr-rotate"]),
+                    json!(["planning", "implementation"]),
                     json!(["implementation"])
                 )]
             );
@@ -348,7 +410,7 @@ pub(super) mod tests {
                 &rule("rotation", "adr-rotate", 1),
             );
 
-            report(rules, "s2", &[rule("rotation", "adr-rotate", 1)]);
+            report_from_terminal(rules, "s2", &[rule("rotation", "adr-rotate", 1)]);
 
             let records = take_captured();
             assert_eq!(records.len(), 1);
@@ -360,11 +422,32 @@ pub(super) mod tests {
         });
     }
 
+    /// The record says how the override was issued.
+    #[test]
+    fn test_record_names_how_the_override_was_issued() {
+        with_rules(WITH_FILE, |_, rules| {
+            let keys = [rule("rotation", "adr-rotate", 1)];
+            for source in [
+                OverrideSource::Terminal,
+                OverrideSource::SessionPrompt,
+                OverrideSource::SessionDialog,
+            ] {
+                report(rules, SESSION, &keys, source);
+                let records = take_captured();
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    attribute(&records[0], "actual.override.source"),
+                    source.as_str()
+                );
+            }
+        });
+    }
+
     /// No output set: nothing is built, and no install id is created.
     #[test]
     fn test_report_without_an_output_does_nothing() {
         with_rules("", |home, rules| {
-            report(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
+            report_from_terminal(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
 
             assert!(take_captured().is_empty());
             assert!(!home.join("telemetry-id").exists());
@@ -377,7 +460,7 @@ pub(super) mod tests {
     fn test_report_when_opted_out_does_nothing() {
         let opted_out = format!("{WITH_FILE}  enabled: false\n");
         with_rules(&opted_out, |home, rules| {
-            report(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
+            report_from_terminal(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
 
             assert!(take_captured().is_empty());
             assert!(!home.join("telemetry-id").exists());
@@ -385,7 +468,7 @@ pub(super) mod tests {
         with_rules(WITH_FILE, |home, rules| {
             let _no = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
 
-            report(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
+            report_from_terminal(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
 
             assert!(take_captured().is_empty());
             assert!(!home.join("telemetry-id").exists());
@@ -400,7 +483,7 @@ pub(super) mod tests {
         with_rules(config, |home, rules| {
             let sink = home.join("otlp.jsonl");
             let _file = EnvGuard::set("ACTUAL_OTLP_FILE", sink.to_str().unwrap());
-            report(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
+            report_from_terminal(rules, SESSION, &[rule("rotation", "adr-rotate", 1)]);
             built = take_captured().len();
         });
         built

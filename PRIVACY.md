@@ -352,7 +352,8 @@ Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
 on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.gate.evaluated` events, `actual.gate.type` on breach events and
-`actual.gate.denied_types` on override events. A check event adds
+`actual.gate.denied_types`, `actual.override.blocking_types` and
+`actual.override.source` on override events. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
 `actual.action.outcome`, `actual.action.warn_reasons` and
 `actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`. An unknown value is
@@ -376,7 +377,9 @@ has only the classes its fields carry below:
 | `actual.detection.method` | How the ADR was detected: `context` when a brief added it to an agent's context, or the gate that judged its rules, `planning` for `plan-check` and `implementation` for `impl-check` | anonymous |
 | `actual.gate.outcome` | What the evaluation came to: `breached` when a gate blocked on the ADR's rules, `overridden` when a human overrode them | anonymous |
 | `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | anonymous |
-| `actual.gate.denied_types` | Which gates, `planning` and `implementation`, were blocking any of the overridden rules when the human overrode them (the gate's latest check in the session denied it), and an empty list when none was: overridden before any denial, or after a later check stopped denying it | anonymous |
+| `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules at any point in the session, and an empty list when none had: overridden before any denial | anonymous |
+| `actual.override.blocking_types` | Which gates, `planning` and `implementation`, were blocking any of the overridden rules when the human overrode them (the gate's latest check in the session denied it), and an empty list when none was: overridden before any denial, or after a later check stopped denying it | anonymous |
+| `actual.override.source` | How the override was issued: `terminal` when a human ran `actual check-override`, `session_prompt` when they typed the override command in the session, `session_dialog` when they chose it in the plugin's dialog | anonymous |
 | `actual.session.end_reason` | The coarse reason Claude Code ended the session: `clear`, `resume`, `logout`, `prompt_input_exit` or `other` | anonymous |
 | `actual.session.last_check_blocked` | Whether the last completed hook check blocked; `false` when none completed | anonymous |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
