@@ -4720,16 +4720,29 @@ pub(crate) mod tests {
             "{out}"
         );
 
+        let implementation = PlanCheckOverrideArgs {
+            gate: Some(OverrideGateArg::Impl),
+            ..plan
+        };
         let out = exec_override_hook_with(
-            &PlanCheckOverrideArgs {
-                gate: Some(OverrideGateArg::Impl),
-                ..plan
-            },
+            &implementation,
             &prompt_env("UserPromptSubmit", "sess-g1", "/actual-cli:override all"),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["overridden"], serde_json::json!([impl_only]));
+
+        // And the same refusal, worded for the changes, once nothing is left
+        // blocking them.
+        let out = exec_override_hook_with(
+            &implementation,
+            &prompt_env("UserPromptSubmit", "sess-g1", "/actual-cli:override all"),
+        )
+        .unwrap();
+        assert!(
+            out.contains("no rules are currently blocking the changes"),
+            "{out}"
+        );
     }
 
     /// `--list-blocking` prints the gate's blocking keys, the same set `all`
