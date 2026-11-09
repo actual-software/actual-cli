@@ -1391,6 +1391,16 @@ pub enum OverrideVia {
     Dialog,
 }
 
+/// The gate whose denial an in-session override answers, for `check-override
+/// --claude-hook --gate`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverrideGateArg {
+    /// `plan-check`, the gate on a plan.
+    Plan,
+    /// `impl-check`, the gate on a turn's changes.
+    Impl,
+}
+
 /// Arguments for the `check-override` command (formerly `plan-check-override`,
 /// still accepted as a backward-compatible alias): a human, never the
 /// agent, explicitly clearing one or more rules that the revision loop
@@ -1461,6 +1471,22 @@ pub struct PlanCheckOverrideArgs {
     /// in the dialog the mod raises when a gate denies).
     #[arg(long, value_name = "HOW", value_enum, default_value_t = OverrideVia::Prompt, requires = "claude_hook")]
     pub via: OverrideVia,
+
+    /// With `--claude-hook`: the gate whose denial this override answers.
+    /// `all` then covers only the rules that gate is blocking now, and a bare
+    /// rule id is matched against that gate's blocking rules first. Without
+    /// it, `all` covers every rule either gate is blocking. The mod's dialog
+    /// passes it, so choosing "Override all" on a plan denial never turns off
+    /// a rule only `impl-check` was denying.
+    #[arg(long, value_name = "GATE", value_enum, requires = "claude_hook")]
+    pub gate: Option<OverrideGateArg>,
+
+    /// With `--claude-hook --gate`: record nothing, and print the rules that
+    /// gate is blocking now as `{"blocking": ["<doc-slug>::<rule-id>", ...]}`.
+    /// The mod lists these in its dialog, so what the user is shown is
+    /// exactly what `/actual-cli:override all` with the same `--gate` records.
+    #[arg(long, requires = "gate")]
+    pub list_blocking: bool,
 
     /// Repository root to resolve the rules directory against. Defaults to
     /// the current directory — run this from the repo the denial came from,
@@ -1753,6 +1779,44 @@ mod parse_tests {
         #[rustfmt::skip]
         let Command::PlanCheckOverride(args) = cli.command else { panic!("expected PlanCheckOverride command") };
         assert_eq!(args.rules, vec!["some-doc::R-A-001".to_string()]);
+    }
+
+    /// `--gate` belongs to the mod's hook mode, and `--list-blocking` needs a
+    /// gate to list.
+    #[test]
+    fn test_check_override_gate_and_list_blocking_parse_only_in_hook_mode() {
+        let cli = Cli::try_parse_from([
+            "actual",
+            "check-override",
+            "--claude-hook",
+            "--gate",
+            "impl",
+            "--list-blocking",
+        ])
+        .unwrap();
+        #[rustfmt::skip]
+        let Command::PlanCheckOverride(args) = cli.command else { panic!("expected PlanCheckOverride command") };
+        assert_eq!(args.gate, Some(OverrideGateArg::Impl));
+        assert!(args.list_blocking);
+
+        assert!(Cli::try_parse_from([
+            "actual",
+            "check-override",
+            "--session",
+            "s1",
+            "--rule",
+            "d::R-1",
+            "--gate",
+            "plan",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "actual",
+            "check-override",
+            "--claude-hook",
+            "--list-blocking"
+        ])
+        .is_err());
     }
 
     /// `--help` must document both the new primary name and the old one, so
