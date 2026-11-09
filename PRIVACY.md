@@ -150,7 +150,7 @@ Each event includes a subset of these properties:
 | `reason_len` | `check-override` only: the character length of the override reason |
 | `reason_hash` | `check-override` only: a one-way SHA-256 of the override reason (peppered server-side before PostHog) -- lets identical reasons group without exposing the text |
 | `override_source` | `check-override` only: how the override was issued -- `terminal`, `session_prompt` (typed as `/actual-cli:override` in the Claude Code session) or `session_dialog` (chosen in the dialog the plugin shows when a gate denies) |
-| `override_gate` | `check-override` only: which gate had denied the rule -- `plan`, `impl`, or `both` (absent if neither had) |
+| `override_gate` | `check-override` only: which gate was blocking the rule when it was overridden (that gate's latest check in the session denied it) -- `plan`, `impl`, or `both` (absent if neither was) |
 | `scope_run_id` | `rules select` only: a random per-run correlation id (not derived from any data) |
 | `rules_scanned` / `stage1_candidates` / `selected` | `rules select` only: counts of rules scanned, stage-1 candidates, and rules finally selected -- numbers only |
 | `stage2_invoked` / `stage2_status` | `rules select` only: whether the LLM rank ran, and its status/degradation (`applied`/`not-needed`/`unavailable`/…) |
