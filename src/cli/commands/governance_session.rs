@@ -782,7 +782,7 @@ pub fn record_round_limit(
 
 /// Append one audit-log entry recording that a round found nothing blocking
 /// but judged only `judged` of `total` applicable rules. Unlike
-/// [`record_override`] and [`record_round_limit`], this names no specific
+/// [`record_override_with`] and [`record_round_limit`], this names no specific
 /// rule key — the whole point is that the unjudged tail was never
 /// individually identified, only counted — so it is not keyed to any one
 /// rule and does not touch the session file itself. Exists so a coverage gap

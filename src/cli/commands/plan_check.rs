@@ -109,14 +109,17 @@
 //!    from cleared to blocking on a later round for no reason the agent
 //!    caused. An explicit override (below) is excluded the same way,
 //!    regardless of plan text.
-//! 3. **An explicit, recorded override.** A human runs
+//! 3. **An explicit, recorded override.** A human either runs
 //!    `actual check-override` directly, from an interactive terminal —
 //!    [`exec_override`]'s own doc comment explains why that check exists and
-//!    what it does and does not guarantee. An overridden rule is excluded
-//!    from judging from that point on, exactly like a cleared rule, but
-//!    every subsequent round says so out loud in a non-blocking notice: an
-//!    override is deliberately visible, not a silent bypass. See
-//!    [`governance_session::record_override`].
+//!    what it does and does not guarantee — or overrides from inside the
+//!    session, by typing `/actual-cli:override` or choosing an override in
+//!    the plugin's dialog, which the plugin records with `actual
+//!    check-override --claude-hook`. An overridden rule is excluded from
+//!    judging from that point on, exactly like a cleared rule, but every
+//!    subsequent round says so out loud in a non-blocking notice: an override
+//!    is deliberately visible, not a silent bypass. See
+//!    [`governance_session::record_override_with`].
 //! 4. **A bounded number of rounds, per rule.** [`DEFAULT_MAX_ROUNDS`] real
 //!    denials of the *same rule* (`--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS`
 //!    to change it) may block a session before the gate stops blocking on

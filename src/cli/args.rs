@@ -1380,18 +1380,6 @@ pub struct ImplCheckArgs {
     pub max_rounds: u32,
 }
 
-/// Arguments for the `check-override` command (formerly `plan-check-override`,
-/// still accepted as a backward-compatible alias): a human, never the
-/// agent, explicitly clearing one or more rules that the revision loop
-/// (`--claude-hook`) has denied, for a specific session.
-///
-/// [`crate::cli::commands::check_engine::exec_override`] refuses to run this
-/// from an agent's default tool-execution environment (see that function's
-/// doc for exactly what the terminal and `CLAUDECODE` checks do and do not
-/// close) — the whole point of an override is that it is a human decision,
-/// made outside the agent's control, and [`crate::cli::commands::governance_session::record_override`]
-/// writes a durable, append-only audit-log entry for every one, so an
-/// override is visible, never silent.
 /// How the user issued an in-session override, for `check-override
 /// --claude-hook --via`.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1403,6 +1391,18 @@ pub enum OverrideVia {
     Dialog,
 }
 
+/// Arguments for the `check-override` command (formerly `plan-check-override`,
+/// still accepted as a backward-compatible alias): a human, never the
+/// agent, explicitly clearing one or more rules that the revision loop
+/// (`--claude-hook`) has denied, for a specific session.
+///
+/// [`crate::cli::commands::check_engine::exec_override`] refuses to run this
+/// from an agent's default tool-execution environment (see that function's
+/// doc for exactly what the terminal and `CLAUDECODE` checks do and do not
+/// close) — the whole point of an override is that it is a human decision,
+/// made outside the agent's control, and [`crate::cli::commands::governance_session::record_override_with`]
+/// writes a durable, append-only audit-log entry for every one, so an
+/// override is visible, never silent.
 #[derive(Parser, Debug)]
 pub struct PlanCheckOverrideArgs {
     /// The session to override, as named in the deny message. One Claude
