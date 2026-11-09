@@ -1393,7 +1393,7 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &keys, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
-    super::override_telemetry::report(&rules_dir, &session_id, &keys);
+    super::override_telemetry::report(&rules_dir, &session_id, &keys, source);
     let not_blocking: Vec<&str> = keys
         .iter()
         .zip(&gates)
@@ -1471,7 +1471,7 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &args.rules, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
-    super::override_telemetry::report(&rules_dir, session_id, &args.rules);
+    super::override_telemetry::report(&rules_dir, session_id, &args.rules, source);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", session_id);
@@ -5319,6 +5319,11 @@ pub(crate) mod tests {
             attribute(record, "actual.gate.denied_types"),
             serde_json::json!(["planning"])
         );
+        assert_eq!(
+            attribute(record, "actual.override.blocking_types"),
+            serde_json::json!(["planning"])
+        );
+        assert_eq!(attribute(record, "actual.override.source"), "terminal");
         assert!(!record.to_string().contains("reviewed and accepted"));
     }
 

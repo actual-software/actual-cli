@@ -335,7 +335,7 @@ pub struct PlanGovernanceEventProperties {
     /// How the override was issued: `terminal`, `session_prompt` or `session_dialog`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_source: Option<String>,
-    /// Which gate had denied the overridden rule: `plan`, `impl`, or `both`.
+    /// Which gate was blocking the overridden rule (its latest check in the session denied it): `plan`, `impl`, or `both`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_gate: Option<String>,
     // --- Scope selection (scope_select events) ---

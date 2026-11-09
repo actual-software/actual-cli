@@ -314,6 +314,18 @@ fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The gates an override record names, each `planning` or `implementation`,
+/// planning first.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OverriddenGates<'a> {
+    /// Gates whose loop in the session had denied an overridden rule at any
+    /// point: `actual.gate.denied_types`.
+    pub denied: &'a [&'a str],
+    /// Gates whose latest check denied an overridden rule, so it was
+    /// blocking when overridden: `actual.override.blocking_types`.
+    pub blocking: &'a [&'a str],
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -369,19 +381,25 @@ impl Origin {
     }
 
     /// The [`GATE_EVALUATED`] record for one logical ADR a human overrode:
-    /// no agent, since a human ran the command, then the outcome, then the
-    /// gates whose loop in this session had denied the overridden rules.
+    /// no agent, since a human ran the command, then the outcome, the gates
+    /// whose loop in this session had denied the overridden rules at any
+    /// point (`actual.gate.denied_types`, unchanged since 0.11.0), the gates
+    /// that were blocking them when they were overridden, and how the
+    /// override was issued.
     pub(crate) fn overridden(
         &self,
         session_id: &str,
         adr_ref: &str,
         adr_ids: &[String],
-        denied_gates: &[&str],
+        gates: OverriddenGates<'_>,
+        source: &str,
     ) -> LogRecord {
         let mut record = self.adr_record(GATE_EVALUATED, session_id, None, adr_ref, adr_ids);
         record.attributes.extend([
             text("actual.gate.outcome", Some("overridden")),
-            strings("actual.gate.denied_types", denied_gates),
+            strings("actual.gate.denied_types", gates.denied),
+            strings("actual.override.blocking_types", gates.blocking),
+            text("actual.override.source", Some(source)),
         ]);
         record
     }
@@ -1236,8 +1254,8 @@ mod tests {
     }
 
     /// An override record carries the same attributes as a context record, in
-    /// the same order and with no agent, then its outcome and the gates that
-    /// had denied the overridden rules.
+    /// the same order and with no agent, then its outcome, the gates that had
+    /// denied the overridden rules, the gates blocking them, and its source.
     #[test]
     fn test_overridden_carries_the_common_attributes_then_the_outcome_and_gates() {
         let origin = origin(None);
@@ -1245,7 +1263,11 @@ mod tests {
             "session-1",
             "grp-1",
             &ids(&["adr-1", "adr-2"]),
-            &["planning", "implementation"],
+            OverriddenGates {
+                denied: &["planning", "implementation"],
+                blocking: &["implementation"],
+            },
+            "session_dialog",
         ));
         let context = record_json(&origin.context_added(
             "session-1",
@@ -1267,6 +1289,20 @@ mod tests {
         assert_eq!(
             overridden.pop().unwrap(),
             (
+                "actual.override.source".to_string(),
+                serde_json::json!({"stringValue": "session_dialog"})
+            )
+        );
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
+                "actual.override.blocking_types".to_string(),
+                serde_json::json!({"arrayValue": {"values": [{"stringValue": "implementation"}]}})
+            )
+        );
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
                 "actual.gate.denied_types".to_string(),
                 serde_json::json!({"arrayValue": {"values": [{"stringValue": "planning"}, {"stringValue": "implementation"}]}})
             )
@@ -1283,18 +1319,24 @@ mod tests {
         assert_eq!(overridden, context);
     }
 
-    /// An override before any denial sends the gate list empty, not absent.
+    /// An override before any denial sends both gate lists empty, not absent.
     #[test]
-    fn test_overridden_with_no_denial_sends_an_empty_list() {
-        let record = record_json(&origin(None).overridden("s", "adr-9", &ids(&["adr-9"]), &[]));
+    fn test_overridden_with_no_denial_sends_empty_lists() {
+        let record = record_json(&origin(None).overridden(
+            "s",
+            "adr-9",
+            &ids(&["adr-9"]),
+            OverriddenGates::default(),
+            "terminal",
+        ));
         let attributes = attributes(&record);
-        assert_eq!(
-            attributes.last().unwrap(),
-            &(
-                "actual.gate.denied_types".to_string(),
-                serde_json::json!({"arrayValue": {"values": []}})
-            )
-        );
+        let empty = serde_json::json!({"arrayValue": {"values": []}});
+        for key in ["actual.gate.denied_types", "actual.override.blocking_types"] {
+            assert!(
+                attributes.contains(&(key.to_string(), empty.clone())),
+                "{key} must be sent as an empty list"
+            );
+        }
     }
 
     /// Used and breached records carry the same attributes as a context
@@ -1855,8 +1897,23 @@ mod tests {
     fn test_an_override_request_round_trips_through_the_official_types() {
         let origin = origin(None);
         let records = [
-            origin.overridden("session-1", "grp-1", &ids(&["adr-1"]), &["planning"]),
-            origin.overridden("session-1", "adr-3", &ids(&["adr-3"]), &[]),
+            origin.overridden(
+                "session-1",
+                "grp-1",
+                &ids(&["adr-1"]),
+                OverriddenGates {
+                    denied: &["planning"],
+                    blocking: &["planning"],
+                },
+                "session_prompt",
+            ),
+            origin.overridden(
+                "session-1",
+                "adr-3",
+                &ids(&["adr-3"]),
+                OverriddenGates::default(),
+                "terminal",
+            ),
         ];
         let request = decoded(&records);
         let line: Value = serde_json::from_str(&json_request(&records)).unwrap();

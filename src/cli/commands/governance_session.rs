@@ -231,9 +231,9 @@ pub struct Override {
     /// `"{doc_slug}::{rule_id}"`.
     pub key: String,
     /// Optional: an override is a decision, and a stated reason is
-    /// encouraged but not required. Files written before reasons became
-    /// optional always carry a string, which still loads.
-    #[serde(default)]
+    /// encouraged but not required. Stored as a string either way, `""` for
+    /// none (see [`reason_on_disk`]).
+    #[serde(default, with = "reason_on_disk")]
     pub reason: Option<String>,
     pub at: DateTime<Utc>,
     /// The round this override was recorded during, for the audit trail.
@@ -246,6 +246,25 @@ pub struct Override {
     /// when neither was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<OverrideGate>,
+}
+
+/// [`Override::reason`] as stored: always a string, `""` for no reason.
+///
+/// 0.12.0 and earlier read `reason` as a required string, and a session file
+/// that fails to parse loads as an empty session the next store overwrites.
+/// Writing `null` would make an older binary on the same session drop its
+/// overrides, deny counts and clearances, so `None` goes out as `""`. Reading
+/// takes `""`, whitespace, `null` or a missing field as `None`.
+mod reason_on_disk {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(reason: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(reason.as_deref().unwrap_or(""))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        Ok(Option::<String>::deserialize(d)?.filter(|r| !r.trim().is_empty()))
+    }
 }
 
 /// Which gate(s) were blocking a rule when it was overridden (see
@@ -624,7 +643,7 @@ struct AuditEntry {
     /// Provenance of an [`AuditKind::Override`]; absent for other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<OverrideSource>,
-    /// Gate(s) that had denied the rule; see [`Override::gate`].
+    /// Gate(s) that were blocking the rule when it was overridden; see [`Override::gate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gate: Option<OverrideGate>,
     /// How many candidate rules were actually judged this round. Present
@@ -1470,5 +1489,66 @@ mod tests {
         };
         store("session-turn", &rd(), &session);
         assert_eq!(load("session-turn", &rd()).turn_start, Some(turn));
+    }
+
+    /// An override with no reason is stored as `"reason": ""`, never `null`,
+    /// so 0.12.0, which reads `reason` as a required string, still parses the
+    /// file instead of loading an empty session and overwriting it. It loads
+    /// back as `None`, and so do the `null` and missing forms.
+    #[test]
+    fn test_missing_reason_is_stored_as_an_empty_string_older_binaries_read() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+
+        record_override_with(
+            "session-no-reason",
+            &rd(),
+            &[key("doc", "R-A")],
+            None,
+            OverrideSource::SessionPrompt,
+        );
+        let path = session_path("session-no-reason", &rd()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["overrides"][0]["reason"], "");
+
+        // 0.12.0's `Override`: `reason` is a plain string with no default.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct V012Override {
+            key: String,
+            reason: String,
+            at: DateTime<Utc>,
+            round: u32,
+        }
+        let old: V012Override = serde_json::from_value(raw["overrides"][0].clone())
+            .expect("0.12.0 must still parse an override without a reason");
+        assert_eq!(old.reason, "");
+
+        assert_eq!(load("session-no-reason", &rd()).overrides[0].reason, None);
+        for stored in [
+            serde_json::json!({"key": "doc::R-A", "reason": null, "at": "2026-01-01T00:00:00Z", "round": 1}),
+            serde_json::json!({"key": "doc::R-A", "at": "2026-01-01T00:00:00Z", "round": 1}),
+            serde_json::json!({"key": "doc::R-A", "reason": "  ", "at": "2026-01-01T00:00:00Z", "round": 1}),
+        ] {
+            let read: Override = serde_json::from_value(stored).unwrap();
+            assert_eq!(read.reason, None);
+        }
+    }
+
+    /// A stated reason is stored and read back unchanged.
+    #[test]
+    fn test_stated_reason_roundtrips() {
+        let stored = Override {
+            key: key("doc", "R-A"),
+            reason: Some("reviewed".to_string()),
+            at: Utc::now(),
+            round: 1,
+            source: OverrideSource::Terminal,
+            gate: None,
+        };
+        let raw = serde_json::to_value(&stored).unwrap();
+        assert_eq!(raw["reason"], "reviewed");
+        assert_eq!(serde_json::from_value::<Override>(raw).unwrap(), stored);
     }
 }
