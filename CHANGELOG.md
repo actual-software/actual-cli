@@ -10,10 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Override a denied rule without leaving the session: type `/actual-cli:override <rule-id|all> [reason]` as a message, or choose an override in the dialog the actual-cli plugin opens when a gate denies. The plugin records it with `actual check-override --claude-hook`, whose contract is in [docs/CHECK_OVERRIDE_HOOK.md](docs/CHECK_OVERRIDE_HOOK.md). `all` covers only the rules a gate's latest check denied. A named rule that isn't blocking is still overridden, and the reply says so. Each override records how it was issued (`terminal`, `session_prompt` or `session_dialog`) and which gate was blocking it
 - The companion plugin's `SessionEnd` hook can send `actual.session.ended` with the session id, a coarse end reason and whether the last completed hook check blocked. A later hook check reopens a resumed conversation for its next end; repeated ends without a check are suppressed. Telemetry opt-out stops both the event and its local state. Killed sessions can't send the event, so they still need the inactivity fallback. See `PRIVACY.md`
-- `actual.gate.denied_types` on override events names the gates whose latest check denied an overridden rule, and is empty when none was blocking it
 
 ### Changed
 - `check-override`'s `--reason` is optional. An override without one is still recorded
+- `actual.gate.denied_types` on override events now names the gates whose latest check denied an overridden rule, and is empty when none was blocking it. 0.11.0 and 0.12.0 named any gate that had denied the rule earlier in the session, so the attribute's meaning differs across those versions
 
 ### Fixed
 - Concurrent hooks no longer lose each other's writes to a session's governance state. An override recorded while `impl-check` recorded the turn's starting commit, or while another check was judging, could be dropped after the user had been told it was recorded
