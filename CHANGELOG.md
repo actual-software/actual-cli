@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-10
+
 ### Added
 - Override a denied rule without leaving the session: type `/actual-cli:override <rule-id|all> [reason]` as a message, or choose an override in the dialog the actual-cli plugin opens when a gate denies. The plugin records it with `actual check-override --claude-hook`, whose contract is in [docs/CHECK_OVERRIDE_HOOK.md](docs/CHECK_OVERRIDE_HOOK.md). `all` covers only the rules a gate's latest check denied, and the dialog's "Override all" covers only the denying gate's (`--gate plan|impl`), listing exactly those rules first (`--list-blocking`). A named rule that isn't blocking is still overridden, and the reply says so. Each override records how it was issued (`terminal`, `session_prompt` or `session_dialog`) and which gate was blocking it. The OpenTelemetry override event adds them as `actual.override.source` and `actual.override.blocking_types`; `actual.gate.denied_types` keeps its 0.11.0 meaning, any gate that had denied the rule in the session
 - The companion plugin's `SessionEnd` hook can send `actual.session.ended` with the session id, a coarse end reason and whether the last completed hook check blocked. A later hook check reopens a resumed conversation for its next end; repeated ends without a check are suppressed. Telemetry opt-out stops both the event and its local state. Killed sessions can't send the event, so they still need the inactivity fallback. See `PRIVACY.md`
