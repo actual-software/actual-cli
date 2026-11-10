@@ -737,11 +737,22 @@ pub fn slug_terms(slug: &str) -> Vec<String> {
     terms(&segments.join(" "))
 }
 
-/// True for a short all-hex segment, the shape of a content hash.
+/// Hex characters of the hash every name the context sync generates ends in
+/// (8 bytes of a SHA-256).
+const GENERATED_NAME_HASH_LENGTH: usize = 16;
+
+/// True for a short all-hex segment, the shape of a content hash: 4 to 12 hex
+/// characters with a letter (older names), or the generated names' 16.
 fn is_content_hash(segment: &str) -> bool {
-    (4..=12).contains(&segment.len())
-        && segment.chars().all(|c| c.is_ascii_hexdigit())
-        && segment.chars().any(|c| c.is_ascii_alphabetic())
+    if !segment.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    match segment.len() {
+        // At this length an all-digit run is still a hash, not a word or a version.
+        GENERATED_NAME_HASH_LENGTH => true,
+        4..=12 => segment.chars().any(|c| c.is_ascii_alphabetic()),
+        _ => false,
+    }
 }
 
 /// A header `root` as clean repository-relative segments: empty and `.`
@@ -1376,6 +1387,35 @@ mod tests {
         assert!(!is_content_hash("2024"));
         assert!(!is_content_hash("tokens"));
         assert!(!is_content_hash("ab"));
+    }
+
+    /// Rule files the context sync writes end in 16 hex characters (8 bytes of a
+    /// SHA-256 that covers the ADR id), the one length every generated name uses.
+    #[test]
+    fn test_slug_terms_drops_a_16_hex_content_hash() {
+        assert_eq!(
+            slug_terms(
+                "cross-cutting-activities-returning-validation-errors-pass-f7bf6500768f7b2f"
+            ),
+            vec![
+                "cross",
+                "cutting",
+                "activity",
+                "returning",
+                "validation",
+                "error",
+                "pass"
+            ]
+        );
+    }
+
+    /// One 16-hex hash in about 1,800 has no letter; at that length it is still a
+    /// hash, not a word or a version.
+    #[test]
+    fn test_is_content_hash_accepts_an_all_digit_16_hex_hash() {
+        assert!(is_content_hash("f7bf6500768f7b2f"));
+        assert!(is_content_hash("1234567890123456"));
+        assert!(!is_content_hash("f7bf6500768f7b2f0"));
     }
 
     #[test]
