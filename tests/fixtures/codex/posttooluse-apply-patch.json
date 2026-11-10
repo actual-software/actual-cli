@@ -1,0 +1,15 @@
+{
+  "session_id": "01a1c2fe-a843-7991-862e-b76a1d09c348",
+  "turn_id": "01a1c2fe-a95b-7861-9799-a1738d81c1c9",
+  "transcript_path": "__FIXTURE_DIR__/codex-transcript-default.jsonl",
+  "cwd": "__REPO_ROOT__",
+  "model": "gpt-6-luna",
+  "permission_mode": "bypassPermissions",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: __REPO_ROOT__/src/app.ts\n@@\n-  return 42;\n+  return 43;\n*** End Patch"
+  },
+  "tool_response": "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM __REPO_ROOT__/src/app.ts\n",
+  "tool_use_id": "exec-24f8433c-456f-4fb0-bd07-14b3bab0d32d"
+}

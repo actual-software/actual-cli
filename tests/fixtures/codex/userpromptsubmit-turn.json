@@ -1,0 +1,10 @@
+{
+  "session_id": "01a1c301-6da3-7821-b56b-e8de710c84c7",
+  "turn_id": "01a1c301-6ddc-7472-aaa8-1a3eb266f254",
+  "transcript_path": "__FIXTURE_DIR__/codex-transcript-plan.jsonl",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6-luna",
+  "permission_mode": "default",
+  "prompt": "Plan how to add a function getUser(id) to src/app.ts that loads a user from the database. Keep the plan short (3 steps). Do not ask me any questions."
+}
