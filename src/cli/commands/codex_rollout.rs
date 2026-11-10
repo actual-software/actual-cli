@@ -19,7 +19,14 @@
 //!   no `turn_id`) holds the plan inside `<proposed_plan>…</proposed_plan>`.
 //!   It is the fallback when no `Plan` item was written, and is attributed to
 //!   the turn by position: everything after that turn's `task_started` and
-//!   before the next one.
+//!   before the next one;
+//! - a `Stop` hook's block starts a continuation in the same turn, which the
+//!   rollout marks with an `item_completed` whose `item.type` is
+//!   `"HookPrompt"`. The agent may answer it with a revised plan, or with a
+//!   final answer that proposes none (declining to revise, say). A plan the
+//!   continuation did not re-propose is withdrawn: checking it again would
+//!   block the turn over a plan nobody is proposing, round after round, until
+//!   the round limit (observed on Codex CLI 0.167.0).
 //!
 //! Codex documents the rollout as "not a stable interface", so everything here
 //! fails open: an unreadable file, a compressed (`.zst`) rollout, an unknown
@@ -47,7 +54,8 @@ pub struct TurnFacts {
     /// `Some(true)` when the turn ran in Plan mode, `Some(false)` in any other
     /// mode, `None` when the rollout never named the turn's mode.
     pub plan_mode: Option<bool>,
-    /// The latest plan the turn proposed, without its tags.
+    /// The plan the turn is proposing as it ends, without its tags: the
+    /// latest one, unless a continuation withdrew it.
     pub plan: Option<String>,
 }
 
@@ -108,8 +116,13 @@ fn scan(source: impl Read, turn_id: &str) -> TurnFacts {
 fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
     let mut facts = TurnFacts::default();
     let mut in_turn = false;
-    let mut item_plan: Option<String> = None;
-    let mut answer_plan: Option<String> = None;
+    let mut plan: Option<String> = None;
+    // A `Plan` item since the last continuation began: the final answer that
+    // follows repeats it, and the item's text wins.
+    let mut item_since_hook = false;
+    // A continuation began since the last plan was proposed: a final answer
+    // with no plan in it now withdraws that plan.
+    let mut hook_since_plan = false;
     let mut scanned: u64 = 0;
 
     for line in BufReader::new(source).lines() {
@@ -121,9 +134,10 @@ fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
         // Cheap prefilter: a line that mentions none of the markers cannot
         // matter, and most of a rollout is tool output.
         let task_started = line.contains("\"task_started\"");
-        let plan_item = line.contains("\"item_completed\"") && line.contains("\"Plan\"");
+        let item = line.contains("\"item_completed\"")
+            && (line.contains("\"Plan\"") || line.contains("\"HookPrompt\""));
         let answer = in_turn && line.contains("\"final_answer\"");
-        if !(task_started || plan_item || answer) {
+        if !(task_started || item || answer) {
             continue;
         }
         let Ok(parsed) = serde_json::from_str::<Line>(&line) else {
@@ -144,13 +158,20 @@ fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
                 }
             }
             (Some("event_msg"), Some("item_completed")) if this_turn => {
-                if let Some(text) = payload
-                    .item
-                    .filter(|item| item.kind.as_deref() == Some("Plan"))
-                    .and_then(|item| item.text)
-                    .filter(|text| !text.trim().is_empty())
-                {
-                    item_plan = Some(text);
+                let Some(item) = payload.item else { continue };
+                match item.kind.as_deref() {
+                    Some("Plan") => {
+                        if let Some(text) = item.text.filter(|text| !text.trim().is_empty()) {
+                            plan = Some(text);
+                            item_since_hook = true;
+                            hook_since_plan = false;
+                        }
+                    }
+                    Some("HookPrompt") => {
+                        item_since_hook = false;
+                        hook_since_plan = true;
+                    }
+                    _ => {}
                 }
             }
             (Some("response_item"), Some("message"))
@@ -163,14 +184,21 @@ fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
                     .into_iter()
                     .filter_map(|c| c.text)
                     .collect();
-                if let Some(plan) = proposed_plan(&text) {
-                    answer_plan = Some(plan);
+                match proposed_plan(&text) {
+                    Some(answer_plan) => {
+                        if !item_since_hook {
+                            plan = Some(answer_plan);
+                        }
+                        hook_since_plan = false;
+                    }
+                    None if hook_since_plan => plan = None,
+                    None => {}
                 }
             }
             _ => {}
         }
     }
-    facts.plan = item_plan.or(answer_plan);
+    facts.plan = plan;
     facts
 }
 
@@ -200,6 +228,12 @@ mod tests {
 
     fn answer(text: &str) -> String {
         serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":text}]}}).to_string()
+    }
+
+    /// The line a `Stop` block's continuation writes, as Codex CLI 0.167.0
+    /// writes it.
+    fn hook_prompt(turn: &str) -> String {
+        serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":turn,"item":{"type":"HookPrompt","id":"h","fragments":[{"text":"CONFLICT R-D-001","hook_run_id":"stop:4"}]}}}).to_string()
     }
 
     fn facts(lines: &[String]) -> TurnFacts {
@@ -271,6 +305,76 @@ mod tests {
             plan_item(TURN, "from item"),
         ]);
         assert_eq!(f.plan.as_deref(), Some("from item"));
+    }
+
+    /// Blocked, the agent answered the continuation without a plan (it
+    /// declined to revise): the plan is withdrawn, so the gate has nothing to
+    /// check again. The shape observed live on Codex CLI 0.167.0, where the
+    /// stale plan was otherwise blocked until the round limit.
+    #[test]
+    fn test_a_continuation_without_a_plan_withdraws_it() {
+        let f = facts(&[
+            task_started(TURN, "plan"),
+            plan_item(TURN, "draft"),
+            answer("<proposed_plan>\ndraft\n</proposed_plan>"),
+            hook_prompt(TURN),
+            answer("That plan conflicts with the rules, so I won't propose it."),
+        ]);
+        assert_eq!(f.plan_mode, Some(true));
+        assert_eq!(f.plan, None);
+    }
+
+    /// A continuation that revises the plan, as a `Plan` item or only in its
+    /// final answer, is checked on the revision.
+    #[test]
+    fn test_a_continuation_that_revises_is_checked_on_the_revision() {
+        let draft = [
+            task_started(TURN, "plan"),
+            plan_item(TURN, "draft"),
+            answer("<proposed_plan>\ndraft\n</proposed_plan>"),
+            hook_prompt(TURN),
+        ];
+        let mut by_item = draft.to_vec();
+        by_item.push(plan_item(TURN, "revised"));
+        by_item.push(answer("<proposed_plan>\nrevised\n</proposed_plan>"));
+        assert_eq!(facts(&by_item).plan.as_deref(), Some("revised"));
+
+        let mut by_answer = draft.to_vec();
+        by_answer.push(answer(
+            "<proposed_plan>\nrevised in the answer\n</proposed_plan>",
+        ));
+        assert_eq!(
+            facts(&by_answer).plan.as_deref(),
+            Some("revised in the answer")
+        );
+
+        // Withdrawn on one continuation, proposed again on the next.
+        let mut again = draft.to_vec();
+        again.push(answer("No plan this time."));
+        again.push(hook_prompt(TURN));
+        again.push(answer("<proposed_plan>\nback\n</proposed_plan>"));
+        assert_eq!(facts(&again).plan.as_deref(), Some("back"));
+    }
+
+    /// Without a continuation, a final answer that drops the tags does not
+    /// withdraw the turn's `Plan` item; and another turn's continuation is
+    /// not this turn's.
+    #[test]
+    fn test_only_this_turns_continuation_withdraws_a_plan() {
+        let f = facts(&[
+            task_started(TURN, "plan"),
+            plan_item(TURN, "kept"),
+            answer("The plan is above."),
+        ]);
+        assert_eq!(f.plan.as_deref(), Some("kept"));
+
+        let f = facts(&[
+            task_started(TURN, "plan"),
+            plan_item(TURN, "kept"),
+            hook_prompt("other"),
+            answer("Still the plan above."),
+        ]);
+        assert_eq!(f.plan.as_deref(), Some("kept"));
     }
 
     /// A blank `Plan` item and a final answer with no block leave no plan.
