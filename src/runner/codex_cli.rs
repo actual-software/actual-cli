@@ -208,6 +208,13 @@ fn build_codex_args(
         "exec".to_string(),
         "--sandbox".to_string(),
         sandbox.as_arg().to_string(),
+        // The judge's own session must not run the user's hooks: the
+        // actual-cli plugin's `Stop` hook would rerun `impl-check`, which
+        // spawns this judge again. `-c` rather than `--disable hooks`, because
+        // a Codex too old to know the `hooks` feature ignores an unknown
+        // config key but rejects an unknown feature name.
+        "-c".to_string(),
+        "features.hooks=false".to_string(),
     ];
     if let Some(m) = model {
         args.push("--model".to_string());
@@ -248,6 +255,10 @@ async fn run_codex_subprocess<T: serde::de::DeserializeOwned>(
     if let Some(key) = api_key {
         cmd.env("OPENAI_API_KEY", key);
     }
+    // The backstop for `features.hooks=false` in `build_codex_args`, as for
+    // the Claude runner: a hook that runs anyway sees this marker and stays
+    // silent. See `SUBPROCESS_MARKER_ENV`.
+    cmd.env(crate::runner::subprocess::SUBPROCESS_MARKER_ENV, "1");
     // When the timeout fires, the `wait_with_output` future is dropped, which drops
     // the `Child` it owns. With `kill_on_drop(true)`, tokio sends SIGKILL to the child
     // on drop, preventing orphaned processes.
@@ -884,11 +895,13 @@ echo '{json}' > "$OUTPUT_FILE"
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "--sandbox");
         assert_eq!(args[2], "workspace-write");
-        assert_eq!(args[3], "--model");
-        assert_eq!(args[4], "gpt-5");
-        assert_eq!(args[5], "--output-last-message");
-        assert_eq!(args[6], "/tmp/codex-output.txt");
-        assert_eq!(args[7], "my prompt");
+        assert_eq!(args[3], "-c");
+        assert_eq!(args[4], "features.hooks=false");
+        assert_eq!(args[5], "--model");
+        assert_eq!(args[6], "gpt-5");
+        assert_eq!(args[7], "--output-last-message");
+        assert_eq!(args[8], "/tmp/codex-output.txt");
+        assert_eq!(args[9], "my prompt");
     }
 
     #[test]
@@ -900,9 +913,11 @@ echo '{json}' > "$OUTPUT_FILE"
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "--sandbox");
         assert_eq!(args[2], "read-only");
-        assert_eq!(args[3], "--output-last-message");
-        assert_eq!(args[4], "/tmp/codex-output.txt");
-        assert_eq!(args[5], "my prompt");
+        assert_eq!(args[3], "-c");
+        assert_eq!(args[4], "features.hooks=false");
+        assert_eq!(args[5], "--output-last-message");
+        assert_eq!(args[6], "/tmp/codex-output.txt");
+        assert_eq!(args[7], "my prompt");
         // No --model flag — Codex CLI uses its own default
         assert!(
             !args.iter().any(|a| a == "--model"),
@@ -1038,6 +1053,7 @@ for arg in "$@"; do
     fi
 done
 echo "$OPENAI_API_KEY" > "{env_file}"
+echo "$ACTUAL_CLI_SUBPROCESS" >> "{env_file}"
 echo '{json}' > "$OUTPUT_FILE"
 "#,
             env_file = env_file.display(),
@@ -1056,8 +1072,12 @@ echo '{json}' > "$OUTPUT_FILE"
             .await
             .unwrap();
 
-        let captured_key = std::fs::read_to_string(&env_file).unwrap();
-        assert_eq!(captured_key.trim(), "sk-test-key-12345");
+        let captured = std::fs::read_to_string(&env_file).unwrap();
+        let mut lines = captured.lines();
+        assert_eq!(lines.next(), Some("sk-test-key-12345"));
+        // The judge is marked as this CLI's own subprocess, so the
+        // actual-cli plugin's hooks stay silent inside it.
+        assert_eq!(lines.next(), Some("1"));
     }
 
     // ---- Empty output file (exit 0, no content) with error in stdout ----
