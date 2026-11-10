@@ -284,8 +284,11 @@ actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--mi
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--ablate SIGNAL]... [--rebuild] [--json]
 actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 actual rules brief --claude-session-start [--repo PATH] [--rules-dir PATH]
+actual rules brief --codex-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S] [--max-session-chars N]
+actual rules brief --codex-session-start [--repo PATH] [--rules-dir PATH]
 actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 actual session summary --claude-hook [--repo PATH] [--rules-dir PATH]
+actual session summary --codex-hook [--repo PATH] [--rules-dir PATH]
 actual session summary --session ID [--repo PATH] [--rules-dir PATH] [--json]
 ```
 
@@ -293,7 +296,9 @@ actual session summary --session ID [--repo PATH] [--rules-dir PATH] [--json]
 `adr-header-v2`. The Actual Skill greps for that literal to learn that the CLI
 reads the v2 header, the same way it probes `UserPromptSubmit` in
 `impl-check --help`; a CLI without it is not asked to read v2 files. A test pins
-the literal, so it changes only together with that probe.
+the literal, so it changes only together with that probe. The Codex hooks probe
+the same way for `codex-hook`, which `plan-check --help`, `impl-check --help`
+and `rules brief --help` each name as `Capability marker: codex-hook`.
 
 `rules brief` is the hook's form of a selection: given the file an agent is
 about to touch, it names the decisions that govern it and their MUST rules.
@@ -307,6 +312,35 @@ the hook cannot grant or deny a tool call even by mistake. It is stage 1 only
 outside the repository, a missing rule set) is empty stdout and exit 0, so a
 broken brief never breaks an agent's edit loop. `--file` runs the same
 selection at a terminal and prints the brief as text.
+
+`--codex-hook` is the same brief for Codex, which has no file-reading tool and
+names files only inside a command. `PostToolUse` on `Bash` briefs the files a
+read-only shell command reads: every pipeline stage must start with a program
+that only prints what it reads (`cat`, `sed`, `head`, `tail`, `grep`, `rg`,
+`nl`, `wc` and a few more), with no `sed -i`, no output redirection other than
+to `/dev/null` or another descriptor, and no command substitution, heredoc or
+background job. Words are split the way a shell splits them, so a `|` inside a
+quoted pattern is not a pipe, and a leading `cd` chain moves the base the paths
+resolve from; a `cd` later in the command makes it ambiguous and briefs
+nothing. Of the words that look like a file with an extension, the first two
+that exist are briefed. `PreToolUse` on `apply_patch` briefs up to three files a
+patch's `*** Add File:`, `*** Update File:` and `*** Move to:` headers name,
+absolute or relative. The files of one call are briefed in turn against the
+same memory and arrive as one `additionalContext`, in the same reply shape
+Claude Code gets, which carries only keys Codex's strict hook parser accepts.
+Codex envelopes carry no `agent_id`, so a Codex session has one memory.
+`--codex-session-start` is `--claude-session-start` for a Codex `SessionStart`
+envelope.
+
+`--max-session-chars N` caps the characters of brief one session receives,
+counted in the session's record below across every agent. A brief that would
+cross the cap is dropped whole and is not recorded as delivered, so it stays
+eligible; the first time that happens the reply is a note that briefing has
+stopped, and after that the hook is silent (`no-brief=budget-spent`). `0` turns
+briefing off without the note. It applies in either hook mode and only with a
+`session_id`. The Codex hooks pass it; on Claude Code the actual-cli mod keeps
+its own budget instead, so the flag is deliberately not read from
+`ACTUAL_RULES_BRIEF_MAX_SESSION_CHARS`.
 
 Every path is placed from the repository root: `--repo`, else `<root>` when
 `--rules-dir` is `<root>/.actual/rules`, else the envelope's `cwd` under
