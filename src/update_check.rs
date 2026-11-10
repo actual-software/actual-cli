@@ -180,18 +180,23 @@ pub fn applies_to(command: &Command) -> bool {
         | Command::Models(_)
         | Command::Cache(_)
         | Command::PlanCheckOverride(_) => true,
-        Command::PlanCheck(args) => !(args.claude_hook || args.json),
-        Command::ImplCheck(args) => !(args.claude_hook || args.json),
+        Command::PlanCheck(args) => !(args.claude_hook || args.codex_hook || args.json),
+        Command::ImplCheck(args) => !(args.claude_hook || args.codex_hook || args.json),
         Command::Rules(rules) => match &rules.action {
             RulesAction::Ls(args) => !args.json,
             RulesAction::Index(args) => !args.json,
             RulesAction::Select(args) => !args.json,
             RulesAction::Eval(args) => !args.json,
-            RulesAction::Brief(args) => !(args.claude_hook || args.claude_session_start),
+            RulesAction::Brief(args) => {
+                !(args.claude_hook
+                    || args.claude_session_start
+                    || args.codex_hook
+                    || args.codex_session_start)
+            }
             RulesAction::ReportUse(_) => false,
         },
         Command::Session(session) => match &session.action {
-            SessionAction::Summary(args) => !(args.claude_hook || args.json),
+            SessionAction::Summary(args) => !(args.claude_hook || args.codex_hook || args.json),
         },
         Command::Adr(adr) => match &adr.action {
             AdrAction::New(args) => !args.json,

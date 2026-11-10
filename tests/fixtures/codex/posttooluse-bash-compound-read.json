@@ -1,0 +1,15 @@
+{
+  "session_id": "01a1c301-6da3-7821-b56b-e8de710c84c7",
+  "turn_id": "01a1c301-6ddc-7472-aaa8-1a3eb266f254",
+  "transcript_path": "__FIXTURE_DIR__/codex-transcript-plan.jsonl",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-6-luna",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "sed -n '1,240p' src/app.ts && rg -n \"getUser|user.*(find|query)|database|db\\.\" src"
+  },
+  "tool_response": "// entry point\nexport function main(): number {\n  return 43;\n}\n",
+  "tool_use_id": "exec-9096327d-045b-4726-a9da-fe822ae26451"
+}

@@ -1,0 +1,11 @@
+{
+  "session_id": "01a1c2fe-a843-7991-862e-b76a1d09c348",
+  "turn_id": "01a1c2fe-a95b-7861-9799-a1738d81c1c9",
+  "transcript_path": "__FIXTURE_DIR__/codex-transcript-default.jsonl",
+  "cwd": "__REPO_ROOT__",
+  "model": "gpt-6-luna",
+  "permission_mode": "bypassPermissions",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "DONE"
+}
