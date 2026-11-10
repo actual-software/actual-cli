@@ -49,7 +49,9 @@ use crate::rules::{RuleDocument, RuleLevel, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 10;
+///
+/// 11: a generated name's 16-hex hash is no longer read as slug terms.
+pub const INDEX_FORMAT_VERSION: u32 = 11;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

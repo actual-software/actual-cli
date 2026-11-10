@@ -329,6 +329,25 @@ mod tests {
         assert!(load(&dir, &index.content_digest).is_none());
     }
 
+    /// v10 read a generated name's 16-hex hash as words, so its slug terms
+    /// hold fragments such as `bf` from `...-pass-f7bf6500768f7b2f`. Upgrading
+    /// with unchanged rule files must rebuild such an index, not serve it.
+    #[test]
+    fn test_load_misses_on_a_v10_index_that_read_16_hex_hashes_as_words() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let repo = seed(&[("a.md", DOC)]);
+        let dir = rules_dir(repo.path());
+        let mut index = build(repo.path());
+        index.format_version = 10;
+        store(&dir, &index);
+
+        assert!(load(&dir, &index.content_digest).is_none());
+    }
+
     #[test]
     fn test_load_misses_on_an_absent_or_corrupt_entry() {
         let _lock = ENV_MUTEX.lock().unwrap();
