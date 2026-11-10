@@ -841,8 +841,22 @@ pub struct RulesBriefArgs {
     #[arg(long, conflicts_with_all = ["claude_hook", "file"])]
     pub claude_session_start: bool,
 
-    /// The file to brief, in direct mode. Ignored under `--claude-hook`,
-    /// which takes the path from the envelope.
+    /// Read a Codex hook envelope from stdin and emit the hook's JSON contract.
+    ///
+    /// Codex has no file-reading tool, so `PostToolUse` on `Bash` is the read
+    /// path: the files a read-only shell command names (`cat`, `sed -n`,
+    /// `head`, `grep`, ...) are briefed. `PreToolUse` on `apply_patch` briefs
+    /// the files a patch adds or updates. Every failure degrades to empty
+    /// stdout and exit 0. Capability marker: codex-hook
+    #[arg(long, conflicts_with_all = ["claude_hook", "claude_session_start", "file"])]
+    pub codex_hook: bool,
+
+    /// `--claude-session-start` for a Codex `SessionStart` envelope.
+    #[arg(long, conflicts_with_all = ["claude_hook", "claude_session_start", "codex_hook", "file"])]
+    pub codex_session_start: bool,
+
+    /// The file to brief, in direct mode. Ignored under `--claude-hook` and
+    /// `--codex-hook`, which take the path from the envelope.
     #[arg(long, value_name = "PATH")]
     pub file: Option<String>,
 
@@ -879,6 +893,17 @@ pub struct RulesBriefArgs {
         allow_hyphen_values = true
     )]
     pub min_score: Option<f64>,
+
+    /// Stop briefing once this many characters of briefs have been delivered
+    /// in one session, counted across every agent in it. The first brief that
+    /// would cross the line is dropped whole and replaced, once, by a note
+    /// saying briefing has stopped; 0 turns briefing off. Hook modes only,
+    /// and only with a `session_id`; unset means no cap. Deliberately not
+    /// read from `ACTUAL_RULES_BRIEF_MAX_SESSION_CHARS`: on Claude Code the
+    /// actual-cli mod enforces that cap itself, and a second one here would
+    /// add a second exhaustion note. The Codex hook forwards it as this flag.
+    #[arg(long, value_name = "CHARS")]
+    pub max_session_chars: Option<usize>,
 }
 
 /// Arguments for the `session` command
@@ -905,14 +930,19 @@ pub struct SessionSummaryArgs {
     #[arg(long)]
     pub claude_hook: bool,
 
+    /// The same for a Codex `Stop` envelope, printed as the hook's
+    /// `{"systemMessage": …}` reply so Codex shows it to the user.
+    #[arg(long, conflicts_with = "claude_hook")]
+    pub codex_hook: bool,
+
     /// The session to summarize, in direct mode, which prints the current
     /// line and never records it as shown. A rule set holding no decision
     /// has no line.
     #[arg(
         long,
         value_name = "ID",
-        required_unless_present = "claude_hook",
-        conflicts_with = "claude_hook"
+        required_unless_present_any = ["claude_hook", "codex_hook"],
+        conflicts_with_all = ["claude_hook", "codex_hook"]
     )]
     pub session: Option<String>,
 
@@ -927,7 +957,7 @@ pub struct SessionSummaryArgs {
 
     /// Print the counts, the decisions added, the areas with no ADR and the
     /// line as JSON, in direct mode.
-    #[arg(long, conflicts_with = "claude_hook")]
+    #[arg(long, conflicts_with_all = ["claude_hook", "codex_hook"])]
     pub json: bool,
 }
 
@@ -1167,8 +1197,8 @@ pub struct PlanCheckArgs {
     pub plan: Vec<String>,
 
     /// Read the plan from this file instead of the positional argument or
-    /// stdin. Ignored under `--claude-hook`.
-    #[arg(long, value_name = "PATH", conflicts_with = "claude_hook")]
+    /// stdin. Ignored under `--claude-hook` and `--codex-hook`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["claude_hook", "codex_hook"])]
     pub plan_file: Option<std::path::PathBuf>,
 
     /// Repository root to resolve rules and paths against. Defaults to the
@@ -1189,6 +1219,16 @@ pub struct PlanCheckArgs {
     /// than an error exit, per that contract.
     #[arg(long)]
     pub claude_hook: bool,
+
+    /// Parse a Codex `Stop` hook envelope from stdin and, when the turn that
+    /// just ended was in Plan mode, check the plan it proposed. Codex has no
+    /// `ExitPlanMode` tool, so the plan and the turn's mode are read from the
+    /// session rollout at the envelope's `transcript_path`; a turn in any
+    /// other mode, or one whose rollout cannot be read, prints nothing. A
+    /// conflict is a `{"decision":"block"}` reply that sends the agent back
+    /// to revise the plan. Capability marker: codex-hook
+    #[arg(long, conflicts_with = "claude_hook")]
+    pub codex_hook: bool,
 
     /// Maximum number of rule documents to judge the plan against.
     #[arg(long, default_value_t = 20)]
@@ -1288,8 +1328,8 @@ pub struct ImplCheckArgs {
     /// which always resolves the diff from the working tree (tracked changes
     /// plus untracked, non-ignored files, against the commit the turn started
     /// from when a `UserPromptSubmit` hook recorded one, otherwise against
-    /// `HEAD`).
-    #[arg(long, value_name = "PATH", conflicts_with = "claude_hook")]
+    /// `HEAD`). Ignored under `--codex-hook` for the same reason.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["claude_hook", "codex_hook"])]
     pub diff_file: Option<std::path::PathBuf>,
 
     /// Repository root to resolve rules, paths, and the working-tree diff
@@ -1318,6 +1358,13 @@ pub struct ImplCheckArgs {
     /// also sees work the agent committed, or committed and pushed, during it.
     #[arg(long)]
     pub claude_hook: bool,
+
+    /// The same check for a Codex `UserPromptSubmit` or `Stop` envelope. A
+    /// `Stop` that ends a Plan-mode turn checks nothing, since Plan mode makes
+    /// no edits; a conflict is a `{"decision":"block"}` reply. Capability
+    /// marker: codex-hook
+    #[arg(long, conflicts_with = "claude_hook")]
+    pub codex_hook: bool,
 
     /// Maximum number of rule documents to judge the diff against.
     #[arg(long, default_value_t = 20)]

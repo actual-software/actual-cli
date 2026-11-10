@@ -1,0 +1,14 @@
+{
+  "session_id": "01a1c2fe-a843-7991-862e-b76a1d09c348",
+  "turn_id": "01a1c2fe-a95b-7861-9799-a1738d81c1c9",
+  "transcript_path": "__FIXTURE_DIR__/codex-transcript-default.jsonl",
+  "cwd": "__REPO_ROOT__",
+  "model": "gpt-6-luna",
+  "permission_mode": "bypassPermissions",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cat src/app.ts"
+  },
+  "tool_use_id": "exec-7e1dd9dc-8986-454e-b69d-fbadca02f514"
+}

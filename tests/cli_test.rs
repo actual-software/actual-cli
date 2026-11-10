@@ -3117,3 +3117,257 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
                 && attribute["value"]["boolValue"] == true
         }));
 }
+
+// ── --codex-hook: the Codex modes end to end ────────────────────────────────
+//
+// Codex parses hook output strictly, so these assert the exact key set of each
+// reply as well as its content: a key Codex does not know fails the hook run.
+
+/// Every top-level key of the one JSON line `stdout` holds, sorted.
+fn codex_reply_keys(stdout: &[u8]) -> (Vec<String>, serde_json::Value) {
+    let text = String::from_utf8(stdout.to_vec()).unwrap();
+    assert_eq!(text.lines().count(), 1, "exactly one line: {text:?}");
+    let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    (keys, value)
+}
+
+/// A rollout under `dir` holding one turn `t1` in `mode`, proposing `plan`
+/// when given, and the Codex `Stop` envelope that ends it.
+fn codex_stop(dir: &std::path::Path, session: &str, mode: &str, plan: Option<&str>) -> String {
+    let rollout = dir.join("rollout-codex.jsonl");
+    let mut lines = vec![serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1","collaboration_mode_kind":mode}}).to_string()];
+    if let Some(plan) = plan {
+        lines.push(serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"Plan","id":"p","text":plan}}}).to_string());
+    }
+    std::fs::write(&rollout, lines.join("\n")).unwrap();
+    serde_json::json!({
+        "session_id": session,
+        "turn_id": "t1",
+        "transcript_path": rollout,
+        "cwd": dir,
+        "hook_event_name": "Stop",
+        "model": "gpt-6-luna",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": null,
+    })
+    .to_string()
+}
+
+/// Make the fake judge at `path` find R-A-001 violated.
+#[cfg(unix)]
+fn judge_finds_r_a_001_violated(path: &std::path::Path) {
+    let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A Plan-mode turn whose plan conflicts is sent back with a `Stop` block:
+/// `decision` and `reason`, and nothing Codex would reject.
+#[cfg(unix)]
+#[test]
+fn test_plan_check_codex_hook_blocks_a_conflicting_plan() {
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let stop = codex_stop(
+        fixture.repo.path(),
+        "sess-codex-1",
+        "plan",
+        Some("Sign access tokens with HS256"),
+    );
+
+    let output = fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(stop)
+        .assert()
+        .success();
+    let (keys, value) = codex_reply_keys(&output.get_output().stdout);
+    assert_eq!(keys, ["decision", "reason"]);
+    assert_eq!(value["decision"], "block");
+    let reason = value["reason"].as_str().unwrap();
+    assert!(reason.contains("R-A-001"), "{reason}");
+    assert!(reason.contains("outside Codex"), "{reason}");
+    assert!(!reason.contains("/actual-cli:override"), "{reason}");
+}
+
+/// Codex runs the plan gate on every `Stop`; a turn in any other mode prints
+/// nothing at all.
+#[cfg(unix)]
+#[test]
+fn test_plan_check_codex_hook_is_silent_outside_plan_mode() {
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let stop = codex_stop(
+        fixture.repo.path(),
+        "sess-codex-2",
+        "default",
+        Some("ignored"),
+    );
+    fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(stop)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+/// `--codex-hook` and `--claude-hook` are one mode or the other.
+#[test]
+fn test_codex_hook_conflicts_with_claude_hook() {
+    cmd()
+        .args(["plan-check", "--claude-hook", "--codex-hook"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+/// The implementation gate checks a default-mode turn's diff and blocks a
+/// conflict the same way; a Plan-mode turn is the plan gate's.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_codex_hook_checks_only_default_turns() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+
+    let output = fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(codex_stop(
+            fixture.repo.path(),
+            "sess-codex-3",
+            "default",
+            None,
+        ))
+        .assert()
+        .success();
+    let (keys, value) = codex_reply_keys(&output.get_output().stdout);
+    assert_eq!(keys, ["decision", "reason"]);
+    assert!(value["reason"].as_str().unwrap().contains("R-A-001"));
+
+    fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(codex_stop(
+            fixture.repo.path(),
+            "sess-codex-4",
+            "plan",
+            Some("a plan"),
+        ))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+/// A shell read of a governed file is briefed through `additionalContext`,
+/// and the `SessionStart` mode answers silently.
+#[test]
+fn test_rules_brief_codex_hook_briefs_a_shell_read() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo.path().join("services/auth")).unwrap();
+    std::fs::write(repo.path().join("services/auth/token.ts"), "jwt.sign()\n").unwrap();
+    let read = serde_json::json!({
+        "session_id": "s1",
+        "turn_id": "t1",
+        "cwd": repo.path(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cat services/auth/token.ts"},
+        "tool_response": "jwt.sign()\n",
+    })
+    .to_string();
+    let brief = |input: String| {
+        actual_in(
+            repo.path(),
+            config_dir.path(),
+            &["rules", "brief", "--codex-hook"],
+        )
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone()
+    };
+
+    let (keys, value) = codex_reply_keys(&brief(read.clone()));
+    assert_eq!(keys, ["hookSpecificOutput"]);
+    assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("R-A-001"));
+    assert!(brief(read).is_empty(), "briefed once per session");
+
+    let start = serde_json::json!({"session_id": "s1", "cwd": repo.path(), "hook_event_name": "SessionStart", "source": "compact"}).to_string();
+    actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["rules", "brief", "--codex-session-start"],
+    )
+    .write_stdin(start)
+    .assert()
+    .success()
+    .stdout(predicate::str::is_empty());
+}
+
+/// The session summary reaches Codex as a `systemMessage`, once per change.
+#[test]
+fn test_session_summary_codex_hook_reports_as_a_system_message() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    brief_a_read(repo.path(), config_dir.path());
+    let stop = stop_envelope(repo.path());
+    let summary = || {
+        actual_in(
+            repo.path(),
+            config_dir.path(),
+            &["session", "summary", "--codex-hook"],
+        )
+        .write_stdin(stop.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone()
+    };
+
+    let (keys, value) = codex_reply_keys(&summary());
+    assert_eq!(keys, ["systemMessage"]);
+    assert!(value["systemMessage"].as_str().unwrap().contains("ADR"));
+    assert!(summary().is_empty(), "unchanged, so not shown again");
+}
+
+/// The actual-cli plugin's Codex hooks probe for this mode by grepping
+/// `--help` for the literal below, as they probe `adr-header-v2`. It is a
+/// contract with that repository, so it is pinned for each command the Codex
+/// hooks call.
+#[test]
+fn test_codex_hook_capability_marker_is_in_each_commands_help() {
+    let commands: [&[&str]; 3] = [
+        &["plan-check", "--help"],
+        &["impl-check", "--help"],
+        &["rules", "brief", "--help"],
+    ];
+    for args in commands {
+        cmd()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Capability marker: codex-hook"));
+    }
+    cmd()
+        .args(["session", "summary", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--codex-hook"));
+}

@@ -36,6 +36,21 @@
 //! entry point for a `SessionStart` hook: on `compact` (and `clear`) it
 //! forgets what was briefed. Direct mode and an envelope without a
 //! `session_id` have no session and brief every time.
+//!
+//! **Codex.** `--codex-hook` answers the same question for Codex, which has no
+//! file-reading tool: `PostToolUse` on `Bash` briefs the files a read-only
+//! shell command names, and `PreToolUse` on `apply_patch` the files a patch
+//! writes (see [`super::codex_paths`]). Each file is briefed in turn against
+//! the same memory, so a second file adds only what the first did not, and the
+//! briefs arrive as one `additionalContext`. The reply shape is the one Claude
+//! Code gets, which is also exactly what Codex's schema allows.
+//!
+//! **A session budget.** `--max-session-chars` caps the characters of brief a
+//! session receives, counted in [`super::brief_ledger`] across every agent. A
+//! brief that would cross the cap is dropped whole, and the first time that
+//! happens the reply is a note saying briefing has stopped, so it never goes
+//! quietly dead. On Claude Code the actual-cli mod keeps this budget itself;
+//! the Codex hook, which has no mod, passes the flag.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Component, Path, PathBuf};
@@ -98,6 +113,31 @@ pub struct ToolInput {
     pub file_path: Option<String>,
 }
 
+/// The fields this command reads from a Codex hook envelope. Codex names the
+/// file nowhere directly: `tool_input.command` is a shell command line for
+/// `Bash` and the patch text for `apply_patch`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CodexEnvelope {
+    hook_event_name: Option<String>,
+    tool_name: Option<String>,
+    session_id: Option<String>,
+    cwd: Option<String>,
+    tool_input: Option<CodexToolInput>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CodexToolInput {
+    command: Option<String>,
+}
+
+/// What the session is told, once, when its brief budget runs out: the text
+/// the actual-cli mod uses on Claude Code, so both hosts say the same thing.
+const EXHAUSTED_NOTICE: &str = "Actual rule briefing has reached its per-session context \
+budget and will stay quiet from here. Run `actual rules brief --file <path>` if you need the \
+rules for a specific file.";
+
 #[derive(Debug, Serialize)]
 struct HookSpecificContext {
     #[serde(rename = "hookEventName")]
@@ -116,13 +156,17 @@ struct ContextOutput {
 }
 
 pub fn exec(args: &RulesBriefArgs) -> Result<(), ActualError> {
-    if args.claude_session_start {
+    if args.claude_session_start || args.codex_session_start {
         session_start(&read_stdin(), args);
         return Ok(());
     }
     if args.claude_hook {
         emit(hook_reply(&read_stdin(), args));
         // Always `Ok`: see the fail-open note in the module docs.
+        return Ok(());
+    }
+    if args.codex_hook {
+        emit(codex_hook_reply(&read_stdin(), args));
         return Ok(());
     }
     exec_direct(args)
@@ -182,6 +226,8 @@ pub(crate) enum NoBrief {
     /// Claimed, and nothing renderable fit: no rule lines, none that
     /// `--max-chars` left room for, or a `--limit` of 0.
     NothingToShow,
+    /// A brief was ready, and `--max-session-chars` had no room left for it.
+    BudgetSpent,
 }
 
 impl NoBrief {
@@ -193,6 +239,7 @@ impl NoBrief {
             Self::Ungoverned => "ungoverned",
             Self::AlreadyBriefed => "already-briefed",
             Self::NothingToShow => "nothing-to-show",
+            Self::BudgetSpent => "budget-spent",
         }
     }
 
@@ -206,6 +253,9 @@ impl NoBrief {
                 format!("Every rule document governing {file} was briefed earlier this session.")
             }
             Self::NothingToShow => format!("No rule text fits the brief budget for {file}."),
+            Self::BudgetSpent => {
+                format!("This session's brief budget has no room left for {file}.")
+            }
         }
     }
 }
@@ -339,15 +389,99 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     });
     let brief = match brief_for(&root, &file, args, session) {
         Ok(brief) => brief,
+        Err(NoBrief::BudgetSpent) => {
+            report(
+                NoBrief::BudgetSpent,
+                &relative_to_root(&root, &file).unwrap_or(file),
+            );
+            return budget_notice(&root, args, session).map(|note| context_reply(event, note));
+        }
         Err(reason) => return report(reason, &relative_to_root(&root, &file).unwrap_or(file)),
     };
+    Some(context_reply(event, brief))
+}
+
+/// The `additionalContext` reply naming `event`.
+fn context_reply(event: String, context: String) -> String {
     serde_json::to_string(&ContextOutput {
         hook_specific_output: HookSpecificContext {
             hook_event_name: event,
-            additional_context: brief,
+            additional_context: context,
         },
     })
-    .ok()
+    .expect("two strings serialize")
+}
+
+/// The Codex hook's reply for one envelope, or `None` for silence. Like
+/// [`hook_reply`], every failure is silence.
+fn codex_hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
+    let envelope: CodexEnvelope = serde_json::from_str(raw).ok()?;
+    let event = envelope.hook_event_name?;
+    let tool = envelope.tool_name?;
+    let command = envelope.tool_input?.command?;
+    let cwd = envelope_root(envelope.cwd);
+    let files = match (event.as_str(), tool.as_str()) {
+        ("PostToolUse", "Bash") => {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            super::codex_paths::shell_read_paths(&command, &cwd, home.as_deref())
+        }
+        ("PreToolUse", "apply_patch") => super::codex_paths::patch_paths(&command, &cwd),
+        _ => return None,
+    };
+    let root = repo_root(args, || cwd.clone());
+    let session_id = envelope.session_id.filter(|id| !id.is_empty());
+    let session = session_id.as_deref().map(|session_id| SessionIdentity {
+        session_id,
+        agent_id: None,
+    });
+
+    let mut briefs = Vec::new();
+    for file in files {
+        let file = file.to_string_lossy().into_owned();
+        match brief_for(&root, &file, args, session) {
+            Ok(brief) => briefs.push(brief),
+            Err(reason) => {
+                report(reason, &relative_to_root(&root, &file).unwrap_or(file));
+                if reason == NoBrief::BudgetSpent {
+                    if let Some(note) = budget_notice(&root, args, session) {
+                        briefs.push(note);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    (!briefs.is_empty()).then(|| context_reply(event, briefs.join("\n\n")))
+}
+
+/// [`EXHAUSTED_NOTICE`], the first time this session's budget turns a brief
+/// away, and `None` after that. A cap of 0 means briefing is off, which is a
+/// choice rather than an exhausted budget, so it says nothing.
+fn budget_notice(
+    root: &Path,
+    args: &RulesBriefArgs,
+    session: Option<SessionIdentity<'_>>,
+) -> Option<String> {
+    let who = session?;
+    if args.max_session_chars == Some(0) {
+        return None;
+    }
+    let dir = brief_ledger::ledger_dir()?;
+    let rules_dir = resolve(
+        &args
+            .rules_dir
+            .clone()
+            .unwrap_or_else(|| crate::rules::rules_dir(root)),
+    );
+    let key = LedgerKey {
+        session_id: who.session_id,
+        rules_dir: &rules_dir,
+    };
+    if brief_ledger::load(&dir, &key).budget_spent {
+        return None;
+    }
+    brief_ledger::update(&dir, &key, |ledger| ledger.budget_spent = true);
+    Some(EXHAUSTED_NOTICE.to_string())
 }
 
 /// Who is being briefed, for the once-per-session memory.
@@ -479,6 +613,26 @@ fn brief_for(
     else {
         return Err(NoBrief::NothingToShow);
     };
+    let chars = rendered.brief.chars().count();
+
+    // The budget is checked before anything is recorded, so a brief turned
+    // away here stays eligible: the memory does not count it as delivered,
+    // and neither does the session summary.
+    if let (Some(cap), Some(who), Some(dir)) =
+        (args.max_session_chars, session, brief_ledger::ledger_dir())
+    {
+        let key = LedgerKey {
+            session_id: who.session_id,
+            rules_dir: &key_dir,
+        };
+        if brief_ledger::load(&dir, &key)
+            .briefed_chars
+            .saturating_add(chars)
+            > cap
+        {
+            return Err(NoBrief::BudgetSpent);
+        }
+    }
 
     // The session-wide record counts what the memory below remembers, by the
     // same rule, but keys on the session alone: subagents add to one count,
@@ -492,7 +646,7 @@ fn brief_for(
             .shown
             .iter()
             .map(|&position| decisions[position].key.as_str());
-        brief_ledger::record(&dir, &key, added);
+        brief_ledger::record_brief(&dir, &key, added, chars);
         // Telemetry counts by a different rule: any ADR with a rule the agent
         // was just given, however its decision was trimmed.
         #[cfg(feature = "telemetry")]
@@ -761,6 +915,8 @@ mod tests {
         RulesBriefArgs {
             claude_hook: true,
             claude_session_start: false,
+            codex_hook: false,
+            codex_session_start: false,
             file: None,
             repo: Some(root.to_path_buf()),
             rules_dir: None,
@@ -769,6 +925,7 @@ mod tests {
             max_chars: crate::rules::brief::DEFAULT_MAX_CHARS,
             // Explicit, so these tests never read the machine's own config.
             min_score: Some(0.0),
+            max_session_chars: None,
         }
     }
 
@@ -2723,5 +2880,293 @@ mod tests {
                 )]
             );
         });
+    }
+
+    // ── --codex-hook: shell reads and patches ─────────────────────────────
+
+    fn codex_args(root: &Path) -> RulesBriefArgs {
+        RulesBriefArgs {
+            claude_hook: false,
+            codex_hook: true,
+            ..args(root)
+        }
+    }
+
+    /// A Codex envelope as Phase 0 captured it: the file is named only inside
+    /// `tool_input.command`.
+    fn codex_envelope(
+        root: &Path,
+        session: &str,
+        event: &str,
+        tool: &str,
+        command: &str,
+    ) -> String {
+        serde_json::json!({
+            "session_id": session,
+            "turn_id": "turn-1",
+            "cwd": root.to_string_lossy(),
+            "hook_event_name": event,
+            "model": "gpt-6-luna",
+            "permission_mode": "default",
+            "tool_name": tool,
+            "tool_input": {"command": command},
+            "tool_use_id": "exec-1",
+        })
+        .to_string()
+    }
+
+    fn codex_repo() -> TempDir {
+        let root = repo();
+        let file = root.path().join("services/auth/oauth/token.ts");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "export const sign = () => {};\n").unwrap();
+        std::fs::create_dir_all(root.path().join("infra")).unwrap();
+        std::fs::write(root.path().join("infra/main.tf"), "x").unwrap();
+        root
+    }
+
+    fn context_of(reply: &str) -> (Vec<String>, String, String) {
+        let value: serde_json::Value = serde_json::from_str(reply).unwrap();
+        let keys = value.as_object().unwrap().keys().cloned().collect();
+        let inner = &value["hookSpecificOutput"];
+        assert_eq!(
+            inner.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["additionalContext", "hookEventName"],
+            "Codex rejects any other key: {reply}"
+        );
+        (
+            keys,
+            inner["hookEventName"].as_str().unwrap().to_string(),
+            inner["additionalContext"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// A shell read of a governed file is briefed after it runs, once.
+    #[test]
+    fn test_codex_a_shell_read_is_briefed_once() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "sed -n '1,40p' services/auth/oauth/token.ts",
+            );
+
+            let reply = codex_hook_reply(&read, &a).expect("a brief");
+            let (keys, event, context) = context_of(&reply);
+            assert_eq!(keys, ["hookSpecificOutput"]);
+            assert_eq!(event, "PostToolUse");
+            assert!(context.contains("R-A-001"), "{context}");
+            assert_eq!(codex_hook_reply(&read, &a), None, "briefed already");
+        });
+    }
+
+    /// A patch is briefed before it is applied, from its headers, whether
+    /// they name the file absolutely or relatively.
+    #[test]
+    fn test_codex_a_patch_is_briefed_before_it_applies() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let absolute = format!(
+                "*** Begin Patch\n*** Update File: {}\n@@\n-a\n+b\n*** End Patch",
+                governed(root.path())
+            );
+            let reply = codex_hook_reply(
+                &codex_envelope(root.path(), "s1", "PreToolUse", "apply_patch", &absolute),
+                &a,
+            )
+            .expect("a brief");
+            assert_eq!(context_of(&reply).1, "PreToolUse");
+
+            let relative =
+                "*** Begin Patch\n*** Add File: services/auth/oauth/new.ts\n+x\n*** End Patch";
+            assert!(codex_hook_reply(
+                &codex_envelope(root.path(), "s2", "PreToolUse", "apply_patch", relative),
+                &a
+            )
+            .is_some());
+        });
+    }
+
+    /// Two files read at once arrive as one reply; an ungoverned one adds
+    /// nothing to it.
+    #[test]
+    fn test_codex_files_read_together_share_one_reply() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let reply = codex_hook_reply(
+                &codex_envelope(
+                    root.path(),
+                    "s1",
+                    "PostToolUse",
+                    "Bash",
+                    "cat infra/main.tf services/auth/oauth/token.ts",
+                ),
+                &a,
+            )
+            .expect("a brief");
+            let context = context_of(&reply).2;
+            assert_eq!(context.matches("R-A-001").count(), 1, "{context}");
+        });
+    }
+
+    /// Only a shell read after it runs and a patch before it applies are
+    /// answered, and anything unreadable is silence.
+    #[test]
+    fn test_codex_answers_only_reads_and_patches() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let cat = "cat services/auth/oauth/token.ts";
+            for raw in [
+                codex_envelope(root.path(), "s1", "PreToolUse", "Bash", cat),
+                codex_envelope(root.path(), "s1", "PostToolUse", "apply_patch", cat),
+                codex_envelope(
+                    root.path(),
+                    "s1",
+                    "PostToolUse",
+                    "Bash",
+                    "rm services/auth/oauth/token.ts",
+                ),
+                codex_envelope(
+                    root.path(),
+                    "s1",
+                    "PostToolUse",
+                    "Bash",
+                    "cat infra/main.tf",
+                ),
+                serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"})
+                    .to_string(),
+                "not json".to_string(),
+            ] {
+                assert_eq!(codex_hook_reply(&raw, &a), None, "{raw}");
+            }
+        });
+    }
+
+    /// Without a session there is no memory: every read is briefed.
+    #[test]
+    fn test_codex_without_a_session_briefs_every_time() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let read = codex_envelope(
+                root.path(),
+                "",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            assert!(codex_hook_reply(&read, &a).is_some());
+            assert!(codex_hook_reply(&read, &a).is_some());
+        });
+    }
+
+    // ── --max-session-chars ───────────────────────────────────────────────
+
+    fn session_ledger(root: &Path, session: &str) -> brief_ledger::BriefLedger {
+        let rules_dir = resolve(&crate::rules::rules_dir(root));
+        brief_ledger::load(
+            &brief_ledger::ledger_dir().unwrap(),
+            &LedgerKey {
+                session_id: session,
+                rules_dir: &rules_dir,
+            },
+        )
+    }
+
+    /// A brief that fits is delivered and counted.
+    #[test]
+    fn test_a_brief_within_the_budget_is_counted() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let mut a = codex_args(root.path());
+            a.max_session_chars = Some(1_000_000);
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            let context = context_of(&codex_hook_reply(&read, &a).unwrap()).2;
+            let recorded = session_ledger(root.path(), "s1");
+            assert_eq!(recorded.briefed_chars, context.chars().count());
+            assert!(!recorded.budget_spent);
+        });
+    }
+
+    /// The first brief that does not fit is replaced by the notice, once, and
+    /// stays eligible: nothing records it as delivered.
+    #[test]
+    fn test_a_spent_budget_says_so_once() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let mut a = codex_args(root.path());
+            a.max_session_chars = Some(10);
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+
+            let reply = codex_hook_reply(&read, &a).expect("the notice");
+            assert_eq!(context_of(&reply).2, EXHAUSTED_NOTICE);
+            assert_eq!(codex_hook_reply(&read, &a), None);
+            let recorded = session_ledger(root.path(), "s1");
+            assert!(recorded.budget_spent);
+            assert_eq!(recorded.briefed_chars, 0);
+            assert!(recorded.briefed.is_empty());
+
+            // The Claude Code path honours the flag the same way.
+            let mut claude = args(root.path());
+            claude.max_session_chars = Some(10);
+            let first = session_envelope(root.path(), "s2", None, &governed(root.path()));
+            let reply = hook_reply(&first, &claude).expect("the notice");
+            assert!(reply.contains("per-session context budget"), "{reply}");
+            assert_eq!(hook_reply(&first, &claude), None);
+        });
+    }
+
+    /// A cap of 0 is briefing switched off, not a budget running out, so it
+    /// says nothing at all; and without a session there is nothing to count.
+    #[test]
+    fn test_a_zero_budget_is_silence() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let mut a = codex_args(root.path());
+            a.max_session_chars = Some(0);
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            assert_eq!(codex_hook_reply(&read, &a), None);
+            assert!(!session_ledger(root.path(), "s1").budget_spent);
+
+            let no_session = codex_envelope(
+                root.path(),
+                "",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            assert!(codex_hook_reply(&no_session, &a).is_some());
+        });
+    }
+
+    #[test]
+    fn test_budget_spent_has_a_token_and_a_sentence() {
+        assert_eq!(NoBrief::BudgetSpent.token(), "budget-spent");
+        assert!(NoBrief::BudgetSpent.sentence("a.ts").contains("a.ts"));
     }
 }
