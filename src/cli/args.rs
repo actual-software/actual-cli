@@ -375,7 +375,7 @@ pub struct ModelsArgs {
     pub no_fetch: bool,
 }
 
-/// ADR-powered AI context file generator
+/// Align coding agents with your architecture decisions
 #[derive(Parser, Debug)]
 #[command(name = "actual", version, about)]
 pub struct Cli {
@@ -385,32 +385,6 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Analyze repo, fetch ADRs, tailor and write AI context files
-    AdrBot(SyncArgs),
-    /// Check output file state
-    Status(StatusArgs),
-    /// Check the coding-agent runner's auth, or mint a scoped access token
-    Auth(AuthArgs),
-    /// Sign in to your Actual AI account via browser OAuth
-    Login(LoginArgs),
-    /// Sign out of your Actual AI account and clear local credentials
-    Logout,
-    /// Show the signed-in Actual AI account and organization
-    Whoami,
-    /// Ask the Advisor an org-scoped architecture question
-    Advisor(AdvisorArgs),
-    /// Mint an access token headlessly via the RFC 7523 jwt-bearer grant
-    MintToken(MintTokenArgs),
-    /// View or edit configuration
-    Config(ConfigArgs),
-    /// List all available AI backend runners
-    Runners,
-    /// List known model names grouped by runner
-    Models(ModelsArgs),
-    /// Clear local cache (analysis and tailoring results)
-    Cache(CacheArgs),
-    /// Inspect the rule documents under `.actual/rules/`
-    Rules(RulesArgs),
     /// Check an implementation plan against the selected `.actual/rules/`
     PlanCheck(PlanCheckArgs),
     /// Check a `git diff` against the same committed `.actual/rules/` corpus
@@ -433,6 +407,32 @@ pub enum Command {
     /// command from a separate, ordinary terminal instead.
     #[command(name = "check-override", visible_alias = "plan-check-override")]
     PlanCheckOverride(PlanCheckOverrideArgs),
+    /// Inspect the rule documents under `.actual/rules/`
+    Rules(RulesArgs),
+    /// Sign in to your Actual AI account via browser OAuth
+    Login(LoginArgs),
+    /// Sign out of your Actual AI account and clear local credentials
+    Logout,
+    /// Show the signed-in Actual AI account and organization
+    Whoami,
+    /// Analyze repo, fetch ADRs, tailor and write AI context files
+    AdrBot(SyncArgs),
+    /// Check output file state
+    Status(StatusArgs),
+    /// Check the coding-agent runner's auth, or mint a scoped access token
+    Auth(AuthArgs),
+    /// Ask the Advisor an org-scoped architecture question
+    Advisor(AdvisorArgs),
+    /// Mint an access token headlessly via the RFC 7523 jwt-bearer grant
+    MintToken(MintTokenArgs),
+    /// View or edit configuration
+    Config(ConfigArgs),
+    /// List all available AI backend runners
+    Runners,
+    /// List known model names grouped by runner
+    Models(ModelsArgs),
+    /// Clear local cache (analysis and tailoring results)
+    Cache(CacheArgs),
 
     /// Report what Actual AI did in a coding session
     Session(SessionArgs),

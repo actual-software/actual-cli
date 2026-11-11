@@ -25,7 +25,7 @@ pub(crate) fn zero_adr_context_lines(request: &crate::api::types::MatchRequest) 
         .collect();
     fws.sort_unstable();
 
-    let support_msg = "  Actual AI is working on adding support for more languages and frameworks, but unfortunately does not support this repository yet. See for more info - https://cli.actual.ai/docs".to_string();
+    let support_msg = "  Actual AI is working on adding support for more languages and frameworks, but unfortunately does not support this repository yet. See for more info - https://github.com/actual-software/actual-cli/blob/main/docs/ADR_BOT_AND_ADVISOR.md".to_string();
 
     if langs.is_empty() {
         vec![
