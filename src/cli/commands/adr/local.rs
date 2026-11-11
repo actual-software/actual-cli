@@ -117,9 +117,7 @@ fn render_pair(
 /// Write `text` to a new file at `path`, creating its directory; an
 /// existing file is never replaced.
 fn write_new_file(path: &Path, text: &str) -> Result<(), ActualError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    path.parent().map(std::fs::create_dir_all).transpose()?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -587,10 +585,11 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut args = new_args("Use Postgres", &[], &[]);
         args.content.context.clear();
-        match write_new(&args, tmp.path(), true, TODAY) {
-            Err(ActualError::AdrInvalid { reasons }) => assert_eq!(reasons.len(), 2, "{reasons:?}"),
-            other => panic!("expected AdrInvalid, got {other:?}"),
-        }
+        let err = write_new(&args, tmp.path(), true, TODAY).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons.len() == 2),
+            "{err:?}"
+        );
         let bad = new_args("Use Postgres", &["Use it."], &[]);
         assert!(matches!(
             write_new(&bad, tmp.path(), true, TODAY),
@@ -760,12 +759,11 @@ mod tests {
         mixed_repository(tmp.path());
         let mut args = check_args(&[]);
         args.root = Some(tmp.path().to_path_buf());
-        match exec_check(&args) {
-            Err(ActualError::AdrCheckFailed(message)) => {
-                assert_eq!(message, "2 of 3 decision files failed the check")
-            }
-            other => panic!("expected AdrCheckFailed, got {other:?}"),
-        }
+        let err = exec_check(&args).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrCheckFailed(message)) if message == "2 of 3 decision files failed the check"),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -203,6 +203,9 @@ struct CreateOutcome {
     files: Option<RenameOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope_problem: Option<String>,
+    /// The status the pushed files had, when the save gave them another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_status_was: Option<String>,
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
@@ -219,8 +222,14 @@ struct Outgoing {
     file: Option<DecisionFile>,
 }
 
-/// Read and check what `create` would send, before anything goes out.
-fn outgoing(args: &AdrCreateArgs, as_draft: bool, today: &str) -> Result<Outgoing, ActualError> {
+/// Read and check what `create` would send, before anything goes out. A
+/// relative `--file` is read from `dir`.
+fn outgoing(
+    args: &AdrCreateArgs,
+    dir: &Path,
+    as_draft: bool,
+    today: &str,
+) -> Result<Outgoing, ActualError> {
     let Some(path) = &args.file else {
         let title = args.title.as_deref().unwrap_or_default();
         let doc = content_from_flags(title, &args.content)?;
@@ -232,7 +241,7 @@ fn outgoing(args: &AdrCreateArgs, as_draft: bool, today: &str) -> Result<Outgoin
             file: None,
         });
     };
-    let file = files::read_decision_file(path)?;
+    let file = files::read_decision_file(&dir.join(path))?;
     if file.body.encode_utf16().count() > MAX_CONTEXT_FILE_UNITS {
         return Err(ActualError::AdrInvalid {
             reasons: vec![format!(
@@ -258,10 +267,10 @@ async fn run_create(
     today: &str,
 ) -> Result<String, ActualError> {
     let status = save_status(args.status, interactive);
-    let outgoing = outgoing(args, status == SaveStatus::Draft, today)?;
+    let outgoing = outgoing(args, dir, status == SaveStatus::Draft, today)?;
     // A pushed file names its own repository through the checkout it sits in.
-    let root: PathBuf = match &args.file {
-        Some(path) => files::root_of(path).unwrap_or_else(|| dir.to_path_buf()),
+    let root: PathBuf = match &outgoing.file {
+        Some(file) => files::root_of(&file.path).unwrap_or_else(|| dir.to_path_buf()),
         None => dir.to_path_buf(),
     };
     let session = session(&args.api).await?;
@@ -287,10 +296,22 @@ async fn run_create(
         })
         .await?;
 
-    let files = outgoing
+    let files = outgoing.file.as_ref().map(|file| {
+        files::rename_pair(
+            &root,
+            file,
+            &created.adr_id,
+            &created.title,
+            &created.status,
+        )
+    });
+    let local_status_was = outgoing
         .file
         .as_ref()
-        .map(|file| files::rename_pair(&root, file, &created.adr_id, &created.title));
+        .and_then(|file| file.meta.as_ref()?.status.clone())
+        .filter(|was| {
+            *was != created.status && files.as_ref().is_some_and(|f| !f.renamed.is_empty())
+        });
     let scope_paths = outgoing
         .file
         .as_ref()
@@ -330,6 +351,7 @@ async fn run_create(
         created,
         files,
         scope_problem,
+        local_status_was,
     };
     Ok(if args.api.json {
         format!("{}\n", json_text(&outcome))
@@ -449,6 +471,14 @@ fn render_created(outcome: &CreateOutcome, repo: &Repo) -> String {
         for problem in &files.problems {
             let _ = writeln!(out, "  {} {problem}", theme::warning("note:"));
         }
+    }
+    if let Some(was) = &outcome.local_status_was {
+        let _ = writeln!(
+            out,
+            "  The local files now say {}, as Actual AI saved it (they said {}).",
+            sanitize_server_text(&created.status),
+            sanitize_server_text(was)
+        );
     }
     if let Some(problem) = &outcome.scope_problem {
         let _ = writeln!(out, "{} {problem}", theme::warning("warning:"));
@@ -1042,16 +1072,12 @@ mod tests {
             .create();
         let create = server.mock("POST", "/v1/cli/adrs").expect(0).create();
         let err = block(run_create(&create_args(&server), tmp.path(), true, TODAY)).unwrap_err();
-        match err {
-            ActualError::AdrDuplicate { message, hint } => {
-                assert!(
-                    message.contains("d1 \"Use Postgres for storage\""),
-                    "{message}"
-                );
-                assert!(hint.contains("--allow-duplicate"));
-            }
-            other => panic!("expected AdrDuplicate, got {other:?}"),
-        }
+        assert!(
+            matches!(&err, ActualError::AdrDuplicate { message, hint }
+                if message.contains("d1 \"Use Postgres for storage\"")
+                    && hint.contains("--allow-duplicate")),
+            "{err:?}"
+        );
         create.assert();
     }
 
@@ -1092,12 +1118,10 @@ mod tests {
         let mut args = create_args(&server);
         args.repo = None;
         let err = block(run_create(&args, tmp.path(), true, TODAY)).unwrap_err();
-        match err {
-            ActualError::AdrRepoRequired(message) => {
-                assert!(message.contains("no origin remote"), "{message}")
-            }
-            other => panic!("expected AdrRepoRequired, got {other:?}"),
-        }
+        assert!(
+            matches!(&err, ActualError::AdrRepoRequired(message) if message.contains("no origin remote")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1190,6 +1214,77 @@ mod tests {
     }
 
     #[test]
+    fn create_from_a_relative_file_with_no_terminal_saves_a_draft_and_the_files_follow() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo_dir = tempdir().unwrap();
+        git_repo(
+            repo_dir.path(),
+            Some("https://github.com/actual-software/actual-cli"),
+        );
+        let doc = new_pair(repo_dir.path(), &[]);
+        let relative = doc.strip_prefix(repo_dir.path()).unwrap().to_path_buf();
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        server
+            .mock("GET", "/v1/cli/adrs")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(list_body(&[], None))
+            .create();
+        let create = server
+            .mock("POST", "/v1/cli/adrs")
+            .match_body(Matcher::PartialJson(serde_json::json!({"status": "draft"})))
+            .with_status(200)
+            .with_body(created_body("draft"))
+            .expect(1)
+            .create();
+        let args = AdrCreateArgs {
+            file: Some(relative),
+            title: None,
+            content: AdrContentArgs::default(),
+            status: None,
+            repo: None,
+            allow_duplicate: false,
+            api: api(&server),
+        };
+        let text = block(run_create(&args, repo_dir.path(), false, TODAY)).unwrap();
+        create.assert();
+        assert!(
+            text.contains("in actual-software/actual-cli as draft"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "The local files now say draft, as Actual AI saved it (they said accepted)."
+            ),
+            "{text}"
+        );
+        let rule = crate::adr::files::find_rule_file(repo_dir.path(), ADR).unwrap();
+        let doc = repo_dir
+            .path()
+            .join("docs/adr")
+            .join(crate::adr::names::decision_doc_file_name(
+                ADR,
+                "Use Postgres for storage",
+            ));
+        for moved in [doc, rule] {
+            let file = crate::adr::files::read_decision_file(&moved).unwrap();
+            assert_eq!(
+                file.meta.unwrap().status.as_deref(),
+                Some("draft"),
+                "{moved:?}"
+            );
+        }
+    }
+
+    #[test]
     fn create_from_a_file_reports_a_scope_it_could_not_set() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
@@ -1254,13 +1349,13 @@ mod tests {
             allow_duplicate: false,
             api: api(&server),
         };
-        match block(run_create(&args, tmp.path(), true, TODAY)).unwrap_err() {
-            ActualError::AdrDuplicate { message, hint } => {
-                assert!(message.contains("already decision"), "{message}");
-                assert_eq!(hint, format!("actual adr show {own_id}"));
-            }
-            other => panic!("expected AdrDuplicate, got {other:?}"),
-        }
+        let err = block(run_create(&args, tmp.path(), true, TODAY)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrDuplicate { message, hint }
+                if message.contains("already decision")
+                    && *hint == format!("actual adr show {own_id}")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1285,10 +1380,11 @@ mod tests {
         let big = tmp.path().join("big.md");
         std::fs::write(&big, "x".repeat(MAX_CONTEXT_FILE_UNITS + 1)).unwrap();
         args.file = Some(big);
-        match block(run_create(&args, tmp.path(), true, TODAY)) {
-            Err(ActualError::AdrInvalid { reasons }) => assert!(reasons[0].contains("over 100 KB")),
-            other => panic!("expected AdrInvalid, got {other:?}"),
-        }
+        let err = block(run_create(&args, tmp.path(), true, TODAY)).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons[0].contains("over 100 KB")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1309,12 +1405,11 @@ mod tests {
         active.state = "active".to_string();
         let mut second = active.clone();
         second.id = "d2".to_string();
-        match refuse_duplicates(Some("other"), &doc, &[active, second]) {
-            Err(ActualError::AdrDuplicate { message, .. }) => {
-                assert!(message.contains("looks like some"), "{message}")
-            }
-            other => panic!("expected AdrDuplicate, got {other:?}"),
-        }
+        let err = refuse_duplicates(Some("other"), &doc, &[active, second]).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrDuplicate { message, .. }) if message.contains("looks like some")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1329,6 +1424,7 @@ mod tests {
                 problems: vec!["No rule file".to_string()],
             }),
             scope_problem: Some("scope".to_string()),
+            local_status_was: Some("draft".to_string()),
         };
         let text = render_created(
             &outcome,
@@ -1340,6 +1436,12 @@ mod tests {
         assert!(!text.contains("renamed"), "{text}");
         assert!(text.contains("No rule file"));
         assert!(text.contains("scope"));
+        assert!(
+            text.contains(
+                "The local files now say accepted, as Actual AI saved it (they said draft)."
+            ),
+            "{text}"
+        );
     }
 
     // ── update ──
@@ -1410,10 +1512,11 @@ mod tests {
         let mut args = update_args(&server);
         args.policies = vec!["no level".to_string()];
         args.levels = vec!["bad".to_string()];
-        match update_request(&args) {
-            Err(ActualError::AdrInvalid { reasons }) => assert_eq!(reasons.len(), 2),
-            other => panic!("expected AdrInvalid, got {other:?}"),
-        }
+        let err = update_request(&args).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons.len() == 2),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1632,10 +1735,7 @@ mod tests {
             let mut argv = vec!["actual", "adr"];
             argv.extend(args.iter().copied());
             argv.extend(["--api-url", url.as_str()]);
-            let cli = crate::Cli::parse_from(argv.clone());
-            let crate::Command::Adr(adr) = cli.command else {
-                panic!("not an adr command");
-            };
+            let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
             super::super::exec(&adr).unwrap_or_else(|e| panic!("{argv:?}: {e:?}"));
         }
     }

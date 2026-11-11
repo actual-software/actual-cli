@@ -152,14 +152,16 @@ pub fn read_decision_file(path: &Path) -> Result<DecisionFile, ActualError> {
 }
 
 fn read_text(path: &Path) -> Result<String, ActualError> {
-    let size = std::fs::metadata(path)?.len();
+    let named =
+        |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let size = std::fs::metadata(path).map_err(named)?.len();
     if size > MAX_FILE_SIZE {
         return Err(ActualError::ConfigError(format!(
             "{} is {size} bytes, over the {MAX_FILE_SIZE}-byte limit for a decision file",
             path.display()
         )));
     }
-    Ok(std::fs::read_to_string(path)?)
+    Ok(std::fs::read_to_string(path).map_err(named)?)
 }
 
 /// The decision docs under `<root>/docs/adr/` and its subdirectories.
@@ -185,11 +187,10 @@ fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
+    for (path, kind) in entries
+        .flatten()
+        .filter_map(|entry| Some((entry.path(), entry.file_type().ok()?)))
+    {
         if kind.is_dir() && depth > 1 {
             collect_markdown(&path, depth - 1, out);
         } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "md") {
@@ -211,12 +212,19 @@ pub fn find_rule_file(root: &Path, adr_id: &str) -> Option<PathBuf> {
 }
 
 /// The repository root a decision doc sits in: the directory above its
-/// `docs/adr/`, when the path runs through one.
+/// `docs/adr/`, when the path runs through one. A relative path that starts
+/// at `docs/adr/` gives `.`.
 pub fn root_of(doc: &Path) -> Option<PathBuf> {
     doc.ancestors()
         .find(|dir| dir.ends_with(DECISION_DIR))
         .and_then(|adr_dir| adr_dir.parent()?.parent())
-        .map(Path::to_path_buf)
+        .map(|root| {
+            if root.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                root.to_path_buf()
+            }
+        })
 }
 
 /// `text` with its header replaced by `header`, the body kept byte for byte.
@@ -242,9 +250,16 @@ pub struct RenameOutcome {
 
 /// After a push, move `doc` and its rule file to the names the sync writes
 /// for decision `new_id` titled `title`, and point both headers at the new
-/// id. Status and scope stay as they are. A rule file that can't be found,
-/// or a target that already exists, is reported and left alone.
-pub fn rename_pair(root: &Path, doc: &DecisionFile, new_id: &str, title: &str) -> RenameOutcome {
+/// id and the `status` it was saved with. The scope stays as it is. A rule
+/// file that can't be found, or a target that already exists, is reported
+/// and left alone.
+pub fn rename_pair(
+    root: &Path,
+    doc: &DecisionFile,
+    new_id: &str,
+    title: &str,
+    status: &str,
+) -> RenameOutcome {
     let mut outcome = RenameOutcome::default();
     let meta = doc.meta.clone().unwrap_or_default();
     let header_for = |file_name: &str| AdrHeader {
@@ -254,10 +269,7 @@ pub fn rename_pair(root: &Path, doc: &DecisionFile, new_id: &str, title: &str) -
             .clone()
             .unwrap_or_else(|| description_for(title)),
         adr_id: new_id.to_string(),
-        status: meta
-            .status
-            .clone()
-            .unwrap_or_else(|| "accepted".to_string()),
+        status: status.to_string(),
         scope_root: meta.root.clone().unwrap_or_else(|| ".".to_string()),
         scope_paths: meta.paths.clone(),
     };
@@ -300,9 +312,7 @@ fn move_with_header(from: &Path, to: &Path, header: &str, outcome: &mut RenameOu
                     to.display()
                 )));
             }
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+            to.parent().map(std::fs::create_dir_all).transpose()?;
         }
         std::fs::write(to, text)?;
         if from != to {
@@ -494,7 +504,10 @@ mod tests {
             Some(PathBuf::from("/repo"))
         );
         assert_eq!(root_of(Path::new("/repo/notes/x.md")), None);
-        assert_eq!(root_of(Path::new("docs/adr/x.md")), Some(PathBuf::from("")));
+        assert_eq!(
+            root_of(Path::new("docs/adr/x.md")),
+            Some(PathBuf::from("."))
+        );
     }
 
     #[test]
@@ -503,7 +516,7 @@ mod tests {
         let root = tmp.path();
         let (doc, rule) = local_pair(root);
         let file = read_decision_file(&doc).unwrap();
-        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage");
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "accepted");
         assert!(outcome.problems.is_empty(), "{:?}", outcome.problems);
         assert_eq!(outcome.renamed.len(), 2);
         assert!(!doc.exists() && !rule.exists());
@@ -534,13 +547,42 @@ mod tests {
     }
 
     #[test]
+    fn rename_pair_gives_both_headers_the_status_the_decision_was_saved_with() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let (doc, _) = local_pair(root);
+        let file = read_decision_file(&doc).unwrap();
+        assert_eq!(
+            file.meta.as_ref().unwrap().status.as_deref(),
+            Some("accepted")
+        );
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "draft");
+        assert_eq!(outcome.renamed.len(), 2, "{:?}", outcome.problems);
+        for renamed in &outcome.renamed {
+            let moved = read_decision_file(&renamed.to).unwrap();
+            assert_eq!(moved.meta.unwrap().status.as_deref(), Some("draft"));
+        }
+    }
+
+    #[test]
+    fn a_missing_decision_file_is_named_in_the_error() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("docs/adr/gone.md");
+        let err = read_decision_file(&missing).err();
+        assert!(
+            matches!(&err, Some(ActualError::IoError(e)) if e.to_string().contains("gone.md")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn rename_pair_without_a_rule_file_moves_the_doc_and_says_so() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
         let (doc, rule) = local_pair(root);
         std::fs::remove_file(&rule).unwrap();
         let file = read_decision_file(&doc).unwrap();
-        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage");
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "accepted");
         assert_eq!(outcome.renamed.len(), 1);
         assert_eq!(outcome.problems.len(), 1);
         assert!(outcome.problems[0].contains("No rule file"));
@@ -553,7 +595,7 @@ mod tests {
         let doc = root.join(DECISION_DIR).join("drafts").join("plain.md");
         write(&doc, "# Plain title\n\n## Context\n\n- Why.");
         let file = read_decision_file(&doc).unwrap();
-        let outcome = rename_pair(root, &file, NEW, "Plain title");
+        let outcome = rename_pair(root, &file, NEW, "Plain title", "accepted");
         assert_eq!(outcome.renamed.len(), 1);
         let moved = read_decision_file(&outcome.renamed[0].to).unwrap();
         assert_eq!(moved.adr_id(), Some(NEW));
@@ -573,7 +615,7 @@ mod tests {
             .join(decision_doc_file_name(NEW, "Use Postgres for storage"));
         write(&taken, "someone else's");
         let file = read_decision_file(&doc).unwrap();
-        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage");
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "accepted");
         assert!(doc.exists());
         assert_eq!(std::fs::read_to_string(&taken).unwrap(), "someone else's");
         assert!(
@@ -597,7 +639,7 @@ mod tests {
             ),
         );
         let file = read_decision_file(&doc).unwrap();
-        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage");
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "draft");
         assert_eq!(outcome.renamed[0].from, outcome.renamed[0].to);
         let moved = read_decision_file(&doc).unwrap();
         assert_eq!(moved.adr_id(), Some(NEW));
@@ -611,7 +653,7 @@ mod tests {
         let (doc, _) = local_pair(root);
         let file = read_decision_file(&doc).unwrap();
         std::fs::remove_file(&doc).unwrap();
-        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage");
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "accepted");
         assert!(
             outcome.problems[0].contains("left as it is"),
             "{:?}",
