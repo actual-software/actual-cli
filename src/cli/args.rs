@@ -409,15 +409,15 @@ pub enum Command {
     PlanCheckOverride(PlanCheckOverrideArgs),
     /// Inspect the rule documents under `.actual/rules/`
     Rules(RulesArgs),
-    /// Write and check ADRs in this repository, and manage your decisions in
-    /// Actual AI
-    Adr(AdrArgs),
     /// Sign in to your Actual AI account via browser OAuth
     Login(LoginArgs),
     /// Sign out of your Actual AI account and clear local credentials
     Logout,
     /// Show the signed-in Actual AI account and organization
     Whoami,
+    /// Write and check ADRs in this repository, and manage your decisions in
+    /// Actual AI
+    Adr(AdrArgs),
     /// Analyze repo, fetch ADRs, tailor and write AI context files
     AdrBot(SyncArgs),
     /// Check output file state
