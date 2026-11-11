@@ -63,7 +63,7 @@ Write them by hand, or manage your ADRs at [app.actual.ai](https://app.actual.ai
 
 ## Checking plans and changes
 
-In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason, and the turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [reason]` in the session; [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
+In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [reason]` in the session; [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
 
 From a terminal or in CI:
 
@@ -73,7 +73,7 @@ actual impl-check                       # check the working tree against HEAD, u
 git diff HEAD | actual impl-check       # check a diff from stdin
 ```
 
-Each check reports one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review) or `not_checked`. Only `conflicting` exits non-zero, so a CI job that has to tell "checked and clean" from "could not check" should read the `status` field from `--json`. The checks judge your rules with a model through a runner, the Claude Code CLI by default; `actual runners` lists the others.
+Each check reports one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review) or `not_checked`. Only `conflicting` exits non-zero, so a CI job that has to tell "checked and clean" from "could not check" should read the `status` field from `--json`. To judge your rules, the checks need a runner: the Claude Code CLI by default, or any other that `actual runners` lists.
 
 ## Filtering rules
 

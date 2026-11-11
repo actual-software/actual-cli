@@ -16,7 +16,7 @@ AI-native software teams: developers who build with coding agents and want plans
 
 ## Where do the Actual.ai Skill and CLI work?
 
-The checks and rule briefing run in Claude Code, through the skill's hooks. Outside Claude Code, the CLI runs on its own in your terminal and in CI. Either way it judges your rules with one of five runners: `claude-cli` (the default), `anthropic-api`, `openai-api`, `codex-cli`, and `cursor-cli`.
+The checks and rule briefing run in Claude Code, through the skill's hooks. Outside Claude Code there's no hook to run them, so the CLI runs on its own in your terminal and in CI. Either way it judges your rules with one of five runners: `claude-cli` (the default), `anthropic-api`, `openai-api`, `codex-cli`, and `cursor-cli`.
 
 | Platform | Architecture | Install method |
 |----------|--------------|----------------|
@@ -31,11 +31,11 @@ On Linux, every install method in the table puts a prebuilt binary on your machi
 
 ## When do the Actual.ai Skill and CLI run?
 
-Whenever your agent plans, reads or changes code in a repository with rules. The skill manages the CLI and decides when each command runs: `actual plan-check` when your agent leaves plan mode, before implementation starts, `actual impl-check` at the end of every turn, and `actual rules brief` as your agent reads a file. In a terminal or CI, the CLI runs when you call it.
+Whenever your agent works in a repository that has rules. The skill decides when each command runs: `actual plan-check` when your agent leaves plan mode, before implementation starts, `actual impl-check` at the end of every turn, and `actual rules brief` as your agent reads a file. In a terminal or CI, the CLI doesn't run until you call it.
 
 ## How do the Actual.ai Skill and CLI work?
 
-Each capability below is something the skill does for you, and the skill wraps the matching CLI command. If you're scripting or running in CI, open the Direct CLI section under each one.
+Each capability below is something the skill does for you. It wraps a CLI command. If you're scripting or running in CI, open the Direct CLI section under each one.
 
 ### Governance
 
