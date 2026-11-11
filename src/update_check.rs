@@ -19,7 +19,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::args::{Command, RulesAction, SessionAction};
+use crate::cli::args::{AdrAction, Command, RulesAction, SessionAction};
 use crate::cli::ui::theme;
 use crate::config::types::Config;
 
@@ -191,6 +191,20 @@ pub fn applies_to(command: &Command) -> bool {
         },
         Command::Session(session) => match &session.action {
             SessionAction::Summary(args) => !(args.claude_hook || args.json),
+        },
+        Command::Adr(adr) => match &adr.action {
+            AdrAction::New(args) => !args.json,
+            AdrAction::Check(args) => !args.api.json,
+            AdrAction::List(args) => !args.api.json,
+            AdrAction::Show(args) => !args.api.json,
+            AdrAction::Create(args) => !args.api.json,
+            AdrAction::Update(args) => !args.api.json,
+            AdrAction::Publish(args)
+            | AdrAction::Unpublish(args)
+            | AdrAction::Delete(args)
+            | AdrAction::Restore(args)
+            | AdrAction::Accept(args) => !args.api.json,
+            AdrAction::Reject(args) => !args.api.json,
         },
         Command::MintToken(_)
         | Command::Version(_)
@@ -715,6 +729,18 @@ mod tests {
             &["rules", "eval", "--golden", "golden.json"],
             &["rules", "brief", "--file", "src/lib.rs"],
             &["session", "summary", "--session", "s1"],
+            &["adr", "new", "T"],
+            &["adr", "check"],
+            &["adr", "list"],
+            &["adr", "show", "d1"],
+            &["adr", "create", "--title", "T"],
+            &["adr", "update", "d1", "--title", "T"],
+            &["adr", "publish", "d1"],
+            &["adr", "unpublish", "d1"],
+            &["adr", "delete", "d1"],
+            &["adr", "restore", "d1"],
+            &["adr", "accept", "d1"],
+            &["adr", "reject", "d1", "--reason", "r"],
         ];
         for args in shown {
             assert!(
@@ -739,6 +765,14 @@ mod tests {
             &["rules", "brief", "--claude-session-start"],
             &["session", "summary", "--claude-hook"],
             &["session", "summary", "--session", "s1", "--json"],
+            &["adr", "new", "T", "--json"],
+            &["adr", "check", "--json"],
+            &["adr", "list", "--json"],
+            &["adr", "show", "d1", "--json"],
+            &["adr", "create", "--title", "T", "--json"],
+            &["adr", "update", "d1", "--title", "T", "--json"],
+            &["adr", "publish", "d1", "--json"],
+            &["adr", "reject", "d1", "--reason", "r", "--json"],
             &[
                 "mint-token",
                 "--service-account-id",

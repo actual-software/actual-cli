@@ -409,6 +409,9 @@ pub enum Command {
     PlanCheckOverride(PlanCheckOverrideArgs),
     /// Inspect the rule documents under `.actual/rules/`
     Rules(RulesArgs),
+    /// Write and check ADRs in this repository, and manage your decisions in
+    /// Actual AI
+    Adr(AdrArgs),
     /// Sign in to your Actual AI account via browser OAuth
     Login(LoginArgs),
     /// Sign out of your Actual AI account and clear local credentials
@@ -780,6 +783,284 @@ pub struct CacheArgs {
 pub enum CacheAction {
     /// Clear all cached data (analysis and tailoring results)
     Clear,
+}
+
+/// Arguments for the `adr` command
+#[derive(Parser, Debug)]
+#[command(
+    after_help = "Local commands (new, check) need no sign-in. The others act on \
+    your organization's decisions in Actual AI and need `actual login`. See docs/ADR_COMMANDS.md."
+)]
+pub struct AdrArgs {
+    #[command(subcommand)]
+    pub action: AdrAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdrAction {
+    /// Write a decision into docs/adr/ and its rule file into .actual/rules/
+    New(AdrNewArgs),
+
+    /// Check decision files with Actual AI's save rules and list likely
+    /// duplicates
+    Check(AdrCheckArgs),
+
+    /// List your organization's decisions
+    List(AdrListArgs),
+
+    /// Show one decision with its policies
+    Show(AdrShowArgs),
+
+    /// Save a decision to Actual AI, from a local file or from flags
+    Create(AdrCreateArgs),
+
+    /// Change a decision's title, context, policies, levels or scope
+    Update(AdrUpdateArgs),
+
+    /// Publish a draft decision so it governs
+    Publish(AdrIdArgs),
+
+    /// Move an active decision back to draft
+    Unpublish(AdrIdArgs),
+
+    /// Archive a decision, as Delete does in the web app (`restore` undoes it)
+    Delete(AdrIdArgs),
+
+    /// Restore an archived decision
+    Restore(AdrIdArgs),
+
+    /// Accept a suggested decision
+    Accept(AdrIdArgs),
+
+    /// Reject a suggested decision, with a reason
+    Reject(AdrRejectArgs),
+}
+
+/// Options shared by the `adr` commands that call Actual AI.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct AdrApiOptions {
+    /// API base URL. Defaults to `ACTUAL_API_URL`, then production.
+    #[arg(long, value_name = "URL", hide = true)]
+    pub api_url: Option<String>,
+
+    /// Print the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The decision content `adr new` writes and `adr create` sends without a
+/// file.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct AdrContentArgs {
+    /// Why the decision is needed: one point per flag.
+    #[arg(long = "context", value_name = "POINT")]
+    pub context: Vec<String>,
+
+    /// A policy as `LEVEL: statement`, one per flag. LEVEL is MUST, MUST NOT,
+    /// SHOULD, SHOULD NOT or MAY.
+    #[arg(long = "policy", value_name = "POLICY")]
+    pub policies: Vec<String>,
+
+    /// Who made the decision, for the decision's Deciders line.
+    #[arg(long, value_name = "NAMES")]
+    pub deciders: Option<String>,
+}
+
+/// Arguments for `adr new`
+#[derive(Parser, Debug)]
+pub struct AdrNewArgs {
+    /// The decision's title, on one line.
+    #[arg(value_name = "TITLE")]
+    pub title: String,
+
+    #[command(flatten)]
+    pub content: AdrContentArgs,
+
+    /// A path the decision applies to, relative to the repository root, one
+    /// per flag; a leading `!` excludes. Leave it out for the whole
+    /// repository.
+    #[arg(long = "scope", value_name = "GLOB")]
+    pub scope: Vec<String>,
+
+    /// `accepted` governs at once; `draft` is read by no check. Defaults to
+    /// accepted at a terminal and draft when no person is at one.
+    #[arg(long, value_enum)]
+    pub status: Option<crate::api::adr_types::SaveStatus>,
+
+    /// Repository root to write into. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    /// Print the files written as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `adr check`
+#[derive(Parser, Debug)]
+pub struct AdrCheckArgs {
+    /// Decision files to check. Defaults to every file under docs/adr/ that
+    /// carries an ADR header.
+    #[arg(value_name = "FILE")]
+    pub files: Vec<std::path::PathBuf>,
+
+    /// Compare only with this repository's files, not with your decisions in
+    /// Actual AI, even when signed in.
+    #[arg(long)]
+    pub no_cloud: bool,
+
+    /// Connected repository to compare with: its name, owner/name or id.
+    /// Defaults to the one the working tree's origin remote names.
+    #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr list`
+#[derive(Parser, Debug)]
+pub struct AdrListArgs {
+    /// Connected repository: its name, owner/name or id. Defaults to the one
+    /// the working tree's origin remote names, else the whole organization.
+    #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Only decisions in this list of the web app's decisions page.
+    #[arg(long, value_enum)]
+    pub state: Option<crate::api::adr_types::DecisionState>,
+
+    /// Decisions per page, 1 to 200.
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
+    pub limit: u32,
+
+    /// Decisions to skip, for the next page.
+    #[arg(long, default_value_t = 0)]
+    pub offset: u64,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr show`
+#[derive(Parser, Debug)]
+pub struct AdrShowArgs {
+    /// The decision's id, as `actual adr list` prints it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr create`
+#[derive(Parser, Debug)]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["file", "title"])))]
+pub struct AdrCreateArgs {
+    /// A decision file to push, such as one `actual adr new` wrote. Its pair
+    /// is renamed to the file names Actual AI's sync uses for the new
+    /// decision.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["title", "context", "policies", "deciders"])]
+    pub file: Option<std::path::PathBuf>,
+
+    /// The decision's title, when it isn't sent from a file.
+    #[arg(long, value_name = "TITLE")]
+    pub title: Option<String>,
+
+    #[command(flatten)]
+    pub content: AdrContentArgs,
+
+    /// `accepted` governs at once; `draft` waits for `actual adr publish`.
+    /// Defaults to accepted at a terminal and draft when no person is at one.
+    #[arg(long, value_enum)]
+    pub status: Option<crate::api::adr_types::SaveStatus>,
+
+    /// Connected repository: its name, owner/name or id. Defaults to the one
+    /// the working tree's origin remote names.
+    #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Send it even if the repository has decisions that look the same.
+    #[arg(long)]
+    pub allow_duplicate: bool,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr update`
+#[derive(Parser, Debug)]
+#[command(group(
+    clap::ArgGroup::new("change")
+        .required(true)
+        .multiple(true)
+        .args(["title", "context", "policies", "levels", "scope", "clear_scope"])
+))]
+pub struct AdrUpdateArgs {
+    /// The decision's id, as `actual adr list` prints it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// A new title.
+    #[arg(long, value_name = "TITLE")]
+    pub title: Option<String>,
+
+    /// A new context, one point per flag; replaces the old one.
+    #[arg(long = "context", value_name = "POINT")]
+    pub context: Vec<String>,
+
+    /// The whole policy list after the change, one `LEVEL: statement` per
+    /// flag. Prefix a policy's id and `=` to keep it (`<id>=MUST: …`); a new
+    /// policy has no id, and a policy you leave out is removed.
+    #[arg(long = "policy", value_name = "POLICY", conflicts_with = "levels")]
+    pub policies: Vec<String>,
+
+    /// Change one policy's level, as `<policy id>=LEVEL`, one per flag.
+    #[arg(long = "level", value_name = "ID=LEVEL")]
+    pub levels: Vec<String>,
+
+    /// The paths the decision applies to after the change, one per flag; a
+    /// leading `!` excludes.
+    #[arg(long = "scope", value_name = "GLOB", conflicts_with = "clear_scope")]
+    pub scope: Vec<String>,
+
+    /// Apply the decision to its whole root again.
+    #[arg(long)]
+    pub clear_scope: bool,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr publish`, `unpublish`, `delete`, `restore` and
+/// `accept`
+#[derive(Parser, Debug)]
+pub struct AdrIdArgs {
+    /// The decision's id, as `actual adr list` prints it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr reject`
+#[derive(Parser, Debug)]
+pub struct AdrRejectArgs {
+    /// The suggested decision's id, as `actual adr list` prints it.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Why it was rejected, saved with the decision.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
 }
 
 /// Arguments for the `rules` command

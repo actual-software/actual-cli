@@ -1,3 +1,4 @@
+pub mod adr;
 pub mod analysis;
 pub mod api;
 pub mod auth;
@@ -47,6 +48,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Models(args) => cli::commands::models::exec(args.no_fetch),
         Command::Cache(args) => cli::commands::cache::exec(args),
         Command::Rules(args) => cli::commands::rules::exec(args),
+        Command::Adr(args) => cli::commands::adr::exec(args),
         Command::PlanCheck(args) => cli::commands::plan_check::exec(args),
         Command::PlanCheckOverride(args) => cli::commands::check_engine::exec_override(args),
         Command::ImplCheck(args) => cli::commands::impl_check::exec(args),
