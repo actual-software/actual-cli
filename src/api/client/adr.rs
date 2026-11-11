@@ -813,21 +813,20 @@ mod tests {
             ),
         ];
         for (json, expected) in cases {
-            match adr_error_from_body(StatusCode::FORBIDDEN, body(json)) {
-                ActualError::AdrAccessDenied { message, hint } => {
-                    assert!(message.starts_with("Actual AI refused the request (HTTP 403): "));
-                    assert!(hint.contains(expected), "hint {hint:?} for {json}");
-                }
-                other => panic!("expected AdrAccessDenied, got {other:?}"),
-            }
+            let err = adr_error_from_body(StatusCode::FORBIDDEN, body(json));
+            assert!(
+                matches!(&err, ActualError::AdrAccessDenied { message, hint }
+                    if message.starts_with("Actual AI refused the request (HTTP 403): ")
+                        && hint.contains(expected)),
+                "{err:?} for {json}"
+            );
         }
-        match adr_error_from_body(StatusCode::FORBIDDEN, AdrErrorBody::default()) {
-            ActualError::AdrAccessDenied { message, hint } => {
-                assert!(message.ends_with("access denied"));
-                assert_eq!(hint, "actual login");
-            }
-            other => panic!("expected AdrAccessDenied, got {other:?}"),
-        }
+        let err = adr_error_from_body(StatusCode::FORBIDDEN, AdrErrorBody::default());
+        assert!(
+            matches!(&err, ActualError::AdrAccessDenied { message, hint }
+                if message.ends_with("access denied") && hint == "actual login"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -838,43 +837,37 @@ mod tests {
                 r#"{"bodyErrors":{"issues":[{"path":["reason"],"message":"String must contain at least 1 character(s)"}],"name":"ZodError"},"queryParameterErrors":null,"pathParameterErrors":null,"headerErrors":null}"#,
             ),
         );
-        match schema {
-            ActualError::AdrInvalid { reasons } => {
-                assert_eq!(
-                    reasons,
-                    ["reason: String must contain at least 1 character(s)"]
-                )
-            }
-            other => panic!("expected AdrInvalid, got {other:?}"),
-        }
+        assert!(
+            matches!(&schema, ActualError::AdrInvalid { reasons }
+                if *reasons == ["reason: String must contain at least 1 character(s)"]),
+            "{schema:?}"
+        );
         let writer = adr_error_from_body(
             StatusCode::BAD_REQUEST,
             body(r#"{"error":"invalid_request","message":"Policy statements cannot be empty"}"#),
         );
-        match writer {
-            ActualError::AdrInvalid { reasons } => {
-                assert_eq!(reasons, ["Policy statements cannot be empty"])
-            }
-            other => panic!("expected AdrInvalid, got {other:?}"),
-        }
+        assert!(
+            matches!(&writer, ActualError::AdrInvalid { reasons }
+                if *reasons == ["Policy statements cannot be empty"]),
+            "{writer:?}"
+        );
         let empty = adr_error_from_body(StatusCode::BAD_REQUEST, AdrErrorBody::default());
         assert!(matches!(empty, ActualError::ApiError(m) if m == "HTTP 400 Bad Request"));
     }
 
     #[test]
     fn other_refusals_keep_the_server_code_and_message() {
-        match adr_error_from_body(
+        let err = adr_error_from_body(
             StatusCode::CONFLICT,
             body(
                 r#"{"error":"conflict","message":"Only a draft can be published; this decision is active"}"#,
             ),
-        ) {
-            ActualError::ApiResponseError { code, message } => {
-                assert_eq!(code, "conflict");
-                assert!(message.starts_with("Only a draft"));
-            }
-            other => panic!("expected ApiResponseError, got {other:?}"),
-        }
+        );
+        assert!(
+            matches!(&err, ActualError::ApiResponseError { code, message }
+                if code == "conflict" && message.starts_with("Only a draft")),
+            "{err:?}"
+        );
         assert!(matches!(
             adr_error_from_body(StatusCode::SERVICE_UNAVAILABLE, AdrErrorBody::default()),
             ActualError::ServiceUnavailable

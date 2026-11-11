@@ -340,14 +340,14 @@ mod tests {
             ],
             ..AdrContentArgs::default()
         };
-        match content_from_flags("T", &bad) {
-            Err(ActualError::AdrInvalid { reasons }) => {
-                assert_eq!(reasons.len(), 2);
-                assert!(reasons[0].starts_with("Policy 1 doesn't start with a level"));
-                assert!(reasons[1].starts_with("Policy 3 "));
-            }
-            other => panic!("expected AdrInvalid, got {other:?}"),
-        }
+        let err = content_from_flags("T", &bad).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrInvalid { reasons })
+                if reasons.len() == 2
+                    && reasons[0].starts_with("Policy 1 doesn't start with a level")
+                    && reasons[1].starts_with("Policy 3 ")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -373,18 +373,13 @@ mod tests {
         for args in cloud {
             let mut argv = vec!["actual", "adr"];
             argv.extend(args.iter().copied());
-            let cli = crate::Cli::parse_from(argv.clone());
-            let crate::Command::Adr(adr) = cli.command else {
-                panic!("not an adr command: {argv:?}");
-            };
+            let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
             let err = exec(&adr).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    ActualError::NotLoggedIn | ActualError::AdrInvalid { .. }
-                ),
-                "{argv:?}: {err:?}"
+            let expected = matches!(
+                &err,
+                ActualError::NotLoggedIn | ActualError::AdrInvalid { .. }
             );
+            assert!(expected, "{argv:?}: {err:?}");
         }
         let root = tmp.path().to_str().unwrap();
         for args in [
@@ -393,10 +388,7 @@ mod tests {
         ] {
             let mut argv = vec!["actual", "adr"];
             argv.extend(args.iter().copied());
-            let cli = crate::Cli::parse_from(argv);
-            let crate::Command::Adr(adr) = cli.command else {
-                panic!("not an adr command");
-            };
+            let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
             // `new` with no context or policy fails the save check; `check`
             // of an empty repository passes.
             let _ = exec(&adr);

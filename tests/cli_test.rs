@@ -3149,3 +3149,28 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
                 && attribute["value"]["boolValue"] == true
         }));
 }
+
+#[test]
+fn test_adr_new_then_check_work_signed_out() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["adr", "new", "Use Postgres for storage"])
+        .args(["--context", "Services need one relational store."])
+        .args([
+            "--policy",
+            "MUST: Services store relational data in Postgres.",
+        ])
+        .arg("--root")
+        .arg(dir.path())
+        .assert()
+        .success();
+    for sub in ["docs/adr", ".actual/rules"] {
+        let written: Vec<_> = std::fs::read_dir(dir.path().join(sub)).unwrap().collect();
+        assert_eq!(written.len(), 1, "{sub}");
+    }
+    cmd()
+        .args(["adr", "check", "--no-cloud", "--root"])
+        .arg(dir.path())
+        .assert()
+        .success();
+}
