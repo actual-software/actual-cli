@@ -349,7 +349,14 @@ fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError
     }
 
     let mut child = git_command(root, Some(&index))
-        .args(["diff", "--no-ext-diff", base, "--"])
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base,
+            "--",
+        ])
         .spawn()
         .map_err(ActualError::IoError)?;
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -799,6 +806,22 @@ mod tests {
         let diff = working_tree_diff(repo.path()).unwrap();
         assert!(diff.contains("service.rs"));
         assert!(diff.contains("todo!()"));
+    }
+
+    /// Rule selection reads the header paths behind `a/` and `b/`, so a git
+    /// config that changes the prefixes must not change them here.
+    #[test]
+    fn test_working_tree_diff_keeps_a_and_b_prefixes_whatever_the_git_config() {
+        for key in ["diff.noprefix", "diff.mnemonicPrefix"] {
+            let repo = git_repo_with_baseline();
+            run_git(repo.path(), &["config", key, "true"]);
+            std::fs::write(repo.path().join("service.rs"), "fn handler() { 1 }\n").unwrap();
+            let diff = working_tree_diff(repo.path()).unwrap();
+            assert!(
+                diff.contains("--- a/service.rs\n+++ b/service.rs\n"),
+                "{key}: {diff}"
+            );
+        }
     }
 
     #[test]

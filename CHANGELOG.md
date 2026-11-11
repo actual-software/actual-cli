@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `impl-check` judges a rule whose ADR file header sets a `root` other than the whole repository. It used to read the diff's `a/` and `b/` header prefixes as part of each path, which put every changed file outside the root, so the rule was dropped and the check reported that no rule applied. A file a rule excludes no longer gets that rule through the same prefixes. The default diff now keeps the `a/` and `b/` prefixes even when git config sets `diff.noprefix` or `diff.mnemonicPrefix`
+
 ## [0.13.0] - 2026-11-10
 
 ### Added

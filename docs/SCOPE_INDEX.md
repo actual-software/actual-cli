@@ -140,6 +140,12 @@ hard negative decided before any signal is scored, so it holds for the path
 signal, for word matches, and for the brief's text fallback alike. A query that
 names several files keeps the decision for the ones it can still govern.
 
+**A diff as the query.** `impl-check` takes the files a diff touches from its
+file headers, with git's `a/` and `b/` prefixes removed, so root and excludes
+judge `packages/web/src/x.ts` and not `b/packages/web/src/x.ts`. The prefixed
+copies those headers leave in the diff's text, and `/dev/null`, are not read as
+paths. Other paths named in the diff's lines still count.
+
 **Status.** `deleted`, `draft`, `archived-draft`, `deferred`, `rejected` and
 `suggested` mark a decision that does not govern, as do `superseded` and `deprecated`, which no
 generator emits today. Such a document is left out of the index, so it is never
