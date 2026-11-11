@@ -183,7 +183,10 @@ pub(super) fn run_pipeline(
 ) -> Result<Outcome, ActualError> {
     let plan_digest = governance_session::content_digest(plan_text);
     let resolved = scope::resolve_in(rules_dir, root, knobs.rebuild)?;
-    let query = Query::new(plan_text.to_string());
+    let query = match kind {
+        check::ArtifactKind::Plan => Query::new(plan_text),
+        check::ArtifactKind::Diff => Query::for_diff(plan_text),
+    };
     let prefiltered = select::prefilter(&resolved.index, &query, knobs.limit, knobs.candidates);
 
     if prefiltered.is_empty() {
@@ -3359,6 +3362,52 @@ pub(crate) mod tests {
         assert!(matches!(
             outcome,
             Outcome::NoRunner { documents_selected, .. } if documents_selected > 0
+        ));
+    }
+
+    /// A diff of a file inside a rule's root reaches the judge (no runner is
+    /// available, so `NoRunner` with a selection is as far as it gets), and a
+    /// diff entirely outside that root never selects the rule.
+    #[test]
+    fn test_run_pipeline_judges_a_rooted_rule_only_on_a_diff_inside_its_root() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+
+        let rooted = v2_oauth("accepted").replace(
+            "root: .",
+            "root: services/auth\n    paths:\n      - \"oauth/**\"",
+        );
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", &rooted)]);
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let diff_of = |path: &str| {
+            format!(
+                "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+sign access tokens with RS256\n"
+            )
+        };
+        let run = |diff: &str| {
+            run_pipeline(
+                diff,
+                root.path(),
+                &rules_dir,
+                &args.check_knobs(),
+                check::ArtifactKind::Diff,
+                false,
+                &GovernanceSession::default(),
+            )
+            .unwrap()
+        };
+
+        assert!(matches!(
+            run(&diff_of("services/auth/oauth/token.rs")),
+            Outcome::NoRunner { documents_selected, .. } if documents_selected > 0
+        ));
+        assert!(matches!(
+            run(&diff_of("web/app/token.rs")),
+            Outcome::NothingApplies
         ));
     }
 

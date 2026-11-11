@@ -324,27 +324,97 @@ impl Query {
         self
     }
 
+    /// A query for a unified `git diff`: its text, with the paths its file
+    /// headers name as explicit paths.
+    pub fn for_diff(diff: impl Into<String>) -> Self {
+        let text = diff.into();
+        let paths = diff_header_paths(&text);
+        Self::new(text).with_paths(paths)
+    }
+
     /// Paths the query names: those given explicitly, plus any path-shaped
     /// token found in the prose, so `touch apps/actual/lib/oauth/token.ts` in a
-    /// plan sentence counts without the caller having to split it out.
+    /// plan sentence counts without the caller having to split it out. A prose
+    /// token that is an explicit path behind git's `a/` or `b/` prefix is that
+    /// path, not another one, and `/dev/null` is a diff header naming no file,
+    /// so both are dropped.
     pub fn all_paths(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for path in self
+        let explicit: Vec<String> = self
             .paths
             .iter()
             .map(|p| p.trim_start_matches("./").trim_end_matches('/').to_string())
-            .chain(
-                signals::globs_from_prose(&self.text)
-                    .into_iter()
-                    .map(|g| g.pattern.trim_end_matches("/**").to_string()),
-            )
-        {
-            if !path.is_empty() && !out.contains(&path) {
-                out.push(path);
+            .collect();
+        let is_prefixed_explicit = |path: &str| {
+            ["a/", "b/"].iter().any(|prefix| {
+                path.strip_prefix(prefix)
+                    .is_some_and(|rest| explicit.iter().any(|e| e == rest))
+            })
+        };
+        let prose: Vec<String> = signals::globs_from_prose(&self.text)
+            .into_iter()
+            .map(|g| g.pattern.trim_end_matches("/**").to_string())
+            .filter(|path| path != "/dev/null" && !is_prefixed_explicit(path))
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        for path in explicit.iter().chain(prose.iter()) {
+            if !path.is_empty() && !out.contains(path) {
+                out.push(path.clone());
             }
         }
         out
     }
+}
+
+/// The paths a `git diff`'s file headers name, in order and without
+/// duplicates, with git's `a/` and `b/` prefixes removed. Only the lines
+/// between a `diff --git` line and that file's first `@@` are read, so an added
+/// line that happens to start `++ b/` is not taken for a header.
+fn diff_header_paths(diff: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut in_header = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            in_header = true;
+            continue;
+        }
+        if line.starts_with("@@") {
+            in_header = false;
+        }
+        if !in_header {
+            continue;
+        }
+        let path = if let Some(name) = line.strip_prefix("--- ") {
+            header_name(name, "a/")
+        } else if let Some(name) = line.strip_prefix("+++ ") {
+            header_name(name, "b/")
+        } else {
+            ["rename from ", "rename to ", "copy from ", "copy to "]
+                .iter()
+                .find_map(|key| line.strip_prefix(key))
+                .and_then(|name| header_name(name, ""))
+        };
+        if let Some(path) = path {
+            if !path.is_empty() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// One header line's file name: unquoted, without the trailing tab git writes
+/// after a name containing a space, and without `prefix`. `None` for
+/// `/dev/null`, the side of an added or deleted file that has no file.
+fn header_name(name: &str, prefix: &str) -> Option<String> {
+    let name = name.trim_end_matches('\t');
+    let name = name
+        .strip_prefix('"')
+        .and_then(|n| n.strip_suffix('"'))
+        .unwrap_or(name);
+    if name == "/dev/null" {
+        return None;
+    }
+    Some(name.strip_prefix(prefix).unwrap_or(name).to_string())
 }
 
 /// What one field contributed to a document's score, and on the strength of
@@ -2636,6 +2706,92 @@ mod tests {
         let index = index_of(vec![v2_doc("web-rules", "packages/web", &["src/**"])]);
         assert_eq!(slugs_for(&index, "packages"), vec!["web-rules"]);
         assert_eq!(slugs_for(&index, "packages/web"), vec!["web-rules"]);
+    }
+
+    // ── a git diff as the query ──────────────────────────────────────────
+
+    /// What `git diff` prints for one added file whose single line is `line`.
+    fn added_file_diff(path: &str, line: &str) -> String {
+        format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{line}\n"
+        )
+    }
+
+    #[test]
+    fn test_diff_header_paths_read_every_header_shape_without_git_prefixes() {
+        let diff = "\
+--- a/commit-message-separator.txt
+diff --git a/src/edited.rs b/src/edited.rs
+index 1..2 100644
+--- a/src/edited.rs
++++ b/src/edited.rs
+@@ -1 +1,2 @@
+ fn kept() {}
++++ b/src/added-line-not-a-header.rs
+diff --git a/src/gone.rs b/src/gone.rs
+deleted file mode 100644
+--- a/src/gone.rs
++++ /dev/null
+diff --git a/old/name.rs b/new/name.rs
+similarity index 100%
+rename from old/name.rs
+rename to new/name.rs
+diff --git a/my file.rs b/my file.rs
+--- \"a/my file.rs\"\t
++++ b/my file.rs\t
+diff --git a/src/edited.rs b/src/copy.rs
+copy from src/edited.rs
+copy to src/copy.rs
+";
+        assert_eq!(
+            diff_header_paths(diff),
+            vec![
+                "src/edited.rs",
+                "src/gone.rs",
+                "old/name.rs",
+                "new/name.rs",
+                "my file.rs",
+                "src/copy.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_for_diff_names_the_header_paths_and_drops_their_prefixed_copies() {
+        let query = Query::for_diff(added_file_diff("packages/api/src/handler.ts", "x"));
+        assert_eq!(query.paths, vec!["packages/api/src/handler.ts"]);
+        assert_eq!(query.all_paths(), vec!["packages/api/src/handler.ts"]);
+        // A prefixed token that is not a header path is still a path.
+        let query = Query::for_diff(added_file_diff("src/x.ts", "see b/other/y.ts"));
+        assert_eq!(query.all_paths(), vec!["src/x.ts", "b/other/y.ts"]);
+    }
+
+    /// A rooted rule governs a diff of a file inside its root. Read as prose,
+    /// the same diff names only `a/packages/...` and `b/packages/...`, which
+    /// sit outside `packages/api`, so the rule dropped before any scoring.
+    #[test]
+    fn test_a_rooted_document_governs_a_git_diff_inside_its_root_and_not_outside() {
+        let index = index_of(vec![v2_doc("api-rules", "packages/api", &["src/**"])]);
+        let inside = added_file_diff("packages/api/src/handler.ts", "quux");
+        let hits = index.search(&Query::for_diff(inside.clone()), 10);
+        assert_eq!(
+            hits.into_iter().map(|h| h.slug).collect::<Vec<_>>(),
+            vec!["api-rules"]
+        );
+        assert!(index.search(&Query::new(inside), 10).is_empty());
+
+        let outside = added_file_diff("packages/web/src/handler.ts", "quux");
+        assert!(index.search(&Query::for_diff(outside), 10).is_empty());
+    }
+
+    /// The `b/` copy of an excluded file's path is not excluded, so it used to
+    /// keep the document on the diff's words.
+    #[test]
+    fn test_an_excluded_file_in_a_git_diff_drops_the_document() {
+        let index = index_of(vec![v2_doc("w", ".", &["src/**", "!src/generated/**"])]);
+        let diff = added_file_diff("src/generated/a.ts", "quux applies lot");
+        assert!(index.search(&Query::for_diff(diff.clone()), 10).is_empty());
+        assert!(!index.search(&Query::new(diff), 10).is_empty());
     }
 
     // ── adr_id as the decision key ───────────────────────────────────────
