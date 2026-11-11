@@ -1,6 +1,6 @@
 # actual — Getting Started
 
-`actual` checks your coding agent's plans and changes against your team's architecture decisions, committed as rule files in `.actual/rules/`. This guide goes from installing the Actual.ai Skill and the CLI to your first check, with signing in as an optional last step, and then lists every command and configuration setting.
+`actual` checks your coding agent's plans and changes against your team's architecture decisions, committed as rule files in `.actual/rules/`. This guide takes you from installing the Actual.ai Skill and the CLI to your first check (signing in comes last, and it's optional), then lists every command and configuration setting.
 
 ## Installation
 
@@ -20,7 +20,7 @@ The checks run in Claude Code through the Actual.ai Skill, a Claude Code plugin.
 /reload-plugins
 ```
 
-The first time you run `/actual`, the skill offers to install the CLI with npm. To install the CLI yourself, or for CI, use one of the methods below.
+The first time you run `/actual`, the skill offers to install the CLI with npm. If you'd rather install the CLI yourself, or you need it in CI, use one of the methods below.
 
 **Linux:** every method below installs a prebuilt binary that needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40, RHEL 10, or a later release of any of them. Check yours with `ldd --version`. Ubuntu 22.04, Debian 12, RHEL 9 and Amazon Linux 2023 ship an older glibc, where the arm64 binary exits with ``version `GLIBC_2.39' not found`` and the x64 binary runs but prints ``weak version `GLIBC_2.39' not found`` every time it starts. On any glibc older than 2.39, build from source instead with `cargo install --git https://github.com/actual-software/actual-cli.git actual-cli`, which needs a Rust toolchain and a C compiler.
 

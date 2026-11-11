@@ -1,6 +1,6 @@
 # adr-bot and the Advisor
 
-`actual adr-bot` and `actual advisor` still ship with the CLI, and this page is their reference. For checking your agent's plans and changes against your rules, start with the [README](../README.md).
+This page is the reference for `actual adr-bot` and `actual advisor`, which still ship with the CLI. For checking your agent's plans and changes against your rules, start with the [README](../README.md).
 
 ## adr-bot: ADR-backed context
 
