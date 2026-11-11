@@ -1347,7 +1347,7 @@ mod tests {
         let cfg = OAuthConfig::new_device("https://auth.example/");
         assert_eq!(cfg.base_url, "https://auth.example"); // trailing slash trimmed
         assert_eq!(cfg.client_id, "actual-cli");
-        assert_eq!(cfg.scopes, "adr:query adr:review mcp:invoke");
+        assert_eq!(cfg.scopes, "adr:query adr:review mcp:invoke observe:events");
     }
 
     #[test]

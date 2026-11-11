@@ -1,5 +1,6 @@
 pub mod boundary;
 pub mod canonicalize;
+pub mod kev;
 pub mod diff;
 pub mod governance;
 pub mod hook_output;
