@@ -16,6 +16,9 @@ use crate::api::types::{
 use crate::config::types::Config;
 use crate::error::{sanitize_server_text, ActualError};
 
+mod adr;
+pub use adr::MAX_PAGE;
+
 pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
 
 /// The Actual API base URL the signed-in commands use: `flag`, a command's
