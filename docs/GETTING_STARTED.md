@@ -1,8 +1,26 @@
 # actual — Getting Started
 
-`actual` generates and maintains AI instruction files (`CLAUDE.md`, `AGENTS.md`, or Cursor rules) for your codebase by pulling tailored Architecture Decision Records from Actual's API and writing them into your repo.
+`actual` checks your coding agent's plans and changes against your team's architecture decisions, committed as rule files in `.actual/rules/`. This guide goes from installing the Actual.ai Skill and the CLI to your first check, with signing in as an optional last step, and then lists every command and configuration setting.
 
 ## Installation
+
+### Actual.ai Skill
+
+The checks run in Claude Code through the Actual.ai Skill, a Claude Code plugin. Run each command on its own, in a Claude Code session:
+
+```
+/plugin marketplace add actual-software/actual-skill
+```
+
+```
+/plugin install actual-cli@actual-cli-skills
+```
+
+```
+/reload-plugins
+```
+
+The first time you run `/actual`, the skill offers to install the CLI with npm. To install the CLI yourself, or for CI, use one of the methods below.
 
 **Linux:** every method below installs a prebuilt binary that needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40, RHEL 10, or a later release of any of them. Check yours with `ldd --version`. Ubuntu 22.04, Debian 12, RHEL 9 and Amazon Linux 2023 ship an older glibc, where the arm64 binary exits with ``version `GLIBC_2.39' not found`` and the x64 binary runs but prints ``weak version `GLIBC_2.39' not found`` every time it starts. On any glibc older than 2.39, build from source instead with `cargo install --git https://github.com/actual-software/actual-cli.git actual-cli`, which needs a Rust toolchain and a C compiler.
 
@@ -68,7 +86,7 @@ cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
 
 ## Prerequisites
 
-You need an AI runner. Pick one:
+The checks judge your rules with an AI runner. Pick one:
 
 **Claude Code CLI (default)**
 ```bash
@@ -99,13 +117,48 @@ actual config set runner codex-cli
 actual config set runner cursor-cli
 ```
 
+## Adding rules
+
+The checks read the rule files committed under `.actual/rules/`. Write them by hand in the format the [README](../README.md#adding-rules) shows, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files there. Then see what the CLI read:
+
+```bash
+actual rules ls
+```
+
+## Running the checks
+
+In Claude Code, the skill runs them for you: `actual plan-check` on your agent's plan when it leaves plan mode, and `actual impl-check` on its changes at the end of every turn. To run them yourself, from inside the repository:
+
+```bash
+actual plan-check --plan-file plan.md
+actual impl-check
+```
+
+Only a `conflicting` verdict exits non-zero, so a CI job that has to tell "checked and clean" from "could not check" should read the `status` field from `--json`. [Governance](HOW_IT_WORKS.md#governance) covers the other outcomes and how to override a rule.
+
+## Signing in (optional)
+
+The checks and `rules` run signed out. To sign in to your Actual AI account through your browser:
+
+```bash
+actual login
+actual whoami   # show the signed-in account and organization
+```
+
 ## Commands
 
 ```bash
+actual plan-check     # check a plan against the rules selected for it
+actual impl-check     # check a git diff against the rules selected for it
+actual check-override # human override for a rule plan-check/impl-check denied
+actual rules          # list, index, select and brief rule documents under .actual/rules/
+actual login          # sign in to your Actual AI account via browser OAuth
+actual logout         # sign out and clear local credentials
+actual whoami         # show the signed-in account and organization
 actual adr-bot        # analyze repo & write AI context files
-actual advisor        # ask the Advisor an org-scoped architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify the configured AI runner is authenticated
+actual advisor        # ask the Advisor an org-scoped architecture question
 actual config show    # view current configuration
 actual config set     # set a config value (e.g. actual config set runner anthropic-api)
 actual config path    # print config file location
@@ -114,6 +167,8 @@ actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
 actual version        # print the version and how to upgrade it (--check compares with the latest)
 ```
+
+[adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers `adr-bot`, `status` and `advisor`.
 
 ## Configuration
 
