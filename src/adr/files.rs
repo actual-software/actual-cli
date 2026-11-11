@@ -304,7 +304,7 @@ pub fn rename_pair(
 fn move_with_header(from: &Path, to: &Path, header: &str, outcome: &mut RenameOutcome) {
     let result = (|| -> Result<(), ActualError> {
         let text = read_text(from)?;
-        let text = replace_header(&text, header);
+        let text = replace_header(text.strip_prefix('\u{feff}').unwrap_or(&text), header);
         if from != to {
             if to.exists() {
                 return Err(ActualError::ConfigError(format!(
@@ -644,6 +644,26 @@ mod tests {
         let moved = read_decision_file(&doc).unwrap();
         assert_eq!(moved.adr_id(), Some(NEW));
         assert!(moved.is_draft());
+    }
+
+    #[test]
+    fn rename_drops_a_byte_order_mark_with_the_old_header() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let (doc, _) = local_pair(root);
+        let text = std::fs::read_to_string(&doc).unwrap();
+        write(&doc, &format!("\u{feff}{text}"));
+        let file = read_decision_file(&doc).unwrap();
+        let outcome = rename_pair(root, &file, NEW, "Use Postgres for storage", "accepted");
+        assert!(outcome.problems.is_empty(), "{:?}", outcome.problems);
+        let new_doc = root
+            .join(DECISION_DIR)
+            .join(decision_doc_file_name(NEW, "Use Postgres for storage"));
+        let moved = std::fs::read_to_string(&new_doc).unwrap();
+        assert!(
+            !moved.contains(OLD) && !moved.contains('\u{feff}'),
+            "{moved}"
+        );
     }
 
     #[test]
