@@ -45,6 +45,7 @@ actual impl-check                      # check your working tree against .actual
 
 - [Actual.ai Skill and CLI in depth](docs/HOW_IT_WORKS.md): what they do and the commands behind each capability.
 - [Getting Started](docs/GETTING_STARTED.md): installation, runners, flags and configuration.
+- [adr-bot and the Advisor](docs/ADR_BOT_AND_ADVISOR.md): ADR guidance written into your agent's context file, and architecture questions answered from your ADRs.
 - [Command reference](https://actual.ai/cli/docs) on actual.ai, also as [Markdown](https://actual.ai/cli/docs.md) for your agent.
 
 ## Privacy & Telemetry

@@ -48,47 +48,6 @@ Ask your agent to "sign me in to Actual AI." The skill runs `actual login`, whic
 
 </details>
 
-### Org-scoped architecture answers
-
-When your agent hits an architecture question, the skill asks the Advisor through `actual advisor`. The answer is grounded in your team's ADRs and cites its sources, so you can trace every recommendation back to a decision your team made. The question is scoped to the repository you're working in: the CLI matches the working tree's `origin` remote to a connected repository and falls back to your organization when nothing matches.
-
-<details>
-<summary><strong>Direct CLI</strong></summary>
-
-```bash
-actual advisor "How should we handle database access in a new service?"
-actual advisor --repo actual-cli "..."       # scope to a repo by name
-actual advisor --repo owner/actual-cli "..." # disambiguate a shared name
-actual advisor --repo none "..."             # ask at the organization level
-actual advisor --show-scope                  # print the active scope and exit
-```
-
-The scope you choose is remembered per repository; `--repo auto` returns to auto-detection.
-
-</details>
-
-### ADR-backed context
-
-Ask your agent to "set up Actual for this repository." The skill runs `actual adr-bot`, which analyzes your repository, fetches the ADRs that apply to it, tailors them to your codebase, and writes the result into the file your agent reads. Your agent starts every session already knowing how your team builds things. Content sits between managed markers, so later runs update it without touching anything you wrote yourself. Ask to "preview the ADR guidance" first and the skill runs it with `--dry-run`.
-
-| Format | Flag | Output file |
-|--------|------|-------------|
-| Claude Code (default) | `--output-format claude-md` | `CLAUDE.md` |
-| Agents | `--output-format agents-md` | `AGENTS.md` |
-| Cursor Rules | `--output-format cursor-rules` | `.cursor/rules/actual-policies.mdc` |
-
-<details>
-<summary><strong>Direct CLI</strong></summary>
-
-```bash
-actual adr-bot --dry-run                       # preview without writing
-actual adr-bot                                 # write CLAUDE.md
-actual adr-bot --output-format agents-md       # write AGENTS.md instead
-actual status                                  # check managed markers and staleness
-```
-
-</details>
-
 ### Governance
 
 In Claude Code, the skill checks your agent's work against the rule documents committed in `.actual/rules/`. When your agent leaves plan mode, the skill runs `actual plan-check` on the plan before you see the approval dialog. At the end of every turn, it runs `actual impl-check` on the changes. A conflict goes back to the agent with the rule and the reason, and the turn continues until it's fixed.
@@ -157,5 +116,4 @@ See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill
 ### Requirements
 
 - The [Actual.ai Skill](https://github.com/actual-software/actual-skill) in a supported coding agent: Claude Code, Codex, ChatGPT, Cursor, or OpenCode. The skill offers to install the CLI on first use.
-- For the Advisor: an Actual AI account (sign up at [actual.ai/cli](https://actual.ai/cli), or ask your agent to sign you in) and your repository onboarded at [app.actual.ai](https://app.actual.ai).
 - For ADR-backed context and governance: a configured runner. Claude Code CLI is the default; `actual runners` lists the rest. ADR-backed context needs no account or API key.
