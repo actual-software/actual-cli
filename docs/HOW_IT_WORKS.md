@@ -4,19 +4,19 @@ The detail behind the [README](../README.md): what the skill and CLI do and the 
 
 ## What are the Actual.ai Skill and CLI?
 
-The Actual.ai CLI is the engine behind the [Actual.ai Skill](https://github.com/actual-software/actual-skill). Together they give your AI coding agents guardrails for AI-powered software development. The skill is how you and your agent use Actual: you ask in plain language, and the skill manages the CLI for you. The CLI connects your agent to the Advisor, which answers org-scoped architecture questions from your team's Architectural Decision Records (ADRs), and every answer cites the decisions it drew on.
+The Actual.ai CLI checks your coding agent's plans and changes against your team's Architectural Decision Records (ADRs), committed as rule files in `.actual/rules/`. The [Actual.ai Skill](https://github.com/actual-software/actual-skill) is its Claude Code plugin: it runs the checks at the right moments, briefs your agent on the rules for each file it reads, and manages the CLI for you.
 
 ## Why do I need the Actual.ai Skill and CLI?
 
-Coding agents don't know the architecture decisions your team has already made, so they write code that ignores them. The skill gives your agent that context and checks its plans and changes against your rules, running the CLI underneath, so its code follows your architecture from the start. You don't have to remember a command to get there.
+Coding agents don't know the architecture decisions your team has already made, so they write code that ignores them. The skill puts the rules for each file in front of your agent and checks its plans and changes against them, running the CLI underneath, so its code follows your architecture from the start. You don't have to remember a command to get there.
 
 ## Who are the Actual.ai Skill and CLI for?
 
-AI-native software teams: developers who build with coding agents and want answers, plans, and code grounded in the architecture decisions their team has already made. Most teams install the skill and let it manage the CLI. Teams wiring Actual into scripts or CI can also call the CLI directly.
+AI-native software teams: developers who build with coding agents and want plans and code grounded in the architecture decisions their team has already made. Most teams install the skill and let it manage the CLI. Teams wiring Actual into scripts or CI can also call the CLI directly.
 
 ## Where do the Actual.ai Skill and CLI work?
 
-The skill works inside the coding agent your team already uses: Claude Code, Codex, ChatGPT, Cursor, or OpenCode. The CLI it wraps writes context for Claude Code, Codex, and Cursor, and uses five runners: `claude-cli` (the default), `anthropic-api`, `openai-api`, `codex-cli`, and `cursor-cli`. Outside an agent, the CLI also runs on its own in your terminal and in CI.
+The checks and rule briefing run in Claude Code, through the skill's hooks. Outside Claude Code, the CLI runs on its own in your terminal and in CI. Either way it judges your rules with one of five runners: `claude-cli` (the default), `anthropic-api`, `openai-api`, `codex-cli`, and `cursor-cli`.
 
 | Platform | Architecture | Install method |
 |----------|--------------|----------------|
@@ -31,22 +31,11 @@ On Linux, every install method in the table puts a prebuilt binary on your machi
 
 ## When do the Actual.ai Skill and CLI run?
 
-Whenever an architecture question comes up. The skill manages the CLI and decides when each command runs. Before your agent writes code, the skill asks the Advisor how your team builds things. When your agent's context needs refreshing, the skill runs `actual adr-bot`. In Claude Code, the skill also runs `actual plan-check` before implementation starts and `actual impl-check` at the end of every turn.
+Whenever your agent plans, reads or changes code in a repository with rules. The skill manages the CLI and decides when each command runs: `actual plan-check` when your agent leaves plan mode, before implementation starts, `actual impl-check` at the end of every turn, and `actual rules brief` as your agent reads a file. In a terminal or CI, the CLI runs when you call it.
 
 ## How do the Actual.ai Skill and CLI work?
 
-Each capability below is something you ask the skill for, and the skill wraps the matching CLI command. If you're scripting or running in CI, open the Direct CLI section under each one.
-
-### Browser OAuth in seconds
-
-Ask your agent to "sign me in to Actual AI." The skill runs `actual login`, which signs you in through your browser and stores your credentials locally.
-
-<details>
-<summary><strong>Direct CLI</strong></summary>
-
-`actual whoami` shows the signed-in account, organization, and scopes, and `actual logout` signs you out. For CI and headless agents, see [Agent authentication](AGENT_AUTH.md): `actual auth create-token` mints a scoped access token from an existing session, and `actual mint-token` signs one from a service-account key when there is no human to sign in.
-
-</details>
+Each capability below is something the skill does for you, and the skill wraps the matching CLI command. If you're scripting or running in CI, open the Direct CLI section under each one.
 
 ### Governance
 
@@ -62,58 +51,87 @@ Governance never gets in the way of unrelated work. Infrastructure failures fail
 
 Every round and override is recorded in `~/.actualai/actual/plan-check-overrides.log`. Governance relies on Claude Code hooks, which the skill installs.
 
+`plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`.
+
+<details>
+<summary><strong>Direct CLI</strong></summary>
+
+```bash
+actual plan-check --plan-file plan.md --json
+actual impl-check                     # working tree vs HEAD, including untracked files
+git diff HEAD | actual impl-check
+```
+
+With `--claude-hook`, both commands speak Claude Code's hook contract, which is how the skill manages them in Claude Code.
+
+</details>
+
+### Rules in context
+
+Your agent is briefed as it works. When it reads a file, the skill runs `actual rules brief`, so the rules that govern that file reach the agent before its first edit. A file it writes without reading first, usually a new one, is briefed when it writes it. `actual rules` also shows you which rules apply where: `rules ls`, `rules index` and `rules brief` use no model and no network, and `rules select` asks a runner only to rank more matches than it can keep.
+
 <details>
 <summary><strong>Direct CLI</strong></summary>
 
 ```bash
 actual rules ls                       # list rule documents, level counts, warnings
 actual rules select "Add a caching layer in front of the user repository."
-actual plan-check --plan-file plan.md --json
-actual impl-check                     # working tree vs HEAD, including untracked files
-git diff HEAD | actual impl-check
+actual rules select --file src/api/   # the rule documents that govern a path
+actual rules brief --file src/api/users.ts
 ```
 
-`plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`. With `--claude-hook`, both commands speak Claude Code's hook contract, which is how the skill manages them in Claude Code. Rule files may open with a YAML header (ADR file header v2) that declares the decision's id, status, root and path scope; files without one work as before, and the two can share a directory. A decision whose status is `draft`, `deferred`, `rejected` or similar does not govern. See [Rule selection](RULE_SELECTION.md) and [Scope index](SCOPE_INDEX.md) for details.
+Rule files may open with a YAML header (ADR file header v2) that declares the decision's id, status, root and path scope; files without one work as before, and the two can share a directory. A decision whose status is `draft`, `deferred`, `rejected` or similar does not govern. See [Rule selection](RULE_SELECTION.md) and [Scope index](SCOPE_INDEX.md) for details.
+
+</details>
+
+### Sign-in
+
+Signing in is optional, since the checks and `rules` run signed out. Ask your agent to "sign me in to Actual AI." The skill runs `actual login`, which signs you in through your browser and stores your credentials locally.
+
+<details>
+<summary><strong>Direct CLI</strong></summary>
+
+`actual whoami` shows the signed-in account, organization, and scopes, and `actual logout` signs you out. For CI and headless agents, see [Agent authentication](AGENT_AUTH.md): `actual auth create-token` mints a scoped access token from an existing session, and `actual mint-token` signs one from a service-account key when there is no human to sign in.
 
 </details>
 
 ### Troubleshooting
 
-Ask your agent to "diagnose why Actual is failing." The skill knows every error the CLI can return, all five runners, and all three output formats, so it can find the cause and retry without you reading logs.
+Ask your agent to "diagnose why Actual is failing." The skill knows every error the CLI can return and all five runners, so it can find the cause and retry without you reading logs.
 
 <details>
 <summary><strong>Direct CLI — Commands the skill wraps</strong></summary>
 
 ```
+actual plan-check     # check a plan against the rules selected for it
+actual impl-check     # check a git diff against the rules selected for it
+actual check-override # human override for a rule plan-check/impl-check denied
+actual rules          # list, index, and select rule documents under .actual/rules/ (ADR file header v2 or the original format)
 actual login          # sign in to your Actual AI account via browser OAuth
 actual logout         # sign out and clear local credentials
 actual whoami         # show the signed-in account and organization
-actual advisor        # ask the Advisor an org-scoped architecture question
 actual adr-bot        # analyze the repo and write AI context files
 actual status         # check output file state (managed markers, staleness)
 actual auth           # check the runner's auth, or mint a scoped access token
+actual advisor        # ask the Advisor an org-scoped architecture question
 actual mint-token     # mint a token from a service-account key (no browser)
 actual config         # show, set, or locate configuration
 actual runners        # list available AI backend runners
 actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
-actual rules          # list, index, and select rule documents under .actual/rules/ (ADR file header v2 or the original format)
-actual plan-check     # check a plan against the rules selected for it
-actual impl-check     # check a git diff against the rules selected for it
-actual check-override # human override for a rule plan-check/impl-check denied
 ```
 
 </details>
 
 ### Configuration
 
-The skill manages the CLI with its defaults, so most teams never touch configuration. The CLI's config lives at `~/.actualai/actual/config.yaml` and is created on first run. See [Getting Started](GETTING_STARTED.md) for every flag, runner setting, and environment variable override.
+The skill manages the CLI with its defaults, so most teams never touch configuration. The CLI's config lives at `~/.actualai/actual/config.yaml` and is created on first run. See [Getting Started](GETTING_STARTED.md) for every runner setting, config key, and environment variable override.
 
 ### Documentation
 
-See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill) for skill setup, and the [Actual CLI docs](https://actual.ai/cli/docs) for the full command reference the skill wraps. Point your agent at [docs.md](https://actual.ai/cli/docs.md) for the same docs in Markdown.
+See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill) for skill setup, and the [Actual CLI docs](https://actual.ai/cli/docs) for the full command reference the skill wraps. Point your agent at [docs.md](https://actual.ai/cli/docs.md) for the same docs in Markdown. [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers those two commands.
 
 ### Requirements
 
-- The [Actual.ai Skill](https://github.com/actual-software/actual-skill) in a supported coding agent: Claude Code, Codex, ChatGPT, Cursor, or OpenCode. The skill offers to install the CLI on first use.
-- For ADR-backed context and governance: a configured runner. Claude Code CLI is the default; `actual runners` lists the rest. ADR-backed context needs no account or API key.
+- The [Actual.ai Skill](https://github.com/actual-software/actual-skill) in Claude Code, for the checks and rule briefing. The skill offers to install the CLI on first use.
+- For the checks: a configured runner. Claude Code CLI is the default; `actual runners` lists the rest. The checks and `rules` need no Actual AI account.
