@@ -61,6 +61,8 @@ These rules apply to every HTTP handler under `src/api/`.
 
 Write them by hand, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
 
+`actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. Signed in, `actual adr create` saves a decision to your Actual AI account, where `list`, `show`, `update`, `publish` and the other `actual adr` commands manage it. [ADR commands](docs/ADR_COMMANDS.md) covers each one.
+
 ## Checking plans and changes
 
 In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [reason]` in the session (CLI 0.13.0 or later); [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
@@ -95,6 +97,7 @@ Signing in is optional, since the checks and `rules` run signed out. `actual log
 
 - [Actual.ai Skill and CLI in depth](docs/HOW_IT_WORKS.md): governance, rules in context, sign-in and troubleshooting.
 - [Getting Started](docs/GETTING_STARTED.md): installation, runners, commands and configuration.
+- [ADR commands](docs/ADR_COMMANDS.md): writing and checking ADRs in your repository, and managing your organization's decisions from the terminal.
 - [adr-bot and the Advisor](docs/ADR_BOT_AND_ADVISOR.md): ADR guidance written into your agent's context file, and architecture questions answered from your ADRs.
 - [Command reference](https://actual.ai/cli/docs) on actual.ai, also as [Markdown](https://actual.ai/cli/docs.md) for your agent.
 

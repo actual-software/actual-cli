@@ -129,7 +129,7 @@ The skill manages the CLI with its defaults, so most teams never touch configura
 
 ### Documentation
 
-See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill) for skill setup, and the [Actual CLI docs](https://actual.ai/cli/docs) for the full command reference the skill wraps. Point your agent at [docs.md](https://actual.ai/cli/docs.md) for the same docs in Markdown. [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers those two commands.
+See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill) for skill setup, and the [Actual CLI docs](https://actual.ai/cli/docs) for the full command reference the skill wraps. Point your agent at [docs.md](https://actual.ai/cli/docs.md) for the same docs in Markdown. [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers those two commands, and [ADR commands](ADR_COMMANDS.md) covers writing decisions and managing them in Actual AI with `actual adr`.
 
 ### Requirements
 

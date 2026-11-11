@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `actual adr` writes and checks ADRs in your repository and manages your organization's decisions in Actual AI. `adr new` writes a decision and its rule file under the names Actual AI's sync uses, and `adr check` runs Actual AI's save check on decision files and lists likely duplicates; neither needs a sign-in. Signed in, `adr list`, `show`, `create`, `update`, `publish`, `unpublish`, `delete`, `restore`, `accept` and `reject` manage the decisions in your account. `create` refuses a decision the repository already has unless given `--allow-duplicate`, and sends each decision once: when no answer comes back it exits 3 and asks you to look with `adr list` before trying again. `new` and `create` default to a draft when no person is at the terminal, so a coding agent never publishes a governing decision on its own. `create --file` renames the pushed pair to the names Actual AI's sync uses, and both headers take the status the decision was saved with. See [docs/ADR_COMMANDS.md](docs/ADR_COMMANDS.md)
+
 ### Changed
 - `actual --help` lists `plan-check`, `impl-check`, `check-override`, `rules`, `login`, `logout` and `whoami` first, and describes the CLI as "Align coding agents with your architecture decisions"
 - When `actual adr-bot` can't match ADRs to a repository's languages or frameworks yet, its message links [docs/ADR_BOT_AND_ADVISOR.md](docs/ADR_BOT_AND_ADVISOR.md) in place of `https://cli.actual.ai/docs`

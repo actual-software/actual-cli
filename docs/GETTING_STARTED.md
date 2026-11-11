@@ -119,7 +119,7 @@ actual config set runner cursor-cli
 
 ## Adding rules
 
-The checks read the rule files committed under `.actual/rules/`. Write them by hand in the format the [README](../README.md#adding-rules) shows, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files there. Then see what the CLI read:
+The checks read the rule files committed under `.actual/rules/`. Write them by hand in the format the [README](../README.md#adding-rules) shows, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files there. `actual adr new` writes a decision and its rule file for you; see [ADR commands](ADR_COMMANDS.md). Then see what the CLI read:
 
 ```bash
 actual rules ls
@@ -155,6 +155,7 @@ actual rules          # list, index, select and brief rule documents under .actu
 actual login          # sign in to your Actual AI account via browser OAuth
 actual logout         # sign out and clear local credentials
 actual whoami         # show the signed-in account and organization
+actual adr            # write and check ADRs locally; list, create and publish decisions in Actual AI
 actual adr-bot        # analyze repo & write AI context files
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify the configured AI runner is authenticated
@@ -168,7 +169,7 @@ actual cache clear    # clear local analysis and tailoring caches
 actual version        # print the version and how to upgrade it (--check compares with the latest)
 ```
 
-[adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers `adr-bot`, `status` and `advisor`.
+[ADR commands](ADR_COMMANDS.md) covers `adr`, and [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers `adr-bot`, `status` and `advisor`.
 
 ## Configuration
 
