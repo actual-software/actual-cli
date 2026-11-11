@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `actual --help` lists `plan-check`, `impl-check`, `check-override`, `rules`, `login`, `logout` and `whoami` first, and describes the CLI as "Align coding agents with your architecture decisions"
+- When `actual adr-bot` can't match ADRs to a repository's languages or frameworks yet, its message links [docs/ADR_BOT_AND_ADVISOR.md](docs/ADR_BOT_AND_ADVISOR.md) in place of `https://cli.actual.ai/docs`
+- The README, `docs/HOW_IT_WORKS.md` and `docs/GETTING_STARTED.md` lead with installing the plugin and the CLI, adding rules, `plan-check` and `impl-check`, `rules` and optional sign-in. The `adr-bot` and `advisor` docs moved to `docs/ADR_BOT_AND_ADVISOR.md`
+
 ### Fixed
 - `impl-check` judges a rule whose ADR file header sets a `root` other than the whole repository. It used to read the diff's `a/` and `b/` header prefixes as part of each path, which put every changed file outside the root, so the rule was dropped and the check reported that no rule applied. A file a rule excludes no longer gets that rule through the same prefixes. The default diff now keeps the `a/` and `b/` prefixes even when git config sets `diff.noprefix` or `diff.mnemonicPrefix`
 
