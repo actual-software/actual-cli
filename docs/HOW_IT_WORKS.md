@@ -47,7 +47,7 @@ Governance never gets in the way of unrelated work. Infrastructure failures fail
 /actual-cli:override <rule-id> [code] [reason]
 ```
 
-`/actual-cli:override all` clears every rule a gate is blocking now. You can also run `actual check-override --session <id> --rule <doc-slug>::<rule-id>` from an ordinary terminal, outside Claude Code, with an optional `--reason "..."` and `--reason-code`. The code is one of `misread`, `not-here`, `adr-wrong`, `adr-outdated` or `accepted`; in the session, it is the first word after the target. Only the code is sent with telemetry, and the reason's words stay on your machine. An override applies to both gates for the rest of the session.
+`/actual-cli:override all` clears every rule a gate is blocking now. You can also run `actual check-override --session <id> --rule <doc-slug>::<rule-id>` from an ordinary terminal, outside Claude Code, with an optional `--reason "..."` and `--reason-code`. The code is one of `misread`, `not-here`, `adr-wrong`, `adr-outdated` or `accepted`; in the session, it is the first word after the target. Telemetry sends the code. When the code is `other` (the reason names no code), it also sends the typed text, with anything that looks like a secret stripped, cut to 280 characters and shown only to your organization's admins. Words typed after one of the five named codes stay on your machine. See [PRIVACY.md](../PRIVACY.md). An override applies to both gates for the rest of the session.
 
 Every round and override is recorded in `~/.actualai/actual/plan-check-overrides.log`. Governance relies on Claude Code hooks, which the skill installs.
 

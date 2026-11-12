@@ -30,7 +30,10 @@
 //! **Why.** `actual.override.reason` is the override's reason code
 //! (`misread`, `not-here`, `adr-wrong`, `adr-outdated`, `accepted`, or
 //! `other` for typed text that names no code), empty when no reason was
-//! given. The record never carries the words the human typed.
+//! given. Only an `other` override also sends its typed text, as
+//! `actual.override.reason_text`, stripped of anything that looks like a
+//! secret and cut to [`reason_text::MAX_CHARS`] characters. Text typed with
+//! a named code is never sent.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved (a release build has its default), [`report`] returns before it
@@ -44,17 +47,18 @@ use super::governance_session::{
     self, GovernanceSession, LoopState, OverrideReasonCode, OverrideSource,
 };
 use crate::rules::types::RuleDocument;
-use crate::telemetry::otlp;
+use crate::telemetry::{otlp, reason_text};
 
 /// Report the override of `keys` that `check-override` just recorded for
-/// `session_id`, issued via `source`. Best-effort and silent, like the
-/// override's other events.
+/// `session_id`, issued via `source` with `reason_code` and the typed
+/// `reason`. Best-effort and silent, like the override's other events.
 pub(super) fn report(
     rules_dir: &Path,
     session_id: &str,
     keys: &[String],
     source: OverrideSource,
     reason_code: Option<OverrideReasonCode>,
+    reason: Option<&str>,
 ) {
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
@@ -70,6 +74,14 @@ pub(super) fn report(
     if adrs.is_empty() {
         return;
     }
+    let text = match reason_code {
+        Some(OverrideReasonCode::Other) => reason.and_then(reason_text::shareable),
+        _ => None,
+    };
+    let reason = otlp::OverrideReason {
+        code: reason_code.map(OverrideReasonCode::as_str),
+        text: text.as_deref(),
+    };
     let origin = otlp::Origin::resolve();
     let records = adrs
         .iter()
@@ -84,7 +96,7 @@ pub(super) fn report(
                 &adr.adr_ids,
                 gates,
                 source.as_str(),
-                reason_code.map(OverrideReasonCode::as_str),
+                reason,
             )
         })
         .collect();
@@ -215,7 +227,14 @@ pub(super) mod tests {
 
     /// [`report`] for an override issued from a terminal.
     fn report_from_terminal(rules: &Path, session_id: &str, keys: &[String]) {
-        report(rules, session_id, keys, OverrideSource::Terminal, None);
+        report(
+            rules,
+            session_id,
+            keys,
+            OverrideSource::Terminal,
+            None,
+            None,
+        );
     }
 
     fn deny(rules: &Path, kind: ArtifactKind, key: &str) {
@@ -451,7 +470,7 @@ pub(super) mod tests {
                 OverrideSource::SessionPrompt,
                 OverrideSource::SessionDialog,
             ] {
-                report(rules, SESSION, &keys, source, None);
+                report(rules, SESSION, &keys, source, None, None);
                 let records = take_captured();
                 assert_eq!(records.len(), 1);
                 assert_eq!(
@@ -462,26 +481,81 @@ pub(super) mod tests {
         });
     }
 
-    /// The record carries the reason code, and only the code; empty when no
-    /// reason was given.
-    #[test]
-    fn test_record_carries_the_reason_code() {
+    /// The typed text `report` sends for `code` and `reason`, or `None` when
+    /// the record leaves it out. Checks the record carries the code too.
+    fn sent_text(code: Option<OverrideReasonCode>, reason: Option<&str>) -> Option<String> {
+        let mut sent = None;
         with_rules(WITH_FILE, |_, rules| {
             let keys = [rule("rotation", "adr-rotate", 1)];
-            for code in [
-                Some(OverrideReasonCode::NotHere),
-                Some(OverrideReasonCode::Other),
-                None,
-            ] {
-                report(rules, SESSION, &keys, OverrideSource::SessionDialog, code);
-                let records = take_captured();
-                assert_eq!(records.len(), 1);
-                assert_eq!(
-                    attribute(&records[0], "actual.override.reason"),
-                    code.map_or("", OverrideReasonCode::as_str)
-                );
-            }
+            report(
+                rules,
+                SESSION,
+                &keys,
+                OverrideSource::SessionDialog,
+                code,
+                reason,
+            );
+            let records = take_captured();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                attribute(&records[0], "actual.override.reason"),
+                code.map_or("", OverrideReasonCode::as_str)
+            );
+            sent = records[0]["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == "actual.override.reason_text")
+                .map(|kv| kv["value"]["stringValue"].as_str().unwrap().to_string());
         });
+        sent
+    }
+
+    /// An `other` override sends its typed text, stripped and cut to
+    /// [`reason_text::MAX_CHARS`] characters.
+    #[test]
+    fn test_other_sends_its_text_stripped_and_cut() {
+        assert_eq!(
+            sent_text(
+                Some(OverrideReasonCode::Other),
+                Some("legacy client, ADR predates it")
+            ),
+            Some("legacy client, ADR predates it".to_string())
+        );
+        let long = format!("password=hunter2 {}", "y".repeat(400));
+        let sent = sent_text(Some(OverrideReasonCode::Other), Some(&long)).unwrap();
+        assert_eq!(sent.chars().count(), reason_text::MAX_CHARS);
+        assert!(sent.starts_with("password=[redacted] yyy"), "{sent}");
+    }
+
+    /// A planted fake token is stripped from what an `other` override sends.
+    #[test]
+    fn test_other_strips_a_planted_token() {
+        let token = format!("ghp_{}", "Zx9".repeat(12));
+        let sent = sent_text(
+            Some(OverrideReasonCode::Other),
+            Some(&format!("used {token} to reproduce")),
+        );
+        assert_eq!(sent.as_deref(), Some("used [redacted] to reproduce"));
+    }
+
+    /// The five named codes send no text, even when words were typed with
+    /// them, and neither does an override with no reason or nothing left to
+    /// send.
+    #[test]
+    fn test_named_codes_send_no_text() {
+        for code in [
+            OverrideReasonCode::Misread,
+            OverrideReasonCode::NotHere,
+            OverrideReasonCode::AdrWrong,
+            OverrideReasonCode::AdrOutdated,
+            OverrideReasonCode::Accepted,
+        ] {
+            assert_eq!(sent_text(Some(code), Some("in a hurry")), None, "{code:?}");
+        }
+        assert_eq!(sent_text(None, None), None);
+        assert_eq!(sent_text(Some(OverrideReasonCode::Other), None), None);
+        assert_eq!(sent_text(Some(OverrideReasonCode::Other), Some("  ")), None);
     }
 
     /// No output set: nothing is built, and no install id is created.

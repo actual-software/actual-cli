@@ -1433,7 +1433,7 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &keys, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
-    super::override_telemetry::report(&rules_dir, &session_id, &keys, source, reason_code);
+    super::override_telemetry::report(&rules_dir, &session_id, &keys, source, reason_code, reason);
     let reason = describe_reason(reason_code, reason);
     let not_blocking: Vec<&str> = keys
         .iter()
@@ -1514,7 +1514,14 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &args.rules, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
-    super::override_telemetry::report(&rules_dir, session_id, &args.rules, source, reason_code);
+    super::override_telemetry::report(
+        &rules_dir,
+        session_id,
+        &args.rules,
+        source,
+        reason_code,
+        reason,
+    );
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", session_id);
@@ -5596,7 +5603,23 @@ pub(crate) mod tests {
             serde_json::json!(["planning"])
         );
         assert_eq!(attribute(record, "actual.override.source"), "terminal");
-        assert!(!record.to_string().contains("reviewed and accepted"));
+        // A --reason without a code is `other`, so its text is sent.
+        assert_eq!(attribute(record, "actual.override.reason"), "other");
+        assert_eq!(
+            attribute(record, "actual.override.reason_text"),
+            "reviewed and accepted"
+        );
+
+        // With a named code, the same words stay on the machine.
+        let args = PlanCheckOverrideArgs {
+            reason_code: Some(crate::cli::args::OverrideReasonCodeArg::Accepted),
+            ..args
+        };
+        assert!(exec_override_impl(&args).is_ok());
+        let records = take_captured();
+        assert_eq!(records.len(), 1);
+        assert_eq!(attribute(&records[0], "actual.override.reason"), "accepted");
+        assert!(!records[0].to_string().contains("reviewed and accepted"));
     }
 
     /// The override must land in the same governed context (`rules_dir`) the
