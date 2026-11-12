@@ -11,6 +11,8 @@ pub mod opt_out;
 #[cfg(feature = "telemetry")]
 pub mod otlp;
 pub mod plan_governance;
+#[cfg(feature = "telemetry")]
+pub(crate) mod reason_text;
 pub mod reporter;
 pub mod scope;
 #[cfg(feature = "telemetry")]
