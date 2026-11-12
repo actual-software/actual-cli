@@ -65,7 +65,7 @@ Write them by hand, or manage your ADRs at [app.actual.ai](https://app.actual.ai
 
 ## Checking plans and changes
 
-In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [reason]` in the session (CLI 0.13.0 or later); [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
+In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [code] [reason]` in the session (CLI 0.13.0 or later); [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
 
 From a terminal or in CI:
 

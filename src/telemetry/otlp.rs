@@ -80,7 +80,8 @@ pub(crate) const ACTION_COMPLETED: &str = "actual.action.completed";
 pub(crate) const SESSION_ENDED: &str = "actual.session.ended";
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
-const SCHEMA_VERSION: i64 = 1;
+/// 2 adds `actual.override.reason`.
+const SCHEMA_VERSION: i64 = 2;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -384,8 +385,8 @@ impl Origin {
     /// no agent, since a human ran the command, then the outcome, the gates
     /// whose loop in this session had denied the overridden rules at any
     /// point (`actual.gate.denied_types`, unchanged since 0.11.0), the gates
-    /// that were blocking them when they were overridden, and how the
-    /// override was issued.
+    /// that were blocking them when they were overridden, how the override
+    /// was issued, and its reason code, empty when none was given.
     pub(crate) fn overridden(
         &self,
         session_id: &str,
@@ -393,6 +394,7 @@ impl Origin {
         adr_ids: &[String],
         gates: OverriddenGates<'_>,
         source: &str,
+        reason_code: Option<&str>,
     ) -> LogRecord {
         let mut record = self.adr_record(GATE_EVALUATED, session_id, None, adr_ref, adr_ids);
         record.attributes.extend([
@@ -400,6 +402,7 @@ impl Origin {
             strings("actual.gate.denied_types", gates.denied),
             strings("actual.override.blocking_types", gates.blocking),
             text("actual.override.source", Some(source)),
+            text("actual.override.reason", reason_code),
         ]);
         record
     }
@@ -1220,7 +1223,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "1"})
+            serde_json::json!({"intValue": "2"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -1255,7 +1258,8 @@ mod tests {
 
     /// An override record carries the same attributes as a context record, in
     /// the same order and with no agent, then its outcome, the gates that had
-    /// denied the overridden rules, the gates blocking them, and its source.
+    /// denied the overridden rules, the gates blocking them, its source and
+    /// its reason code.
     #[test]
     fn test_overridden_carries_the_common_attributes_then_the_outcome_and_gates() {
         let origin = origin(None);
@@ -1268,6 +1272,7 @@ mod tests {
                 blocking: &["implementation"],
             },
             "session_dialog",
+            Some("adr-outdated"),
         ));
         let context = record_json(&origin.context_added(
             "session-1",
@@ -1286,6 +1291,13 @@ mod tests {
         assert_eq!(record["eventName"], GATE_EVALUATED);
         assert_eq!(record["severityNumber"], 9);
         let mut overridden = shared(&record);
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
+                "actual.override.reason".to_string(),
+                serde_json::json!({"stringValue": "adr-outdated"})
+            )
+        );
         assert_eq!(
             overridden.pop().unwrap(),
             (
@@ -1328,6 +1340,7 @@ mod tests {
             &ids(&["adr-9"]),
             OverriddenGates::default(),
             "terminal",
+            None,
         ));
         let attributes = attributes(&record);
         let empty = serde_json::json!({"arrayValue": {"values": []}});
@@ -1337,6 +1350,11 @@ mod tests {
                 "{key} must be sent as an empty list"
             );
         }
+        // No reason given: the code is sent empty, not left out.
+        assert!(attributes.contains(&(
+            "actual.override.reason".to_string(),
+            serde_json::json!({"stringValue": ""})
+        )));
     }
 
     /// Used and breached records carry the same attributes as a context
@@ -1761,7 +1779,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(1))
+            Some(&common::any_value::Value::IntValue(2))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -1802,7 +1820,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"1"}"#, r#"{"intValue":"one"}"#),
+            whole.replace(r#"{"intValue":"2"}"#, r#"{"intValue":"two"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -1906,6 +1924,7 @@ mod tests {
                     blocking: &["planning"],
                 },
                 "session_prompt",
+                Some("misread"),
             ),
             origin.overridden(
                 "session-1",
@@ -1913,6 +1932,7 @@ mod tests {
                 &ids(&["adr-3"]),
                 OverriddenGates::default(),
                 "terminal",
+                None,
             ),
         ];
         let request = decoded(&records);

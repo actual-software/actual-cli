@@ -321,17 +321,13 @@ pub struct PlanGovernanceEventProperties {
     pub datetime_utc: Option<String>,
     // --- Override reason (rule_override events only) ---
     // The override reason is customer free text and the event never carries it
-    // raw; only these privacy-preserving summaries are sent.
+    // or a hash of it; only these privacy-preserving summaries are sent.
     /// Coarse length bucket of the override reason.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason_category: Option<PlanGovernanceReasonCategory>,
+    pub reason_length_bucket: Option<PlanGovernanceReasonCategory>,
     /// Character length of the override reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_len: Option<u32>,
-    /// Unsalted SHA-256 hex of the override reason (peppered server-side before
-    /// PostHog). Lets identical reasons be grouped without exposing the text.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason_hash: Option<String>,
     /// How the override was issued: `terminal`, `session_prompt` or `session_dialog`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_source: Option<String>,

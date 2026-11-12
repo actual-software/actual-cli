@@ -25,8 +25,12 @@
 //! pre-emptive override from the override of a live breach.
 //!
 //! **How it was issued.** `actual.override.source` is `terminal`,
-//! `session_prompt` or `session_dialog`. The record never carries the reason
-//! the human gave.
+//! `session_prompt` or `session_dialog`.
+//!
+//! **Why.** `actual.override.reason` is the override's reason code
+//! (`misread`, `not-here`, `adr-wrong`, `adr-outdated`, `accepted`, or
+//! `other` for typed text that names no code), empty when no reason was
+//! given. The record never carries the words the human typed.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved (a release build has its default), [`report`] returns before it
@@ -36,14 +40,22 @@ use std::path::Path;
 
 use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::override_keys;
-use super::governance_session::{self, GovernanceSession, LoopState, OverrideSource};
+use super::governance_session::{
+    self, GovernanceSession, LoopState, OverrideReasonCode, OverrideSource,
+};
 use crate::rules::types::RuleDocument;
 use crate::telemetry::otlp;
 
 /// Report the override of `keys` that `check-override` just recorded for
 /// `session_id`, issued via `source`. Best-effort and silent, like the
 /// override's other events.
-pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String], source: OverrideSource) {
+pub(super) fn report(
+    rules_dir: &Path,
+    session_id: &str,
+    keys: &[String],
+    source: OverrideSource,
+    reason_code: Option<OverrideReasonCode>,
+) {
     let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
         return;
     };
@@ -66,7 +78,14 @@ pub(super) fn report(rules_dir: &Path, session_id: &str, keys: &[String], source
                 denied: &gates.denied,
                 blocking: &gates.blocking,
             };
-            origin.overridden(session_id, &adr.key, &adr.adr_ids, gates, source.as_str())
+            origin.overridden(
+                session_id,
+                &adr.key,
+                &adr.adr_ids,
+                gates,
+                source.as_str(),
+                reason_code.map(OverrideReasonCode::as_str),
+            )
         })
         .collect();
     brief_telemetry::dispatch(&outputs, records);
@@ -196,7 +215,7 @@ pub(super) mod tests {
 
     /// [`report`] for an override issued from a terminal.
     fn report_from_terminal(rules: &Path, session_id: &str, keys: &[String]) {
-        report(rules, session_id, keys, OverrideSource::Terminal);
+        report(rules, session_id, keys, OverrideSource::Terminal, None);
     }
 
     fn deny(rules: &Path, kind: ArtifactKind, key: &str) {
@@ -432,12 +451,34 @@ pub(super) mod tests {
                 OverrideSource::SessionPrompt,
                 OverrideSource::SessionDialog,
             ] {
-                report(rules, SESSION, &keys, source);
+                report(rules, SESSION, &keys, source, None);
                 let records = take_captured();
                 assert_eq!(records.len(), 1);
                 assert_eq!(
                     attribute(&records[0], "actual.override.source"),
                     source.as_str()
+                );
+            }
+        });
+    }
+
+    /// The record carries the reason code, and only the code; empty when no
+    /// reason was given.
+    #[test]
+    fn test_record_carries_the_reason_code() {
+        with_rules(WITH_FILE, |_, rules| {
+            let keys = [rule("rotation", "adr-rotate", 1)];
+            for code in [
+                Some(OverrideReasonCode::NotHere),
+                Some(OverrideReasonCode::Other),
+                None,
+            ] {
+                report(rules, SESSION, &keys, OverrideSource::SessionDialog, code);
+                let records = take_captured();
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    attribute(&records[0], "actual.override.reason"),
+                    code.map_or("", OverrideReasonCode::as_str)
                 );
             }
         });
