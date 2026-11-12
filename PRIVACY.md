@@ -23,7 +23,7 @@ in and on who processes it. This notice is explicit about both:
   account.
 - **Third-party analytics (PostHog) cannot recover your raw ids, but can match
   events to a known repository.** Before telemetry reaches PostHog, the
-  account/org/repo identity hashes and the override-reason hash are peppered
+  account/org/repo identity hashes are peppered
   server-side (the pepper and the hash→account map are never shared), so PostHog
   cannot reverse them to raw account, user, or organization ids. The
   repository-derived keys — `repo_hash`, `repo_url_hash`, and the logged-out
@@ -94,7 +94,7 @@ repository-derived hashes, so it is **pseudonymous rather than anonymous** — s
 We do not sell or share telemetry with third parties for their own purposes.
 Telemetry is sent to PostHog only as Actual's analytics service provider, and
 only for operating Actual's product analytics. Before anything reaches PostHog,
-the account/org/repo identity hashes and the override-reason hash are peppered
+the account/org/repo identity hashes are peppered
 server-side (the pepper and the hash→account map are never shared), so PostHog
 cannot reverse them to raw account, user, or organization ids, and never
 receives raw identifiers or customer content. The repository-derived keys
@@ -146,9 +146,8 @@ Each event includes a subset of these properties:
 | `org_id_hash` | One-way SHA-256 of `"org:"+<organization id>`, only when logged in -- the event **never** carries the raw org id; peppered server-side before PostHog |
 | `repo_id_hash` | One-way SHA-256 of `"repo:"+<connected-repo id>`, sent whenever that id is known locally -- **including logged-out runs where a repository pin persists**; the event **never** carries the raw id; peppered server-side before PostHog |
 | `org_id` | A synthetic, repo-derived org identifier (a UUID from the repo slug), sent **only when not logged in**, so logged-out runs still have an org-shaped grouping key -- derived deterministically from the repo slug and **not** peppered, so recomputable from the repository |
-| `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
+| `reason_length_bucket` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
 | `reason_len` | `check-override` only: the character length of the override reason |
-| `reason_hash` | `check-override` only: a one-way SHA-256 of the override reason (peppered server-side before PostHog) -- lets identical reasons group without exposing the text |
 | `override_source` | `check-override` only: how the override was issued -- `terminal`, `session_prompt` (typed as `/actual-cli:override` in the Claude Code session) or `session_dialog` (chosen in the dialog the plugin shows when a gate denies) |
 | `override_gate` | `check-override` only: which gate was blocking the rule when it was overridden (that gate's latest check in the session denied it) -- `plan`, `impl`, or `both` (absent if neither was) |
 | `scope_run_id` | `rules select` only: a random per-run correlation id (not derived from any data) |
@@ -208,9 +207,9 @@ known repository.
 `plan_governance_rule_override` event (one per cleared rule), distinct from a
 real check's completion so overrides are cleanly separable and override rate has
 an unambiguous denominator. **The override reason is customer free text, and
-the event never carries it raw** -- only `reason_category`, `reason_len`, and a
-one-way `reason_hash` (see above). A reason is optional; without one,
-`reason_category` is `empty` and no hash is sent.
+the event never carries it or a hash of it** -- only `reason_length_bucket` and
+`reason_len` (see above). A reason is optional; without one,
+`reason_length_bucket` is `empty`.
 
 Each event also carries a `distinct_id`: a random, opaque identifier
 generated once on first use and stored locally
@@ -352,8 +351,8 @@ Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
 on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.gate.evaluated` events, `actual.gate.type` on breach events and
-`actual.gate.denied_types`, `actual.override.blocking_types` and
-`actual.override.source` on override events. A check event adds
+`actual.gate.denied_types`, `actual.override.blocking_types`,
+`actual.override.source` and `actual.override.reason` on override events. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
 `actual.action.outcome`, `actual.action.warn_reasons` and
 `actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`. An unknown value is
@@ -368,7 +367,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `1` | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `2` (2 added `actual.override.reason`) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook sends it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -380,6 +379,7 @@ has only the classes its fields carry below:
 | `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules at any point in the session, and an empty list when none had: overridden before any denial | anonymous |
 | `actual.override.blocking_types` | Which gates, `planning` and `implementation`, were blocking any of the overridden rules when the human overrode them (the gate's latest check in the session denied it), and an empty list when none was: overridden before any denial, or after a later check stopped denying it | anonymous |
 | `actual.override.source` | How the override was issued: `terminal` when a human ran `actual check-override`, `session_prompt` when they typed the override command in the session, `session_dialog` when they chose it in the plugin's dialog | anonymous |
+| `actual.override.reason` | Why the human overrode, as a code: `misread`, `not-here`, `adr-wrong`, `adr-outdated` or `accepted`, `other` when the typed reason names no code, and empty when none was given. Only the code is sent; the words typed with it stay on your machine | anonymous |
 | `actual.session.end_reason` | The coarse reason Claude Code ended the session: `clear`, `resume`, `logout`, `prompt_input_exit` or `other` | anonymous |
 | `actual.session.last_check_blocked` | Whether the last completed hook check blocked; `false` when none completed | anonymous |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
@@ -566,7 +566,7 @@ paths never make it, `--no-rank` skips it, and so does `rules select --by-adr`.
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.
 
-`actual check-override` keeps the reason you give in two files on your machine:
+`actual check-override` keeps the reason you give, and its code, in two files on your machine:
 the session's record under `~/.actualai/actual/plan-check-sessions/` and
 `~/.actualai/actual/plan-check-overrides.log`. The reason stays out of every
 prompt above, but it does come back to the agent. Later `--claude-hook` rounds

@@ -1,6 +1,6 @@
 # In-session overrides: the `check-override --claude-hook` contract
 
-When `plan-check` or `impl-check` denies a rule, the user can override it without leaving the session by typing `/actual-cli:override <rule-id|all> [reason]` as a message, or by choosing an override in the dialog the actual-cli plugin raises. The plugin's mod records either one by running `actual check-override --claude-hook`. This page is the contract between the two. The plugin lives in a separate repository and relies on everything below.
+When `plan-check` or `impl-check` denies a rule, the user can override it without leaving the session by typing `/actual-cli:override <rule-id|all> [code] [reason]` as a message, or by choosing an override in the dialog the actual-cli plugin raises. The plugin's mod records either one by running `actual check-override --claude-hook`. This page is the contract between the two. The plugin lives in a separate repository and relies on everything below.
 
 ## Invocation
 
@@ -34,6 +34,8 @@ The prompt must start with `/actual-cli:override` or a bare `/override`. Another
 - `all` overrides every rule a gate is blocking now: a rule the gate's latest check denied that isn't already overridden. With `--gate`, only that gate's.
 - A rule id, bare (`R-A-001`) or full (`<doc-slug>::<rule-id>`), overrides that rule. A rule a gate is blocking now wins over others with the same id; otherwise any rule in the corpus matches. A rule that isn't blocking is still overridden, and the reply says so.
 
+The reason's first word can be a reason code: `misread`, `not-here`, `adr-wrong`, `adr-outdated` or `accepted`, matched without regard to case or trailing punctuation. That word is stored as the override's code and the rest as its text. A reason that starts with any other word is stored whole, with the code `other`, and no reason means no code. So the mod's dialog sends `/actual-cli:override all misread`, and text typed under "Other" passes through unchanged: `accepted, in a hurry` is stored as `accepted`. CLI 0.13.0 and earlier store the whole reason as text, code word included.
+
 ## Output
 
 Exit code 0 in every case below. Stdout is one JSON object, or nothing.
@@ -66,4 +68,4 @@ This is the set `/actual-cli:override all` with the same `--gate` records, so a 
 
 ## What is recorded
 
-Each overridden rule gets an entry in the session file and a line in `~/.actualai/actual/plan-check-overrides.log` with its source (`session_prompt` or `session_dialog`), the reason if one was given, and which gate was blocking it (`plan`, `impl`, `both`, or none). An override applies to both gates for the rest of the session.
+Each overridden rule gets an entry in the session file and a line in `~/.actualai/actual/plan-check-overrides.log` with its source (`session_prompt` or `session_dialog`), the reason and its code if one was given, and which gate was blocking it (`plan`, `impl`, `both`, or none). An override applies to both gates for the rest of the session.

@@ -1703,6 +1703,21 @@ pub enum OverrideGateArg {
     Impl,
 }
 
+/// Why a human overrode, for `check-override --reason-code`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverrideReasonCodeArg {
+    /// The check misread the change.
+    Misread,
+    /// The ADR doesn't apply here.
+    NotHere,
+    /// The ADR is wrong.
+    AdrWrong,
+    /// The ADR is out of date.
+    AdrOutdated,
+    /// The block is right, going ahead anyway.
+    Accepted,
+}
+
 /// Arguments for the `check-override` command (formerly `plan-check-override`,
 /// still accepted as a backward-compatible alias): a human, never the
 /// agent, explicitly clearing one or more rules that the revision loop
@@ -1750,10 +1765,19 @@ pub struct PlanCheckOverrideArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
+    /// Why, as a code: `misread` (the check misread the change), `not-here`
+    /// (the ADR doesn't apply here), `adr-wrong`, `adr-outdated`, or
+    /// `accepted` (the block is right, going ahead anyway). Only the code
+    /// leaves the machine; `--reason` text stays local. With `--reason` and
+    /// no code, the override is recorded as `other`.
+    #[arg(long, value_name = "CODE", value_enum, conflicts_with = "claude_hook")]
+    pub reason_code: Option<OverrideReasonCodeArg>,
+
     /// Hook mode, for the actual-cli plugin's mod: read a `UserPromptSubmit`
     /// envelope on stdin and, if its prompt is `/actual-cli:override
-    /// <rule-id|all> [reason]` (a bare `/override` is accepted too), record
-    /// that override. Does not require a terminal, and an unrecognized or
+    /// <rule-id|all> [code] [reason]` (a bare `/override` is accepted too),
+    /// record that override. A first word after the target that names a
+    /// `--reason-code` is the code; any other text is recorded as `other`. Does not require a terminal, and an unrecognized or
     /// unresolvable prompt records nothing. Prints hook JSON whose top-level
     /// `overridden` array lists the keys recorded, or nothing for a prompt
     /// that is not an override command; docs/CHECK_OVERRIDE_HOOK.md has the
@@ -2140,6 +2164,45 @@ mod parse_tests {
             "check-override",
             "--claude-hook",
             "--list-blocking"
+        ])
+        .is_err());
+    }
+
+    /// `--reason-code` takes the five codes a human picks, never `other`, and
+    /// belongs to the terminal path, where the hook mode reads a leading word.
+    #[test]
+    fn test_check_override_reason_code_takes_the_five_codes() {
+        let parse = |code: &str| {
+            Cli::try_parse_from([
+                "actual",
+                "check-override",
+                "--session",
+                "s1",
+                "--rule",
+                "d::R-1",
+                "--reason-code",
+                code,
+            ])
+        };
+        for (code, want) in [
+            ("misread", OverrideReasonCodeArg::Misread),
+            ("not-here", OverrideReasonCodeArg::NotHere),
+            ("adr-wrong", OverrideReasonCodeArg::AdrWrong),
+            ("adr-outdated", OverrideReasonCodeArg::AdrOutdated),
+            ("accepted", OverrideReasonCodeArg::Accepted),
+        ] {
+            #[rustfmt::skip]
+            let Command::PlanCheckOverride(args) = parse(code).unwrap().command else { panic!("expected PlanCheckOverride command") };
+            assert_eq!(args.reason_code, Some(want));
+        }
+        assert!(parse("other").is_err());
+        assert!(parse("wrong").is_err());
+        assert!(Cli::try_parse_from([
+            "actual",
+            "check-override",
+            "--claude-hook",
+            "--reason-code",
+            "misread",
         ])
         .is_err());
     }
