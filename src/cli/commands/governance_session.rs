@@ -797,9 +797,9 @@ pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGa
 /// Record an explicit, human-issued override: mark `keys` settled for
 /// `(session_id, rules_dir)` and append one audit-log entry per key, noting
 /// how it was issued (`source`), its reason code, and which gate was blocking
-/// the rule. Updates
-/// the session itself under [`update`]'s lock, so the caller does not need
-/// to separately `load`/`store`, and a concurrent hook's write cannot drop it.
+/// the rule. Updates the session itself under [`update`]'s lock, so the
+/// caller does not need to separately `load`/`store`, and a concurrent hook's
+/// write cannot drop it.
 /// Returns that gate for each of `keys`, read from the same locked copy the
 /// override was recorded on, for the caller's events and reply.
 pub fn record_override_with(
