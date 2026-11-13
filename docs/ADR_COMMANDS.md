@@ -34,7 +34,7 @@ actual adr new "Use Postgres for storage" \
 
 | Flag | Meaning |
 |------|---------|
-| `--context POINT` | Why the decision is needed, one point per flag |
+| `--context POINT` | Why the decision is needed, one point per flag. Optional |
 | `--policy "LEVEL: statement"` | One policy per flag. LEVEL is `MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` or `MAY` |
 | `--deciders NAMES` | The decision's Deciders line |
 | `--scope GLOB` | A path the decision applies to, relative to the repository root, one per flag. A leading `!` excludes. Leave it out for the whole repository |
@@ -64,7 +64,7 @@ An accepted decision governs at once: `plan-check` and `impl-check` read its rul
 
 ## Decisions in Actual AI
 
-Sign in with `actual login`. The default sign-in can read and change decisions; a 403 from Actual AI exits 2 with the step that fixes it, such as signing in again or signing in to the organization the decision belongs to.
+Sign in with `actual login`. The default sign-in can read and change decisions; a 403 from Actual AI exits 2 with the step that fixes it, such as signing in again or signing in to the organization the decision belongs to. These commands call the same decision routes as the web app, so a decision changed here reads the same there.
 
 Commands that work on one repository use the connected repository your checkout's `origin` remote names. `--repo` picks another by its name, `owner/name` or id. `adr list` with neither lists the whole organization.
 
@@ -76,12 +76,14 @@ Commands that work on one repository use the connected repository your checkout'
 | `actual adr update <id>` | Change the title, context, policies, policy levels or scope |
 | `actual adr publish <id>` | Publish a draft so it governs |
 | `actual adr unpublish <id>` | Move an active decision back to draft |
-| `actual adr delete <id>` | Archive a decision, as Delete does in the web app |
-| `actual adr restore <id>` | Restore an archived decision |
-| `actual adr accept <id>` | Accept a suggested decision |
-| `actual adr reject <id> --reason TEXT` | Reject a suggested decision; the reason is saved with it |
+| `actual adr delete <id>` | Archive an active decision or a draft, as Delete does in the web app |
+| `actual adr restore <id>` | Restore an archived decision to the list it was archived from |
+| `actual adr accept <id>` | Accept a suggestion |
+| `actual adr reject <id> --reason TEXT` | Reject a suggestion; the reason is saved with it |
 
-A change Actual AI makes to the repository's rule files arrives through its usual sync pull request, and the command says when it started one.
+Before a change, the command reads your organization's decisions and checks the decision's state by the web app's rules, and sends nothing when the state doesn't allow it. Only a draft can be published and only an active decision unpublished. `delete` takes an active decision or a draft, `restore` an archived one, and `accept` and `reject` a suggestion, either a new decision or a suggested change to an active one. `show` and the changes take a decision's id as `list` prints it. For a suggestion Actual AI grouped from several policies, the id of any of those policies' rows works too. A grouped draft is published in the web app, and a grouped decision can't be restored yet.
+
+A change to the repository's rule files arrives through Actual AI's usual sync pull request.
 
 ### Saving a decision
 
@@ -92,10 +94,13 @@ actual adr create --title "Use Postgres for storage" --policy "MUST: Services st
 
 `create` runs these steps in order and stops at the first that fails:
 
-1. It checks the decision locally with the save check `adr new` uses. A decision that fails is never sent.
+1. It reads the decision from the file or the flags. A file that doesn't parse, or a `--policy` without a level, is refused before anything is sent.
 2. It reads the repository's decisions in Actual AI and refuses when the file is already one of them, or when a decision looks the same by the rule in [Checking decision files](#checking-decision-files). `--allow-duplicate` sends it anyway. If the decisions can't be read, nothing is sent.
-3. It sends the decision once and never retries. When the request can't reach Actual AI, nothing was saved and the error says so. When the request was sent but no answer came back, or the answer couldn't be read, the decision may have been saved: the command exits 3 and asks you to look with `actual adr list` before you run `create` again.
-4. With `--file`, it renames both files to the names the sync uses for the new decision's id, and their headers take that id and the status the decision was saved with. A file pushed as a draft therefore stops governing locally until it's published and Actual AI's sync pull request rewrites its files, and the command says when the local status changed. A scope in the file's header is then set on the new decision; if that step fails, the decision stays saved and the command prints the `actual adr update` command that sets the scope.
+3. It sends the decision once and never retries. A decision from flags is saved the way the web app's New Decision saves one: a draft, or an accepted decision in one request. A file is saved the way the web app's Import saves it, which keeps the whole document and always saves a draft. Actual AI checks the decision as it saves it, and a refusal lists the reasons. When the request can't reach Actual AI, nothing was saved and the error says so. When the request was sent but no answer came back, or the answer couldn't be read, the decision may have been saved: the command exits 3 and asks you to look with `actual adr list` before you run `create` again.
+4. With `--file`, a scope in the file's header is set on the new draft, and an accepted save then publishes it. If either step fails, the decision stays a saved draft and the command prints the commands that finish the job.
+5. With `--file`, it renames both files to the names the sync uses for the new decision's id, and their headers take that id and the status the decision was saved with. A file pushed as a draft therefore stops governing locally until it's published and Actual AI's sync pull request rewrites its files, and the command says when the local status changed.
+
+`--deciders` belongs to `adr new`: a decision saved from flags has no Deciders line, and a file keeps its own.
 
 ### Changing a decision
 
@@ -107,7 +112,7 @@ actual adr update <id> --policy "<policy id>=MUST: Services store relational dat
 actual adr update <id> --scope 'services/**' --scope '!services/legacy/**'
 ```
 
-`--policy` gives the whole policy list after the change: prefix a policy's id and `=` to keep that policy, write a new one without an id, and leave out a policy to remove it. `--level` changes one policy's level and can't be combined with `--policy`. `--context` replaces the whole context, and `--clear-scope` applies the decision to its whole repository again.
+`--policy` gives the whole policy list after the change: prefix a policy's id and `=` to keep that policy, write a new one without an id, and leave out a policy to remove it. `--level` changes one policy's level and can't be combined with `--policy`. `--context` replaces the whole context, and `--clear-scope` applies the decision to its whole repository again. `update` saves the whole decision the way the web app's editor does, with the decision's current title, context and scope where the flags change nothing. An archived decision can't be changed until it's restored.
 
 `update` prints the decision as it was saved. Editing the policy list can give the policies new ids, so take the ids for your next edit from that output or from `actual adr show`.
 
@@ -120,5 +125,5 @@ Every command takes `--json` and prints its result as JSON on standard output. E
 | 0 | Done |
 | 1 | A decision failed a check: the local save check, Actual AI's refusal of its content on `create` or `update`, `adr check`, or `create`'s duplicate refusal |
 | 2 | Signed out, a sign-in without access to the decision, or no connected repository could be chosen |
-| 3 | Actual AI couldn't be reached or answered with another error, such as an id it doesn't know or publishing a decision that's already active, or a `create` whose outcome is unknown |
+| 3 | Actual AI couldn't be reached or answered with another error, no decision has the id given, the decision's state doesn't allow the change (such as publishing a decision that's already active), or a `create` whose outcome is unknown |
 | 5 | A local file couldn't be read or written |

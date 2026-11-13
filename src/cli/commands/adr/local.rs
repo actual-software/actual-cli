@@ -56,7 +56,10 @@ pub(super) fn write_new(
     today: &str,
 ) -> Result<Written, ActualError> {
     let status = save_status(args.status, interactive);
-    let doc = content_from_flags(&args.title, &args.content)?;
+    let doc = ContextFile {
+        deciders: args.deciders.clone().unwrap_or_default(),
+        ..content_from_flags(&args.title, &args.content)?
+    };
     let doc = check_document(&doc, status == SaveStatus::Draft, today)
         .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let adr_id = Uuid::new_v4().to_string();
@@ -332,11 +335,7 @@ async fn cloud_decisions(
         ),
         Err(e) => return skipped(format!("Couldn't read your decisions in Actual AI: {e}")),
     };
-    match session
-        .client
-        .list_all_decisions(&session.org_id, repo.as_deref())
-        .await
-    {
+    match super::cloud::decisions(&session, repo.as_deref()).await {
         Ok(decisions) => (
             CloudComparison {
                 compared: true,
@@ -503,8 +502,8 @@ mod tests {
             content: AdrContentArgs {
                 context: vec!["We need one relational store.".to_string()],
                 policies: policies.iter().map(|p| p.to_string()).collect(),
-                deciders: Some("Ana".to_string()),
             },
+            deciders: Some("Ana".to_string()),
             scope: scope.iter().map(|s| s.to_string()).collect(),
             status: None,
             root: None,
@@ -583,11 +582,12 @@ mod tests {
     #[test]
     fn new_refuses_a_decision_the_save_check_fails() {
         let tmp = tempdir().unwrap();
-        let mut args = new_args("Use Postgres", &[], &[]);
+        let mut args = new_args("  ", &[], &[]);
         args.content.context.clear();
         let err = write_new(&args, tmp.path(), true, TODAY).err();
         assert!(
-            matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons.len() == 2),
+            matches!(&err, Some(ActualError::AdrInvalid { reasons })
+                if reasons == &["Add a title.", "Add at least one policy."]),
             "{err:?}"
         );
         let bad = new_args("Use Postgres", &["Use it."], &[]);
@@ -783,21 +783,21 @@ mod tests {
             TODAY,
         )
         .unwrap();
-        let decision = |id: &str, title: &str, state: &str| {
+        let decision = |id: &str, title: &str, status: &str| {
             format!(
-                r#"{{"id":"{id}","title":"{title}","state":"{state}","policies":[{{"id":"{id}:r","level":"MUST","statement":"Store relational data in Postgres."}}]}}"#
+                r#"{{"id":"{id}","title":"{title}","status":"{status}","policyRules":[{{"id":"r","adrId":"{id}","level":"MUST","statement":"Store relational data in Postgres."}}]}}"#
             )
         };
         let mut server = mockito::Server::new();
         let list = server
-            .mock("GET", "/v1/cli/adrs")
-            .match_query(Matcher::UrlEncoded("repo_unique_id".into(), REPO.into()))
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded("repository_id".into(), REPO.into()))
             .with_status(200)
             .with_body(format!(
-                r#"{{"decisions":[{},{},{}],"total":3,"next_offset":null}}"#,
-                decision(&written.adr_id, "Use Postgres for storage", "active"),
+                r#"{{"adrs":[{},{},{}],"suggestions":[]}}"#,
+                decision(&written.adr_id, "Use Postgres for storage", "accepted"),
                 decision("cloud-2", "Postgres for storage", "draft"),
-                decision("cloud-3", "Use Postgres for storage", "archived"),
+                decision("cloud-3", "Use Postgres for storage", "deleted"),
             ))
             .create();
         let mut args = check_args(&[]);
@@ -830,10 +830,10 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut server = mockito::Server::new();
         let org = server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", "/v1/gcp/product/decisions")
             .match_query(Matcher::Any)
             .with_status(200)
-            .with_body(r#"{"decisions":[{"id":"c1","title":"T","state":"active"}],"total":1,"next_offset":null}"#)
+            .with_body(r#"{"adrs":[{"id":"c1","title":"T","status":"accepted"}],"suggestions":[]}"#)
             .create();
         let mut args = check_args(&[]);
         args.no_cloud = false;
@@ -900,7 +900,7 @@ mod tests {
             .with_body(CONNECTED)
             .create();
         server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", "/v1/gcp/product/decisions")
             .match_query(Matcher::Any)
             .with_status(500)
             .create();

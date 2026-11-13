@@ -823,16 +823,17 @@ pub enum AdrAction {
     /// Move an active decision back to draft
     Unpublish(AdrIdArgs),
 
-    /// Archive a decision, as Delete does in the web app (`restore` undoes it)
+    /// Archive an active decision or a draft, as Delete does in the web app
+    /// (`restore` undoes it)
     Delete(AdrIdArgs),
 
     /// Restore an archived decision
     Restore(AdrIdArgs),
 
-    /// Accept a suggested decision
+    /// Accept a suggestion
     Accept(AdrIdArgs),
 
-    /// Reject a suggested decision, with a reason
+    /// Reject a suggestion, with a reason
     Reject(AdrRejectArgs),
 }
 
@@ -860,10 +861,6 @@ pub struct AdrContentArgs {
     /// SHOULD, SHOULD NOT or MAY.
     #[arg(long = "policy", value_name = "POLICY")]
     pub policies: Vec<String>,
-
-    /// Who made the decision, for the decision's Deciders line.
-    #[arg(long, value_name = "NAMES")]
-    pub deciders: Option<String>,
 }
 
 /// Arguments for `adr new`
@@ -875,6 +872,10 @@ pub struct AdrNewArgs {
 
     #[command(flatten)]
     pub content: AdrContentArgs,
+
+    /// Who made the decision, for the decision's Deciders line.
+    #[arg(long, value_name = "NAMES")]
+    pub deciders: Option<String>,
 
     /// A path the decision applies to, relative to the repository root, one
     /// per flag; a leading `!` excludes. Leave it out for the whole
@@ -964,7 +965,7 @@ pub struct AdrCreateArgs {
     /// A decision file to push, such as one `actual adr new` wrote. Its pair
     /// is renamed to the file names Actual AI's sync uses for the new
     /// decision.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["title", "context", "policies", "deciders"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["title", "context", "policies"])]
     pub file: Option<std::path::PathBuf>,
 
     /// The decision's title, when it isn't sent from a file.
@@ -1051,7 +1052,7 @@ pub struct AdrIdArgs {
 /// Arguments for `adr reject`
 #[derive(Parser, Debug)]
 pub struct AdrRejectArgs {
-    /// The suggested decision's id, as `actual adr list` prints it.
+    /// The suggestion's id, as `actual adr list` prints it.
     #[arg(value_name = "ID")]
     pub id: String,
 
