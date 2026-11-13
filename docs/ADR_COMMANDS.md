@@ -112,7 +112,7 @@ actual adr update <id> --policy "<policy id>=MUST: Services store relational dat
 actual adr update <id> --scope 'services/**' --scope '!services/legacy/**'
 ```
 
-`--policy` gives the whole policy list after the change: prefix a policy's id and `=` to keep that policy, write a new one without an id, and leave out a policy to remove it. `--level` changes one policy's level and can't be combined with `--policy`. `--context` replaces the whole context, and `--clear-scope` applies the decision to its whole repository again. `update` saves the whole decision the way the web app's editor does, with the decision's current title, context and scope where the flags change nothing. An archived decision can't be changed until it's restored.
+`--policy` gives the whole policy list after the change: prefix a policy's id and `=` to keep that policy, write a new one without an id, and leave out a policy to remove it. `--level` changes one policy's level and can't be combined with `--policy`. `--context` replaces the whole context, and an empty `--context ''` clears it. `--clear-scope` applies the decision to its whole repository again. A blank `--title`, or a policy with no statement, is refused before anything is sent. `update` saves the whole decision the way the web app's editor does, with the decision's current title, context and scope where the flags change nothing. An archived decision can't be changed until it's restored.
 
 `update` prints the decision as it was saved. Editing the policy list can give the policies new ids, so take the ids for your next edit from that output or from `actual adr show`.
 
@@ -123,7 +123,7 @@ Every command takes `--json` and prints its result as JSON on standard output. E
 | Exit code | Meaning |
 |-----------|---------|
 | 0 | Done |
-| 1 | A decision failed a check: the local save check, Actual AI's refusal of its content on `create` or `update`, `adr check`, or `create`'s duplicate refusal |
-| 2 | Signed out, a sign-in without access to the decision, no connected repository could be chosen, or a flag the command can't use, such as a blank `--reason` |
+| 1 | A decision failed a check: the local save check, a `--policy` or `--level` value that doesn't parse, a blank `update --title` or policy statement, Actual AI's refusal of its content on `create` or `update`, `adr check`, or `create`'s duplicate refusal |
+| 2 | Signed out, a sign-in without access to the decision, no connected repository could be chosen, or a value refused while the command line is read, such as a blank `--reason` |
 | 3 | Actual AI couldn't be reached or answered with another error; no decision has the id given, or `update` names a policy the decision doesn't have; the decision can't take the change (such as publishing a decision that's already active); or a `create` whose outcome is unknown |
 | 5 | A local file couldn't be read or written |
