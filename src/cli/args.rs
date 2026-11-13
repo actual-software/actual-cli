@@ -1780,8 +1780,9 @@ pub struct PlanCheckOverrideArgs {
     /// envelope on stdin and, if its prompt is `/actual-cli:override
     /// <rule-id|all> [code] [reason]` (a bare `/override` is accepted too),
     /// record that override. A first word after the target that names a
-    /// `--reason-code` is the code; any other text is recorded as `other`. Does not require a terminal, and an unrecognized or
-    /// unresolvable prompt records nothing. Prints hook JSON whose top-level
+    /// `--reason-code` is the code; any other text is recorded as `other`.
+    /// Does not require a terminal, and an unrecognized or unresolvable
+    /// prompt records nothing. Prints hook JSON whose top-level
     /// `overridden` array lists the keys recorded, or nothing for a prompt
     /// that is not an override command; docs/CHECK_OVERRIDE_HOOK.md has the
     /// full contract.
