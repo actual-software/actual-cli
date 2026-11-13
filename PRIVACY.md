@@ -409,10 +409,12 @@ word is no code, or as a `check-override --reason` with no `--reason-code`, so
 it can hold anything they wrote, file paths included. The CLI strips it
 before sending: a token with a well-known prefix (Actual, GitHub, Anthropic,
 OpenAI, Slack, GitLab, AWS, Google), a JSON Web Token, the value after
-`Bearer` or `Basic`, the value after `=` or `:` following a key whose name
-ends in `password`, `passwd`, `pwd`, `secret`, `token`, `api_key`,
-`access_key`, `private_key` (with `_`, `-` or nothing between the words),
-`credential`, `credentials` or `auth`, credentials in a URL, a PEM private key, 32 or more hex
+`Bearer` or `Basic` when it looks like a credential (it holds a digit, `=` or
+`.`, or a capital letter after its first character), the value after `=` or
+`:` following a key, quoted or not, whose name ends in `password`, `passwd`,
+`pwd`, `secret`, `token`, `api_key`, `access_key`, `private_key`, `secret_key`
+(with `_`, `-` or nothing between the words), `credential`, `credentials` or
+`auth`, credentials in a URL, with or without a user name, a PEM private key, 32 or more hex
 digits, and 32 or more base64 characters that mix digits with upper and lower
 case each become `[redacted]`. The stripped text is then cut to 280
 characters. Stripping matches patterns, so it can miss a secret in an unusual

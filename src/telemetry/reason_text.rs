@@ -12,41 +12,75 @@ pub(crate) const MAX_CHARS: usize = 280;
 
 const REDACTED: &str = "[redacted]";
 
-/// Each pattern with its replacement, applied in order.
-static PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    [
+/// What a match becomes.
+type Replace = fn(&Captures) -> String;
+
+fn redacted(_: &Captures) -> String {
+    REDACTED.to_string()
+}
+
+/// Each pattern with what its matches become, applied in order.
+static PATTERNS: LazyLock<Vec<(Regex, Replace)>> = LazyLock::new(|| {
+    let patterns: [(&str, Replace); 7] = [
         // A PEM private key, to its END line or the end of the text.
         (
             r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)",
-            REDACTED,
+            redacted,
         ),
-        // Credentials in a URL: scheme://user:password@host.
-        (r"://[^/\s:@]+:[^/\s@]+@", "://[redacted]@"),
+        // Credentials in a URL: scheme://user:password@host, the user
+        // possibly empty.
+        (r"://[^/\s:@]*:[^/\s@]+@", |_| format!("://{REDACTED}@")),
         // Tokens with a well-known prefix: Actual, GitHub, Anthropic, OpenAI,
         // Slack, GitLab, AWS access keys, Google API keys.
         (
             r"\b(?:actl_pat_|gh[pousr]_|github_pat_|sk-ant-|sk-|xox[abeprs]-|glpat-|AKIA|ASIA|AIza)[A-Za-z0-9_\-]{8,}",
-            REDACTED,
+            redacted,
         ),
         // A JSON Web Token.
         (
             r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]*",
-            REDACTED,
+            redacted,
         ),
-        // An Authorization header value.
-        (r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}", "$1 [redacted]"),
-        // A value assigned to a key whose name says it is secret.
+        // An Authorization header value, when it looks like a credential, so
+        // prose such as "Basic configuration" is kept.
         (
-            r#"(?i)\b([A-Za-z0-9_\-]*(?:password|passwd|pwd|secret|token|api[_\-]?key|access[_\-]?key|private[_\-]?key|credentials?|auth))(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
-            "$1$2[redacted]",
+            r"(?i)\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=\-]{8,})",
+            |caps| {
+                let value = &caps[3];
+                let token = value.trim_end_matches('.');
+                if is_credential_shaped(token) {
+                    format!(
+                        "{}{}{REDACTED}{}",
+                        &caps[1],
+                        &caps[2],
+                        &value[token.len()..]
+                    )
+                } else {
+                    caps[0].to_string()
+                }
+            },
+        ),
+        // A value assigned to a key whose name says it is secret, the key
+        // possibly quoted, as in JSON or YAML.
+        (
+            r#"(?i)\b([A-Za-z0-9_\-]*(?:password|passwd|pwd|secret|token|api[_\-]?key|access[_\-]?key|private[_\-]?key|secret[_\-]?key|credentials?|auth))(["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
+            |caps| format!("{}{}{REDACTED}", &caps[1], &caps[2]),
         ),
         // 32 or more hex digits.
-        (r"\b[0-9A-Fa-f]{32,}\b", REDACTED),
-    ]
-    .into_iter()
-    .map(|(pattern, replacement)| (Regex::new(pattern).unwrap(), replacement))
-    .collect()
+        (r"\b[0-9A-Fa-f]{32,}\b", redacted),
+    ];
+    patterns
+        .into_iter()
+        .map(|(pattern, replace)| (Regex::new(pattern).unwrap(), replace))
+        .collect()
 });
+
+/// Whether an Authorization value holds a digit, `=` or `.`, or an
+/// upper-case letter after its first character.
+fn is_credential_shaped(value: &str) -> bool {
+    value.contains(|c: char| c.is_ascii_digit() || c == '=' || c == '.')
+        || value.chars().skip(1).any(|c| c.is_ascii_uppercase())
+}
 
 /// A run of 32 or more base64 or base64url characters; only one that mixes
 /// digits, upper and lower case is redacted, so a long path or word is kept.
@@ -56,8 +90,8 @@ static BASE64: LazyLock<Regex> =
 /// `text` fit to send, or `None` when nothing is left once it is trimmed.
 pub(crate) fn shareable(text: &str) -> Option<String> {
     let mut stripped = text.trim().to_string();
-    for (pattern, replacement) in PATTERNS.iter() {
-        stripped = pattern.replace_all(&stripped, *replacement).into_owned();
+    for (pattern, replace) in PATTERNS.iter() {
+        stripped = pattern.replace_all(&stripped, *replace).into_owned();
     }
     let stripped = BASE64.replace_all(&stripped, |caps: &Captures| {
         let run = &caps[0];
@@ -147,6 +181,25 @@ mod tests {
     }
 
     #[test]
+    fn test_prose_after_bearer_or_basic_is_kept() {
+        for prose in [
+            "Basic configuration is intentional here",
+            "the bearer requirement is handled upstream.",
+            "Basic Configuration only.",
+        ] {
+            assert_eq!(shareable(prose).as_deref(), Some(prose));
+        }
+        assert_eq!(
+            shareable("it was Bearer abc123defg.").as_deref(),
+            Some("it was Bearer [redacted].")
+        );
+        assert_eq!(
+            shareable("token: Bearer abc123defg").as_deref(),
+            Some("token: [redacted] [redacted]")
+        );
+    }
+
+    #[test]
     fn test_a_secret_key_keeps_its_name_and_loses_its_value() {
         assert_eq!(
             shareable(r#"password=hunter2 DB_PASSWORD: "two words" api-key='k' token = abc"#)
@@ -158,10 +211,38 @@ mod tests {
     }
 
     #[test]
+    fn test_a_quoted_key_loses_its_value() {
+        assert_eq!(
+            shareable(r#"{"password": "hunter2", "token":"abc", "user": "me"}"#).as_deref(),
+            Some(r#"{"password": [redacted], "token":[redacted], "user": "me"}"#)
+        );
+        assert_eq!(
+            shareable("'client_secret': hunter2").as_deref(),
+            Some("'client_secret': [redacted]")
+        );
+    }
+
+    #[test]
+    fn test_a_secret_key_name_loses_its_value() {
+        assert_eq!(
+            shareable("SECRET_KEY=hunter2 and secret-key: hunter3").as_deref(),
+            Some("SECRET_KEY=[redacted] and secret-key: [redacted]")
+        );
+    }
+
+    #[test]
     fn test_url_credentials_are_redacted() {
         assert_eq!(
             shareable("cloned https://bot:s3cr3t@example.com/repo.git").as_deref(),
             Some("cloned https://[redacted]@example.com/repo.git")
+        );
+    }
+
+    #[test]
+    fn test_url_credentials_with_no_user_are_redacted() {
+        assert_eq!(
+            shareable("cache at redis://:hunter2@cache:6379/0").as_deref(),
+            Some("cache at redis://[redacted]@cache:6379/0")
         );
     }
 
