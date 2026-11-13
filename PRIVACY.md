@@ -308,8 +308,9 @@ Local session state stores only that boolean and a duplicate-suppression flag, i
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
-blocked on, which of them a human overrode, how each check came out and what
-made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
+blocked on, which of them a human overrode and why (as a code, plus, from a
+signed-in run, the text typed for an `other` override), how each check came out
+and what made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
 
 **Release builds send these events to Actual's API by default.** They go to
 `/v1/logs` on the address the CLI's other telemetry uses: the config file's
