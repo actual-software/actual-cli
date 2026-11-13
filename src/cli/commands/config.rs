@@ -91,14 +91,14 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
             Ok(())
         }
         ConfigAction::Set(args) => {
-            let mut cfg = config::paths::load_from(path)?;
-            let warning = if args.repo {
-                set_for_repo(&mut cfg, &args.key, &args.value)?;
-                None
-            } else {
-                config::dotpath::set(&mut cfg, &args.key, &args.value)?
-            };
-            config::paths::save_to(&cfg, path)?;
+            let warning = config::paths::update_at(path, |cfg| {
+                if args.repo {
+                    set_for_repo(cfg, &args.key, &args.value)?;
+                    Ok(None)
+                } else {
+                    config::dotpath::set(cfg, &args.key, &args.value)
+                }
+            })?;
             if let Some(msg) = warning {
                 eprintln!("{msg}");
             }
@@ -618,7 +618,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Exercise the `save_to()` error branch inside `run_with_path(Set)`.
+    /// Exercise the write-error branch inside `run_with_path(Set)`.
     ///
     /// Uses an explicit path (no env vars) so this test is fully
     /// deterministic and cannot race with other test modules.
@@ -628,8 +628,8 @@ mod tests {
     /// fails when only the config *file itself* is read-only — `rename(2)`
     /// only needs write permission on the containing directory, not on the
     /// entry it replaces. Forcing the failure this test wants means making
-    /// the directory read-only instead, which blocks creating the `.tmp`
-    /// sibling in the first place.
+    /// the directory read-only instead, so `update_at` can't create the
+    /// `config.lock` it opens first.
     #[cfg(unix)]
     #[test]
     fn test_run_with_path_set_save_error() {
@@ -641,8 +641,8 @@ mod tests {
         // Create a valid config so load_from succeeds
         config::paths::save_to(&config::Config::default(), &config_file).unwrap();
 
-        // Make the containing directory read-only so save_to's write of the
-        // `.tmp` sibling fails.
+        // Make the containing directory read-only so the write fails at
+        // `config.lock`, before any save.
         let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
         perms.set_mode(0o555);
         std::fs::set_permissions(dir.path(), perms.clone()).unwrap();

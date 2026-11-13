@@ -226,7 +226,7 @@ pub fn run_analysis_cached(
         }
     };
 
-    let mut cfg = config::paths::load_from(config_path)?;
+    let cfg = config::paths::load_from(config_path)?;
     let cfg_hash = compute_config_hash(&cfg);
 
     // Check for cache hit (skip when force=true)
@@ -259,7 +259,7 @@ pub fn run_analysis_cached(
         analysis: analysis.clone(),
         analyzed_at: chrono::Utc::now(),
     };
-    try_save_analysis_cache(&mut cfg, config_path, cached_analysis)?;
+    try_save_analysis_cache(config_path, cached_analysis)?;
 
     Ok(AnalysisOutcome {
         analysis,
@@ -271,17 +271,15 @@ pub fn run_analysis_cached(
 ///
 /// This is extracted so it can be unit-tested independently of `run_analysis_cached`
 /// (which cannot easily produce an oversized analysis in tests).
-fn try_save_analysis_cache(
-    cfg: &mut config::types::Config,
-    config_path: &Path,
-    cached: CachedAnalysis,
-) -> Result<(), ActualError> {
+fn try_save_analysis_cache(config_path: &Path, cached: CachedAnalysis) -> Result<(), ActualError> {
     if is_analysis_cache_oversized(&cached) {
         tracing::warn!("analysis cache exceeds size limit; skipping cache write");
         return Ok(());
     }
-    cfg.cached_analysis = Some(cached);
-    config::paths::save_to(cfg, config_path)
+    config::paths::update_at(config_path, |cfg| {
+        cfg.cached_analysis = Some(cached);
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -1146,8 +1144,7 @@ cached_analysis:
             .unwrap_or(0);
         assert!(size > CACHE_MAX_SIZE_BYTES, "fixture must exceed limit");
 
-        let mut cfg = config::Config::default();
-        let result = try_save_analysis_cache(&mut cfg, &config_path, big_cached);
+        let result = try_save_analysis_cache(&config_path, big_cached);
 
         // Should succeed (not an error) but the cache should NOT have been written.
         assert!(
@@ -1155,13 +1152,37 @@ cached_analysis:
             "oversized cache skipping must not be an error"
         );
         assert!(
-            cfg.cached_analysis.is_none(),
-            "oversized cache must not be stored in cfg"
-        );
-        assert!(
             !config_path.exists(),
             "oversized cache must not be written to disk"
         );
+    }
+
+    /// The cache is saved after the analysis, which can take a while, so a
+    /// setting changed after `run_analysis_cached` loaded the config must
+    /// still be in the file once the cache lands beside it.
+    #[test]
+    fn test_saving_the_analysis_cache_keeps_a_setting_changed_during_the_analysis() {
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+        config::paths::save_to(&config::Config::default(), &config_path).unwrap();
+        let loaded_by_the_run = config::paths::load_from(&config_path).unwrap();
+
+        config::paths::update_at(&config_path, |cfg| {
+            config::dotpath::set(cfg, "telemetry.enabled", "false").map(|_| ())
+        })
+        .unwrap();
+        let cached = CachedAnalysis {
+            repo_path: "/fake/repo".to_string(),
+            head_commit: Some("abc123".to_string()),
+            config_hash: Some(compute_config_hash(&loaded_by_the_run)),
+            analysis: valid_analysis(),
+            analyzed_at: chrono::Utc::now(),
+        };
+        try_save_analysis_cache(&config_path, cached).unwrap();
+
+        let saved = config::paths::load_from(&config_path).unwrap();
+        assert_eq!(saved.telemetry.and_then(|t| t.enabled), Some(false));
+        assert_eq!(saved.cached_analysis.unwrap().analysis, valid_analysis());
     }
 
     #[test]
