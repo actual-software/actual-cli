@@ -3,7 +3,7 @@ members = [".", "crates/tui-test", "crates/release-sign"]
 
 [package]
 name = "actual-cli"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "Align coding agents with your architecture decisions"
 license = "MIT"
