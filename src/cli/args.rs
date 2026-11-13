@@ -339,6 +339,25 @@ fn parse_non_empty_selection_value(s: &str) -> Result<String, String> {
     }
 }
 
+/// The most characters Actual AI saves for a rejection reason, counted after
+/// trimming as its route counts them (UTF-16 code units).
+const REJECT_REASON_MAX: usize = 10_000;
+
+/// Refuse a rejection reason Actual AI wouldn't save, before the reject is
+/// sent: the reason is saved in a second request, after the reject.
+fn parse_reject_reason(s: &str) -> Result<String, String> {
+    let length = crate::adr::context_file::js_trim(s).encode_utf16().count();
+    if length == 0 {
+        Err("the reason can't be blank".to_string())
+    } else if length > REJECT_REASON_MAX {
+        Err(format!(
+            "the reason is {length} characters; Actual AI saves at most {REJECT_REASON_MAX}"
+        ))
+    } else {
+        Ok(s.to_string())
+    }
+}
+
 /// Parse and validate a model name, rejecting flag-like values and shell metacharacters.
 ///
 /// Allowed: alphanumeric start, then alphanumeric, dots, underscores, slashes, or hyphens.
@@ -1056,8 +1075,9 @@ pub struct AdrRejectArgs {
     #[arg(value_name = "ID")]
     pub id: String,
 
-    /// Why it was rejected, saved with the decision.
-    #[arg(long, value_name = "TEXT")]
+    /// Why it was rejected, saved with the decision: up to 10,000
+    /// characters.
+    #[arg(long, value_name = "TEXT", value_parser = parse_reject_reason)]
     pub reason: String,
 
     #[command(flatten)]
@@ -1977,6 +1997,29 @@ mod parse_tests {
     #[test]
     fn test_parse_rule_key_rejects_empty_rule_id() {
         assert!(parse_rule_key("some-doc::").is_err());
+    }
+
+    #[test]
+    fn test_parse_reject_reason_refuses_what_actual_ai_would_not_save() {
+        assert_eq!(
+            parse_reject_reason(" We use MySQL. ").unwrap(),
+            " We use MySQL. "
+        );
+        assert_eq!(
+            parse_reject_reason(" \u{3000}\n\u{FEFF}").unwrap_err(),
+            "the reason can't be blank"
+        );
+        let longest = format!(" {} ", "a".repeat(REJECT_REASON_MAX));
+        assert!(parse_reject_reason(&longest).is_ok());
+        // An emoji is two UTF-16 code units.
+        let over = format!("{}\u{1F600}", "a".repeat(REJECT_REASON_MAX - 1));
+        assert_eq!(
+            parse_reject_reason(&over).unwrap_err(),
+            "the reason is 10001 characters; Actual AI saves at most 10000"
+        );
+        let err =
+            Cli::try_parse_from(["actual", "adr", "reject", "d1", "--reason", "  "]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

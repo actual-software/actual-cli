@@ -336,14 +336,8 @@ async fn cloud_decisions(
         Err(e) => return skipped(format!("Couldn't read your decisions in Actual AI: {e}")),
     };
     match super::cloud::decisions(&session, repo.as_deref()).await {
-        Ok(decisions) => (
-            CloudComparison {
-                compared: true,
-                scope: Some(scope),
-                decisions: decisions.len(),
-                note,
-            },
-            decisions
+        Ok(decisions) => {
+            let compared: Vec<ExistingDecision> = decisions
                 .into_iter()
                 .filter(|decision| decision.state != "archived")
                 .map(|decision| ExistingDecision {
@@ -351,8 +345,17 @@ async fn cloud_decisions(
                     title: decision.title,
                     policies: decision.policies.into_iter().map(|p| p.statement).collect(),
                 })
-                .collect(),
-        ),
+                .collect();
+            (
+                CloudComparison {
+                    compared: true,
+                    scope: Some(scope),
+                    decisions: compared.len(),
+                    note,
+                },
+                compared,
+            )
+        }
         Err(e) => skipped(format!("Couldn't read your decisions in Actual AI: {e}")),
     }
 }
@@ -807,7 +810,8 @@ mod tests {
         let report = block(run_check(&args, tmp.path(), TODAY));
         list.assert();
         assert!(report.cloud.compared);
-        assert_eq!(report.cloud.decisions, 3);
+        // The archived cloud-3 isn't compared, so it isn't counted.
+        assert_eq!(report.cloud.decisions, 2);
         let others: Vec<_> = report
             .duplicates
             .iter()
@@ -817,7 +821,7 @@ mod tests {
         let text = render_report(&report);
         assert!(text.contains("decision cloud-2 in Actual AI"), "{text}");
         assert!(
-            text.contains(&format!("Compared with 3 decisions in {REPO}.")),
+            text.contains(&format!("Compared with 2 decisions in {REPO}.")),
             "{text}"
         );
     }

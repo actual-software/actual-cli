@@ -75,7 +75,7 @@ impl ActualApiClient {
         let response = match self.authed(post).send().await {
             Ok(response) => response,
             Err(e) if e.is_connect() => {
-                return Err(ActualError::ApiError(format!(
+                return Err(ActualError::AdrNotSaved(format!(
                     "Could not reach Actual AI, so the decision was not saved: {e}"
                 )))
             }
@@ -405,9 +405,11 @@ mod tests {
             .with_bearer("tok");
         let err = client.create_decision(&create_request()).await.unwrap_err();
         assert!(
-            matches!(&err, ActualError::ApiError(m) if m.contains("was not saved")),
+            matches!(&err, ActualError::AdrNotSaved(m)
+                if m.starts_with("Could not reach Actual AI, so the decision was not saved: ")),
             "{err:?}"
         );
+        assert_eq!(err.exit_code(), 3);
     }
 
     #[tokio::test]

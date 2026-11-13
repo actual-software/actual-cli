@@ -165,7 +165,7 @@ fn render_decision(decision: &Decision) -> String {
         format!("{} ({})", clean(&decision.state), clean(&decision.status)),
     );
     if decision.kind == "group" {
-        row("Kind:", "grouped suggestion".to_string());
+        row("Kind:", "AI-grouped".to_string());
     }
     if let Some(repo) = &decision.repo_unique_id {
         row("Repository:", clean(repo));
@@ -202,7 +202,8 @@ fn render_decision(decision: &Decision) -> String {
     out
 }
 
-/// The decision's scope in words: the whole repository, or its paths.
+/// The decision's scope in words: the whole repository, or its paths, an
+/// excluded one keeping its `!` in front of the root.
 fn scope_text(decision: &Decision) -> String {
     match &decision.scope {
         Some(scope) if !scope.paths.is_empty() => {
@@ -210,9 +211,10 @@ fn scope_text(decision: &Decision) -> String {
             scope
                 .paths
                 .iter()
-                .map(|path| match root {
-                    "." | "" => sanitize_server_text(path),
-                    _ => sanitize_server_text(&format!("{root}/{path}")),
+                .map(|path| match (root, path.strip_prefix('!')) {
+                    ("." | "", _) => sanitize_server_text(path),
+                    (_, Some(excluded)) => sanitize_server_text(&format!("!{root}/{excluded}")),
+                    (_, None) => sanitize_server_text(&format!("{root}/{path}")),
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -266,14 +268,19 @@ struct Outgoing {
 
 /// Read what `create` would send, before anything goes out. A relative
 /// `--file` is read from `dir`. Actual AI checks the decision itself when it
-/// saves it.
+/// saves it, but its create route takes no decision without a policy.
 fn outgoing(args: &AdrCreateArgs, dir: &Path) -> Result<Outgoing, ActualError> {
     let Some(path) = &args.file else {
         let title = args.title.as_deref().unwrap_or_default();
-        return Ok(Outgoing {
-            doc: content_from_flags(title, &args.content)?,
-            file: None,
-        });
+        let doc = content_from_flags(title, &args.content)?;
+        if doc.policies.is_empty() {
+            return Err(ActualError::AdrInvalid {
+                reasons: vec![
+                    "Add at least one policy with `--policy \"LEVEL: statement\"`.".to_string(),
+                ],
+            });
+        }
+        return Ok(Outgoing { doc, file: None });
     };
     let file = files::read_decision_file(&dir.join(path))?;
     let parsed = context_file::parse(&file.body).map_err(|reason| ActualError::AdrInvalid {
@@ -489,7 +496,7 @@ async fn check_for_duplicates(
         .await
         .map_err(|e| match e {
             ActualError::NotLoggedIn | ActualError::AdrAccessDenied { .. } => e,
-            other => ActualError::ApiError(format!(
+            other => ActualError::AdrNotSaved(format!(
                 "Couldn't read the repository's decisions to check for duplicates, so nothing \
                  was sent: {other}"
             )),
@@ -780,6 +787,9 @@ async fn run_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<Stri
     let done = match action {
         LifecycleAction::Publish => format!("Published {id}"),
         LifecycleAction::Unpublish => format!("Moved {id} back to draft"),
+        LifecycleAction::Archive if workflow::is_group(&listed.decision) => {
+            format!("Archived {id}. A grouped decision can't be restored yet")
+        }
         LifecycleAction::Archive => {
             format!("Archived {id}. `actual adr restore {id}` brings it back")
         }
@@ -1057,7 +1067,7 @@ mod tests {
         };
         let text = block(run_show(&args)).unwrap();
         assert!(text.contains("ID:          g1"), "{text}");
-        assert!(text.contains("grouped suggestion"));
+        assert!(text.contains("Kind:        AI-grouped"), "{text}");
         assert!(text.contains("id m1:R-1"));
         args.id = "nope".to_string();
         let err = block(run_show(&args)).unwrap_err();
@@ -1072,11 +1082,11 @@ mod tests {
         let text = render_decision(&sample_decision());
         assert!(!text.contains('\u{1b}'), "server text is cleaned: {text:?}");
         for expected in [
-            "Kind:        grouped suggestion",
+            "Kind:        AI-grouped",
             &format!("Repository:  {REPO}"),
             "Date:        2026-11-02",
             "Category:    Storage",
-            "Scope:       backend/src/**, backend/!src/gen/**",
+            "Scope:       backend/src/**, !backend/src/gen/**",
             "Changes:     base-1",
             "  - First.\n  - Second.\n",
             "MUST NOT   Skip it.",
@@ -1272,9 +1282,12 @@ mod tests {
             .create();
         let err = block(run_create(&create_args(&server), tmp.path(), true)).unwrap_err();
         assert!(
-            matches!(&err, ActualError::ApiError(m) if m.contains("nothing was sent")),
+            matches!(&err, ActualError::AdrNotSaved(m)
+                if m == "Couldn't read the repository's decisions to check for duplicates, so \
+                         nothing was sent: API request failed: HTTP 500 Internal Server Error"),
             "{err:?}"
         );
+        assert_eq!(err.exit_code(), 3);
         list.remove();
         server
             .mock("GET", READ)
@@ -1308,6 +1321,15 @@ mod tests {
         // No sign-in is set up: the policy without a level fails first.
         let err = block(run_create(&args, Path::new("."), true)).unwrap_err();
         assert!(matches!(err, ActualError::AdrInvalid { .. }), "{err:?}");
+
+        // Flags with no policy at all: the create route takes none.
+        args.content.policies.clear();
+        let err = block(run_create(&args, Path::new("."), true)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrInvalid { reasons }
+                if reasons == &["Add at least one policy with `--policy \"LEVEL: statement\"`."]),
+            "{err:?}"
+        );
 
         let tmp = tempdir().unwrap();
         let bad = tmp.path().join("bad.md");
@@ -1972,6 +1994,46 @@ mod tests {
             );
             write.assert();
         }
+    }
+
+    #[test]
+    fn deleting_a_grouped_decision_offers_no_restore() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(
+                r#"{"adrs":[{"id":"g1","date":"","title":"Page reads","status":"accepted",
+                    "policyRules":[{"id":"R-1","adrId":"m1","level":"MUST","statement":"Page."}],
+                    "candidateGroupId":"g1","memberAdrIds":["m1","m2"],"kind":"group",
+                    "primaryAdrId":"m1"}],"suggestions":[]}"#,
+            )
+            .create();
+        let archive = server
+            .mock("POST", "/v1/gcp/product/adr-group-action")
+            .match_body(Matcher::Json(
+                json!({"organization_id": ORG, "source_candidate_id": "g1", "action": "archive"}),
+            ))
+            .with_status(200)
+            .with_body(r#"{"success":true}"#)
+            .create();
+        let args = AdrIdArgs {
+            id: "m2".to_string(),
+            api: api(&server),
+        };
+        let text = block(run_lifecycle(&args, LifecycleAction::Archive)).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "{} Archived g1. A grouped decision can't be restored yet.\n",
+                theme::success(&theme::SUCCESS)
+            )
+        );
+        archive.assert();
     }
 
     #[test]

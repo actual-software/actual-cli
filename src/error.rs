@@ -164,6 +164,11 @@ pub enum ActualError {
     /// which one from the working tree.
     #[error("{0}")]
     AdrRepoRequired(String),
+    /// `actual adr create` stopped before Actual AI saved anything: the save
+    /// couldn't reach it, or the read before the save failed. The message
+    /// says which, without [`Self::ApiError`]'s prefix in front of its own.
+    #[error("{0}")]
+    AdrNotSaved(String),
 
     /// A private key was supplied in SEC1 form (`BEGIN EC PRIVATE KEY`), which
     /// the assertion signer cannot load — it reads PKCS#1 and PKCS#8 only.
@@ -249,7 +254,8 @@ impl ActualError {
             | Self::ServiceUnavailable
             | Self::AdrCreateUnconfirmed { .. }
             | Self::AdrNotFound(_)
-            | Self::AdrNotAllowed(_) => 3,
+            | Self::AdrNotAllowed(_)
+            | Self::AdrNotSaved(_) => 3,
             Self::IoError(_) => 5,
             _ => 1,
         }
@@ -1221,5 +1227,10 @@ mod tests {
         assert_eq!(refused.exit_code(), 3);
         assert_eq!(refused.to_string(), "Only a draft can be published.");
         assert_eq!(refused.hint(), None);
+
+        let unsent = ActualError::AdrNotSaved("Could not reach Actual AI.".to_string());
+        assert_eq!(unsent.exit_code(), 3);
+        assert_eq!(unsent.to_string(), "Could not reach Actual AI.");
+        assert_eq!(unsent.hint(), None);
     }
 }
