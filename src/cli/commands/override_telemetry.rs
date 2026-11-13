@@ -30,9 +30,10 @@
 //! **Why.** `actual.override.reason` is the override's reason code
 //! (`misread`, `not-here`, `adr-wrong`, `adr-outdated`, `accepted`, or
 //! `other` for typed text that names no code), empty when no reason was
-//! given. Only an `other` override also sends its typed text, as
+//! given. Only an `other` override also records its typed text, as
 //! `actual.override.reason_text`, stripped of anything that looks like a
-//! secret and cut to [`reason_text::MAX_CHARS`] characters. Text typed with
+//! secret and cut to [`reason_text::MAX_CHARS`] characters, and the uploader
+//! sends it only in a request carrying the sign-in's token. Text typed with
 //! a named code is never sent.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
