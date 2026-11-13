@@ -1761,7 +1761,8 @@ pub struct PlanCheckOverrideArgs {
 
     /// Why this rule is being overridden. Optional but encouraged; an
     /// override without one is still recorded (with its source and the gate
-    /// that denied it).
+    /// that denied it). Without `--reason-code`, telemetry from a signed-in
+    /// run sends this text, as described under `--reason-code`.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
@@ -1769,10 +1770,10 @@ pub struct PlanCheckOverrideArgs {
     /// (the ADR doesn't apply here), `adr-wrong`, `adr-outdated`, or
     /// `accepted` (the block is right, going ahead anyway). With `--reason`
     /// and no code, the override is recorded as `other`. Telemetry sends the
-    /// code. For `other` it also sends the `--reason` text, with anything
-    /// that looks like a secret replaced by `[redacted]` and cut to 280
-    /// characters. Text given with one of the five codes stays on this
-    /// machine.
+    /// code. For `other`, when you're signed in to Actual, it also sends the
+    /// `--reason` text, with anything that looks like a secret replaced by
+    /// `[redacted]` and cut to 280 characters. Text given with one of the
+    /// five codes, or from a signed-out run, stays on this machine.
     #[arg(long, value_name = "CODE", value_enum, conflicts_with = "claude_hook")]
     pub reason_code: Option<OverrideReasonCodeArg>,
 
@@ -2225,12 +2226,20 @@ mod parse_tests {
         let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
         let limit = crate::telemetry::reason_text::MAX_CHARS;
         assert!(
-            help.contains("For `other` it also sends the `--reason` text"),
+            help.contains(
+                "For `other`, when you're signed in to Actual, it also sends the `--reason` text"
+            ),
             "help does not say other text is sent: {help}"
         );
         assert!(
             help.contains(&format!("cut to {limit} characters")),
             "help does not name the {limit}-character limit: {help}"
+        );
+        assert!(
+            help.contains(
+                "Without `--reason-code`, telemetry from a signed-in run sends this text"
+            ),
+            "--reason help does not say its text is sent: {help}"
         );
         assert!(
             !help.contains("text stays local"),
