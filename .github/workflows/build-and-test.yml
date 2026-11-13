@@ -30,6 +30,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
         with:
+          toolchain: "1.99.1"  # pinned until clippy and coverage pass on 1.100
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
@@ -73,6 +74,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: "1.99.1"  # pinned until clippy and coverage pass on 1.100
 
       - name: Cache cargo
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7  # v5.0.4
