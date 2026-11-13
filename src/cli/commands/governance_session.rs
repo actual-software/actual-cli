@@ -246,8 +246,8 @@ pub struct Override {
     /// when neither was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<OverrideGate>,
-    /// Why the human overrode, as a code: the only part of the reason that
-    /// leaves the machine. `None` when no reason was given.
+    /// Why the human overrode, as a code. Telemetry sends it, and for `other`
+    /// the typed text too. `None` when no reason was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<OverrideReasonCode>,
 }
@@ -312,7 +312,7 @@ impl OverrideReasonCode {
         .find(|code| code.as_str().eq_ignore_ascii_case(word))
     }
 
-    /// Split a typed reason into its code and the words kept on the machine:
+    /// Split a typed reason into its code and its text:
     /// a leading code word is the code and the rest is the text, any other
     /// text is `other` and kept whole, and no text is no code.
     pub fn split_reason(reason: Option<&str>) -> (Option<Self>, Option<String>) {
