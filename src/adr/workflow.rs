@@ -201,7 +201,7 @@ pub fn lifecycle_write(
             "Only a draft can be published; this decision is {is}."
         )),
         LifecycleAction::Publish if group => {
-            Err("A grouped draft can't be published here; publish it in the web app.".to_string())
+            Err("A grouped draft can't be published yet.".to_string())
         }
         LifecycleAction::Publish => Ok(publish_write(row_id(decision), org_id)),
         LifecycleAction::Unpublish if state != Active => Err(format!(
@@ -759,7 +759,7 @@ mod tests {
         }
         assert_eq!(
             refusal(group("draft"), Draft, Publish),
-            "A grouped draft can't be published here; publish it in the web app."
+            "A grouped draft can't be published yet."
         );
         assert_eq!(
             refusal(group("deleted"), Archived, Restore),
