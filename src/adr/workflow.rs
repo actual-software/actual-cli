@@ -360,11 +360,14 @@ fn next_policies<'a>(
 }
 
 /// The decision's fields after `edit`: the current title, context, scope,
-/// category and schema version, with what the edit changes.
+/// category and schema version, with what the edit changes. The routes keep
+/// the stored value of a field left out, so an edited text goes out even when
+/// it trims to empty, which is how an empty `--context` clears the context; a
+/// blank stored one is left out.
 fn fields_after(decision: &WebDecision, edit: &DecisionEdit) -> DecisionFields {
-    let text = |edited: &Option<String>, current: &Option<String>| {
-        let text = edited.as_ref().or(current.as_ref())?;
-        Some(js_trim(text).to_string()).filter(|text| !text.is_empty())
+    let text = |edited: &Option<String>, current: &Option<String>| match edited {
+        Some(text) => Some(js_trim(text).to_string()),
+        None => Some(js_trim(current.as_deref()?).to_string()).filter(|text| !text.is_empty()),
     };
     let scope = match &edit.scope {
         Some(paths) => Some(WebScope {
@@ -931,6 +934,22 @@ mod tests {
         assert_eq!(
             rootless.body["content"]["scope"],
             json!({"root": ".", "paths": []})
+        );
+    }
+
+    #[test]
+    fn an_edited_context_goes_out_even_when_empty() {
+        let sent = edit_of(
+            single("accepted"),
+            &DecisionEdit {
+                context: Some("  ".to_string()),
+                ..DecisionEdit::default()
+            },
+        );
+        assert_eq!(sent.body["content"]["context"], "");
+        assert_eq!(
+            sent.body["content"]["title"],
+            single("accepted").title.unwrap()
         );
     }
 

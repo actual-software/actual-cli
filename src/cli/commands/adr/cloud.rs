@@ -631,28 +631,37 @@ pub(super) fn exec_update(args: &AdrUpdateArgs) -> Result<(), ActualError> {
 }
 
 /// One `--policy` value for `update`: `LEVEL: statement`, with an optional
-/// `<policy id>=` in front to keep that policy.
+/// `<policy id>=` in front to keep that policy. A blank statement is refused
+/// here, because the AI-grouped decisions' route drops it without an error.
 fn parse_policy_edit(n: usize, text: &str) -> Result<PolicyEdit, String> {
-    if let Some((id, rest)) = text.split_once('=') {
+    let kept = text.split_once('=').and_then(|(id, rest)| {
         let id = id.trim();
-        if !id.is_empty() && !id.contains(char::is_whitespace) {
-            if let Some((level, statement)) = RuleLevel::split_prefix(rest) {
-                return Ok(PolicyEdit {
-                    id: Some(id.to_string()),
-                    level,
-                    statement: statement.to_string(),
-                });
-            }
+        if id.is_empty() || id.contains(char::is_whitespace) {
+            return None;
         }
-    }
-    match RuleLevel::split_prefix(text) {
-        Some((level, statement)) => Ok(PolicyEdit {
-            id: None,
+        let (level, statement) = RuleLevel::split_prefix(rest)?;
+        Some(PolicyEdit {
+            id: Some(id.to_string()),
             level,
             statement: statement.to_string(),
-        }),
-        None => Err(missing_level(n)),
+        })
+    });
+    let edit = match kept {
+        Some(edit) => edit,
+        None => {
+            let (level, statement) =
+                RuleLevel::split_prefix(text).ok_or_else(|| missing_level(n))?;
+            PolicyEdit {
+                id: None,
+                level,
+                statement: statement.to_string(),
+            }
+        }
+    };
+    if js_trim(&edit.statement).is_empty() {
+        return Err(format!("Policy {n} has no statement."));
     }
+    Ok(edit)
 }
 
 /// One `--level` value: `<policy id>=LEVEL`.
@@ -692,6 +701,13 @@ fn update_edit(args: &AdrUpdateArgs) -> Result<DecisionEdit, ActualError> {
         .iter()
         .filter_map(|text| parse_level_edit(text).map_err(|e| reasons.push(e)).ok())
         .collect();
+    if args
+        .title
+        .as_deref()
+        .is_some_and(|title| js_trim(title).is_empty())
+    {
+        reasons.insert(0, "Add a title.".to_string());
+    }
     if !reasons.is_empty() {
         return Err(ActualError::AdrInvalid { reasons });
     }
@@ -1745,6 +1761,13 @@ mod tests {
         assert!(parse_policy_edit(5, "Just prose.")
             .unwrap_err()
             .starts_with("Policy 5 "));
+        for blank in ["MUST:  ", "d1:rule-1=MAY: \u{3000}"] {
+            assert_eq!(
+                parse_policy_edit(6, blank).unwrap_err(),
+                "Policy 6 has no statement.",
+                "{blank:?}"
+            );
+        }
     }
 
     #[test]
@@ -1803,6 +1826,19 @@ mod tests {
             matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons.len() == 2),
             "{err:?}"
         );
+
+        // A blank title is refused before anything is sent; an empty
+        // context is kept, so the save clears the context.
+        let mut args = update_args(&server);
+        args.title = Some(" \u{A0}".to_string());
+        args.context = vec![String::new()];
+        let err = update_edit(&args).err();
+        assert!(
+            matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons == &["Add a title."]),
+            "{err:?}"
+        );
+        args.title = None;
+        assert_eq!(update_edit(&args).unwrap().context.as_deref(), Some(""));
     }
 
     #[test]
