@@ -3,8 +3,8 @@
 //! A save normalizes the decision, checks its content, caps the size of its
 //! Context File, and makes sure that file reads back to the same decision.
 //! [`check_document`] runs those steps in the server's order and returns
-//! every reason in the server's wording, so `actual adr` can report what a
-//! save would refuse before it sends the request.
+//! every reason in the server's wording, so `actual adr new` and `check` can
+//! report what a save would refuse before a decision file is pushed.
 //!
 //! The server's schema check is not ported: it refuses malformed JSON, which a
 //! [`ContextFile`] cannot be.
@@ -90,17 +90,14 @@ fn normalize(doc: &ContextFile, as_draft: bool, today: &str) -> ContextFile {
     }
 }
 
-/// Refusals for an empty or multi-line title, missing context, no policies,
-/// and each empty or multi-line policy statement, in the server's order.
+/// Refusals for an empty or multi-line title, no policies, and each empty or
+/// multi-line policy statement, in the server's order. Context is optional.
 fn content_errors(doc: &ContextFile) -> Vec<String> {
     let mut errors = Vec::new();
     if doc.title.is_empty() {
         errors.push("Add a title.".to_string());
     } else if has_line_break(&doc.title) {
         errors.push("Keep the title on one line.".to_string());
-    }
-    if doc.context.is_empty() {
-        errors.push("Add context: why the decision is needed.".to_string());
     }
     if doc.policies.is_empty() {
         errors.push("Add at least one policy.".to_string());
@@ -358,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn asks_for_a_title_context_and_a_policy() {
+    fn asks_for_a_title_and_a_policy_but_not_context() {
         let doc = ContextFile {
             title: "   ".to_string(),
             context: strings(&["  "]),
@@ -367,12 +364,13 @@ mod tests {
         };
         assert_eq!(
             errors_of(&doc),
-            [
-                "Add a title.",
-                "Add context: why the decision is needed.",
-                "Add at least one policy."
-            ]
+            ["Add a title.", "Add at least one policy."]
         );
+        let no_context = ContextFile {
+            context: Vec::new(),
+            ..shaped_draft()
+        };
+        assert!(check_document(&no_context, false, TODAY).is_ok());
     }
 
     #[test]
@@ -488,10 +486,7 @@ mod tests {
     #[test]
     fn check_markdown_carries_the_parser_warnings() {
         let checked = check_markdown("## Decision\n\n1. MUST: always do this.\n", false, TODAY);
-        assert_eq!(
-            checked.result,
-            Err(strings(&["Add context: why the decision is needed."]))
-        );
+        assert_eq!(checked.result.unwrap().title, "Untitled");
         assert_eq!(
             checked.warnings,
             [

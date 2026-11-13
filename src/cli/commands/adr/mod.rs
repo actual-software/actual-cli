@@ -206,7 +206,6 @@ fn content_from_flags(title: &str, content: &AdrContentArgs) -> Result<ContextFi
     }
     Ok(ContextFile {
         title: title.to_string(),
-        deciders: content.deciders.clone().unwrap_or_default(),
         context: content.context.clone(),
         policies,
         ..ContextFile::default()
@@ -323,11 +322,9 @@ mod tests {
                 "MUST NOT: Skip the check.".to_string(),
                 "should prefer Postgres".to_string(),
             ],
-            deciders: Some("Ana".to_string()),
         };
         let doc = content_from_flags("Use Postgres", &content).unwrap();
         assert_eq!(doc.title, "Use Postgres");
-        assert_eq!(doc.deciders, "Ana");
         assert_eq!(doc.policies[0].level, RuleLevel::MustNot);
         assert_eq!(doc.policies[0].statement, "Skip the check.");
         assert_eq!(doc.policies[1].level, RuleLevel::Should);

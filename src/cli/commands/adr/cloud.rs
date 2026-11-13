@@ -1,5 +1,7 @@
 //! The `actual adr` commands that act on the organization's decisions in
-//! Actual AI: list, show, create, update and the lifecycle actions.
+//! Actual AI: list, show, create, update and the lifecycle actions. Each one
+//! reads the decisions as the web app does and runs the web app's workflow on
+//! them ([`workflow`]) before it sends a change.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -8,15 +10,15 @@ use serde::Serialize;
 
 use super::{
     content_from_flags, interactive, json_text, missing_level, pick_repo, rule_spelling, runtime,
-    save_status, session, today, Repo, RepoPick, Session,
+    save_status, session, Repo, RepoPick, Session,
 };
-use crate::adr::context_file::{self, ContextFile};
+use crate::adr::context_file::{self, js_trim, ContextFile};
 use crate::adr::files::{self, DecisionFile, RenameOutcome};
 use crate::adr::overlap::{find_overlaps, ExistingDecision};
-use crate::adr::save_check::{check_document, check_markdown, MAX_CONTEXT_FILE_UNITS};
+use crate::adr::workflow::{self, DecisionEdit, LevelEdit, Listed, PolicyEdit};
 use crate::api::adr_types::{
-    CreateDecisionRequest, CreatedDecision, Decision, DecisionAction, DecisionList, LevelEdit,
-    LifecycleAction, PolicyEdit, SaveStatus, ScopeEdit, UpdateDecisionRequest,
+    CreateRequest, Decision, DecisionAction, DecisionList, ImportRequest, LifecycleAction,
+    NewDecision, SaveStatus,
 };
 use crate::cli::args::{
     AdrCreateArgs, AdrIdArgs, AdrListArgs, AdrRejectArgs, AdrShowArgs, AdrUpdateArgs,
@@ -25,6 +27,40 @@ use crate::cli::commands::sync::resolve_cwd;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_lines, sanitize_server_text, ActualError};
 use crate::rules::types::RuleLevel;
+
+// ── reading ────────────────────────────────────────────────────────────────
+
+/// The organization's decisions in the web app's lists, for one repository
+/// when `repo` is given.
+async fn read(session: &Session, repo: Option<&str>) -> Result<Vec<Listed>, ActualError> {
+    let response = session.client.read_decisions(&session.org_id, repo).await?;
+    Ok(workflow::listed(response))
+}
+
+/// The decisions as `list` prints them, for one repository when `repo` is
+/// given.
+pub(super) async fn decisions(
+    session: &Session,
+    repo: Option<&str>,
+) -> Result<Vec<Decision>, ActualError> {
+    Ok(read(session, repo)
+        .await?
+        .iter()
+        .map(workflow::view)
+        .collect())
+}
+
+/// The decision `id` names in the organization: by its own id, or by one of
+/// an AI-grouped decision's rows.
+async fn find(session: &Session, id: &str) -> Result<Listed, ActualError> {
+    let rows = read(session, None).await?;
+    workflow::find(&rows, id).cloned().ok_or_else(|| {
+        ActualError::AdrNotFound(format!(
+            "No decision in your organization has the id {}.",
+            sanitize_server_text(id)
+        ))
+    })
+}
 
 // ── list ───────────────────────────────────────────────────────────────────
 
@@ -51,16 +87,15 @@ async fn run_list(args: &AdrListArgs, dir: &Path) -> Result<String, ActualError>
             (None, "your organization".to_string())
         }
     };
-    let page = session
-        .client
-        .list_decisions(
-            &session.org_id,
-            repo.as_deref(),
-            args.state,
-            args.limit,
-            args.offset,
-        )
-        .await?;
+    let matching = decisions(&session, repo.as_deref())
+        .await?
+        .into_iter()
+        .filter(|decision| {
+            args.state
+                .is_none_or(|state| decision.state == state.as_str())
+        })
+        .collect();
+    let page = workflow::page(matching, args.limit, args.offset);
     Ok(if args.api.json {
         format!("{}\n", json_text(&page))
     } else {
@@ -110,10 +145,7 @@ pub(super) fn exec_show(args: &AdrShowArgs) -> Result<(), ActualError> {
 
 async fn run_show(args: &AdrShowArgs) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
-    let decision = session
-        .client
-        .show_decision(&session.org_id, &args.id, None)
-        .await?;
+    let decision = workflow::view(&find(&session, &args.id).await?);
     Ok(if args.api.json {
         format!("{}\n", json_text(&decision))
     } else {
@@ -194,80 +226,78 @@ fn scope_text(decision: &Decision) -> String {
 
 // ── create ─────────────────────────────────────────────────────────────────
 
+/// The decision `create` saved.
+#[derive(Debug, Serialize)]
+struct Created {
+    adr_id: String,
+    /// `accepted` or `draft`, as it was saved.
+    status: String,
+    title: String,
+    repo_unique_id: String,
+}
+
 /// What `adr create` did, for `--json`.
 #[derive(Debug, Serialize)]
 struct CreateOutcome {
     #[serde(flatten)]
-    created: CreatedDecision,
+    created: Created,
     #[serde(skip_serializing_if = "Option::is_none")]
     files: Option<RenameOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope_problem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish_problem: Option<String>,
     /// The status the pushed files had, when the save gave them another.
     #[serde(skip_serializing_if = "Option::is_none")]
     local_status_was: Option<String>,
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
-    let text = runtime()?.block_on(run_create(args, &resolve_cwd(), interactive(), &today()))?;
+    let text = runtime()?.block_on(run_create(args, &resolve_cwd(), interactive()))?;
     print!("{text}");
     Ok(())
 }
 
-/// The decision `create` sends: its Context File markdown, the decision it
-/// reads as, and the local file it came from.
+/// The decision `create` sends, and the local file it came from.
 struct Outgoing {
-    markdown: String,
     doc: ContextFile,
     file: Option<DecisionFile>,
 }
 
-/// Read and check what `create` would send, before anything goes out. A
-/// relative `--file` is read from `dir`.
-fn outgoing(
-    args: &AdrCreateArgs,
-    dir: &Path,
-    as_draft: bool,
-    today: &str,
-) -> Result<Outgoing, ActualError> {
+/// Read what `create` would send, before anything goes out. A relative
+/// `--file` is read from `dir`. Actual AI checks the decision itself when it
+/// saves it.
+fn outgoing(args: &AdrCreateArgs, dir: &Path) -> Result<Outgoing, ActualError> {
     let Some(path) = &args.file else {
         let title = args.title.as_deref().unwrap_or_default();
-        let doc = content_from_flags(title, &args.content)?;
-        let doc = check_document(&doc, as_draft, today)
-            .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
         return Ok(Outgoing {
-            markdown: context_file::render(&doc),
-            doc,
+            doc: content_from_flags(title, &args.content)?,
             file: None,
         });
     };
     let file = files::read_decision_file(&dir.join(path))?;
-    if file.body.encode_utf16().count() > MAX_CONTEXT_FILE_UNITS {
-        return Err(ActualError::AdrInvalid {
-            reasons: vec![format!(
-                "{} is over 100 KB, the most a decision can hold.",
-                path.display()
-            )],
-        });
-    }
-    let doc = check_markdown(&file.body, as_draft, today)
-        .result
-        .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
+    let parsed = context_file::parse(&file.body).map_err(|reason| ActualError::AdrInvalid {
+        reasons: vec![reason],
+    })?;
     Ok(Outgoing {
-        markdown: file.body.clone(),
-        doc,
+        doc: parsed.doc,
         file: Some(file),
     })
+}
+
+/// The title a save stores: trimmed, or `Untitled` when blank.
+fn stored_title(doc: &ContextFile) -> String {
+    let title = js_trim(&doc.title);
+    if title.is_empty() { "Untitled" } else { title }.to_string()
 }
 
 async fn run_create(
     args: &AdrCreateArgs,
     dir: &Path,
     interactive: bool,
-    today: &str,
 ) -> Result<String, ActualError> {
     let status = save_status(args.status, interactive);
-    let outgoing = outgoing(args, dir, status == SaveStatus::Draft, today)?;
+    let outgoing = outgoing(args, dir)?;
     // A pushed file names its own repository through the checkout it sits in.
     let root: PathBuf = match &outgoing.file {
         Some(file) => files::root_of(&file.path).unwrap_or_else(|| dir.to_path_buf()),
@@ -285,79 +315,166 @@ async fn run_create(
     if !args.allow_duplicate {
         check_for_duplicates(&session, &repo, &outgoing).await?;
     }
-
-    let created = session
-        .client
-        .create_decision(&CreateDecisionRequest {
-            org_id: session.org_id.clone(),
-            repo_unique_id: repo.id.clone(),
-            status,
-            markdown: outgoing.markdown,
-        })
-        .await?;
-
-    let files = outgoing.file.as_ref().map(|file| {
-        files::rename_pair(
-            &root,
-            file,
-            &created.adr_id,
-            &created.title,
-            &created.status,
-        )
-    });
-    let local_status_was = outgoing
-        .file
-        .as_ref()
-        .and_then(|file| file.meta.as_ref()?.status.clone())
-        .filter(|was| {
-            *was != created.status && files.as_ref().is_some_and(|f| !f.renamed.is_empty())
-        });
-    let scope_paths = outgoing
-        .file
-        .as_ref()
-        .and_then(|file| file.meta.as_ref())
-        .map(|meta| meta.paths.clone())
-        .unwrap_or_default();
-    let scope_problem = if scope_paths.is_empty() {
-        None
-    } else {
-        let request = UpdateDecisionRequest {
-            org_id: session.org_id.clone(),
-            scope: Some(ScopeEdit {
-                paths: scope_paths.clone(),
-            }),
-            ..UpdateDecisionRequest::default()
-        };
-        session
-            .client
-            .update_decision(&created.adr_id, &request)
-            .await
-            .err()
-            .map(|e| {
-                format!(
-                    "The decision was saved, but its scope wasn't set ({e}). Run `actual adr \
-                     update {} {}` to set it.",
-                    created.adr_id,
-                    scope_paths
-                        .iter()
-                        .map(|path| format!("--scope '{path}'"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            })
-    };
-
-    let outcome = CreateOutcome {
-        created,
-        files,
-        scope_problem,
-        local_status_was,
+    let outcome = match &outgoing.file {
+        None => create_from_flags(&session, &repo, &outgoing.doc, status).await?,
+        Some(file) => create_from_file(&session, &repo, &root, file, &outgoing.doc, status).await?,
     };
     Ok(if args.api.json {
         format!("{}\n", json_text(&outcome))
     } else {
         render_created(&outcome, &repo)
     })
+}
+
+/// Save a decision built from flags in one request, as the web app's New
+/// Decision does: a draft, or an active decision that governs at once.
+async fn create_from_flags(
+    session: &Session,
+    repo: &Repo,
+    doc: &ContextFile,
+    status: SaveStatus,
+) -> Result<CreateOutcome, ActualError> {
+    let adr = NewDecision {
+        title: doc.title.clone(),
+        context: (!doc.context.is_empty()).then(|| doc.context.join("\n")),
+        policies: doc.policies.iter().map(|p| p.statement.clone()).collect(),
+        policy_levels: doc.policies.iter().map(|p| p.level).collect(),
+        status: (status == SaveStatus::Draft).then_some("draft"),
+    };
+    let adr_id = session
+        .client
+        .create_decision(&CreateRequest {
+            organization_id: session.org_id.clone(),
+            repo_unique_id: repo.id.clone(),
+            adr,
+        })
+        .await?;
+    Ok(CreateOutcome {
+        created: Created {
+            adr_id,
+            status: status.as_str().to_string(),
+            title: stored_title(doc),
+            repo_unique_id: repo.id.clone(),
+        },
+        files: None,
+        scope_problem: None,
+        publish_problem: None,
+        local_status_was: None,
+    })
+}
+
+/// Save a decision file as the web app's Import does, which keeps the whole
+/// document and always saves a draft; then set the scope its header names,
+/// and publish it for an accepted save. A step after the save that fails
+/// leaves a draft and says how to finish. The pair is then renamed to the
+/// names the repository sync gives the saved decision.
+async fn create_from_file(
+    session: &Session,
+    repo: &Repo,
+    root: &Path,
+    file: &DecisionFile,
+    doc: &ContextFile,
+    status: SaveStatus,
+) -> Result<CreateOutcome, ActualError> {
+    let adr_id = session
+        .client
+        .import_decision(&ImportRequest {
+            organization_id: session.org_id.clone(),
+            repo_unique_id: repo.id.clone(),
+            markdown: file.body.clone(),
+        })
+        .await?;
+    let id = sanitize_server_text(&adr_id);
+    let publish = status == SaveStatus::Accepted;
+    let paths = file
+        .meta
+        .as_ref()
+        .map(|meta| meta.paths.clone())
+        .unwrap_or_default();
+    let scope_problem = if paths.is_empty() {
+        None
+    } else {
+        set_scope(session, repo, &adr_id, &paths)
+            .await
+            .err()
+            .map(|e| {
+                let flags: Vec<String> = paths
+                    .iter()
+                    .map(|path| format!("--scope '{path}'"))
+                    .collect();
+                let mut problem = format!(
+                "The decision was saved, but its scope wasn't set ({e}). Run `actual adr update \
+                 {id} {}` to set it.",
+                flags.join(" ")
+            );
+                if publish {
+                    let _ = write!(
+                        problem,
+                        " It stays a draft until then; `actual adr publish {id}` publishes it."
+                    );
+                }
+                problem
+            })
+    };
+    let publish_problem = if publish && scope_problem.is_none() {
+        let write = workflow::publish_write(&adr_id, &session.org_id);
+        session.client.write_decision(&write).await.err().map(|e| {
+            format!(
+                "The decision was saved as a draft, but publishing it failed ({e}). Run \
+                 `actual adr publish {id}` to publish it."
+            )
+        })
+    } else {
+        None
+    };
+    let saved = if publish && scope_problem.is_none() && publish_problem.is_none() {
+        SaveStatus::Accepted
+    } else {
+        SaveStatus::Draft
+    };
+    let title = stored_title(doc);
+    let files = files::rename_pair(root, file, &adr_id, &title, saved.as_str());
+    let local_status_was = file
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.status.clone())
+        .filter(|was| was != saved.as_str() && !files.renamed.is_empty());
+    Ok(CreateOutcome {
+        created: Created {
+            adr_id,
+            status: saved.as_str().to_string(),
+            title,
+            repo_unique_id: repo.id.clone(),
+        },
+        files: Some(files),
+        scope_problem,
+        publish_problem,
+        local_status_was,
+    })
+}
+
+/// Give a just-saved decision the scope `paths`, as the web app's Edit does:
+/// read the decision, then save it whole with the new paths.
+async fn set_scope(
+    session: &Session,
+    repo: &Repo,
+    adr_id: &str,
+    paths: &[String],
+) -> Result<(), ActualError> {
+    let rows = read(session, Some(&repo.id)).await?;
+    let listed = workflow::find(&rows, adr_id).ok_or_else(|| {
+        ActualError::AdrNotFound(format!(
+            "the saved decision {} isn't in the repository's decisions",
+            sanitize_server_text(adr_id)
+        ))
+    })?;
+    let edit = DecisionEdit {
+        scope: Some(paths.to_vec()),
+        ..DecisionEdit::default()
+    };
+    let write =
+        workflow::edit_write(listed, &edit, &session.org_id).map_err(ActualError::AdrNotAllowed)?;
+    session.client.write_decision(&write).await
 }
 
 /// Refuse to send a decision the repository already has: the file's own
@@ -368,9 +485,7 @@ async fn check_for_duplicates(
     repo: &Repo,
     outgoing: &Outgoing,
 ) -> Result<(), ActualError> {
-    let existing = session
-        .client
-        .list_all_decisions(&session.org_id, Some(&repo.id))
+    let existing = decisions(session, Some(&repo.id))
         .await
         .map_err(|e| match e {
             ActualError::NotLoggedIn | ActualError::AdrAccessDenied { .. } => e,
@@ -445,7 +560,7 @@ fn render_created(outcome: &CreateOutcome, repo: &Repo) -> String {
         theme::success(&theme::SUCCESS),
         sanitize_server_text(&created.title),
         sanitize_server_text(&repo.label),
-        sanitize_server_text(&created.status),
+        created.status,
         sanitize_server_text(&created.adr_id),
     );
     if created.status == "accepted" {
@@ -476,11 +591,14 @@ fn render_created(outcome: &CreateOutcome, repo: &Repo) -> String {
         let _ = writeln!(
             out,
             "  The local files now say {}, as Actual AI saved it (they said {}).",
-            sanitize_server_text(&created.status),
+            created.status,
             sanitize_server_text(was)
         );
     }
-    if let Some(problem) = &outcome.scope_problem {
+    for problem in [&outcome.scope_problem, &outcome.publish_problem]
+        .into_iter()
+        .flatten()
+    {
         let _ = writeln!(out, "{} {problem}", theme::warning("warning:"));
     }
     out
@@ -488,8 +606,8 @@ fn render_created(outcome: &CreateOutcome, repo: &Repo) -> String {
 
 // ── update ─────────────────────────────────────────────────────────────────
 
-/// What `adr update` did, for `--json`: the route's answer and the decision
-/// read back after it.
+/// What `adr update` did, for `--json`: the change, and the decision read
+/// back after it.
 #[derive(Debug, Serialize)]
 struct UpdateOutcome {
     update: DecisionAction,
@@ -549,8 +667,8 @@ fn parse_level_edit(text: &str) -> Result<LevelEdit, String> {
         })
 }
 
-/// The update the flags describe, minus the organization.
-fn update_request(args: &AdrUpdateArgs) -> Result<UpdateDecisionRequest, ActualError> {
+/// The change the flags describe.
+fn update_edit(args: &AdrUpdateArgs) -> Result<DecisionEdit, ActualError> {
     let mut reasons = Vec::new();
     let policies: Vec<PolicyEdit> = args
         .policies
@@ -571,58 +689,52 @@ fn update_request(args: &AdrUpdateArgs) -> Result<UpdateDecisionRequest, ActualE
         return Err(ActualError::AdrInvalid { reasons });
     }
     let scope = if args.clear_scope {
-        Some(ScopeEdit { paths: Vec::new() })
+        Some(Vec::new())
     } else {
-        (!args.scope.is_empty()).then(|| ScopeEdit {
-            paths: args.scope.clone(),
-        })
+        (!args.scope.is_empty()).then(|| args.scope.clone())
     };
-    Ok(UpdateDecisionRequest {
-        org_id: String::new(),
+    Ok(DecisionEdit {
         title: args.title.clone(),
         context: (!args.context.is_empty()).then(|| args.context.join("\n")),
         policies: (!policies.is_empty()).then_some(policies),
-        levels: (!levels.is_empty()).then_some(levels),
+        levels,
         scope,
     })
 }
 
 async fn run_update(args: &AdrUpdateArgs) -> Result<String, ActualError> {
-    let mut request = update_request(args)?;
+    let edit = update_edit(args)?;
     let session = session(&args.api).await?;
-    request.org_id = session.org_id.clone();
-    let update = session.client.update_decision(&args.id, &request).await?;
+    let listed = find(&session, &args.id).await?;
+    let write = workflow::edit_write(&listed, &edit, &session.org_id)
+        .map_err(ActualError::AdrNotAllowed)?;
+    session.client.write_decision(&write).await?;
+    let id = sanitize_server_text(&listed.decision.id);
     // A policy-list edit can give the policies new ids, so read the
     // decision back for the next edit.
-    let (decision, read_back_problem) = match session
-        .client
-        .show_decision(&session.org_id, &update.adr_id, None)
-        .await
-    {
-        Ok(decision) => (Some(decision), None),
+    let (decision, read_back_problem) = match find(&session, &listed.decision.id).await {
+        Ok(read_back) => (Some(workflow::view(&read_back)), None),
         Err(e) => (
             None,
             Some(format!(
                 "The change was saved, but reading the decision back failed ({e}). Run \
-                 `actual adr show {}` before the next edit.",
-                sanitize_server_text(&update.adr_id)
+                 `actual adr show {id}` before the next edit."
             )),
         ),
     };
     let outcome = UpdateOutcome {
-        update,
+        update: DecisionAction {
+            success: true,
+            adr_id: listed.decision.id.clone(),
+            reason_saved: None,
+        },
         decision,
         read_back_problem,
     };
     if args.api.json {
         return Ok(format!("{}\n", json_text(&outcome)));
     }
-    let mut out = format!(
-        "{} Updated {}.{}\n",
-        theme::success(&theme::SUCCESS),
-        sanitize_server_text(&outcome.update.adr_id),
-        sync_note(&outcome.update)
-    );
+    let mut out = format!("{} Updated {id}.\n", theme::success(&theme::SUCCESS));
     if let Some(decision) = &outcome.decision {
         out.push('\n');
         out.push_str(&render_decision(decision));
@@ -633,16 +745,6 @@ async fn run_update(args: &AdrUpdateArgs) -> Result<String, ActualError> {
     Ok(out)
 }
 
-/// ` Actual AI is updating the repository's rule files.` when the change
-/// started a sync.
-fn sync_note(action: &DecisionAction) -> &'static str {
-    if action.sync_requested() {
-        " Actual AI is updating the repository's rule files."
-    } else {
-        ""
-    }
-}
-
 // ── lifecycle and reject ───────────────────────────────────────────────────
 
 pub(super) fn exec_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<(), ActualError> {
@@ -651,12 +753,26 @@ pub(super) fn exec_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Resul
     Ok(())
 }
 
+/// Send `action`'s change for the decision, once its state allows it.
+async fn change(
+    session: &Session,
+    listed: &Listed,
+    action: LifecycleAction,
+) -> Result<DecisionAction, ActualError> {
+    let write = workflow::lifecycle_write(listed, action, &session.org_id)
+        .map_err(ActualError::AdrNotAllowed)?;
+    session.client.write_decision(&write).await?;
+    Ok(DecisionAction {
+        success: true,
+        adr_id: listed.decision.id.clone(),
+        reason_saved: None,
+    })
+}
+
 async fn run_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
-    let result = session
-        .client
-        .decision_lifecycle(&args.id, action, &session.org_id)
-        .await?;
+    let listed = find(&session, &args.id).await?;
+    let result = change(&session, &listed, action).await?;
     if args.api.json {
         return Ok(format!("{}\n", json_text(&result)));
     }
@@ -669,12 +785,9 @@ async fn run_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<Stri
         }
         LifecycleAction::Restore => format!("Restored {id}"),
         LifecycleAction::Accept => format!("Accepted {id}"),
+        LifecycleAction::Reject => format!("Rejected {id}"),
     };
-    Ok(format!(
-        "{} {done}.{}\n",
-        theme::success(&theme::SUCCESS),
-        sync_note(&result)
-    ))
+    Ok(format!("{} {done}.\n", theme::success(&theme::SUCCESS)))
 }
 
 pub(super) fn exec_reject(args: &AdrRejectArgs) -> Result<(), ActualError> {
@@ -683,20 +796,20 @@ pub(super) fn exec_reject(args: &AdrRejectArgs) -> Result<(), ActualError> {
     Ok(())
 }
 
+/// Reject a suggestion, then save the reason with it, as the web app does.
 async fn run_reject(args: &AdrRejectArgs) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
-    let result = session
-        .client
-        .reject_decision(&args.id, &session.org_id, &args.reason)
-        .await?;
+    let listed = find(&session, &args.id).await?;
+    let mut result = change(&session, &listed, LifecycleAction::Reject).await?;
+    let feedback = workflow::rejection_feedback(&listed.decision, &session.org_id, &args.reason);
+    result.reason_saved = Some(session.client.write_decision(&feedback).await.is_ok());
     if args.api.json {
         return Ok(format!("{}\n", json_text(&result)));
     }
     let mut out = format!(
-        "{} Rejected {}.{}\n",
+        "{} Rejected {}.\n",
         theme::success(&theme::SUCCESS),
-        sanitize_server_text(&result.adr_id),
-        sync_note(&result)
+        sanitize_server_text(&result.adr_id)
     );
     if result.reason_saved == Some(false) {
         let _ = writeln!(
@@ -716,41 +829,52 @@ mod tests {
     use crate::cli::args::{AdrApiOptions, AdrContentArgs, AdrNewArgs};
     use crate::testutil::ENV_MUTEX;
     use mockito::Matcher;
+    use serde_json::json;
     use tempfile::tempdir;
 
     const ADR: &str = "33333333-3333-4333-8333-333333333333";
     const TODAY: &str = "2026-11-11";
+    const READ: &str = "/v1/gcp/product/decisions";
 
-    fn decision_json(id: &str, title: &str, state: &str, policies: &[(&str, &str)]) -> String {
-        let policies: Vec<String> = policies
+    /// A person's decision as the list read returns it, with `id` its own
+    /// row.
+    fn web_json(id: &str, title: &str, status: &str, policies: &[(&str, &str)]) -> String {
+        let rules: Vec<String> = policies
             .iter()
             .enumerate()
             .map(|(i, (level, statement))| {
                 format!(
-                    r#"{{"id":"{id}:rule-{}","level":"{level}","statement":"{statement}"}}"#,
+                    r#"{{"id":"rule-{}","adrId":"{id}","level":"{level}","statement":"{statement}"}}"#,
                     i + 1
                 )
             })
             .collect();
         format!(
-            r#"{{"id":"{id}","kind":"single","repo_unique_id":"{REPO}","title":"{title}","state":"{state}",
-                "status":"accepted","date":"2026-11-02T09:00:00.000Z","context":"Why.",
-                "policies":[{}],"scope":{{"root":".","paths":[]}},"category":null,"base_adr_id":null}}"#,
-            policies.join(",")
+            r#"{{"id":"{id}","date":"2026-11-02T09:00:00.000Z","title":"{title}","context":"Why.",
+                "status":"{status}","scope":{{"root":".","paths":[]}},"sourceRepoUniqueId":"{REPO}",
+                "schemaVersion":2,"policyRules":[{}],"candidateGroupId":"{id}",
+                "memberAdrIds":["{id}"],"kind":"single","primaryAdrId":"{id}"}}"#,
+            rules.join(",")
         )
     }
 
-    fn list_body(decisions: &[String], next: Option<u64>) -> String {
+    fn read_body(adrs: &[String]) -> String {
         format!(
-            r#"{{"decisions":[{}],"total":{},"next_offset":{}}}"#,
-            decisions.join(","),
-            decisions.len(),
-            next.map_or("null".to_string(), |n| n.to_string())
+            r#"{{"adrs":[{}],"suggestions":[],"version":1,"repository_summaries":[]}}"#,
+            adrs.join(",")
         )
     }
 
-    fn action_body(sync: &str) -> String {
-        format!(r#"{{"success":true,"adr_id":"{ADR}","sync":"{sync}"}}"#)
+    /// The read every command but `list` and `create` makes: the whole
+    /// organization.
+    fn org_read() -> Matcher {
+        Matcher::Exact(format!("organization_id={ORG}&include_summaries=false"))
+    }
+
+    fn repo_read() -> Matcher {
+        Matcher::Exact(format!(
+            "organization_id={ORG}&repository_id={REPO}&include_summaries=false"
+        ))
     }
 
     fn block<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -794,23 +918,21 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/v1/cli/adrs")
-            .match_query(Matcher::Exact(format!(
-                "org_id={ORG}&repo_unique_id={REPO}&state=active&limit=2&offset=0"
-            )))
+            .mock("GET", READ)
+            .match_header("authorization", "Bearer tok")
+            .match_query(repo_read())
             .with_status(200)
-            .with_body(list_body(
-                &[
-                    decision_json(
-                        ADR,
-                        "Use Postgres",
-                        "active",
-                        &[("MUST", "Store data in it.")],
-                    ),
-                    decision_json("d2", "Page reads", "active", &[]),
-                ],
-                Some(2),
-            ))
+            .with_body(read_body(&[
+                web_json(
+                    ADR,
+                    "Use Postgres",
+                    "accepted",
+                    &[("MUST", "Store data in it.")],
+                ),
+                web_json("d2", "Page reads", "draft", &[]),
+                web_json("d3", "Cache reads", "created-from-user", &[]),
+                web_json("d4", "Log reads", "accepted", &[]),
+            ]))
             .create();
         let args = AdrListArgs {
             repo: Some(REPO.to_string()),
@@ -821,8 +943,9 @@ mod tests {
         };
         let text = block(run_list(&args, tmp.path())).unwrap();
         mock.assert();
-        assert!(text.contains(&format!("in {REPO}: 1-2 of 2")), "{text}");
-        assert!(text.contains("Use Postgres"));
+        assert!(text.contains(&format!("in {REPO}: 1-2 of 3")), "{text}");
+        assert!(text.contains("Use Postgres") && text.contains("Cache reads"));
+        assert!(!text.contains("Page reads"), "{text}");
         assert!(text.contains("1 policy"));
         assert!(text.contains("0 policies"));
         assert!(text.contains("actual adr list --offset 2"));
@@ -835,10 +958,10 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         let mock = server
-            .mock("GET", "/v1/cli/adrs")
-            .match_query(Matcher::Exact(format!("org_id={ORG}&limit=50&offset=0")))
+            .mock("GET", READ)
+            .match_query(org_read())
             .with_status(200)
-            .with_body(list_body(&[], None))
+            .with_body(read_body(&[]))
             .expect(2)
             .create();
         let mut args = AdrListArgs {
@@ -884,18 +1007,18 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         server
-            .mock("GET", format!("/v1/cli/adrs/{ADR}").as_str())
-            .match_query(Matcher::Exact(format!("org_id={ORG}")))
+            .mock("GET", READ)
+            .match_query(org_read())
             .with_status(200)
-            .with_body(format!(
-                r#"{{"decision":{}}}"#,
-                decision_json(
+            .with_body(read_body(&[
+                web_json("d0", "Other", "accepted", &[]),
+                web_json(
                     ADR,
                     "Use Postgres",
                     "draft",
-                    &[("SHOULD_NOT", "Use MySQL.")]
-                )
-            ))
+                    &[("SHOULD_NOT", "Use MySQL.")],
+                ),
+            ]))
             .expect(2)
             .create();
         let mut args = AdrShowArgs {
@@ -905,9 +1028,43 @@ mod tests {
         let text = block(run_show(&args)).unwrap();
         assert!(text.contains("SHOULD NOT"), "{text}");
         assert!(text.contains(&format!("id {ADR}:rule-1")));
+        assert!(text.contains("State:       draft (draft)"), "{text}");
         args.api.json = true;
         let json = block(run_show(&args)).unwrap();
         assert!(json.contains("\"level\": \"SHOULD_NOT\""), "{json}");
+    }
+
+    #[test]
+    fn show_finds_an_ai_group_by_a_row_and_names_an_unknown_id() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(
+                r#"{"adrs":[],"suggestions":[{"id":"g1","date":"","title":"Page reads","status":"suggested",
+                    "policyRules":[{"id":"R-1","adrId":"m1","level":"MUST","statement":"Page."}],
+                    "candidateGroupId":"g1","memberAdrIds":["m1"],"kind":"group","primaryAdrId":"m1"}]}"#,
+            )
+            .expect(2)
+            .create();
+        let mut args = AdrShowArgs {
+            id: "m1".to_string(),
+            api: api(&server),
+        };
+        let text = block(run_show(&args)).unwrap();
+        assert!(text.contains("ID:          g1"), "{text}");
+        assert!(text.contains("grouped suggestion"));
+        assert!(text.contains("id m1:R-1"));
+        args.id = "nope".to_string();
+        let err = block(run_show(&args)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrNotFound(m) if m == "No decision in your organization has the id nope."),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -972,7 +1129,6 @@ mod tests {
             content: AdrContentArgs {
                 context: vec!["We need one relational store.".to_string()],
                 policies: vec!["MUST: Store relational data in Postgres.".to_string()],
-                deciders: None,
             },
             status: None,
             repo: Some(REPO.to_string()),
@@ -981,9 +1137,9 @@ mod tests {
         }
     }
 
-    fn created_body(status: &str) -> String {
+    fn created_body() -> String {
         format!(
-            r#"{{"adr_id":"{ADR}","status":"{status}","title":"Use Postgres for storage","repo_unique_id":"{REPO}"}}"#
+            r#"{{"success":true,"data":{{"id":"{ADR}","date":"d","title":"Use Postgres for storage","status":"draft"}}}}"#
         )
     }
 
@@ -994,31 +1150,34 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         let list = server
-            .mock("GET", "/v1/cli/adrs")
-            .match_query(Matcher::UrlEncoded("repo_unique_id".into(), REPO.into()))
+            .mock("GET", READ)
+            .match_query(repo_read())
             .with_status(200)
-            .with_body(list_body(
-                &[decision_json(
-                    "d9",
-                    "Cache every read",
-                    "active",
-                    &[("MAY", "Cache reads.")],
-                )],
-                None,
-            ))
+            .with_body(read_body(&[web_json(
+                "d9",
+                "Cache every read",
+                "accepted",
+                &[("MAY", "Cache reads.")],
+            )]))
             .create();
         let create = server
-            .mock("POST", "/v1/cli/adrs")
-            .match_body(Matcher::PartialJson(serde_json::json!({
-                "org_id": ORG,
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .match_body(Matcher::Json(json!({
+                "organization_id": ORG,
                 "repo_unique_id": REPO,
-                "status": "draft",
+                "adr": {
+                    "title": "Use Postgres for storage",
+                    "context": "We need one relational store.",
+                    "policies": ["Store relational data in Postgres."],
+                    "policyLevels": ["MUST"],
+                    "status": "draft"
+                }
             })))
             .with_status(200)
-            .with_body(created_body("draft"))
+            .with_body(created_body())
             .expect(1)
             .create();
-        let text = block(run_create(&create_args(&server), tmp.path(), false, TODAY)).unwrap();
+        let text = block(run_create(&create_args(&server), tmp.path(), false)).unwrap();
         list.assert();
         create.assert();
         assert!(text.contains(&format!("as draft: {ADR}")), "{text}");
@@ -1026,28 +1185,43 @@ mod tests {
     }
 
     #[test]
-    fn create_at_a_terminal_saves_accepted_and_prints_json() {
+    fn create_at_a_terminal_saves_an_active_decision_and_prints_json() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
-        server
-            .mock("POST", "/v1/cli/adrs")
-            .match_body(Matcher::PartialJson(
-                serde_json::json!({"status": "accepted"}),
-            ))
+        let create = server
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .match_body(Matcher::Json(json!({
+                "organization_id": ORG,
+                "repo_unique_id": REPO,
+                "adr": {
+                    "title": "  ",
+                    "policies": ["Store relational data in Postgres."],
+                    "policyLevels": ["MUST"]
+                }
+            })))
             .with_status(200)
-            .with_body(created_body("accepted"))
+            .with_body(created_body())
+            .expect(2)
             .create();
         let mut args = create_args(&server);
         args.allow_duplicate = true;
-        let text = block(run_create(&args, tmp.path(), true, TODAY)).unwrap();
+        args.title = Some("  ".to_string());
+        args.content.context.clear();
+        let text = block(run_create(&args, tmp.path(), true)).unwrap();
+        assert!(text.contains("\"Untitled\""), "{text}");
+        assert!(text.contains("as accepted"), "{text}");
         assert!(text.contains("opens a pull request"), "{text}");
         args.api.json = true;
-        let json = block(run_create(&args, tmp.path(), true, TODAY)).unwrap();
+        let json = block(run_create(&args, tmp.path(), true)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["adr_id"], ADR);
+        assert_eq!(
+            (value["adr_id"].as_str(), value["status"].as_str()),
+            (Some(ADR), Some("accepted"))
+        );
         assert!(value.get("files").is_none());
+        create.assert();
     }
 
     #[test]
@@ -1057,21 +1231,21 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/v1/cli/adrs")
-            .match_query(Matcher::Any)
+            .mock("GET", READ)
+            .match_query(repo_read())
             .with_status(200)
-            .with_body(list_body(
-                &[decision_json(
-                    "d1",
-                    "Use Postgres for storage",
-                    "active",
-                    &[("MUST", "Store relational data in Postgres.")],
-                )],
-                None,
-            ))
+            .with_body(read_body(&[web_json(
+                "d1",
+                "Use Postgres for storage",
+                "accepted",
+                &[("MUST", "Store relational data in Postgres.")],
+            )]))
             .create();
-        let create = server.mock("POST", "/v1/cli/adrs").expect(0).create();
-        let err = block(run_create(&create_args(&server), tmp.path(), true, TODAY)).unwrap_err();
+        let create = server
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .expect(0)
+            .create();
+        let err = block(run_create(&create_args(&server), tmp.path(), true)).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrDuplicate { message, hint }
                 if message.contains("d1 \"Use Postgres for storage\"")
@@ -1088,23 +1262,26 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         let list = server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", READ)
             .match_query(Matcher::Any)
             .with_status(500)
             .create();
-        let create = server.mock("POST", "/v1/cli/adrs").expect(0).create();
-        let err = block(run_create(&create_args(&server), tmp.path(), true, TODAY)).unwrap_err();
+        let create = server
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .expect(0)
+            .create();
+        let err = block(run_create(&create_args(&server), tmp.path(), true)).unwrap_err();
         assert!(
             matches!(&err, ActualError::ApiError(m) if m.contains("nothing was sent")),
             "{err:?}"
         );
         list.remove();
         server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", READ)
             .match_query(Matcher::Any)
             .with_status(401)
             .create();
-        let err = block(run_create(&create_args(&server), tmp.path(), true, TODAY)).unwrap_err();
+        let err = block(run_create(&create_args(&server), tmp.path(), true)).unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn), "{err:?}");
         create.assert();
     }
@@ -1117,7 +1294,7 @@ mod tests {
         let server = mockito::Server::new();
         let mut args = create_args(&server);
         args.repo = None;
-        let err = block(run_create(&args, tmp.path(), true, TODAY)).unwrap_err();
+        let err = block(run_create(&args, tmp.path(), true)).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrRepoRequired(message) if message.contains("no origin remote")),
             "{err:?}"
@@ -1125,12 +1302,22 @@ mod tests {
     }
 
     #[test]
-    fn create_checks_the_decision_before_signing_in() {
+    fn create_reads_its_input_before_signing_in() {
         let mut args = create_args(&mockito::Server::new());
-        args.content.context.clear();
-        // No sign-in is set up: the save check fails first.
-        let err = block(run_create(&args, Path::new("."), true, TODAY)).unwrap_err();
+        args.content.policies = vec!["Store data.".to_string()];
+        // No sign-in is set up: the policy without a level fails first.
+        let err = block(run_create(&args, Path::new("."), true)).unwrap_err();
         assert!(matches!(err, ActualError::AdrInvalid { .. }), "{err:?}");
+
+        let tmp = tempdir().unwrap();
+        let bad = tmp.path().join("bad.md");
+        std::fs::write(&bad, "# Title only\n").unwrap();
+        args.file = Some(bad);
+        let err = block(run_create(&args, tmp.path(), true)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrInvalid { reasons } if reasons[0].contains("No policies found")),
+            "{err:?}"
+        );
     }
 
     /// Write a pair with `adr new` into `root`, as a person at a terminal would.
@@ -1140,8 +1327,8 @@ mod tests {
             content: AdrContentArgs {
                 context: vec!["We need one relational store.".to_string()],
                 policies: vec!["MUST: Store relational data in Postgres.".to_string()],
-                deciders: None,
             },
+            deciders: None,
             scope: scope.iter().map(|s| s.to_string()).collect(),
             status: Some(SaveStatus::Accepted),
             root: Some(root.to_path_buf()),
@@ -1152,8 +1339,24 @@ mod tests {
             .decision_file
     }
 
+    fn file_args(server: &mockito::Server, file: PathBuf) -> AdrCreateArgs {
+        AdrCreateArgs {
+            file: Some(file),
+            title: None,
+            content: AdrContentArgs::default(),
+            status: None,
+            repo: None,
+            allow_duplicate: false,
+            api: api(server),
+        }
+    }
+
+    fn imported_body() -> String {
+        format!(r#"{{"success":true,"adr_id":"{ADR}"}}"#)
+    }
+
     #[test]
-    fn create_from_a_file_renames_the_pair_and_sends_its_scope() {
+    fn create_from_a_file_imports_it_sets_its_scope_and_publishes() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
@@ -1163,6 +1366,7 @@ mod tests {
             Some("https://github.com/actual-software/actual-cli"),
         );
         let doc = new_pair(repo_dir.path(), &["src/**"]);
+        let markdown = crate::adr::files::read_decision_file(&doc).unwrap().body;
         let mut server = mockito::Server::new();
         server
             .mock("GET", "/v1/connected-repos")
@@ -1170,45 +1374,75 @@ mod tests {
             .with_status(200)
             .with_body(CONNECTED)
             .create();
-        server
-            .mock("GET", "/v1/cli/adrs")
-            .match_query(Matcher::Any)
+        let saved = web_json(
+            ADR,
+            "Use Postgres for storage",
+            "draft",
+            &[("MUST", "Store relational data in Postgres.")],
+        );
+        let reads = server
+            .mock("GET", READ)
+            .match_query(repo_read())
             .with_status(200)
-            .with_body(list_body(&[], None))
+            .with_body(read_body(&[saved]))
+            .expect(2)
             .create();
-        let create = server
-            .mock("POST", "/v1/cli/adrs")
+        let import = server
+            .mock("POST", "/v1/gcp/product/adr-import")
+            .match_body(Matcher::Json(json!({
+                "organization_id": ORG,
+                "repo_unique_id": REPO,
+                "markdown": markdown,
+            })))
             .with_status(200)
-            .with_body(created_body("accepted"))
+            .with_body(imported_body())
             .expect(1)
             .create();
         let scope = server
-            .mock("POST", format!("/v1/cli/adrs/{ADR}/update").as_str())
+            .mock("POST", "/v1/gcp/product/adr-group-update")
+            .match_body(Matcher::PartialJson(json!({
+                "group_id": ADR,
+                "content": {"title": "Use Postgres for storage", "scope": {"root": ".", "paths": ["src/**"]}}
+            })))
+            .with_status(200)
+            .with_body(format!(r#"{{"success":true,"members":[{{"adr_id":"{ADR}"}}]}}"#))
+            .expect(1)
+            .create();
+        let publish = server
+            .mock("POST", "/v1/gcp/product/adr-publish")
             .match_body(Matcher::Json(
-                serde_json::json!({"org_id": ORG, "scope": {"paths": ["src/**"]}}),
+                json!({"organization_id": ORG, "adr_id": ADR}),
             ))
             .with_status(200)
-            .with_body(action_body("requested"))
+            .with_body(r#"{"success":true}"#)
+            .expect(1)
             .create();
         let args = AdrCreateArgs {
-            file: Some(doc.clone()),
-            title: None,
-            content: AdrContentArgs::default(),
-            status: None,
-            repo: None,
             allow_duplicate: false,
-            api: api(&server),
+            ..file_args(&server, doc.clone())
         };
         // The file's own checkout names the repository, wherever the command runs.
-        let text = block(run_create(&args, tmp.path(), true, TODAY)).unwrap();
-        create.assert();
+        let err = block(run_create(&args, tmp.path(), true)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrDuplicate { message, .. } if message.contains("looks like one")),
+            "the saved copy reads as a likely duplicate: {err:?}"
+        );
+        let args = AdrCreateArgs {
+            allow_duplicate: true,
+            ..args
+        };
+        let text = block(run_create(&args, tmp.path(), true)).unwrap();
+        reads.assert();
+        import.assert();
         scope.assert();
+        publish.assert();
         assert!(!doc.exists());
         assert!(
             text.contains("in actual-software/actual-cli as accepted"),
             "{text}"
         );
         assert!(text.contains("renamed"), "{text}");
+        assert!(!text.contains("warning"), "{text}");
         let moved = crate::adr::files::find_rule_file(repo_dir.path(), ADR);
         assert!(moved.is_some(), "the rule file now names the new id");
     }
@@ -1233,29 +1467,30 @@ mod tests {
             .with_body(CONNECTED)
             .create();
         server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", READ)
             .match_query(Matcher::Any)
             .with_status(200)
-            .with_body(list_body(&[], None))
-            .create();
-        let create = server
-            .mock("POST", "/v1/cli/adrs")
-            .match_body(Matcher::PartialJson(serde_json::json!({"status": "draft"})))
-            .with_status(200)
-            .with_body(created_body("draft"))
+            .with_body(read_body(&[]))
             .expect(1)
             .create();
-        let args = AdrCreateArgs {
-            file: Some(relative),
-            title: None,
-            content: AdrContentArgs::default(),
-            status: None,
-            repo: None,
-            allow_duplicate: false,
-            api: api(&server),
-        };
-        let text = block(run_create(&args, repo_dir.path(), false, TODAY)).unwrap();
-        create.assert();
+        let import = server
+            .mock("POST", "/v1/gcp/product/adr-import")
+            .with_status(200)
+            .with_body(imported_body())
+            .expect(1)
+            .create();
+        let publish = server
+            .mock("POST", "/v1/gcp/product/adr-publish")
+            .expect(0)
+            .create();
+        let text = block(run_create(
+            &file_args(&server, relative),
+            repo_dir.path(),
+            false,
+        ))
+        .unwrap();
+        import.assert();
+        publish.assert();
         assert!(
             text.contains("in actual-software/actual-cli as draft"),
             "{text}"
@@ -1285,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn create_from_a_file_reports_a_scope_it_could_not_set() {
+    fn create_from_a_file_leaves_a_draft_when_its_scope_is_not_set() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
@@ -1293,29 +1528,81 @@ mod tests {
         let doc = new_pair(&root, &["src/**", "!src/gen/**"]);
         let mut server = mockito::Server::new();
         server
-            .mock("POST", "/v1/cli/adrs")
+            .mock("POST", "/v1/gcp/product/adr-import")
             .with_status(200)
-            .with_body(created_body("accepted"))
+            .with_body(imported_body())
             .create();
-        server
-            .mock("POST", format!("/v1/cli/adrs/{ADR}/update").as_str())
-            .with_status(409)
-            .with_body(r#"{"error":"conflict","message":"no"}"#)
+        let reads = server
+            .mock("GET", READ)
+            .match_query(repo_read())
+            .with_status(200)
+            .with_body(read_body(&[]))
+            .expect(1)
+            .create();
+        let publish = server
+            .mock("POST", "/v1/gcp/product/adr-publish")
+            .expect(0)
             .create();
         let args = AdrCreateArgs {
-            file: Some(doc),
-            title: None,
-            content: AdrContentArgs::default(),
             status: Some(SaveStatus::Accepted),
             repo: Some(REPO.to_string()),
             allow_duplicate: true,
-            api: api(&server),
+            ..file_args(&server, doc)
         };
-        let text = block(run_create(&args, tmp.path(), false, TODAY)).unwrap();
+        let text = block(run_create(&args, tmp.path(), false)).unwrap();
+        reads.assert();
+        publish.assert();
+        assert!(text.contains("as draft"), "{text}");
+        assert!(
+            text.contains("isn't in the repository's decisions"),
+            "{text}"
+        );
         assert!(
             text.contains("--scope 'src/**' --scope '!src/gen/**'"),
             "{text}"
         );
+        assert!(
+            text.contains(&format!("`actual adr publish {ADR}` publishes it")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn create_from_a_file_reports_a_publish_that_failed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let root = tmp.path().join("repo");
+        let doc = new_pair(&root, &[]);
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/v1/gcp/product/adr-import")
+            .with_status(200)
+            .with_body(imported_body())
+            .create();
+        server
+            .mock("POST", "/v1/gcp/product/adr-publish")
+            .with_status(500)
+            .with_body(r#"{"error":"internal_error","message":"failed to publish draft ADR"}"#)
+            .create();
+        let mut args = AdrCreateArgs {
+            status: Some(SaveStatus::Accepted),
+            repo: Some(REPO.to_string()),
+            allow_duplicate: true,
+            ..file_args(&server, doc)
+        };
+        args.api.json = true;
+        let json = block(run_create(&args, tmp.path(), false)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["status"], "draft");
+        assert!(
+            value["publish_problem"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Run `actual adr publish {ADR}`")),
+            "{json}"
+        );
+        assert!(value.get("local_status_was").is_some(), "{json}");
     }
 
     #[test]
@@ -1332,70 +1619,36 @@ mod tests {
             .to_string();
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", READ)
             .match_query(Matcher::Any)
             .with_status(200)
-            .with_body(list_body(
-                &[decision_json(&own_id, "Renamed since", "archived", &[])],
-                None,
-            ))
+            .with_body(read_body(&[web_json(
+                &own_id,
+                "Renamed since",
+                "deleted",
+                &[],
+            )]))
             .create();
         let args = AdrCreateArgs {
-            file: Some(doc),
-            title: None,
-            content: AdrContentArgs::default(),
-            status: None,
             repo: Some(REPO.to_string()),
-            allow_duplicate: false,
-            api: api(&server),
+            ..file_args(&server, doc)
         };
-        let err = block(run_create(&args, tmp.path(), true, TODAY)).unwrap_err();
+        let err = block(run_create(&args, tmp.path(), true)).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrDuplicate { message, hint }
                 if message.contains("already decision")
+                    && message.contains("archived")
                     && *hint == format!("actual adr show {own_id}")),
             "{err:?}"
         );
     }
 
     #[test]
-    fn create_refuses_a_file_that_fails_the_check_or_is_too_big() {
-        let tmp = tempdir().unwrap();
-        let bad = tmp.path().join("bad.md");
-        std::fs::write(&bad, "# Title only\n").unwrap();
-        let server = mockito::Server::new();
-        let mut args = AdrCreateArgs {
-            file: Some(bad.clone()),
-            title: None,
-            content: AdrContentArgs::default(),
-            status: None,
-            repo: Some(REPO.to_string()),
-            allow_duplicate: true,
-            api: api(&server),
-        };
-        assert!(matches!(
-            block(run_create(&args, tmp.path(), true, TODAY)),
-            Err(ActualError::AdrInvalid { .. })
-        ));
-        let big = tmp.path().join("big.md");
-        std::fs::write(&big, "x".repeat(MAX_CONTEXT_FILE_UNITS + 1)).unwrap();
-        args.file = Some(big);
-        let err = block(run_create(&args, tmp.path(), true, TODAY)).err();
-        assert!(
-            matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons[0].contains("over 100 KB")),
-            "{err:?}"
-        );
-    }
-
-    #[test]
     fn refuse_duplicates_ignores_archived_decisions() {
-        let archived: Decision = serde_json::from_str(&decision_json(
-            "d1",
-            "Use Postgres for storage",
-            "archived",
-            &[("MUST", "Store relational data in Postgres.")],
-        ))
-        .unwrap();
+        let mut archived = sample_decision();
+        archived.id = "d1".to_string();
+        archived.title = "Use Postgres for storage".to_string();
+        archived.state = "archived".to_string();
         let doc = ContextFile {
             title: "Use Postgres for storage".to_string(),
             ..ContextFile::default()
@@ -1415,7 +1668,12 @@ mod tests {
     #[test]
     fn render_created_skips_unmoved_files_and_lists_problems() {
         let outcome = CreateOutcome {
-            created: serde_json::from_str(&created_body("accepted")).unwrap(),
+            created: Created {
+                adr_id: ADR.to_string(),
+                status: "accepted".to_string(),
+                title: "Use Postgres".to_string(),
+                repo_unique_id: REPO.to_string(),
+            },
             files: Some(RenameOutcome {
                 renamed: vec![crate::adr::files::Renamed {
                     from: PathBuf::from("same.md"),
@@ -1424,6 +1682,7 @@ mod tests {
                 problems: vec!["No rule file".to_string()],
             }),
             scope_problem: Some("scope".to_string()),
+            publish_problem: Some("publish".to_string()),
             local_status_was: Some("draft".to_string()),
         };
         let text = render_created(
@@ -1435,7 +1694,10 @@ mod tests {
         );
         assert!(!text.contains("renamed"), "{text}");
         assert!(text.contains("No rule file"));
-        assert!(text.contains("scope"));
+        assert!(
+            text.contains("warning: scope\n") && text.contains("warning: publish\n"),
+            "{text}"
+        );
         assert!(
             text.contains(
                 "The local files now say accepted, as Actual AI saved it (they said draft)."
@@ -1487,32 +1749,34 @@ mod tests {
     }
 
     #[test]
-    fn update_request_sends_only_what_the_flags_set() {
+    fn update_edit_holds_only_what_the_flags_set() {
         let server = mockito::Server::new();
         let mut args = update_args(&server);
         args.title = Some("T".to_string());
         args.context = vec!["One.".to_string(), "Two.".to_string()];
         args.policies = vec!["MUST: A.".to_string()];
         args.scope = vec!["src/**".to_string()];
-        let request = update_request(&args).unwrap();
-        assert_eq!(request.context.as_deref(), Some("One.\nTwo."));
-        assert_eq!(request.policies.unwrap().len(), 1);
-        assert_eq!(request.levels, None);
-        assert_eq!(request.scope.unwrap().paths, ["src/**"]);
+        let edit = update_edit(&args).unwrap();
+        assert_eq!(edit.context.as_deref(), Some("One.\nTwo."));
+        assert_eq!(edit.policies.unwrap().len(), 1);
+        assert!(edit.levels.is_empty());
+        assert_eq!(edit.scope.unwrap(), ["src/**"]);
 
         let mut args = update_args(&server);
         args.clear_scope = true;
         args.levels = vec!["d1:rule-1=MAY".to_string()];
-        let request = update_request(&args).unwrap();
-        assert!(request.scope.unwrap().paths.is_empty());
-        assert_eq!(request.levels.unwrap()[0].level, RuleLevel::May);
-        assert_eq!(request.title, None);
-        assert_eq!(request.context, None);
+        let edit = update_edit(&args).unwrap();
+        assert!(edit.scope.unwrap().is_empty());
+        assert_eq!(edit.levels[0].level, RuleLevel::May);
+        assert_eq!(
+            (edit.title, edit.context, edit.policies),
+            (None, None, None)
+        );
 
         let mut args = update_args(&server);
         args.policies = vec!["no level".to_string()];
         args.levels = vec!["bad".to_string()];
-        let err = update_request(&args).err();
+        let err = update_edit(&args).err();
         assert!(
             matches!(&err, Some(ActualError::AdrInvalid { reasons }) if reasons.len() == 2),
             "{err:?}"
@@ -1520,42 +1784,54 @@ mod tests {
     }
 
     #[test]
-    fn update_reads_the_decision_back() {
+    fn update_saves_the_whole_decision_and_reads_it_back() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
-        let update = server
-            .mock("POST", format!("/v1/cli/adrs/{ADR}/update").as_str())
-            .match_body(Matcher::Json(
-                serde_json::json!({"org_id": ORG, "title": "New title"}),
-            ))
+        let reads = server
+            .mock("GET", READ)
+            .match_query(org_read())
             .with_status(200)
-            .with_body(action_body("requested"))
-            .expect(2)
+            .with_body(read_body(&[web_json(
+                ADR,
+                "New title",
+                "accepted",
+                &[("MUST", "A.")],
+            )]))
+            .expect(4)
             .create();
-        let show = server
-            .mock("GET", format!("/v1/cli/adrs/{ADR}").as_str())
-            .match_query(Matcher::Any)
+        let update = server
+            .mock("POST", "/v1/gcp/product/adr-group-update")
+            .match_body(Matcher::Json(json!({
+                "organization_id": ORG,
+                "group_id": ADR,
+                "content": {
+                    "title": "New title",
+                    "context": "Why.",
+                    "scope": {"root": ".", "paths": []},
+                    "schemaVersion": 2,
+                    "policyRules": [{"adrId": ADR, "statement": "A.", "level": "MUST"}]
+                }
+            })))
             .with_status(200)
             .with_body(format!(
-                r#"{{"decision":{}}}"#,
-                decision_json(ADR, "New title", "active", &[("MUST", "A.")])
+                r#"{{"success":true,"members":[{{"adr_id":"{ADR}"}}]}}"#
             ))
             .expect(2)
             .create();
         let mut args = update_args(&server);
         args.title = Some("New title".to_string());
         let text = block(run_update(&args)).unwrap();
-        assert!(text.contains("Updated"), "{text}");
-        assert!(text.contains("updating the repository's rule files"));
+        assert!(text.contains(&format!("Updated {ADR}.")), "{text}");
         assert!(text.contains("New title"));
         args.api.json = true;
         let json = block(run_update(&args)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["decision"]["title"], "New title");
+        assert_eq!(value["update"], json!({"success": true, "adr_id": ADR}));
+        reads.assert();
         update.assert();
-        show.assert();
     }
 
     #[test]
@@ -1564,57 +1840,123 @@ mod tests {
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
-        server
-            .mock("POST", format!("/v1/cli/adrs/{ADR}/update").as_str())
-            .with_status(200)
-            .with_body(action_body("not_needed"))
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let listed = read_body(&[web_json(ADR, "T", "draft", &[("MUST", "A.")])]);
+        // The first read finds the decision; the read back after the change fails.
+        let read = server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_body_from_request(move |_| {
+                match reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => listed.clone().into(),
+                    _ => b"not json".to_vec(),
+                }
+            })
+            .expect(2)
             .create();
         server
-            .mock("GET", format!("/v1/cli/adrs/{ADR}").as_str())
-            .match_query(Matcher::Any)
-            .with_status(500)
+            .mock("POST", "/v1/gcp/product/adr-group-update")
+            .with_status(200)
+            .with_body(r#"{"success":true,"members":[]}"#)
             .create();
         let mut args = update_args(&server);
         args.levels = vec![format!("{ADR}:rule-1=SHOULD")];
         let text = block(run_update(&args)).unwrap();
+        read.assert();
         assert!(text.contains(&format!("actual adr show {ADR}")), "{text}");
-        assert!(!text.contains("updating the repository"));
     }
 
     #[test]
-    fn update_with_a_bad_policy_sends_nothing() {
+    fn update_sends_nothing_for_a_bad_flag_or_an_archived_decision() {
         let mut args = update_args(&mockito::Server::new());
         args.policies = vec!["nope".to_string()];
         assert!(matches!(
             block(run_update(&args)),
             Err(ActualError::AdrInvalid { .. })
         ));
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(
+                ADR,
+                "T",
+                "deleted",
+                &[("MUST", "A.")],
+            )]))
+            .create();
+        let write = server
+            .mock("POST", "/v1/gcp/product/adr-group-update")
+            .expect(0)
+            .create();
+        let mut args = update_args(&server);
+        args.title = Some("U".to_string());
+        let err = block(run_update(&args)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrNotAllowed(m) if m.starts_with("An archived decision")),
+            "{err:?}"
+        );
+        write.assert();
     }
 
     // ── lifecycle and reject ──
 
     #[test]
-    fn lifecycle_actions_say_what_they_did() {
+    fn lifecycle_actions_send_their_route_and_say_what_they_did() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
-        let mut server = mockito::Server::new();
         let cases = [
-            (LifecycleAction::Publish, "Published"),
-            (LifecycleAction::Unpublish, "back to draft"),
-            (LifecycleAction::Archive, "actual adr restore"),
-            (LifecycleAction::Restore, "Restored"),
-            (LifecycleAction::Accept, "Accepted"),
+            (
+                LifecycleAction::Publish,
+                "draft",
+                "adr-publish",
+                "Published",
+            ),
+            (
+                LifecycleAction::Unpublish,
+                "accepted",
+                "adr-move-to-draft",
+                "back to draft",
+            ),
+            (
+                LifecycleAction::Archive,
+                "accepted",
+                "adr-archive",
+                "actual adr restore",
+            ),
+            (
+                LifecycleAction::Restore,
+                "archived-draft",
+                "adr-restore",
+                "Restored",
+            ),
+            (
+                LifecycleAction::Accept,
+                "suggested",
+                "adr-accept",
+                "Accepted",
+            ),
+            (LifecycleAction::Reject, "updated", "adr-reject", "Rejected"),
         ];
-        for (action, expected) in cases {
+        for (action, status, route, expected) in cases {
+            let mut server = mockito::Server::new();
             server
-                .mock(
-                    "POST",
-                    format!("/v1/cli/adrs/{ADR}/{}", action.path_segment()).as_str(),
-                )
-                .match_body(Matcher::Json(serde_json::json!({"org_id": ORG})))
+                .mock("GET", READ)
+                .match_query(org_read())
                 .with_status(200)
-                .with_body(action_body("requested"))
+                .with_body(read_body(&[web_json(ADR, "T", status, &[("MUST", "A.")])]))
+                .create();
+            let write = server
+                .mock("POST", format!("/v1/gcp/product/{route}").as_str())
+                .with_status(200)
+                .with_body(r#"{"success":true}"#)
+                .expect(2)
                 .create();
             let mut args = AdrIdArgs {
                 id: ADR.to_string(),
@@ -1624,25 +1966,83 @@ mod tests {
             assert!(text.contains(expected), "{text}");
             args.api.json = true;
             let json = block(run_lifecycle(&args, action)).unwrap();
-            assert!(json.contains("\"sync\": \"requested\""), "{json}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+                json!({"success": true, "adr_id": ADR})
+            );
+            write.assert();
         }
     }
 
     #[test]
-    fn reject_warns_when_the_reason_was_not_saved() {
+    fn a_change_the_state_does_not_allow_sends_nothing() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         server
-            .mock("POST", format!("/v1/cli/adrs/{ADR}/reject").as_str())
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(ADR, "T", "accepted", &[])]))
+            .create();
+        let write = server
+            .mock("POST", Matcher::Regex("^/v1/gcp/product/adr-".to_string()))
+            .expect(0)
+            .create();
+        let args = AdrIdArgs {
+            id: ADR.to_string(),
+            api: api(&server),
+        };
+        let err = block(run_lifecycle(&args, LifecycleAction::Publish)).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrNotAllowed(m) if m.ends_with("this decision is active.")),
+            "{err:?}"
+        );
+        let reject = AdrRejectArgs {
+            id: ADR.to_string(),
+            reason: "r".to_string(),
+            api: api(&server),
+        };
+        let err = block(run_reject(&reject)).unwrap_err();
+        assert!(matches!(err, ActualError::AdrNotAllowed(_)), "{err:?}");
+        write.assert();
+    }
+
+    #[test]
+    fn reject_saves_the_reason_and_warns_when_it_could_not() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(
+                ADR,
+                "T",
+                "suggested",
+                &[("MUST", "A.")],
+            )]))
+            .create();
+        let reject = server
+            .mock("POST", "/v1/gcp/product/adr-reject")
             .match_body(Matcher::Json(
-                serde_json::json!({"org_id": ORG, "reason": "We use MySQL."}),
+                json!({"organization_id": ORG, "suggestion_id": ADR}),
             ))
             .with_status(200)
-            .with_body(format!(
-                r#"{{"success":true,"adr_id":"{ADR}","sync":"not_needed","reason_saved":false}}"#
+            .with_body(r#"{"success":true}"#)
+            .expect(3)
+            .create();
+        let saved = server
+            .mock("POST", "/v1/gcp/product/adr-rejection-feedback")
+            .match_body(Matcher::Json(
+                json!({"organization_id": ORG, "adr_id": ADR, "reason": "We use MySQL."}),
             ))
+            .with_status(200)
+            .with_body(r#"{"success":true}"#)
+            .expect(1)
             .create();
         let mut args = AdrRejectArgs {
             id: ADR.to_string(),
@@ -1650,33 +2050,23 @@ mod tests {
             api: api(&server),
         };
         let text = block(run_reject(&args)).unwrap();
-        assert!(text.contains("Rejected"), "{text}");
-        assert!(text.contains("reason wasn't saved"));
+        assert_eq!(
+            text,
+            format!("{} Rejected {ADR}.\n", theme::success(&theme::SUCCESS))
+        );
+        saved.assert();
+        saved.remove();
+        server
+            .mock("POST", "/v1/gcp/product/adr-rejection-feedback")
+            .with_status(404)
+            .with_body(r#"{"error":"not_found","message":"ADR not found or not accessible"}"#)
+            .create();
+        let text = block(run_reject(&args)).unwrap();
+        assert!(text.contains("reason wasn't saved"), "{text}");
         args.api.json = true;
         let json = block(run_reject(&args)).unwrap();
         assert!(json.contains("\"reason_saved\": false"), "{json}");
-    }
-
-    #[test]
-    fn reject_with_a_saved_reason_prints_no_warning() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempdir().unwrap();
-        let _guards = sign_in(tmp.path());
-        let mut server = mockito::Server::new();
-        server
-            .mock("POST", format!("/v1/cli/adrs/{ADR}/reject").as_str())
-            .with_status(200)
-            .with_body(format!(
-                r#"{{"success":true,"adr_id":"{ADR}","sync":"requested","reason_saved":true}}"#
-            ))
-            .create();
-        let args = AdrRejectArgs {
-            id: ADR.to_string(),
-            reason: "r".to_string(),
-            api: api(&server),
-        };
-        let text = block(run_reject(&args)).unwrap();
-        assert!(!text.contains("warning"), "{text}");
+        reject.assert();
     }
 
     /// Each command's exec wrapper, end to end through `adr::exec`.
@@ -1688,29 +2078,20 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let mut server = mockito::Server::new();
         server
-            .mock("GET", "/v1/cli/adrs")
+            .mock("GET", READ)
             .match_query(Matcher::Any)
             .with_status(200)
-            .with_body(list_body(&[], None))
+            .with_body(read_body(&[
+                web_json(ADR, "T", "draft", &[("MUST", "A.")]),
+                web_json("s1", "S", "suggested", &[("MUST", "B.")]),
+            ]))
             .create();
         server
-            .mock("GET", format!("/v1/cli/adrs/{ADR}").as_str())
-            .match_query(Matcher::Any)
+            .mock("POST", Matcher::Regex("^/v1/gcp/product/adr-".to_string()))
             .with_status(200)
             .with_body(format!(
-                r#"{{"decision":{}}}"#,
-                decision_json(ADR, "T", "active", &[])
+                r#"{{"success":true,"data":{{"id":"{ADR}","date":"d"}},"members":[]}}"#
             ))
-            .create();
-        server
-            .mock("POST", "/v1/cli/adrs")
-            .with_status(200)
-            .with_body(created_body("draft"))
-            .create();
-        server
-            .mock("POST", Matcher::Regex(format!("^/v1/cli/adrs/{ADR}/.*")))
-            .with_status(200)
-            .with_body(action_body("not_needed"))
             .create();
         let url = server.url();
         let runs: Vec<Vec<&str>> = vec![
@@ -1729,7 +2110,7 @@ mod tests {
             ],
             vec!["update", ADR, "--title", "T"],
             vec!["publish", ADR],
-            vec!["reject", ADR, "--reason", "r"],
+            vec!["reject", "s1", "--reason", "r"],
         ];
         for args in runs {
             let mut argv = vec!["actual", "adr"];

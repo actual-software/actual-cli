@@ -132,8 +132,8 @@ pub enum ActualError {
     #[error("{0}")]
     RepoNotFound(String),
     /// A decision failed a check before it could be saved: the local save
-    /// check `actual adr new` and `create` run, or Actual AI's own on create
-    /// or update. One reason per line, in the order the check found them.
+    /// check `actual adr new` runs, or Actual AI's own on create or update.
+    /// One reason per line, in the order the check found them.
     #[error("{}", adr_invalid_message(.reasons))]
     AdrInvalid { reasons: Vec<String> },
     /// `actual adr check` found decision files that fail the save check. The
@@ -153,6 +153,13 @@ pub enum ActualError {
     /// may have been saved. Never retried; `hint` says how to look first.
     #[error("{message}")]
     AdrCreateUnconfirmed { message: String, hint: String },
+    /// No decision in the organization has the id `actual adr` was given.
+    #[error("{0}")]
+    AdrNotFound(String),
+    /// `actual adr` refused a change the decision's state doesn't allow, by
+    /// the web app's own rules, and sent nothing.
+    #[error("{0}")]
+    AdrNotAllowed(String),
     /// `actual adr create` needs a connected repository and couldn't tell
     /// which one from the working tree.
     #[error("{0}")]
@@ -240,7 +247,9 @@ impl ActualError {
             Self::ApiError(_)
             | Self::ApiResponseError { .. }
             | Self::ServiceUnavailable
-            | Self::AdrCreateUnconfirmed { .. } => 3,
+            | Self::AdrCreateUnconfirmed { .. }
+            | Self::AdrNotFound(_)
+            | Self::AdrNotAllowed(_) => 3,
             Self::IoError(_) => 5,
             _ => 1,
         }
@@ -305,6 +314,9 @@ impl ActualError {
             | Self::AdrCreateUnconfirmed { hint, .. } => Some(Cow::Owned(hint.clone())),
             Self::AdrRepoRequired(_) => Some(Cow::Borrowed(
                 "Run it in a connected repository's checkout, or pass --repo owner/name",
+            )),
+            Self::AdrNotFound(_) => Some(Cow::Borrowed(
+                "actual adr list  (it prints each decision's id)",
             )),
             _ => None,
         }
@@ -1199,5 +1211,15 @@ mod tests {
         let repo = ActualError::AdrRepoRequired("no repository".to_string());
         assert_eq!(repo.exit_code(), 2);
         assert!(repo.hint().unwrap().contains("--repo"));
+
+        let missing = ActualError::AdrNotFound("No decision has the id d1.".to_string());
+        assert_eq!(missing.exit_code(), 3);
+        assert_eq!(missing.to_string(), "No decision has the id d1.");
+        assert!(missing.hint().unwrap().starts_with("actual adr list"));
+
+        let refused = ActualError::AdrNotAllowed("Only a draft can be published.".to_string());
+        assert_eq!(refused.exit_code(), 3);
+        assert_eq!(refused.to_string(), "Only a draft can be published.");
+        assert_eq!(refused.hint(), None);
     }
 }
