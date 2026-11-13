@@ -106,6 +106,12 @@ pub struct BriefLedger {
     pub reported_used: BTreeMap<String, BTreeSet<String>>,
     /// Logical ADRs already reported as breached, by stage, likewise.
     pub reported_breached: BTreeMap<String, BTreeSet<String>>,
+    /// Characters of brief delivered this session, to any agent, for
+    /// `rules brief --max-session-chars`. Defaulted, like every field here, so
+    /// a record written before the cap existed still loads.
+    pub briefed_chars: usize,
+    /// Whether the session was told briefing hit its cap, so it is told once.
+    pub budget_spent: bool,
 }
 
 impl BriefLedger {
@@ -185,7 +191,26 @@ pub fn load(dir: &Path, key: &LedgerKey<'_>) -> BriefLedger {
         .unwrap_or_default()
 }
 
-/// Add `decision_keys` to the record for `key`, best effort.
+/// Add `decision_keys` to the record for `key`, with the `chars` of brief
+/// they arrived in, best effort.
+pub fn record_brief<'k>(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    decision_keys: impl IntoIterator<Item = &'k str>,
+    chars: usize,
+) {
+    update(dir, key, |ledger| {
+        ledger
+            .briefed
+            .extend(decision_keys.into_iter().map(str::to_string));
+        ledger.briefed_chars = ledger.briefed_chars.saturating_add(chars);
+    });
+}
+
+/// Add `decision_keys` to the record for `key`, best effort. Tests only:
+/// `rules brief` records through [`record_brief`], which also counts the
+/// characters the decisions arrived in.
+#[cfg(test)]
 pub fn record<'k>(
     dir: &Path,
     key: &LedgerKey<'_>,

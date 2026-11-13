@@ -74,13 +74,14 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
-    self, capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline,
-    HookRun, Outcome,
+    self, capped_read, deny_summary, emit, emit_status, finish_hook, render_json, render_panel,
+    run_pipeline, HookRun, Outcome,
 };
+use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession, TurnStart};
+use crate::cli::commands::hook_host::HookHost;
 use crate::cli::commands::impl_check_hook::HookEnvelope;
 use crate::cli::commands::plan_check::repo_root;
-use crate::cli::commands::plan_check_hook;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
 #[cfg(feature = "telemetry")]
@@ -102,13 +103,14 @@ impl ImplCheckArgs {
             candidates: self.candidates,
             runner: self.runner.as_ref(),
             model: self.model.as_deref(),
+            default_runners: crate::cli::commands::rules_rank::DEFAULT_RUNNERS,
         }
     }
 }
 
 pub fn exec(args: &ImplCheckArgs) -> Result<(), ActualError> {
-    if args.claude_hook {
-        exec_hook(args);
+    if let Some(host) = HookHost::select(args.claude_hook, args.codex_hook) {
+        exec_hook(args, host);
         return Ok(());
     }
     exec_direct(args)
@@ -422,17 +424,15 @@ fn git_ok(root: &Path, index: Option<&Path>, args: &[&str], what: &str) -> Resul
 ///
 /// See `plan_check::exec_hook`'s own doc comment for why this is kept to one
 /// fallible line: the same real-stdin-in-a-test-harness hazard applies here.
-fn exec_hook(args: &ImplCheckArgs) {
+fn exec_hook(args: &ImplCheckArgs, host: HookHost) {
     let raw = match capped_read(std::io::stdin(), "the hook payload") {
         Ok(text) => text,
         Err(_) => {
-            emit(plan_check_hook::render_notice(
-                "impl-check could not read the hook payload on stdin",
-            ));
+            emit(host.notice("impl-check could not read the hook payload on stdin"));
             return;
         }
     };
-    exec_hook_with(args, &raw);
+    exec_hook_with(args, host, &raw);
 }
 
 /// Run the `--claude-hook` path against an already-read payload.
@@ -446,18 +446,22 @@ fn exec_hook(args: &ImplCheckArgs) {
 /// below is matched explicitly and turned into a fail-open notice (or, for a
 /// real violation, a deny) rather than propagating an error, so this
 /// function never reaches an ordinary nonzero exit on its own.
-fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
+fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     let envelope: HookEnvelope = match serde_json::from_str(raw) {
         Ok(envelope) => envelope,
         Err(_) => {
-            emit(plan_check_hook::render_notice(
-                "impl-check could not parse the hook payload as JSON",
-            ));
+            emit(host.notice("impl-check could not parse the hook payload as JSON"));
             return;
         }
     };
     if envelope.is_turn_start() {
         record_turn_start(args, &envelope);
+        return;
+    }
+    // A Codex Plan-mode turn makes no edits, and its `Stop` belongs to the
+    // plan gate. An unknown mode still runs the check: skipping it would let
+    // a rollout format change switch the implementation gate off.
+    if host == HookHost::Codex && codex_plan_turn(&envelope) {
         return;
     }
 
@@ -484,7 +488,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     let diff_text = match working_tree_diff_from(&root, base.as_deref().unwrap_or("HEAD")) {
         Ok(text) => text,
         Err(e) => {
-            emit(plan_check_hook::render_notice(&format!(
+            emit(host.notice(&format!(
                 "impl-check could not read the working-tree diff in {}: {e}",
                 root.display()
             )));
@@ -492,11 +496,14 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         }
     };
     if diff_text.trim().is_empty() {
-        emit(plan_check_hook::render_notice(if base.is_some() {
-            "impl-check found no diff to check (nothing has changed since this turn started and there are no untracked files)."
-        } else {
-            "impl-check found no diff to check (working tree matches HEAD and there are no untracked files)."
-        }));
+        emit_status(
+            host,
+            if base.is_some() {
+                "impl-check found no diff to check (nothing has changed since this turn started and there are no untracked files)."
+            } else {
+                "impl-check found no diff to check (working tree matches HEAD and there are no untracked files)."
+            },
+        );
         return;
     }
     let diff_digest = governance_session::content_digest(&diff_text);
@@ -511,14 +518,14 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         &diff_text,
         &root,
         &rules_dir,
-        &args.check_knobs(),
+        &args.check_knobs().for_host(host),
         ArtifactKind::Diff,
         false,
         &session,
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
-            emit(plan_check_hook::render_notice(&format!(
+            emit(host.notice(&format!(
                 "impl-check could not read {}: {e}",
                 rules_dir.display()
             )));
@@ -528,8 +535,12 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
 
     finish_hook(
         &HookRun {
+            host,
             kind: ArtifactKind::Diff,
-            command: "impl-check --claude-hook",
+            command: match host {
+                HookHost::Claude => "impl-check --claude-hook",
+                HookHost::Codex => "impl-check --codex-hook",
+            },
             session_id,
             agent_id: envelope.agent_id.as_deref(),
             artifact_digest: &diff_digest,
@@ -542,6 +553,15 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         &mut session,
         outcome,
     );
+}
+
+/// Whether a Codex `Stop` envelope ends a turn its rollout says ran in Plan
+/// mode. See `codex_rollout`'s module doc.
+fn codex_plan_turn(envelope: &HookEnvelope) -> bool {
+    let (Some(path), Some(turn_id)) = (&envelope.transcript_path, &envelope.turn_id) else {
+        return false;
+    };
+    codex_rollout::turn_facts(Path::new(path), turn_id).plan_mode == Some(true)
 }
 
 /// A `UserPromptSubmit` envelope: record `HEAD` as the commit this turn
@@ -655,6 +675,7 @@ mod tests {
             repo: None,
             rules_dir: None,
             claude_hook: false,
+            codex_hook: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -789,7 +810,7 @@ mod tests {
     fn test_resolve_direct_diff_errors_when_the_diff_file_exceeds_the_size_limit() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("huge.diff");
-        let oversized = vec![b'x'; (plan_check_hook::MAX_READ_BYTES + 1) as usize];
+        let oversized = vec![b'x'; (super::super::plan_check_hook::MAX_READ_BYTES + 1) as usize];
         std::fs::write(&file, &oversized).unwrap();
         let mut args = base_args();
         args.diff_file = Some(file);
@@ -915,7 +936,7 @@ mod tests {
     #[test]
     fn test_working_tree_diff_errors_when_the_diff_exceeds_the_size_limit() {
         let repo = git_repo_with_baseline();
-        let oversized = "x".repeat(plan_check_hook::MAX_READ_BYTES as usize + 1);
+        let oversized = "x".repeat(super::super::plan_check_hook::MAX_READ_BYTES as usize + 1);
         std::fs::write(repo.path().join("huge.txt"), oversized).unwrap();
 
         let err = working_tree_diff(repo.path()).unwrap_err();
@@ -1365,7 +1386,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
-        exec_hook_with(&base_args(), "not json");
+        exec_hook_with(&base_args(), HookHost::Claude, "not json");
     }
 
     #[test]
@@ -1376,7 +1397,7 @@ mod tests {
         let not_a_repo = tempdir().unwrap();
         let mut args = base_args();
         args.repo = Some(not_a_repo.path().to_path_buf());
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1387,7 +1408,7 @@ mod tests {
         let repo = git_repo_with_baseline();
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1403,7 +1424,7 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         args.rules_dir = Some(not_a_dir);
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1415,7 +1436,7 @@ mod tests {
         std::fs::write(repo.path().join("service.rs"), "fn handler() { 4 }\n").unwrap();
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[cfg(unix)]
@@ -1448,7 +1469,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-1", &rules);
         assert_eq!(
@@ -1503,7 +1524,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": novel_session_id}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         // A verdict was reached and persisted -- proof the pipeline actually
         // ran to completion rather than failing to bootstrap.
@@ -1551,7 +1572,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-untracked-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-untracked-1", &rules);
         assert_eq!(
@@ -1591,7 +1612,8 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-telemetry-1"}).to_string();
 
-        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let events =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let completed = events
             .iter()
@@ -1696,7 +1718,8 @@ mod tests {
         };
         take_captured();
 
-        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let governance =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let records = take_captured();
         assert_eq!(
@@ -1725,7 +1748,8 @@ mod tests {
         assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
         assert_eq!(attribute(&records[2], "actual.gate.type"), "implementation");
 
-        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let governance =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
         let session =
             governance_session::load("sess-impl-otlp-1", &crate::rules::rules_dir(repo.path()));
         assert_eq!(session.diff.rounds, 2, "the next Stop was judged too");
@@ -1782,7 +1806,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-budget-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-budget-1", &rules);
         assert_eq!(session.plan.deny_counts.get(&key), Some(&4));
@@ -1844,7 +1868,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-override-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-override-1", &rules);
         assert_eq!(session.overrides.len(), 2);
@@ -1942,14 +1966,14 @@ mod tests {
             })
         };
 
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
         let first = head_of(repo.path());
         assert_eq!(
             governance_session::load("sess-turn-1", &rules).turn_start,
             recorded(first.clone())
         );
 
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
         assert_eq!(
             governance_session::load("sess-turn-1", &rules).turn_start,
             recorded(first.clone())
@@ -1960,7 +1984,7 @@ mod tests {
             repo.path(),
             &["commit", "-q", "-am", "the previous turn's work"],
         );
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
         let second = head_of(repo.path());
         assert_ne!(first, second);
         assert_eq!(
@@ -1987,7 +2011,7 @@ mod tests {
         governance_session::store("sess-turn-unborn", &rules, &stale);
 
         let raw = serde_json::json!({"session_id": "sess-turn-unborn", "hook_event_name": "UserPromptSubmit"}).to_string();
-        exec_hook_with(&turn_start_args(unborn.path()), &raw);
+        exec_hook_with(&turn_start_args(unborn.path()), HookHost::Claude, &raw);
 
         assert_eq!(
             governance_session::load("sess-turn-unborn", &rules).turn_start,
@@ -2005,7 +2029,7 @@ mod tests {
         let repo = git_repo_with_baseline();
 
         let no_id = r#"{"hook_event_name":"UserPromptSubmit"}"#;
-        exec_hook_with(&turn_start_args(repo.path()), no_id);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, no_id);
 
         assert!(!home.path().join("plan-check-sessions").exists());
     }
@@ -2096,6 +2120,7 @@ mod tests {
             |id: &str| serde_json::json!({"session_id": id, "hook_event_name": "Stop"}).to_string();
         exec_hook_with(
             &turn_start_args(repo.path()),
+            HookHost::Claude,
             &prompt("sess-turn-committed"),
         );
 
@@ -2119,8 +2144,8 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
-        exec_hook_with(&args, &stop("sess-turn-committed"));
-        exec_hook_with(&args, &stop("sess-turn-unmarked"));
+        exec_hook_with(&args, HookHost::Claude, &stop("sess-turn-committed"));
+        exec_hook_with(&args, HookHost::Claude, &stop("sess-turn-unmarked"));
 
         assert_eq!(
             governance_session::load("sess-turn-committed", &rules)
@@ -2150,11 +2175,11 @@ mod tests {
         let prompt = serde_json::json!({"session_id": "sess-turn-clean", "hook_event_name": "UserPromptSubmit"}).to_string();
         let stop = serde_json::json!({"session_id": "sess-turn-clean", "hook_event_name": "Stop"})
             .to_string();
-        exec_hook_with(&turn_start_args(repo.path()), &prompt);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &prompt);
 
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, &stop);
+        exec_hook_with(&args, HookHost::Claude, &stop);
 
         let session = governance_session::load("sess-turn-clean", &rules);
         assert!(session.turn_start.is_some());
@@ -2168,5 +2193,117 @@ mod tests {
         assert!(!is_object_id(&"f".repeat(39)));
         assert!(!is_object_id(&"g".repeat(40)));
         assert!(!is_object_id("HEAD"));
+    }
+
+    // ── --codex-hook ───────────────────────────────────────────────────────
+
+    fn codex_stop(dir: &StdPath, mode: &str) -> String {
+        let path = dir.join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1","collaboration_mode_kind":mode}}).to_string(),
+        )
+        .unwrap();
+        serde_json::json!({
+            "session_id": "sess-codex-impl",
+            "turn_id": "t1",
+            "transcript_path": path.to_string_lossy(),
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_plan_turn_reads_the_rollout() {
+        let dir = tempdir().unwrap();
+        let read = |raw: String| codex_plan_turn(&serde_json::from_str(&raw).unwrap());
+        assert!(read(codex_stop(dir.path(), "plan")));
+        assert!(!read(codex_stop(dir.path(), "default")));
+        // Unknown is not Plan mode: the implementation gate still runs.
+        assert!(!read(
+            r#"{"turn_id":"t1","transcript_path":"/nonexistent"}"#.to_string()
+        ));
+        assert!(!read(r#"{"turn_id":"t1"}"#.to_string()));
+    }
+
+    /// A Plan-mode turn's `Stop` belongs to the plan gate: no diff is read
+    /// and nothing is recorded, even with a conflicting change on disk.
+    #[test]
+    fn test_exec_hook_with_codex_skips_a_plan_mode_turn() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); log_signing_key(); }\n",
+        )
+        .unwrap();
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+
+        exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "plan"));
+        assert_eq!(
+            governance_session::load("sess-codex-impl", &rules),
+            GovernanceSession::default()
+        );
+        exec_hook_with(&args, HookHost::Codex, "not json");
+    }
+
+    /// Any other turn is checked, and a conflict is counted.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_codex_checks_a_default_turn() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); log_signing_key(); }\n",
+        )
+        .unwrap();
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+
+        exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "default"));
+        let session = governance_session::load("sess-codex-impl", &rules);
+        assert_eq!(
+            session.diff.deny_counts.get(&governance_session::key(
+                "cross-cutting-token-signing-1c57",
+                "R-A-002"
+            )),
+            Some(&1)
+        );
+    }
+
+    /// With nothing changed, Codex hears nothing: the status line is
+    /// Claude-only.
+    #[test]
+    fn test_exec_hook_with_codex_and_no_diff() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "default"));
     }
 }

@@ -17,9 +17,12 @@ pub mod cache;
 pub(crate) mod check_engine;
 #[cfg(feature = "telemetry")]
 mod check_telemetry;
+mod codex_paths;
+mod codex_rollout;
 pub mod config;
 pub mod create_token;
 pub(crate) mod governance_session;
+mod hook_host;
 pub mod impl_check;
 mod impl_check_hook;
 pub mod login;

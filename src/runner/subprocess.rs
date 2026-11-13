@@ -289,7 +289,7 @@ pub(crate) fn resolve_output(
     }
 }
 
-/// Environment variable set to `"1"` on every `claude` subprocess this CLI
+/// Environment variable set to `"1"` on every `claude` and `codex` subprocess this CLI
 /// spawns, so actual-skill's hooks can recognize one and stay silent.
 ///
 /// A backstop for `InvocationOptions::to_args`'s `disableAllHooks`: if that

@@ -106,7 +106,8 @@ repository.
 ### Plan-governance events (pseudonymous when logged out; first-party identity-linked when logged in)
 
 When `actual plan-check` or `actual impl-check` (including each command's
-`--claude-hook` path Claude Code drives automatically) reaches a verdict --
+`--claude-hook` path Claude Code drives automatically, and the `--codex-hook`
+path Codex drives) reaches a verdict --
 i.e. it actually judged the plan or diff against at least one selected rule
 -- and on `actual check-override`, the CLI sends discrete events describing
 the governance outcome, proxied through `api-service.api.prod.actual.ai` to
@@ -132,7 +133,7 @@ Each event includes a subset of these properties:
 | Property | Description |
 |----------|--------------|
 | `cli_version` | CLI version string |
-| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"impl-check"`, `"impl-check --claude-hook"`, `"check-override"`, `"rules select"`) |
+| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"plan-check --codex-hook"`, `"impl-check"`, `"impl-check --claude-hook"`, `"impl-check --codex-hook"`, `"check-override"`, `"rules select"`) |
 | `rule_id` | The internal id of the specific rule involved -- an Actual-internal identifier, same category as `adr_ids` above, not a file path |
 | `rule_source` | The rule document's internal slug, derived from its filename -- not a filesystem path |
 | `decision` | `allow`, `warn`, or `block` -- the outcome for this rule or run |
@@ -266,14 +267,15 @@ The CLI sends OpenTelemetry log events about ADRs on four occasions:
 
 - `actual.adr.detected`, with `actual.detection.method` set to `context`, the
   first time any of an ADR's rules is added to an agent's context during a
-  Claude Code session, even when the brief has room for only some of them. It
-  comes from the `rules brief --claude-hook` path Claude Code drives, and it
+  Claude Code or Codex session, even when the brief has room for only some of
+  them. It comes from the `rules brief --claude-hook` path Claude Code drives
+  or the `rules brief --codex-hook` path Codex drives, and it
   counts an ADR once per session, whichever agent or subagent it reached and
   however often the context is compacted. A manual `actual rules brief` run
   sends nothing.
 - `actual.adr.detected`, with `actual.detection.method` set to the gate,
-  `planning` or `implementation`, when `plan-check --claude-hook` or
-  `impl-check --claude-hook` judges any of an ADR's rules, whatever the
+  `planning` or `implementation`, when `plan-check` or `impl-check` judges any
+  of an ADR's rules through `--claude-hook` or `--codex-hook`, whatever the
   verdict. It counts an ADR once per session at each gate.
 - `actual.gate.evaluated`, with `actual.gate.outcome` set to `breached` and
   `actual.gate.type` naming the gate, when either gate blocks on one of an

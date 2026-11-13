@@ -35,6 +35,10 @@ pub struct HookEnvelope {
     /// Which hook event delivered the envelope. `UserPromptSubmit` marks the
     /// start of a turn; anything else, or nothing, runs the check.
     pub hook_event_name: Option<String>,
+    /// Codex only: the rollout and the turn a `Stop` envelope ends, read to
+    /// tell a Plan-mode turn (no edits, nothing to check) from any other.
+    pub transcript_path: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 impl HookEnvelope {

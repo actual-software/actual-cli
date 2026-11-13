@@ -366,6 +366,7 @@ pub(super) mod tests {
     fn round(home: &Path, kind: ArtifactKind, session: Option<&str>, verdicts: &[CheckedRule]) {
         let rules_dir = home.join("rules");
         let run = HookRun {
+            host: crate::cli::commands::hook_host::HookHost::Claude,
             kind,
             command: "test --claude-hook",
             session_id: session,
@@ -930,6 +931,7 @@ pub(super) mod tests {
         with_config(WITH_FILE, |home| {
             let rules_dir = home.join("rules");
             let run = HookRun {
+                host: crate::cli::commands::hook_host::HookHost::Claude,
                 kind: ArtifactKind::Diff,
                 command: "impl-check --claude-hook",
                 session_id: Some("s2"),

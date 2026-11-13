@@ -90,6 +90,10 @@ fn exec_summary(args: &SessionSummaryArgs) -> Result<(), ActualError> {
         // Always `Ok`: see the fail-open note in the module docs.
         return Ok(());
     }
+    if args.codex_hook {
+        emit(hook_line(&rules_brief::read_stdin(), args).map(|line| codex_reply(&line)));
+        return Ok(());
+    }
     let Some(session_id) = args.session.as_deref() else {
         return Err(ActualError::ConfigError(
             "session summary needs --session, or --claude-hook with an envelope on stdin"
@@ -98,6 +102,14 @@ fn exec_summary(args: &SessionSummaryArgs) -> Result<(), ActualError> {
     };
     emit(direct_output(session_id, args)?);
     Ok(())
+}
+
+/// The line as a Codex `Stop` hook reply. Codex reads a `Stop` hook's stdout
+/// as JSON and rejects plain text, and shows a `systemMessage` to the user
+/// without adding it to the model's context, which is what the band above
+/// Claude Code's prompt does.
+fn codex_reply(line: &str) -> String {
+    serde_json::json!({ "systemMessage": line }).to_string()
 }
 
 /// Print the line, or nothing. Split out so the decision to stay silent is
@@ -313,6 +325,7 @@ mod tests {
     fn hook_args(root: &Path) -> SessionSummaryArgs {
         SessionSummaryArgs {
             claude_hook: true,
+            codex_hook: false,
             session: None,
             repo: Some(root.to_path_buf()),
             rules_dir: None,
@@ -323,6 +336,7 @@ mod tests {
     fn direct_args(root: &Path) -> SessionSummaryArgs {
         SessionSummaryArgs {
             claude_hook: false,
+            codex_hook: false,
             session: Some("s1".to_string()),
             ..hook_args(root)
         }
@@ -415,6 +429,16 @@ mod tests {
 
     /// The gaps stand alone only when they are every area the session worked
     /// in: nothing added and no folder covered.
+    #[test]
+    fn test_the_codex_reply_is_only_a_system_message() {
+        let reply: serde_json::Value =
+            serde_json::from_str(&codex_reply("Actual AI: 1 of 2 ADRs added to context")).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({"systemMessage": "Actual AI: 1 of 2 ADRs added to context"})
+        );
+    }
+
     #[test]
     fn test_the_line_takes_every_form() {
         for (added, gaps, covered, expected) in [

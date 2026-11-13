@@ -171,6 +171,7 @@ fn candidates(
     explicit: Option<&RunnerChoice>,
     model: Option<&str>,
     cfg: &Config,
+    defaults: &[RunnerChoice],
 ) -> (Vec<RunnerChoice>, Origin) {
     use clap::ValueEnum as _;
 
@@ -190,11 +191,22 @@ fn candidates(
             Origin::Model,
         );
     }
-    (
-        vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
-        Origin::Default,
-    )
+    (defaults.to_vec(), Origin::Default)
 }
+
+/// The runners tried, in order, when nothing names one: no `--runner`, no
+/// configured `runner:` and no model.
+pub const DEFAULT_RUNNERS: &[RunnerChoice] = &[RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi];
+
+/// [`DEFAULT_RUNNERS`] for a check running inside Codex. A Codex user has the
+/// `codex` CLI and may have nothing from Anthropic, so the OpenAI backends
+/// come first; the Anthropic ones follow, so a machine with both still judges.
+pub const CODEX_DEFAULT_RUNNERS: &[RunnerChoice] = &[
+    RunnerChoice::CodexCli,
+    RunnerChoice::OpenAiApi,
+    RunnerChoice::ClaudeCli,
+    RunnerChoice::AnthropicApi,
+];
 
 /// Is this backend usable right now?
 fn probe(choice: &RunnerChoice, cfg: &Config) -> Result<(), String> {
@@ -312,13 +324,26 @@ pub fn resolve(
     cfg: &Config,
     timeout_cap_secs: u64,
 ) -> Result<ResolvedRunner, String> {
+    resolve_with_defaults(explicit, model, cfg, timeout_cap_secs, DEFAULT_RUNNERS)
+}
+
+/// [`resolve`], with the order tried when nothing names a runner as a
+/// parameter. Only that last fallback changes: a flag, a configured runner
+/// or a model still decide exactly as they do in [`resolve`].
+pub fn resolve_with_defaults(
+    explicit: Option<&RunnerChoice>,
+    model: Option<&str>,
+    cfg: &Config,
+    timeout_cap_secs: u64,
+    defaults: &[RunnerChoice],
+) -> Result<ResolvedRunner, String> {
     let timeout = Duration::from_secs(
         cfg.invocation_timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .min(timeout_cap_secs),
     );
 
-    let (choices, origin) = candidates(explicit, model.or(cfg.model.as_deref()), cfg);
+    let (choices, origin) = candidates(explicit, model.or(cfg.model.as_deref()), cfg, defaults);
     let mut tried: Vec<String> = Vec::new();
     for choice in choices {
         match probe(&choice, cfg).and_then(|()| build(&choice, model, cfg, timeout)) {
@@ -666,7 +691,12 @@ mod tests {
     fn test_an_explicit_runner_is_the_whole_candidate_list() {
         // Asking for a backend that is not installed must report that, rather
         // than quietly succeeding with a different one.
-        let got = candidates(Some(&RunnerChoice::CursorCli), Some("sonnet"), &config());
+        let got = candidates(
+            Some(&RunnerChoice::CursorCli),
+            Some("sonnet"),
+            &config(),
+            DEFAULT_RUNNERS,
+        );
         assert_eq!(got, (vec![RunnerChoice::CursorCli], Origin::Flag));
     }
 
@@ -678,7 +708,7 @@ mod tests {
         let mut cfg = config();
         cfg.runner = Some("openai-api".to_string());
         assert_eq!(
-            candidates(None, Some("sonnet"), &cfg),
+            candidates(None, Some("sonnet"), &cfg, DEFAULT_RUNNERS),
             (vec![RunnerChoice::OpenAiApi], Origin::Config)
         );
     }
@@ -688,7 +718,7 @@ mod tests {
         let mut cfg = config();
         cfg.runner = Some("not-a-runner".to_string());
         assert_eq!(
-            candidates(None, Some("sonnet"), &cfg),
+            candidates(None, Some("sonnet"), &cfg, DEFAULT_RUNNERS),
             (
                 vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
                 Origin::Model
@@ -699,7 +729,7 @@ mod tests {
     /// A model is a loose preference, so it yields a list rather than a pin.
     #[test]
     fn test_the_model_picks_the_candidates_when_nothing_else_does() {
-        let (got, origin) = candidates(None, Some("gpt-5.2"), &config());
+        let (got, origin) = candidates(None, Some("gpt-5.2"), &config(), DEFAULT_RUNNERS);
         assert!(got.len() > 1, "a model should widen, not pin: {got:?}");
         assert!(got.contains(&RunnerChoice::OpenAiApi));
         assert!(!got.contains(&RunnerChoice::ClaudeCli));
@@ -709,7 +739,7 @@ mod tests {
     #[test]
     fn test_the_default_candidates_with_no_model_at_all() {
         assert_eq!(
-            candidates(None, None, &config()),
+            candidates(None, None, &config(), DEFAULT_RUNNERS),
             (
                 vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
                 Origin::Default

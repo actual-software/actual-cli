@@ -22,6 +22,7 @@ use crate::cli::args::{
     OverrideGateArg, OverrideVia, PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
+use crate::cli::commands::hook_host::HookHost;
 use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
 use crate::cli::commands::rules_rank;
@@ -76,6 +77,23 @@ pub(super) struct CheckKnobs<'a> {
     pub(super) candidates: usize,
     pub(super) runner: Option<&'a RunnerChoice>,
     pub(super) model: Option<&'a str>,
+    /// The runners tried when nothing names one. See
+    /// [`rules_rank::resolve_with_defaults`].
+    pub(super) default_runners: &'static [RunnerChoice],
+}
+
+impl CheckKnobs<'_> {
+    /// These knobs for a check running in `host`: inside Codex, the OpenAI
+    /// backends are tried first when nothing names a runner.
+    pub(super) fn for_host(self, host: HookHost) -> Self {
+        match host {
+            HookHost::Claude => self,
+            HookHost::Codex => Self {
+                default_runners: rules_rank::CODEX_DEFAULT_RUNNERS,
+                ..self
+            },
+        }
+    }
 }
 
 impl PlanCheckArgs {
@@ -88,6 +106,7 @@ impl PlanCheckArgs {
             candidates: self.candidates,
             runner: self.runner.as_ref(),
             model: self.model.as_deref(),
+            default_runners: rules_rank::DEFAULT_RUNNERS,
         }
     }
 }
@@ -205,11 +224,12 @@ pub(super) fn run_pipeline(
     // rule turns out to already be excluded (see `gathered.excluded` below)
     // never has to resolve a runner it will not use.
     let early_runner = if use_rank {
-        match rules_rank::resolve(
+        match rules_rank::resolve_with_defaults(
             knobs.runner,
             knobs.model,
             &cfg,
             rules_rank::RANK_TIMEOUT_SECS,
+            knobs.default_runners,
         ) {
             Ok(runner) => Some(runner),
             Err(reason) => {
@@ -270,11 +290,12 @@ pub(super) fn run_pipeline(
     // — `resolve` only probes local binary/API-key availability, no
     // network call — so there is no reason to thread two different caps
     // through one cached runner instead.
-    let resolved_runner = match rules_rank::resolve(
+    let resolved_runner = match rules_rank::resolve_with_defaults(
         knobs.runner,
         knobs.model,
         &cfg,
         crate::rules::check::CHECK_TIMEOUT_SECS,
+        knobs.default_runners,
     ) {
         Ok(runner) => runner,
         Err(reason) => {
@@ -1053,8 +1074,20 @@ pub(super) fn send_hook_governance_events(
 /// terminal, or a shell it spawned) — a real false-positive this trades for
 /// closing the common bypass; see [`not_interactive`]'s message, which
 /// tells a human hitting this what to do about it.
+///
+/// Codex's own markers count too. Every command Codex's shell tool runs
+/// carries `CODEX_THREAD_ID` and `CODEX_SESSION_ID` (observed on Codex CLI
+/// 0.167.0), so an agent in Codex is refused the same way. The name stays,
+/// since Claude Code was the first agent it covered.
 fn running_under_claude_code() -> bool {
-    std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some()
+    [
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some())
 }
 
 /// Run `actual check-override` (also reachable via its backward-compatible
@@ -1139,9 +1172,10 @@ fn not_interactive() -> ActualError {
          human decision to override plan- or implementation-stage governance, and this \
          invocation was refused because it looks like an agent's own shell rather than a \
          human's: either no terminal is attached, or this process's environment carries Claude \
-         Code's own CLAUDECODE / CLAUDE_CODE_ENTRYPOINT markers. If you are a human seeing this \
-         from inside Claude Code's integrated terminal (or a similar wrapper), run the command \
-         from a separate, plain terminal window instead. This is a real but not airtight check, \
+         Code's own CLAUDECODE / CLAUDE_CODE_ENTRYPOINT markers or Codex's CODEX_THREAD_ID / \
+         CODEX_SESSION_ID. If you are a human seeing this from inside an agent's integrated \
+         terminal (or a similar wrapper), run the command from a separate, plain terminal \
+         window instead. This is a real but not airtight check, \
          not a cryptographic guarantee of human origin — see `actual check-override --help`."
             .to_string(),
     )
@@ -1535,7 +1569,22 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
 /// read as "the whole plan was checked and this is everything wrong with
 /// it" when it was really "this is everything wrong with the rules we got
 /// to."
+#[cfg(test)]
 pub(super) fn hook_deny_reason(
+    blocking: &[&CheckedRule],
+    session_id: Option<&str>,
+    partial: Option<(usize, usize)>,
+    kind: check::ArtifactKind,
+) -> String {
+    hook_deny_reason_for(HookHost::Claude, blocking, session_id, partial, kind)
+}
+
+/// [`hook_deny_reason`] for either host. The only difference is the line
+/// telling the user how to override: Claude Code has the plugin's
+/// `/actual-cli:override` command, Codex has no such command, so on Codex the
+/// line names `actual check-override` from a terminal alone.
+pub(super) fn hook_deny_reason_for(
+    host: HookHost,
     blocking: &[&CheckedRule],
     session_id: Option<&str>,
     partial: Option<(usize, usize)>,
@@ -1569,13 +1618,21 @@ pub(super) fn hook_deny_reason(
         lines.push(partial_coverage_note(judged, total));
     }
     if let Some(session_id) = session_id {
-        lines.push(format!(
-            "{} Session: {session_id}. Only the user can override a rule — the agent must not \
-             try. Tell the user they can type `{OVERRIDE_COMMAND} <rule-id> [reason]` (or \
-             `{OVERRIDE_COMMAND} all`) as a message in this session, or run `actual \
-             check-override` from an ordinary terminal (see `actual check-override --help`).",
-            copy.revised
-        ));
+        lines.push(match host {
+            HookHost::Claude => format!(
+                "{} Session: {session_id}. Only the user can override a rule — the agent must \
+                 not try. Tell the user they can type `{OVERRIDE_COMMAND} <rule-id> [reason]` \
+                 (or `{OVERRIDE_COMMAND} all`) as a message in this session, or run `actual \
+                 check-override` from an ordinary terminal (see `actual check-override --help`).",
+                copy.revised
+            ),
+            HookHost::Codex => format!(
+                "{} Session: {session_id}. Only the user can override a rule — the agent must \
+                 not try. Tell the user they can run `actual check-override` from an ordinary \
+                 terminal outside Codex (see `actual check-override --help`).",
+                copy.revised
+            ),
+        });
     }
     lines.join("\n")
 }
@@ -1634,6 +1691,13 @@ pub(super) fn emit(json: String) {
     println!("{json}");
 }
 
+/// Emit [`HookHost::status`]'s line, which is nothing on Codex.
+pub(super) fn emit_status(host: HookHost, message: &str) {
+    if let Some(json) = host.status(message) {
+        emit(json);
+    }
+}
+
 /// Everything [`finish_hook`] needs from a `--claude-hook` command that is
 /// not the session or the pipeline's outcome. The two commands differ only in
 /// the values they put here — which artifact kind they judge, the label their
@@ -1642,6 +1706,8 @@ pub(super) fn emit(json: String) {
 // `command`, `agent_id`, `root` and `started` only feed telemetry.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) struct HookRun<'a> {
+    /// Which agent's hook this is, which picks the reply's shape.
+    pub host: HookHost,
     pub kind: check::ArtifactKind,
     /// The telemetry command label, e.g. `"plan-check --claude-hook"`.
     pub command: &'static str,
@@ -1683,22 +1749,25 @@ pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, ou
                     s.loop_state_mut(run.kind).blocking.clear();
                 });
             }
-            emit(plan_check_hook::render_notice(&format!(
-                "No committed rule under .actual/rules/ applies to this {}.",
-                copy.noun
-            )));
+            emit_status(
+                run.host,
+                &format!(
+                    "No committed rule under .actual/rules/ applies to this {}.",
+                    copy.noun
+                ),
+            );
         }
         Outcome::NoRunner { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
+            emit(run.host.notice(&format!(
                 "{} did not run: no runner available ({reason}).",
                 copy.governance
             )));
         }
         Outcome::CheckFailed { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "{} did not run: {reason}",
-                copy.governance
-            )));
+            emit(
+                run.host
+                    .notice(&format!("{} did not run: {reason}", copy.governance)),
+            );
         }
         Outcome::Verdicts {
             verdicts,
@@ -1818,9 +1887,7 @@ fn finish_verdicts(
                 // undecorated -- the override reminder is only appended to
                 // what the human actually sees, same spirit as the
                 // silent-path `notes` below.
-                emit(plan_check_hook::render_notice(&with_override_reminder(
-                    message, session,
-                )));
+                emit(run.host.notice(&with_override_reminder(message, session)));
                 // Every rule here is `blocked: false` -- the round limit let
                 // the call through this round -- so this is `warn`, not
                 // `block`, distinct from a clean pass.
@@ -1854,11 +1921,8 @@ fn finish_verdicts(
         // override" -- a different rule's conflict must not bury the fact
         // that this session still carries a recorded override elsewhere. See
         // `plan_check`'s module doc, "override visibility".
-        let deny_reason = hook_deny_reason(&blocking, session_id, partial, kind);
-        emit(plan_check_hook::render_deny(&with_override_reminder(
-            deny_reason,
-            session,
-        )));
+        let deny_reason = hook_deny_reason_for(run.host, &blocking, session_id, partial, kind);
+        emit(run.host.deny(&with_override_reminder(deny_reason, session)));
         #[cfg(feature = "telemetry")]
         super::check_telemetry::report_round(
             run,
@@ -1925,7 +1989,7 @@ fn finish_verdicts(
         notes.push(reminder);
     }
     if !notes.is_empty() {
-        emit(plan_check_hook::render_notice(&notes.join("\n")));
+        emit(run.host.notice(&notes.join("\n")));
     }
     #[cfg(feature = "telemetry")]
     {
@@ -2102,6 +2166,7 @@ pub(crate) mod tests {
             repo: None,
             rules_dir: None,
             claude_hook: false,
+            codex_hook: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -2645,6 +2710,69 @@ pub(crate) mod tests {
         );
         let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(reason.contains(&a.statement));
+    }
+
+    /// Codex has no `/actual-cli:override` command, so its deny reason names
+    /// only the terminal route; the rest of the reason is the same.
+    #[test]
+    fn test_hook_deny_reason_for_codex_names_only_the_terminal_override() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let claude = hook_deny_reason_for(
+            HookHost::Claude,
+            &[&a],
+            Some("sess-1"),
+            None,
+            check::ArtifactKind::Plan,
+        );
+        let codex = hook_deny_reason_for(
+            HookHost::Codex,
+            &[&a],
+            Some("sess-1"),
+            None,
+            check::ArtifactKind::Plan,
+        );
+        assert!(claude.contains(OVERRIDE_COMMAND), "{claude}");
+        assert!(!codex.contains(OVERRIDE_COMMAND), "{codex}");
+        assert!(codex.contains("actual check-override"), "{codex}");
+        assert!(codex.contains("outside Codex"), "{codex}");
+        assert!(codex.contains("Session: sess-1"), "{codex}");
+        let first = |text: &str| text.lines().next().unwrap().to_string();
+        assert_eq!(first(&claude), first(&codex));
+    }
+
+    /// Inside Codex the OpenAI backends come first; Claude Code keeps its
+    /// order, and nothing else about the knobs changes.
+    #[test]
+    fn test_check_knobs_for_host_changes_only_the_default_runners() {
+        let args = PlanCheckArgs {
+            plan: Vec::new(),
+            plan_file: None,
+            repo: None,
+            rules_dir: None,
+            claude_hook: false,
+            codex_hook: true,
+            limit: 7,
+            candidates: 9,
+            no_rank: false,
+            runner: None,
+            model: Some("m".to_string()),
+            json: false,
+            rebuild: true,
+            max_rounds: 3,
+        };
+        let claude = args.check_knobs().for_host(HookHost::Claude);
+        assert_eq!(claude.default_runners, rules_rank::DEFAULT_RUNNERS);
+        let codex = args.check_knobs().for_host(HookHost::Codex);
+        assert_eq!(codex.default_runners, rules_rank::CODEX_DEFAULT_RUNNERS);
+        assert_eq!((codex.limit, codex.candidates, codex.rebuild), (7, 9, true));
+        assert_eq!(codex.model, Some("m"));
+    }
+
+    #[test]
+    fn test_emit_status_is_silent_on_codex() {
+        // Printing is not captured here; this pins that both arms run.
+        emit_status(HookHost::Codex, "No rule applies.");
+        emit_status(HookHost::Claude, "No rule applies.");
     }
 
     #[test]
@@ -3931,6 +4059,7 @@ pub(crate) mod tests {
         max_rounds: u32,
     ) -> HookRun<'a> {
         HookRun {
+            host: crate::cli::commands::hook_host::HookHost::Claude,
             kind,
             command: "test --claude-hook",
             session_id,
@@ -4458,7 +4587,26 @@ pub(crate) mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("CLAUDECODE");
         let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
+        let _g3 = EnvGuard::remove("CODEX_THREAD_ID");
+        let _g4 = EnvGuard::remove("CODEX_SESSION_ID");
         assert!(!running_under_claude_code());
+    }
+
+    /// An agent's shell in Codex is refused too.
+    #[test]
+    fn test_running_under_claude_code_true_under_codex() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("CLAUDECODE");
+        let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
+        for name in ["CODEX_THREAD_ID", "CODEX_SESSION_ID"] {
+            let _other = EnvGuard::remove(if name == "CODEX_THREAD_ID" {
+                "CODEX_SESSION_ID"
+            } else {
+                "CODEX_THREAD_ID"
+            });
+            let _g = EnvGuard::set(name, "01a1c2fe");
+            assert!(running_under_claude_code(), "{name}");
+        }
     }
 
     #[test]
