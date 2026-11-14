@@ -7,7 +7,7 @@
 //!
 //! A person's decision takes the single-row routes, which answer a wrong state
 //! with a 409 of their own. An AI-grouped decision, whose id names no row,
-//! takes the group routes.
+//! takes the group routes, where the group's accept also publishes a draft.
 
 use std::collections::HashSet;
 
@@ -200,9 +200,7 @@ pub fn lifecycle_write(
         LifecycleAction::Publish if state != Draft => Err(format!(
             "Only a draft can be published; this decision is {is}."
         )),
-        LifecycleAction::Publish if group => {
-            Err("A grouped draft can't be published yet.".to_string())
-        }
+        LifecycleAction::Publish if group => Ok(group_action("accept")),
         LifecycleAction::Publish => Ok(publish_write(row_id(decision), org_id)),
         LifecycleAction::Unpublish if state != Active => Err(format!(
             "Only an active decision can move back to draft; this decision is {is}."
@@ -748,6 +746,7 @@ mod tests {
         use DecisionState::*;
         use LifecycleAction::*;
         for (state, action, name) in [
+            (Draft, Publish, "accept"),
             (Active, Unpublish, "move_to_draft"),
             (Draft, Archive, "archive"),
             (Updated, Accept, "accept"),
@@ -760,10 +759,6 @@ mod tests {
                 json!({"organization_id": ORG, "source_candidate_id": GROUP, "action": name})
             );
         }
-        assert_eq!(
-            refusal(group("draft"), Draft, Publish),
-            "A grouped draft can't be published yet."
-        );
         assert_eq!(
             refusal(group("deleted"), Archived, Restore),
             "A grouped decision can't be restored yet."
