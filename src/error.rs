@@ -131,6 +131,44 @@ pub enum ActualError {
     /// the caller can choose from; the fix rides on the `hint()` line.
     #[error("{0}")]
     RepoNotFound(String),
+    /// A decision failed a check before it could be saved: the local save
+    /// check `actual adr new` runs, or Actual AI's own on create or update.
+    /// One reason per line, in the order the check found them.
+    #[error("{}", adr_invalid_message(.reasons))]
+    AdrInvalid { reasons: Vec<String> },
+    /// `actual adr check` found decision files that fail the save check. The
+    /// report above the error names each file and reason.
+    #[error("{0}")]
+    AdrCheckFailed(String),
+    /// Actual AI refused a decision request with HTTP 403: the sign-in lacks
+    /// the decision scopes, belongs to another organization, or its member's
+    /// role can't change decisions. `hint` names the remedy for that case.
+    #[error("{message}")]
+    AdrAccessDenied { message: String, hint: String },
+    /// `actual adr create` found decisions that look like the one it was
+    /// about to send, so it sent nothing.
+    #[error("{message}")]
+    AdrDuplicate { message: String, hint: String },
+    /// A create reached Actual AI but no answer came back, so the decision
+    /// may have been saved. Never retried; `hint` says how to look first.
+    #[error("{message}")]
+    AdrCreateUnconfirmed { message: String, hint: String },
+    /// No decision in the organization has the id `actual adr` was given.
+    #[error("{0}")]
+    AdrNotFound(String),
+    /// `actual adr` refused a change the decision's state doesn't allow, by
+    /// the web app's own rules, and sent nothing.
+    #[error("{0}")]
+    AdrNotAllowed(String),
+    /// `actual adr create` needs a connected repository and couldn't tell
+    /// which one from the working tree.
+    #[error("{0}")]
+    AdrRepoRequired(String),
+    /// `actual adr create` stopped before Actual AI saved anything: the save
+    /// couldn't reach it, or the read before the save failed. The message
+    /// says which, without [`Self::ApiError`]'s prefix in front of its own.
+    #[error("{0}")]
+    AdrNotSaved(String),
 
     /// A private key was supplied in SEC1 form (`BEGIN EC PRIVATE KEY`), which
     /// the assertion signer cannot load — it reads PKCS#1 and PKCS#8 only.
@@ -207,9 +245,17 @@ impl ActualError {
             | Self::OrgMismatch { .. }
             | Self::RepoNotFound(_)
             | Self::NotInteractive(_)
-            | Self::SelfUpdateRefused { .. } => 2,
+            | Self::SelfUpdateRefused { .. }
+            | Self::AdrAccessDenied { .. }
+            | Self::AdrRepoRequired(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
-            Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
+            Self::ApiError(_)
+            | Self::ApiResponseError { .. }
+            | Self::ServiceUnavailable
+            | Self::AdrCreateUnconfirmed { .. }
+            | Self::AdrNotFound(_)
+            | Self::AdrNotAllowed(_)
+            | Self::AdrNotSaved(_) => 3,
             Self::IoError(_) => 5,
             _ => 1,
         }
@@ -269,6 +315,15 @@ impl ActualError {
             Self::Sec1KeyUnsupported { hint, .. } => Some(Cow::Owned(hint.clone())),
             Self::SelfUpdateRefused { hint, .. } => Some(Cow::Owned(hint.clone())),
             Self::SelfUpdateFailed { hint, .. } => hint.clone().map(Cow::Owned),
+            Self::AdrAccessDenied { hint, .. }
+            | Self::AdrDuplicate { hint, .. }
+            | Self::AdrCreateUnconfirmed { hint, .. } => Some(Cow::Owned(hint.clone())),
+            Self::AdrRepoRequired(_) => Some(Cow::Borrowed(
+                "Run it in a connected repository's checkout, or pass --repo owner/name",
+            )),
+            Self::AdrNotFound(_) => Some(Cow::Borrowed(
+                "actual adr list  (it prints each decision's id)",
+            )),
             _ => None,
         }
     }
@@ -289,6 +344,18 @@ impl ActualError {
             }
             _ => false,
         }
+    }
+}
+
+/// [`ActualError::AdrInvalid`]'s message: one reason inline, several as a
+/// list.
+fn adr_invalid_message(reasons: &[String]) -> String {
+    match reasons {
+        [one] => format!("The decision can't be saved: {one}"),
+        _ => reasons.iter().fold(
+            "The decision can't be saved:".to_string(),
+            |text, reason| format!("{text}\n  - {reason}"),
+        ),
     }
 }
 
@@ -1091,5 +1158,79 @@ mod tests {
             hint: None,
         };
         assert_eq!(bare.hint(), None);
+    }
+
+    #[test]
+    fn test_adr_invalid_lists_each_reason() {
+        let one = ActualError::AdrInvalid {
+            reasons: vec!["Add a title.".to_string()],
+        };
+        assert_eq!(one.to_string(), "The decision can't be saved: Add a title.");
+        assert_eq!(one.exit_code(), 1);
+        assert_eq!(one.hint(), None);
+
+        let two = ActualError::AdrInvalid {
+            reasons: vec![
+                "Add a title.".to_string(),
+                "Add at least one policy.".to_string(),
+            ],
+        };
+        assert_eq!(
+            two.to_string(),
+            "The decision can't be saved:\n  - Add a title.\n  - Add at least one policy."
+        );
+    }
+
+    #[test]
+    fn test_adr_check_failed_is_a_lint_failure() {
+        let err = ActualError::AdrCheckFailed("1 of 2 decision files failed the check".to_string());
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.to_string(), "1 of 2 decision files failed the check");
+        assert_eq!(err.hint(), None);
+    }
+
+    #[test]
+    fn test_adr_errors_carry_their_fix_line() {
+        let denied = ActualError::AdrAccessDenied {
+            message: "denied".to_string(),
+            hint: "actual login".to_string(),
+        };
+        assert_eq!(denied.exit_code(), 2);
+        assert_eq!(denied.to_string(), "denied");
+        assert_eq!(denied.hint().as_deref(), Some("actual login"));
+
+        let duplicate = ActualError::AdrDuplicate {
+            message: "looks like d1".to_string(),
+            hint: "--allow-duplicate".to_string(),
+        };
+        assert_eq!(duplicate.exit_code(), 1);
+        assert_eq!(duplicate.hint().as_deref(), Some("--allow-duplicate"));
+
+        let unconfirmed = ActualError::AdrCreateUnconfirmed {
+            message: "may have landed".to_string(),
+            hint: "actual adr list".to_string(),
+        };
+        assert_eq!(unconfirmed.exit_code(), 3);
+        assert_eq!(unconfirmed.to_string(), "may have landed");
+        assert_eq!(unconfirmed.hint().as_deref(), Some("actual adr list"));
+
+        let repo = ActualError::AdrRepoRequired("no repository".to_string());
+        assert_eq!(repo.exit_code(), 2);
+        assert!(repo.hint().unwrap().contains("--repo"));
+
+        let missing = ActualError::AdrNotFound("No decision has the id d1.".to_string());
+        assert_eq!(missing.exit_code(), 3);
+        assert_eq!(missing.to_string(), "No decision has the id d1.");
+        assert!(missing.hint().unwrap().starts_with("actual adr list"));
+
+        let refused = ActualError::AdrNotAllowed("Only a draft can be published.".to_string());
+        assert_eq!(refused.exit_code(), 3);
+        assert_eq!(refused.to_string(), "Only a draft can be published.");
+        assert_eq!(refused.hint(), None);
+
+        let unsent = ActualError::AdrNotSaved("Could not reach Actual AI.".to_string());
+        assert_eq!(unsent.exit_code(), 3);
+        assert_eq!(unsent.to_string(), "Could not reach Actual AI.");
+        assert_eq!(unsent.hint(), None);
     }
 }

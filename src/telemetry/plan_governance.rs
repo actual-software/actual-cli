@@ -238,20 +238,11 @@ pub fn new_insert_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// A privacy-preserving summary of an override reason: its length bucket, its
-/// character length, and an unsalted SHA-256 of the text. **The reason text
-/// itself is never returned, and events never carry it** — only these
-/// summaries, so identical reasons can be grouped without exporting customer
-/// decision text (see `PRIVACY.md`). Returns `hash = None` for an empty reason.
-pub fn reason_summary(
-    reason: &str,
-) -> (
-    crate::api::types::PlanGovernanceReasonCategory,
-    u32,
-    Option<String>,
-) {
+/// A privacy-preserving summary of an override reason: its length bucket and
+/// its character length. **The reason text itself is never returned, and
+/// events never carry it or a hash of it** (see `PRIVACY.md`).
+pub fn reason_summary(reason: &str) -> (crate::api::types::PlanGovernanceReasonCategory, u32) {
     use crate::api::types::PlanGovernanceReasonCategory as Cat;
-    use sha2::{Digest, Sha256};
 
     let trimmed = reason.trim();
     let len = trimmed.chars().count() as u32;
@@ -261,14 +252,7 @@ pub fn reason_summary(
         20..=99 => Cat::Medium,
         _ => Cat::Long,
     };
-    let hash = if trimmed.is_empty() {
-        None
-    } else {
-        let mut hasher = Sha256::new();
-        hasher.update(trimmed.as_bytes());
-        Some(format!("{:x}", hasher.finalize()))
-    };
-    (category, len, hash)
+    (category, len)
 }
 
 /// The outcome of one delivery attempt, for callers that must know what became
@@ -409,12 +393,11 @@ mod tests {
     // --- reason_summary ---
 
     #[test]
-    fn test_reason_summary_empty_is_empty_category_no_hash() {
+    fn test_reason_summary_empty_is_empty_category() {
         use crate::api::types::PlanGovernanceReasonCategory as Cat;
-        let (cat, len, hash) = reason_summary("   ");
+        let (cat, len) = reason_summary("   ");
         assert_eq!(cat, Cat::Empty);
         assert_eq!(len, 0);
-        assert_eq!(hash, None, "an empty reason must not produce a hash");
     }
 
     #[test]
@@ -426,25 +409,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reason_summary_hash_is_deterministic_64hex_and_hides_text() {
+    fn test_reason_summary_length_is_the_trimmed_char_count() {
         let reason = "false positive: the token is validated in middleware";
-        let (_, len, hash) = reason_summary(reason);
-        let hash = hash.expect("a non-empty reason must hash");
-        assert_eq!(hash.len(), 64);
-        assert!(hash
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
-        // Deterministic and length is the char count.
-        assert_eq!(reason_summary(reason).2.unwrap(), hash);
-        assert_eq!(len, reason.chars().count() as u32);
-        // The hash never contains the raw text.
-        assert!(!hash.contains("token"));
-    }
-
-    #[test]
-    fn test_reason_summary_trims_before_hashing() {
-        // Leading/trailing whitespace must not change the identity of a reason.
-        assert_eq!(reason_summary("  same  ").2, reason_summary("same").2);
+        assert_eq!(reason_summary(reason).1, reason.chars().count() as u32);
+        assert_eq!(reason_summary("  same  "), reason_summary("same"));
     }
 
     // --- distinct_id ---

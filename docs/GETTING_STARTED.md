@@ -1,8 +1,26 @@
 # actual — Getting Started
 
-`actual` generates and maintains AI instruction files (`CLAUDE.md`, `AGENTS.md`, or Cursor rules) for your codebase by pulling tailored Architecture Decision Records from Actual's API and writing them into your repo.
+`actual` checks your coding agent's plans and changes against your team's architecture decisions, committed as rule files in `.actual/rules/`. This guide takes you from installing the Actual.ai Skill and the CLI to your first check (signing in comes last, and it's optional), then lists every command and configuration setting.
 
 ## Installation
+
+### Actual.ai Skill
+
+The checks run in Claude Code through the Actual.ai Skill, a Claude Code plugin. Run each command on its own, in a Claude Code session:
+
+```
+/plugin marketplace add actual-software/actual-skill
+```
+
+```
+/plugin install actual-cli@actual-cli-skills
+```
+
+```
+/reload-plugins
+```
+
+The first time you run `/actual`, the skill offers to install the CLI with npm. If you'd rather install the CLI yourself, or you need it in CI, use one of the methods below.
 
 **Linux:** every method below installs a prebuilt binary that needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40, RHEL 10, or a later release of any of them. Check yours with `ldd --version`. Ubuntu 22.04, Debian 12, RHEL 9 and Amazon Linux 2023 ship an older glibc, where the arm64 binary exits with ``version `GLIBC_2.39' not found`` and the x64 binary runs but prints ``weak version `GLIBC_2.39' not found`` every time it starts. On any glibc older than 2.39, build from source instead with `cargo install --git https://github.com/actual-software/actual-cli.git actual-cli`, which needs a Rust toolchain and a C compiler.
 
@@ -36,9 +54,39 @@ xattr -dr com.apple.quarantine /usr/local/bin/actual
 
 Verify it works: `actual --version`
 
+`actual self-update` upgrades a binary installed this way after checking the new release's signature, but only in a directory you can write without `sudo`. To use it, put `actual` somewhere you own, such as `~/.local/bin`, instead of `/usr/local/bin`. See [SELF_UPDATE.md](SELF_UPDATE.md).
+
+### Check a downloaded release
+
+From v0.12.0, the release workflow publishes `SHA256SUMS`, which lists every archive, on both the [source release page](https://github.com/actual-software/actual-cli/releases) and the [releases mirror](https://github.com/actual-software/actual-releases/releases). A signer adds `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature over that list, by hand after publication. A new release can remain unsigned until that step finishes; if the signature is missing, try again later. Releases through v0.11.0 carry neither file. For a signed release, check the signature first:
+
+```bash
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/actual-software/actual-releases/releases/latest/download/SHA256SUMS.minisig
+curl -fsSL -o actual-release.pub https://raw.githubusercontent.com/actual-software/actual-cli/main/release-keys/primary.pub
+minisign -Vm SHA256SUMS -p actual-release.pub
+shasum -a 256 --check --ignore-missing SHA256SUMS
+```
+
+`minisign` then prints the signed trusted comment, which should name the tag of the release you downloaded, because a signature from an older release still verifies. If it reports a different key id, check against the spare key in [Release signing](RELEASE_SIGNING.md).
+
+### Build from source
+
+To build from source you need a C compiler for the tree-sitter native dependencies:
+
+```bash
+# macOS: Xcode command-line tools (usually already installed)
+xcode-select --install
+
+# Debian/Ubuntu
+sudo apt-get install build-essential
+
+cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
+```
+
 ## Prerequisites
 
-You need an AI runner. Pick one:
+The checks judge your rules with an AI runner. Pick one:
 
 **Claude Code CLI (default)**
 ```bash
@@ -69,106 +117,49 @@ actual config set runner codex-cli
 actual config set runner cursor-cli
 ```
 
-## Running it
+## Adding rules
 
-From inside any git repo:
+The checks read the rule files committed under `.actual/rules/`. Write them by hand in the format the [README](../README.md#adding-rules) shows, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files there. `actual adr new` writes a decision and its rule file for you; see [ADR commands](ADR_COMMANDS.md). Then see what the CLI read:
 
 ```bash
-actual adr-bot
+actual rules ls
 ```
 
-On first run it will analyze your repo, fetch relevant ADRs from Actual's API, tailor them to your codebase using the configured AI runner, and write the result to `CLAUDE.md` in your project root.
+## Running the checks
 
-**Preview before writing anything:**
+In Claude Code, the skill runs them for you: `actual plan-check` on your agent's plan when it leaves plan mode, and `actual impl-check` on its changes at the end of every turn. To run them yourself, from inside the repository:
+
 ```bash
-actual adr-bot --dry-run
-actual adr-bot --dry-run --full   # also prints the full rendered output
+actual plan-check --plan-file plan.md
+actual impl-check
 ```
 
-## Output formats
+Only a `conflicting` verdict exits non-zero, so a CI job that has to tell "checked and clean" from "could not check" should read the `status` field from `--json`. [Governance](HOW_IT_WORKS.md#governance) covers the other outcomes and how to override a rule.
 
-By default, `actual adr-bot` writes to `CLAUDE.md`. Content is wrapped in managed markers so future runs update cleanly without touching anything you've written yourself.
+## Signing in (optional)
 
-| Format | Flag | Output file |
-|--------|------|-------------|
-| Claude Code (default) | `--output-format claude-md` | `CLAUDE.md` |
-| Agents | `--output-format agents-md` | `AGENTS.md` |
-| Cursor Rules | `--output-format cursor-rules` | `.cursor/rules/actual-policies.mdc` |
-
-## Flags
-
-| Flag | What it does |
-|------|-------------|
-| `--dry-run` | Preview only, no file changes |
-| `--full` | With `--dry-run`, output the full rendered file to stdout |
-| `--force` | Skip confirmations and bypass all caches |
-| `--no-tui` | Plain text output (useful in CI or small terminals) |
-| `--no-tailor` | Skip AI tailoring, use raw ADRs |
-| `--verbose` | Show detailed progress |
-| `--runner <RUNNER>` | AI backend: `claude-cli`, `anthropic-api`, `openai-api`, `codex-cli`, `cursor-cli` |
-| `--model <MODEL>` | Override the model used for tailoring |
-| `--output-format <FMT>` | Output format (see table above) |
-| `--project <PATH>` | Target a sub-project in a monorepo (repeatable) |
-| `--max-budget-usd <USD>` | Max budget per tailoring invocation |
-| `--reset-rejections` | Clear remembered ADR rejections |
-| `--show-errors` | Stream runner subprocess stderr in real time |
-| `--api-url <URL>` | Override ADR bank API endpoint |
-
-## Ask the Advisor
-
-`actual advisor` asks the Advisor an architecture question about your organization's codebase and prints the answer, along with any related ADRs, to your terminal. Unlike `adr-bot`, this command talks to your Actual AI account rather than a local AI runner, so sign in first with `actual login`.
+The checks and `rules` run signed out. To sign in to your Actual AI account through your browser:
 
 ```bash
 actual login
-actual advisor "When should we introduce a message queue?"
+actual whoami   # show the signed-in account and organization
 ```
-
-The command starts an Advisor job and polls until the answer is ready (up to a few minutes), writing progress to stderr and the final answer to stdout.
-
-### Scoping the question to a repository
-
-By default the question is scoped to the repository you're standing in. `actual` reads the working tree's `origin` remote and, if one of your organization's connected repositories matches, scopes the answer to that repo. If nothing matches (or you aren't inside a git repo), the question runs at the organization level.
-
-Override the scope with `--repo`, which accepts a repository **name**, an `owner/name` form (to disambiguate a name shared across owners), or a repo **UUID**:
-
-```bash
-actual advisor --repo actual-cli "..."        # by name
-actual advisor --repo owner/actual-cli "..."  # by owner/name
-actual advisor --repo 3f2a1c9e-... "..."      # by UUID
-```
-
-Two values are reserved keywords rather than repository names:
-
-| Value | Effect |
-|-------|--------|
-| `--repo none` | Pin the scope to the organization level (opt out of repo scoping) |
-| `--repo auto` | Forget any pin and return to git-remote auto-detection |
-
-The scope you choose is **remembered per repository** (keyed by the working tree's `origin` remote) and reused on later `actual advisor` calls from the same tree, so you don't have to repeat `--repo` each time. Inspect the active scope without asking a question:
-
-```bash
-actual advisor --show-scope
-```
-
-To scope to a repository literally named `none` or `auto`, pass its `owner/name` form or UUID instead of the bare keyword.
-
-### Advisor flags
-
-| Flag | What it does |
-|------|-------------|
-| `<QUERY>` | The architecture question to ask. Optional when the command is used only to change or show scope (`--show-scope`, or a bare `--repo` value with no question) |
-| `--repo <REPO>` | Scope to a connected repository by name, `owner/name`, or UUID; `none` pins org level, `auto` resets to auto-detection. Omit to auto-detect from the `origin` remote |
-| `--show-scope` | Print the remembered scope for the current repository and exit (reads local config only, no query) |
-| `--org <ORG_ID>` | Organization to scope to (defaults to your signed-in org). Passing `--org` without `--repo` runs a one-shot organization-level query without changing the remembered scope |
-| `--api-url <URL>` | Advisor API base URL (defaults to production; also settable via the `ACTUAL_API_URL` environment variable) |
 
 ## Commands
 
 ```bash
+actual plan-check     # check a plan against the rules selected for it
+actual impl-check     # check a git diff against the rules selected for it
+actual check-override # human override for a rule plan-check/impl-check denied
+actual rules          # list, index, select and brief rule documents under .actual/rules/
+actual login          # sign in to your Actual AI account via browser OAuth
+actual logout         # sign out and clear local credentials
+actual whoami         # show the signed-in account and organization
+actual adr            # write and check ADRs locally; list, create and publish decisions in Actual AI
 actual adr-bot        # analyze repo & write AI context files
-actual advisor        # ask the Advisor an org-scoped architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify the configured AI runner is authenticated
+actual advisor        # ask the Advisor an org-scoped architecture question
 actual config show    # view current configuration
 actual config set     # set a config value (e.g. actual config set runner anthropic-api)
 actual config path    # print config file location
@@ -177,6 +168,8 @@ actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
 actual version        # print the version and how to upgrade it (--check compares with the latest)
 ```
+
+[ADR commands](ADR_COMMANDS.md) covers `adr`, and [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers `adr-bot`, `status` and `advisor`.
 
 ## Configuration
 

@@ -12,12 +12,44 @@ fn test_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "ADR-powered AI context file generator",
+            "Align coding agents with your architecture decisions",
         ))
         .stdout(predicate::str::contains("adr-bot"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("auth"))
         .stdout(predicate::str::contains("config"));
+}
+
+#[test]
+fn test_help_lists_the_checks_rules_and_sign_in_first() {
+    let output = cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    let commands: Vec<&str> = help
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        &commands[..7],
+        &[
+            "plan-check",
+            "impl-check",
+            "check-override",
+            "rules",
+            "login",
+            "logout",
+            "whoami"
+        ]
+    );
 }
 
 #[test]
@@ -3116,4 +3148,29 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
             attribute["key"] == "actual.session.last_check_blocked"
                 && attribute["value"]["boolValue"] == true
         }));
+}
+
+#[test]
+fn test_adr_new_then_check_work_signed_out() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["adr", "new", "Use Postgres for storage"])
+        .args(["--context", "Services need one relational store."])
+        .args([
+            "--policy",
+            "MUST: Services store relational data in Postgres.",
+        ])
+        .arg("--root")
+        .arg(dir.path())
+        .assert()
+        .success();
+    for sub in ["docs/adr", ".actual/rules"] {
+        let written: Vec<_> = std::fs::read_dir(dir.path().join(sub)).unwrap().collect();
+        assert_eq!(written.len(), 1, "{sub}");
+    }
+    cmd()
+        .args(["adr", "check", "--no-cloud", "--root"])
+        .arg(dir.path())
+        .assert()
+        .success();
 }

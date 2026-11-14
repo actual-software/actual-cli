@@ -45,7 +45,12 @@
 //! bearer, and Actual attributes them from the token. The records themselves
 //! gain no identity field. [`crate::telemetry::sign_in`] decides which records
 //! the token covers, and a 401 sends the batch again once, signed out.
+//!
+//! **Typed reason text goes only with the token.** A request without it, and
+//! the file sink's copy of that request, leaves out [`REASON_TEXT`], since
+//! Actual can restrict and delete only events it can tie to an organization.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -79,8 +84,13 @@ pub(crate) const ACTION_COMPLETED: &str = "actual.action.completed";
 
 pub(crate) const SESSION_ENDED: &str = "actual.session.ended";
 
+/// The typed reason of an `other` override, the one attribute only a request
+/// carrying the sign-in's token holds.
+const REASON_TEXT: &str = "actual.override.reason_text";
+
 /// The version of the attributes below, sent as `actual.event.schema_version`.
-const SCHEMA_VERSION: i64 = 1;
+/// 2 adds `actual.override.reason` and `actual.override.reason_text`.
+const SCHEMA_VERSION: i64 = 2;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -183,7 +193,7 @@ fn setting(env: &str, configured: Option<&str>) -> Option<String> {
 /// decimal strings, ids as hex. An absent field reads as its default. This is
 /// the form the file sink holds, and the spool with a [`Spooled`] stamp beside
 /// it; the endpoint gets [`LogRecord::to_proto`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LogRecord {
     time_unix_nano: String,
@@ -216,9 +226,16 @@ impl LogRecord {
             ..Default::default()
         })
     }
+
+    /// This record as a request without the sign-in's token carries it:
+    /// without [`REASON_TEXT`].
+    fn signed_out(mut self) -> Self {
+        self.attributes.retain(|kv| kv.key != REASON_TEXT);
+        self
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeyValue {
     key: String,
     value: AnyValue,
@@ -236,7 +253,7 @@ impl KeyValue {
 
 // The variants spell OTLP/JSON's keys: stringValue, intValue, arrayValue.
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum AnyValue {
     StringValue(String),
@@ -326,6 +343,17 @@ pub(crate) struct OverriddenGates<'a> {
     pub blocking: &'a [&'a str],
 }
 
+/// Why a human overrode, as an override record names it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OverrideReason<'a> {
+    /// The reason code: `actual.override.reason`, sent empty when none was
+    /// given.
+    pub code: Option<&'a str>,
+    /// The typed text, already stripped and cut: `actual.override.reason_text`,
+    /// left out when `None`. Only an `other` override passes one.
+    pub text: Option<&'a str>,
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -384,8 +412,9 @@ impl Origin {
     /// no agent, since a human ran the command, then the outcome, the gates
     /// whose loop in this session had denied the overridden rules at any
     /// point (`actual.gate.denied_types`, unchanged since 0.11.0), the gates
-    /// that were blocking them when they were overridden, and how the
-    /// override was issued.
+    /// that were blocking them when they were overridden, how the override
+    /// was issued, its reason code, empty when none was given, and its typed
+    /// text when it has one to send.
     pub(crate) fn overridden(
         &self,
         session_id: &str,
@@ -393,6 +422,7 @@ impl Origin {
         adr_ids: &[String],
         gates: OverriddenGates<'_>,
         source: &str,
+        reason: OverrideReason<'_>,
     ) -> LogRecord {
         let mut record = self.adr_record(GATE_EVALUATED, session_id, None, adr_ref, adr_ids);
         record.attributes.extend([
@@ -400,7 +430,11 @@ impl Origin {
             strings("actual.gate.denied_types", gates.denied),
             strings("actual.override.blocking_types", gates.blocking),
             text("actual.override.source", Some(source)),
+            text("actual.override.reason", reason.code),
         ]);
+        if let Some(reason_text) = reason.text {
+            record.attributes.push(text(REASON_TEXT, Some(reason_text)));
+        }
         record
     }
 
@@ -609,11 +643,17 @@ struct Spooled<R> {
 /// Append `records` to the OTLP spool for the uploader, best-effort: records
 /// the spool turns away are logged at debug and dropped. Records bound for
 /// Actual's API in `outputs` are stamped with the current sign-in, if any.
+/// Without a stamp no request will carry the token, so [`REASON_TEXT`] isn't
+/// spooled either.
 pub(crate) fn spool(outputs: &Outputs, records: &[LogRecord]) {
     let sign_in = sign_in::recording_stamp(outputs.endpoint.as_deref());
     let lines: Vec<String> = records
         .iter()
         .filter_map(|record| {
+            let record = match sign_in {
+                Some(_) => Cow::Borrowed(record),
+                None => Cow::Owned(record.clone().signed_out()),
+            };
             serde_json::to_string(&Spooled {
                 record,
                 sign_in: sign_in.clone(),
@@ -637,8 +677,8 @@ fn records(lines: &[String]) -> Vec<Spooled<LogRecord>> {
 }
 
 /// The requests `spooled` goes out in: the records `sign_in` covers, flagged
-/// to carry its token, then the rest. An empty one is left out, so a batch
-/// sent signed out is one request, as it always was.
+/// to carry its token, then the rest, [`LogRecord::signed_out`]. An empty one
+/// is left out, so a batch sent signed out is one request, as it always was.
 fn requests(
     spooled: Vec<Spooled<LogRecord>>,
     sign_in: Option<&SignIn>,
@@ -646,10 +686,11 @@ fn requests(
     let (covered, rest): (Vec<_>, Vec<_>) = spooled.into_iter().partition(|spooled| {
         sign_in.is_some_and(|sign_in| sign_in.covers(spooled.sign_in.as_deref()))
     });
+    let covered: Vec<LogRecord> = covered.into_iter().map(|s| s.record).collect();
+    let rest: Vec<LogRecord> = rest.into_iter().map(|s| s.record.signed_out()).collect();
     [(covered, true), (rest, false)]
         .into_iter()
         .filter(|(group, _)| !group.is_empty())
-        .map(|(group, signed)| (group.into_iter().map(|s| s.record).collect(), signed))
         .collect()
 }
 
@@ -761,17 +802,12 @@ async fn flush_within(config: &Config, budget: Duration) {
             let body = protobuf_request(&records);
             let token = sign_in.as_ref().filter(|_| signed).map(SignIn::token);
             let left = deadline.saturating_duration_since(Instant::now());
-            let mut sent = post(
-                client,
-                endpoint,
-                body.clone(),
-                token,
-                left,
-                tokio::time::sleep,
-            )
-            .await;
+            let mut sent = post(client, endpoint, body, token, left, tokio::time::sleep).await;
             if token.is_some() && sent == Sent::Rejected(401) {
                 sign_in = None;
+                let unsigned: Vec<LogRecord> =
+                    records.iter().cloned().map(LogRecord::signed_out).collect();
+                let body = protobuf_request(&unsigned);
                 let left = deadline.saturating_duration_since(Instant::now());
                 sent = post(client, endpoint, body, None, left, tokio::time::sleep).await;
             }
@@ -1220,7 +1256,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "1"})
+            serde_json::json!({"intValue": "2"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -1255,7 +1291,8 @@ mod tests {
 
     /// An override record carries the same attributes as a context record, in
     /// the same order and with no agent, then its outcome, the gates that had
-    /// denied the overridden rules, the gates blocking them, and its source.
+    /// denied the overridden rules, the gates blocking them, its source, its
+    /// reason code and its typed text.
     #[test]
     fn test_overridden_carries_the_common_attributes_then_the_outcome_and_gates() {
         let origin = origin(None);
@@ -1268,6 +1305,10 @@ mod tests {
                 blocking: &["implementation"],
             },
             "session_dialog",
+            OverrideReason {
+                code: Some("other"),
+                text: Some("the ADR predates the new client"),
+            },
         ));
         let context = record_json(&origin.context_added(
             "session-1",
@@ -1286,6 +1327,20 @@ mod tests {
         assert_eq!(record["eventName"], GATE_EVALUATED);
         assert_eq!(record["severityNumber"], 9);
         let mut overridden = shared(&record);
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
+                "actual.override.reason_text".to_string(),
+                serde_json::json!({"stringValue": "the ADR predates the new client"})
+            )
+        );
+        assert_eq!(
+            overridden.pop().unwrap(),
+            (
+                "actual.override.reason".to_string(),
+                serde_json::json!({"stringValue": "other"})
+            )
+        );
         assert_eq!(
             overridden.pop().unwrap(),
             (
@@ -1328,6 +1383,7 @@ mod tests {
             &ids(&["adr-9"]),
             OverriddenGates::default(),
             "terminal",
+            OverrideReason::default(),
         ));
         let attributes = attributes(&record);
         let empty = serde_json::json!({"arrayValue": {"values": []}});
@@ -1337,6 +1393,15 @@ mod tests {
                 "{key} must be sent as an empty list"
             );
         }
+        // No reason given: the code is sent empty, not left out, and there
+        // is no text.
+        assert!(attributes.contains(&(
+            "actual.override.reason".to_string(),
+            serde_json::json!({"stringValue": ""})
+        )));
+        assert!(!attributes
+            .iter()
+            .any(|(key, _)| key == "actual.override.reason_text"));
     }
 
     /// Used and breached records carry the same attributes as a context
@@ -1761,7 +1826,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(1))
+            Some(&common::any_value::Value::IntValue(2))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -1802,7 +1867,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"1"}"#, r#"{"intValue":"one"}"#),
+            whole.replace(r#"{"intValue":"2"}"#, r#"{"intValue":"two"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -1906,6 +1971,10 @@ mod tests {
                     blocking: &["planning"],
                 },
                 "session_prompt",
+                OverrideReason {
+                    code: Some("misread"),
+                    text: None,
+                },
             ),
             origin.overridden(
                 "session-1",
@@ -1913,6 +1982,10 @@ mod tests {
                 &ids(&["adr-3"]),
                 OverriddenGates::default(),
                 "terminal",
+                OverrideReason {
+                    code: Some("other"),
+                    text: Some("typed"),
+                },
             ),
         ];
         let request = decoded(&records);
@@ -3115,6 +3188,177 @@ mod tests {
             [all[..100].to_vec(), all[100..].to_vec()]
         );
         assert!(OTLP_LOGS.is_empty());
+    }
+
+    /// `n` override records whose refs start with `prefix`, each with typed
+    /// reason text.
+    fn overrides(prefix: &str, n: usize) -> Vec<LogRecord> {
+        let origin = origin(None);
+        (0..n)
+            .map(|i| {
+                let adr = format!("{prefix}-{i}");
+                origin.overridden(
+                    "s",
+                    &adr,
+                    &ids(&[&adr]),
+                    OverriddenGates::default(),
+                    "terminal",
+                    OverrideReason {
+                        code: Some("other"),
+                        text: Some("typed words"),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Whether each record in each request `received` holds has reason text.
+    fn reason_texts(received: &Received) -> Vec<Vec<bool>> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| {
+                collector::ExportLogsServiceRequest::decode(body.as_slice())
+                    .unwrap()
+                    .resource_logs[0]
+                    .scope_logs[0]
+                    .log_records
+                    .iter()
+                    .map(|record| record.attributes.iter().any(|kv| kv.key == REASON_TEXT))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Typed reason text goes only in a request carrying the token. Records
+    /// from signed-out runs, or from another organization's sign-in, reach
+    /// neither the endpoint nor the file sink with it, and keep their code.
+    #[tokio::test]
+    async fn test_reason_text_goes_only_with_the_token() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let (signed, signed_bodies) = logs(&mut server, Some("Bearer token-a"), 200, 1).await;
+        let (unsigned, unsigned_bodies) = logs(&mut server, None, 200, 1).await;
+        let (outputs, _) = at(&server);
+        let file = home.path().join("otlp.jsonl");
+        let config = config(outputs.endpoint.as_deref(), Some(file.to_str().unwrap()));
+
+        spool(&outputs, &overrides("before", 2));
+        save(&signed_in(
+            "org-b",
+            "token-b",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &overrides("org-b", 1));
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &overrides("org-a", 2));
+
+        flush(&config).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        assert_eq!(refs(&signed_bodies), [adr_refs("org-a", 2)]);
+        assert_eq!(reason_texts(&signed_bodies), [vec![true; 2]]);
+        let mut rest = adr_refs("before", 2);
+        rest.extend(adr_refs("org-b", 1));
+        assert_eq!(refs(&unsigned_bodies), [rest]);
+        assert_eq!(reason_texts(&unsigned_bodies), [vec![false; 3]]);
+        let written = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains(REASON_TEXT) && lines[0].contains("typed words"));
+        assert!(!lines[1].contains(REASON_TEXT) && !lines[1].contains("typed words"));
+        assert_eq!(lines[1].matches("\"other\"").count(), 3, "{}", lines[1]);
+    }
+
+    /// Recorded signed out, the text never reaches the spool, since no
+    /// request will carry the token for it. Signed in, it waits there.
+    #[test]
+    fn test_reason_text_is_spooled_only_under_a_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let spool_file = home.path().join("otlp-logs-spool.jsonl");
+
+        spool(&outputs, &overrides("out", 1));
+        let signed_out = std::fs::read_to_string(&spool_file).unwrap();
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &overrides("in", 1));
+        let both = std::fs::read_to_string(&spool_file).unwrap();
+
+        assert!(!signed_out.contains(REASON_TEXT), "{signed_out}");
+        assert!(signed_out.contains("\"other\""), "{signed_out}");
+        assert_eq!(both.matches(REASON_TEXT).count(), 1, "{both}");
+    }
+
+    /// Signed in, a custom endpoint still never gets the text: it never gets
+    /// the token.
+    #[tokio::test]
+    async fn test_a_custom_endpoint_never_gets_reason_text() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let api = mockito::Server::new_async().await;
+        let mut custom = mockito::Server::new_async().await;
+        let (_home, _api) = isolated(&api.url());
+        let (unsigned, bodies) = logs(&mut custom, None, 200, 1).await;
+        let (outputs, config) = at(&custom);
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &overrides("a", 2));
+
+        flush(&config).await;
+
+        unsigned.assert_async().await;
+        assert_eq!(reason_texts(&bodies), [vec![false; 2]]);
+    }
+
+    /// A 401 resends the batch signed out, so without the text.
+    #[tokio::test]
+    async fn test_a_refused_token_resends_without_reason_text() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (_home, _api) = isolated(&server.url());
+        let (signed, signed_bodies) = logs(&mut server, Some("Bearer token-a"), 401, 1).await;
+        let (unsigned, unsigned_bodies) = logs(&mut server, None, 200, 1).await;
+        let (outputs, config) = at(&server);
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &overrides("a", 2));
+
+        flush(&config).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        assert_eq!(reason_texts(&signed_bodies), [vec![true; 2]]);
+        assert_eq!(reason_texts(&unsigned_bodies), [vec![false; 2]]);
+        assert_eq!(refs(&unsigned_bodies), [adr_refs("a", 2)]);
     }
 
     /// Every other final answer to a signed request stays final: nothing is

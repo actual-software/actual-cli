@@ -102,7 +102,10 @@ async fn resolve_repo(
 /// owner, disambiguating a name shared across owners. Zero matches — or a bare
 /// name shared across owners — is a `RepoNotFound` error whose message lists the
 /// choices.
-fn resolve_repo_name(value: &str, repos: &[ConnectedRepository]) -> Result<String, ActualError> {
+pub(crate) fn resolve_repo_name(
+    value: &str,
+    repos: &[ConnectedRepository],
+) -> Result<String, ActualError> {
     let matches: Vec<&ConnectedRepository> = match value.split_once('/') {
         Some((owner, name)) => repos
             .iter()
@@ -125,7 +128,7 @@ fn resolve_repo_name(value: &str, repos: &[ConnectedRepository]) -> Result<Strin
 }
 
 /// A connected repo rendered as `owner/name` for user-facing lists.
-fn qualified_name(repo: &ConnectedRepository) -> String {
+pub(crate) fn qualified_name(repo: &ConnectedRepository) -> String {
     format!("{}/{}", repo.external_owner, repo.name)
 }
 
@@ -160,14 +163,14 @@ fn ambiguous_message(value: &str, matches: &[&ConnectedRepository]) -> String {
 /// A git remote parsed into the repository's owner and name — the
 /// `actual-software` / `actual-cli` of `git@github.com:actual-software/actual-cli.git`.
 #[derive(Debug, PartialEq, Eq)]
-struct RepoRemote {
+pub(crate) struct RepoRemote {
     owner: String,
     name: String,
 }
 
 impl RepoRemote {
     /// The `owner/name` form used in user-facing messages.
-    fn slug(&self) -> String {
+    pub(crate) fn slug(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 }
@@ -178,7 +181,7 @@ impl RepoRemote {
 /// last two path segments are taken as owner and name, so a scheme, an optional
 /// `user@`, and a `host:port` prefix are all tolerated. Returns `None` when the
 /// URL does not yield an owner/name pair.
-fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
+pub(crate) fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
     let trimmed = url.trim().trim_end_matches('/');
     let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     // Split on both the path separator and the scp-style host separator, dropping
@@ -202,7 +205,7 @@ fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
 /// owner differs still resolves to its connected upstream. Returns every
 /// candidate — the caller scopes on exactly one and falls back to org level on
 /// zero or several.
-fn match_remote_to_repos<'a>(
+pub(crate) fn match_remote_to_repos<'a>(
     remote: &RepoRemote,
     repos: &'a [ConnectedRepository],
 ) -> Vec<&'a ConnectedRepository> {
@@ -242,7 +245,7 @@ fn format_repo_scope(qualified_name: Option<&str>, id: &str) -> String {
 /// out. Best-effort: every failure collapses to `None` so auto-detection can fall
 /// back to an org-level query. Mirrors the sync pipeline's `git remote get-url`
 /// invocation (piped output, `kill_on_drop`, bounded by a timeout).
-async fn origin_remote_url(dir: &Path) -> Option<String> {
+pub(crate) async fn origin_remote_url(dir: &Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["remote", "get-url", "origin"]);
     cmd.current_dir(dir);

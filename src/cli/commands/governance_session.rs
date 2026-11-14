@@ -246,6 +246,87 @@ pub struct Override {
     /// when neither was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<OverrideGate>,
+    /// Why the human overrode, as a code. Telemetry sends it, and for `other`
+    /// the typed text too. `None` when no reason was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<OverrideReasonCode>,
+}
+
+/// Why a human overrode a rule. The first four say the block was wrong,
+/// `accepted` says it was right and they went ahead anyway, and `other` is a
+/// typed reason that names no code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverrideReasonCode {
+    /// The check misread the change.
+    Misread,
+    /// The ADR doesn't apply here.
+    NotHere,
+    /// The ADR is wrong.
+    AdrWrong,
+    /// The ADR is out of date.
+    AdrOutdated,
+    /// The block is right, going ahead anyway.
+    Accepted,
+    /// A typed reason that names no code.
+    Other,
+}
+
+impl From<crate::cli::args::OverrideReasonCodeArg> for OverrideReasonCode {
+    fn from(arg: crate::cli::args::OverrideReasonCodeArg) -> Self {
+        use crate::cli::args::OverrideReasonCodeArg as Arg;
+        match arg {
+            Arg::Misread => OverrideReasonCode::Misread,
+            Arg::NotHere => OverrideReasonCode::NotHere,
+            Arg::AdrWrong => OverrideReasonCode::AdrWrong,
+            Arg::AdrOutdated => OverrideReasonCode::AdrOutdated,
+            Arg::Accepted => OverrideReasonCode::Accepted,
+        }
+    }
+}
+
+impl OverrideReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverrideReasonCode::Misread => "misread",
+            OverrideReasonCode::NotHere => "not-here",
+            OverrideReasonCode::AdrWrong => "adr-wrong",
+            OverrideReasonCode::AdrOutdated => "adr-outdated",
+            OverrideReasonCode::Accepted => "accepted",
+            OverrideReasonCode::Other => "other",
+        }
+    }
+
+    /// The code `word` names, ignoring case and trailing punctuation, or
+    /// `None`. `other` is never a word a human types to pick a code.
+    pub fn from_word(word: &str) -> Option<Self> {
+        let word = word.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '-');
+        [
+            OverrideReasonCode::Misread,
+            OverrideReasonCode::NotHere,
+            OverrideReasonCode::AdrWrong,
+            OverrideReasonCode::AdrOutdated,
+            OverrideReasonCode::Accepted,
+        ]
+        .into_iter()
+        .find(|code| code.as_str().eq_ignore_ascii_case(word))
+    }
+
+    /// Split a typed reason into its code and its text:
+    /// a leading code word is the code and the rest is the text, any other
+    /// text is `other` and kept whole, and no text is no code.
+    pub fn split_reason(reason: Option<&str>) -> (Option<Self>, Option<String>) {
+        let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) else {
+            return (None, None);
+        };
+        let (first, rest) = reason
+            .split_once(char::is_whitespace)
+            .map_or((reason, ""), |(first, rest)| (first, rest.trim()));
+        match Self::from_word(first) {
+            Some(code) => (Some(code), Some(rest.to_string()).filter(|r| !r.is_empty())),
+            None => (Some(OverrideReasonCode::Other), Some(reason.to_string())),
+        }
+    }
 }
 
 /// [`Override::reason`] as stored: always a string, `""` for no reason.
@@ -646,6 +727,9 @@ struct AuditEntry {
     /// Gate(s) that were blocking the rule when it was overridden; see [`Override::gate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gate: Option<OverrideGate>,
+    /// The reason code of an [`AuditKind::Override`]; see [`Override::reason_code`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason_code: Option<OverrideReasonCode>,
     /// How many candidate rules were actually judged this round. Present
     /// only for [`AuditKind::PartialCoverage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,6 +776,7 @@ pub fn record_override(
         rules_dir,
         keys,
         reason,
+        reason.map(|_| OverrideReasonCode::Other),
         OverrideSource::Terminal,
     );
 }
@@ -711,9 +796,10 @@ pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGa
 
 /// Record an explicit, human-issued override: mark `keys` settled for
 /// `(session_id, rules_dir)` and append one audit-log entry per key, noting
-/// how it was issued (`source`) and which gate was blocking the rule. Updates
-/// the session itself under [`update`]'s lock, so the caller does not need
-/// to separately `load`/`store`, and a concurrent hook's write cannot drop it.
+/// how it was issued (`source`), its reason code, and which gate was blocking
+/// the rule. Updates the session itself under [`update`]'s lock, so the
+/// caller does not need to separately `load`/`store`, and a concurrent hook's
+/// write cannot drop it.
 /// Returns that gate for each of `keys`, read from the same locked copy the
 /// override was recorded on, for the caller's events and reply.
 pub fn record_override_with(
@@ -721,11 +807,19 @@ pub fn record_override_with(
     rules_dir: &std::path::Path,
     keys: &[String],
     reason: Option<&str>,
+    reason_code: Option<OverrideReasonCode>,
     source: OverrideSource,
 ) -> Vec<Option<OverrideGate>> {
     let mut gates = Vec::new();
     update(session_id, rules_dir, |session| {
-        gates = record_overrides_in(session, session_id, rules_dir, keys, reason, source);
+        gates = record_overrides_in(
+            session,
+            session_id,
+            rules_dir,
+            keys,
+            (reason, reason_code),
+            source,
+        );
     });
     gates
 }
@@ -735,7 +829,7 @@ fn record_overrides_in(
     session_id: &str,
     rules_dir: &std::path::Path,
     keys: &[String],
-    reason: Option<&str>,
+    (reason, reason_code): (Option<&str>, Option<OverrideReasonCode>),
     source: OverrideSource,
 ) -> Vec<Option<OverrideGate>> {
     let at = Utc::now();
@@ -752,6 +846,7 @@ fn record_overrides_in(
             round,
             source,
             gate,
+            reason_code,
         });
         append_audit(&AuditEntry {
             at,
@@ -763,6 +858,7 @@ fn record_overrides_in(
             kind: AuditKind::Override,
             source: Some(source),
             gate,
+            reason_code,
             judged: None,
             total: None,
         });
@@ -795,6 +891,7 @@ pub fn record_round_limit(
             gate: None,
             judged: None,
             total: None,
+            reason_code: None,
         });
     }
 }
@@ -830,6 +927,7 @@ pub fn record_partial_coverage(
         gate: None,
         judged: Some(judged),
         total: Some(total),
+        reason_code: None,
     });
 }
 
@@ -1100,6 +1198,7 @@ mod tests {
             round: 1,
             source: OverrideSource::Terminal,
             gate: None,
+            reason_code: None,
         });
 
         assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v1"));
@@ -1130,6 +1229,7 @@ mod tests {
             round: 1,
             source: OverrideSource::Terminal,
             gate: None,
+            reason_code: None,
         });
 
         assert!(!session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v2"));
@@ -1389,6 +1489,7 @@ mod tests {
             round: 1,
             source: OverrideSource::Terminal,
             gate: None,
+            reason_code: None,
         });
         assert!(session.excludes(ArtifactKind::Plan, &key, "other-plan"));
         assert!(session.excludes(ArtifactKind::Diff, &key, "other-diff"));
@@ -1505,6 +1606,7 @@ mod tests {
             &rd(),
             &[key("doc", "R-A")],
             None,
+            None,
             OverrideSource::SessionPrompt,
         );
         let path = session_path("session-no-reason", &rd()).unwrap();
@@ -1546,9 +1648,103 @@ mod tests {
             round: 1,
             source: OverrideSource::Terminal,
             gate: None,
+            reason_code: None,
         };
         let raw = serde_json::to_value(&stored).unwrap();
         assert_eq!(raw["reason"], "reviewed");
+        assert!(raw.get("reason_code").is_none(), "{raw}");
         assert_eq!(serde_json::from_value::<Override>(raw).unwrap(), stored);
+    }
+
+    /// Each code is written in kebab case and read back unchanged.
+    #[test]
+    fn test_reason_code_roundtrips_in_kebab_case() {
+        for (code, name) in [
+            (OverrideReasonCode::Misread, "misread"),
+            (OverrideReasonCode::NotHere, "not-here"),
+            (OverrideReasonCode::AdrWrong, "adr-wrong"),
+            (OverrideReasonCode::AdrOutdated, "adr-outdated"),
+            (OverrideReasonCode::Accepted, "accepted"),
+            (OverrideReasonCode::Other, "other"),
+        ] {
+            assert_eq!(code.as_str(), name);
+            let stored = Override {
+                key: key("doc", "R-A"),
+                reason: None,
+                at: Utc::now(),
+                round: 1,
+                source: OverrideSource::SessionDialog,
+                gate: None,
+                reason_code: Some(code),
+            };
+            let raw = serde_json::to_value(&stored).unwrap();
+            assert_eq!(raw["reason_code"], name);
+            assert_eq!(serde_json::from_value::<Override>(raw).unwrap(), stored);
+        }
+    }
+
+    /// A leading code word is the code and the rest is kept as text; other
+    /// text is `other` and kept whole; `other` itself is never a typed code.
+    #[test]
+    fn test_split_reason_reads_a_leading_code_word() {
+        use OverrideReasonCode as Code;
+        let split = |r: &str| OverrideReasonCode::split_reason(Some(r));
+        assert_eq!(OverrideReasonCode::split_reason(None), (None, None));
+        assert_eq!(split("   "), (None, None));
+        assert_eq!(split("misread"), (Some(Code::Misread), None));
+        assert_eq!(split("  NOT-HERE  "), (Some(Code::NotHere), None));
+        assert_eq!(split("adr-wrong"), (Some(Code::AdrWrong), None));
+        assert_eq!(split("adr-outdated"), (Some(Code::AdrOutdated), None));
+        assert_eq!(
+            split("Accepted, in a hurry"),
+            (Some(Code::Accepted), Some("in a hurry".to_string()))
+        );
+        assert_eq!(
+            split("accepted: will fix later"),
+            (Some(Code::Accepted), Some("will fix later".to_string()))
+        );
+        assert_eq!(
+            split("demo token, not a real secret"),
+            (
+                Some(Code::Other),
+                Some("demo token, not a real secret".to_string())
+            )
+        );
+        assert_eq!(
+            split("other"),
+            (Some(Code::Other), Some("other".to_string()))
+        );
+        assert_eq!(
+            split("acceptedly"),
+            (Some(Code::Other), Some("acceptedly".to_string()))
+        );
+    }
+
+    /// The code lands on the session's override and on its audit-log line.
+    #[test]
+    fn test_record_override_with_stores_the_reason_code() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+
+        record_override_with(
+            "session-code",
+            &rd(),
+            &[key("doc", "R-A")],
+            Some("the rule predates the new client"),
+            Some(OverrideReasonCode::AdrOutdated),
+            OverrideSource::SessionDialog,
+        );
+        let session = load("session-code", &rd());
+        assert_eq!(
+            session.overrides[0].reason_code,
+            Some(OverrideReasonCode::AdrOutdated)
+        );
+        assert_eq!(
+            session.overrides[0].reason.as_deref(),
+            Some("the rule predates the new client")
+        );
+        let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
+        let line = log.lines().last().unwrap();
+        assert!(line.contains("\"reason_code\":\"adr-outdated\""), "{line}");
     }
 }

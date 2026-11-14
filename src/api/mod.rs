@@ -1,3 +1,4 @@
+pub mod adr_types;
 pub mod client;
 pub mod retry;
 pub mod types;

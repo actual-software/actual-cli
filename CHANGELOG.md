@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An override records why, as a code: `misread`, `not-here`, `adr-wrong`, `adr-outdated` or `accepted`. In the session, the first word after the target is read as the code (`/actual-cli:override all misread`), and a reason that starts with any other word is recorded as `other`. From a terminal, `check-override --reason-code <code>` sets it, and a `--reason` without one is `other`. The code is stored with the override and in `plan-check-overrides.log`, and the OpenTelemetry override event sends it as `actual.override.reason`. For an `other` override, a request carrying your sign-in's token also sends the typed text as `actual.override.reason_text`, with anything that looks like a secret replaced by `[redacted]` and cut to 280 characters; Actual shows it only to the organization's admins. A signed-out run, a request whose token Actual refuses and any other endpoint send the code alone. Words typed after one of the five named codes stay on the machine. `actual.event.schema_version` is now `2`
+- `actual adr` writes and checks ADRs in your repository and manages your organization's decisions in Actual AI. `adr new` writes a decision and its rule file under the names Actual AI's sync uses, and `adr check` runs Actual AI's save check on decision files and lists likely duplicates; neither needs a sign-in. Signed in, `adr list`, `show`, `create`, `update`, `publish`, `unpublish`, `delete`, `restore`, `accept` and `reject` manage the decisions in your account through the same decision routes as the web app, and refuse a change the decision's state doesn't allow by the web app's rules. `create` refuses a decision the repository already has unless given `--allow-duplicate`, and sends each decision once: when no answer comes back it exits 3 and asks you to look with `adr list` before trying again. `new` and `create` default to a draft when no person is at the terminal, so a coding agent never publishes a governing decision on its own. `create --file` renames the pushed pair to the names Actual AI's sync uses, and both headers take the status the decision was saved with. See [docs/ADR_COMMANDS.md](docs/ADR_COMMANDS.md)
+
+### Changed
+- The `plan_governance_rule_override` analytics event no longer sends a hash of the override reason, and its length bucket is renamed from `reason_category` to `reason_length_bucket`
+- `actual --help` lists `plan-check`, `impl-check`, `check-override`, `rules`, `login`, `logout` and `whoami` first, and describes the CLI as "Align coding agents with your architecture decisions"
+- When `actual adr-bot` can't match ADRs to a repository's languages or frameworks yet, its message links [docs/ADR_BOT_AND_ADVISOR.md](docs/ADR_BOT_AND_ADVISOR.md) in place of `https://cli.actual.ai/docs`
+- The README, `docs/HOW_IT_WORKS.md` and `docs/GETTING_STARTED.md` lead with installing the plugin and the CLI, adding rules, `plan-check` and `impl-check`, `rules` and optional sign-in. The `adr-bot` and `advisor` docs moved to `docs/ADR_BOT_AND_ADVISOR.md`
+
+### Fixed
+- `impl-check` judges a rule whose ADR file header sets a `root` other than the whole repository. It used to read the diff's `a/` and `b/` header prefixes as part of each path, which put every changed file outside the root, so the rule was dropped and the check reported that no rule applied. A file a rule excludes no longer gets that rule through the same prefixes. The default diff now keeps the `a/` and `b/` prefixes even when git config sets `diff.noprefix` or `diff.mnemonicPrefix`
+
 ## [0.13.0] - 2026-11-10
 
 ### Added

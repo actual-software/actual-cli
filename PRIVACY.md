@@ -23,7 +23,7 @@ in and on who processes it. This notice is explicit about both:
   account.
 - **Third-party analytics (PostHog) cannot recover your raw ids, but can match
   events to a known repository.** Before telemetry reaches PostHog, the
-  account/org/repo identity hashes and the override-reason hash are peppered
+  account/org/repo identity hashes are peppered
   server-side (the pepper and the hash→account map are never shared), so PostHog
   cannot reverse them to raw account, user, or organization ids. The
   repository-derived keys — `repo_hash`, `repo_url_hash`, and the logged-out
@@ -81,7 +81,9 @@ plan-governance events carry the same hash beside `user_id_hash` when you are
 logged in.
 
 Telemetry does not include raw usernames, email addresses, IP addresses, file
-contents, file paths, or source code. When you are logged in, plan-governance
+contents, file paths, or source code, with one exception: the reason a person
+types for an `other` override, which a signed-in run sends as
+`actual.override.reason_text` and which can hold any of these (see below). When you are logged in, plan-governance
 events include one-way identity hashes that let Actual, as the first party,
 attribute activity to your Actual account, organization, and connected
 repository; the events never carry the raw identifiers, but these hashes are
@@ -94,7 +96,7 @@ repository-derived hashes, so it is **pseudonymous rather than anonymous** — s
 We do not sell or share telemetry with third parties for their own purposes.
 Telemetry is sent to PostHog only as Actual's analytics service provider, and
 only for operating Actual's product analytics. Before anything reaches PostHog,
-the account/org/repo identity hashes and the override-reason hash are peppered
+the account/org/repo identity hashes are peppered
 server-side (the pepper and the hash→account map are never shared), so PostHog
 cannot reverse them to raw account, user, or organization ids, and never
 receives raw identifiers or customer content. The repository-derived keys
@@ -146,9 +148,8 @@ Each event includes a subset of these properties:
 | `org_id_hash` | One-way SHA-256 of `"org:"+<organization id>`, only when logged in -- the event **never** carries the raw org id; peppered server-side before PostHog |
 | `repo_id_hash` | One-way SHA-256 of `"repo:"+<connected-repo id>`, sent whenever that id is known locally -- **including logged-out runs where a repository pin persists**; the event **never** carries the raw id; peppered server-side before PostHog |
 | `org_id` | A synthetic, repo-derived org identifier (a UUID from the repo slug), sent **only when not logged in**, so logged-out runs still have an org-shaped grouping key -- derived deterministically from the repo slug and **not** peppered, so recomputable from the repository |
-| `reason_category` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
+| `reason_length_bucket` | `check-override` only: a coarse length bucket of the override reason (`empty`/`short`/`medium`/`long`) -- derived from length, never the text |
 | `reason_len` | `check-override` only: the character length of the override reason |
-| `reason_hash` | `check-override` only: a one-way SHA-256 of the override reason (peppered server-side before PostHog) -- lets identical reasons group without exposing the text |
 | `override_source` | `check-override` only: how the override was issued -- `terminal`, `session_prompt` (typed as `/actual-cli:override` in the Claude Code session) or `session_dialog` (chosen in the dialog the plugin shows when a gate denies) |
 | `override_gate` | `check-override` only: which gate was blocking the rule when it was overridden (that gate's latest check in the session denied it) -- `plan`, `impl`, or `both` (absent if neither was) |
 | `scope_run_id` | `rules select` only: a random per-run correlation id (not derived from any data) |
@@ -208,9 +209,11 @@ known repository.
 `plan_governance_rule_override` event (one per cleared rule), distinct from a
 real check's completion so overrides are cleanly separable and override rate has
 an unambiguous denominator. **The override reason is customer free text, and
-the event never carries it raw** -- only `reason_category`, `reason_len`, and a
-one-way `reason_hash` (see above). A reason is optional; without one,
-`reason_category` is `empty` and no hash is sent.
+the event never carries it or a hash of it** -- only `reason_length_bucket` and
+`reason_len` (see above). A reason is optional; without one,
+`reason_length_bucket` is `empty`. The OpenTelemetry override event is the one
+place typed reason text goes, and only for the `other` code from a signed-in
+run (see `actual.override.reason_text` below).
 
 Each event also carries a `distinct_id`: a random, opaque identifier
 generated once on first use and stored locally
@@ -305,8 +308,9 @@ Local session state stores only that boolean and a duplicate-suppression flag, i
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
-blocked on, which of them a human overrode, how each check came out and what
-made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
+blocked on, which of them a human overrode and why (as a code, plus, from a
+signed-in run, the text typed for an `other` override), how each check came out
+and what made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
 
 **Release builds send these events to Actual's API by default.** They go to
 `/v1/logs` on the address the CLI's other telemetry uses: the config file's
@@ -346,20 +350,25 @@ account or organization, go in a request of their own without the token. A
 request Actual refuses with a 401 is sent once more without it. Any other
 endpoint, a custom one included, never gets the token. The default endpoint is
 at that address unless the config file's `api_url` or `ACTUAL_API_URL` names
-another one.
+another one. Typed reason text, `actual.override.reason_text`, goes only in a
+request that carries the token: every request without it, and the file sink's
+copy of that request, leaves the attribute out and keeps the reason code.
 
 Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
 on `actual.adr.detected` events, `actual.gate.outcome` on
 `actual.gate.evaluated` events, `actual.gate.type` on breach events and
-`actual.gate.denied_types`, `actual.override.blocking_types` and
-`actual.override.source` on override events. A check event adds
+`actual.gate.denied_types`, `actual.override.blocking_types`,
+`actual.override.source` and `actual.override.reason` on override events, plus
+`actual.override.reason_text` on an override whose code is `other`, in a
+request that carries your sign-in's token. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
 `actual.action.outcome`, `actual.action.warn_reasons` and
 `actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`. An unknown value is
-sent as an empty string. None of them names you, your organization, your
-repository or this installation, so an event carries the same fields signed in
-or out. Only the token on a signed-in request to Actual's API, described above,
+sent as an empty string. Apart from `actual.override.reason_text`, which holds
+whatever a person typed and goes only in a signed-in request, none of them
+names you, your organization, your repository or this installation, so an event
+carries the same other fields signed in or out. Only the token on a signed-in request to Actual's API, described above,
 says whose events they are, and it makes every event in that request
 first-party identity-linked. Sent signed out or to another endpoint, an event
 has only the classes its fields carry below:
@@ -368,7 +377,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `1` | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `2` (2 added `actual.override.reason` and `actual.override.reason_text`) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook sends it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -380,6 +389,8 @@ has only the classes its fields carry below:
 | `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules at any point in the session, and an empty list when none had: overridden before any denial | anonymous |
 | `actual.override.blocking_types` | Which gates, `planning` and `implementation`, were blocking any of the overridden rules when the human overrode them (the gate's latest check in the session denied it), and an empty list when none was: overridden before any denial, or after a later check stopped denying it | anonymous |
 | `actual.override.source` | How the override was issued: `terminal` when a human ran `actual check-override`, `session_prompt` when they typed the override command in the session, `session_dialog` when they chose it in the plugin's dialog | anonymous |
+| `actual.override.reason` | Why the human overrode, as a code: `misread`, `not-here`, `adr-wrong`, `adr-outdated` or `accepted`, `other` when the typed reason names no code, and empty when none was given. Words typed after one of the five named codes stay on your machine; the text of an `other` reason is sent as `actual.override.reason_text` | anonymous |
+| `actual.override.reason_text` | The reason the human typed, sent only when its code is `other` (the text names no code) and only in a request that carries your sign-in's token. It's left out for every other code, when no reason was given, and from every request without the token. Before it's sent, anything that looks like a secret becomes `[redacted]` (see below), and the result is cut to 280 characters | first-party identity-linked: customer free text, shown only to your organization's admins |
 | `actual.session.end_reason` | The coarse reason Claude Code ended the session: `clear`, `resume`, `logout`, `prompt_input_exit` or `other` | anonymous |
 | `actual.session.last_check_blocked` | Whether the last completed hook check blocked; `false` when none completed | anonymous |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
@@ -395,8 +406,31 @@ release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
 override was recorded, when a check started or completed, or when the session ended), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
-**No event carries rule text, plan or diff text, override reasons, file paths,
-raw account identifiers, identity hashes or installation id.**
+**Apart from the `actual.override.reason_text` of an `other` override, no event
+carries rule text, plan or diff text, override reasons, file paths, raw account
+identifiers, identity hashes or installation id.**
+
+`actual.override.reason_text` carries whatever the human typed under "Other"
+in the override dialog, as a typed `/actual-cli:override` reason whose first
+word is no code, or as a `check-override --reason` with no `--reason-code`, so
+it can hold anything they wrote, file paths included. The CLI strips it
+before sending: a token with a well-known prefix (Actual, GitHub, Anthropic,
+OpenAI, Slack, GitLab, AWS, Google), a JSON Web Token, the value after
+`Bearer` or `Basic` when it looks like a credential (it holds a digit, `=` or
+`.`, or a capital letter after its first character), the value after `=` or
+`:` following a key, quoted or not, whose name ends in `password`, `passwd`,
+`pwd`, `secret`, `token`, `api_key`, `access_key`, `private_key`, `secret_key`
+(with `_`, `-` or nothing between the words), `credential`, `credentials` or
+`auth`, credentials in a URL, with or without a user name, a PEM private key, 32 or more hex
+digits, and 32 or more base64 characters that mix digits with upper and lower
+case each become `[redacted]`. The stripped text is then cut to 280
+characters. Stripping matches patterns, so it can miss a secret in an unusual
+shape; don't type one. A run that isn't signed in to Actual, a request whose
+token Actual refuses, and any other endpoint send the code without the text, so
+the text reaches Actual only with your organization attached. Actual shows it
+only to your organization's admins. Text typed with `misread`, `not-here`, `adr-wrong`, `adr-outdated` or
+`accepted` is never sent, and the plan-governance analytics event carries no
+reason text or hash for any code.
 
 None of these runs contacts the endpoint itself. Each writes its events to a
 local spool (`~/.actualai/actual/otlp-logs-spool.jsonl`, readable only by the
@@ -441,7 +475,8 @@ signed out by the time they're sent or your sign-in has expired and can't be
 renewed, when Actual refused the token, and when the endpoint isn't at the
 address `actual advisor` uses, as when the config file's `api_url` or
 `ACTUAL_API_URL` names another one. The events still carry the fields in the
-table above, with the classes given there:
+table above, with the classes given there, except `actual.override.reason_text`,
+which a request without your sign-in never carries:
 
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. The ADR references lead to the repository the
@@ -566,7 +601,7 @@ paths never make it, `--no-rank` skips it, and so does `rules select --by-adr`.
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.
 
-`actual check-override` keeps the reason you give in two files on your machine:
+`actual check-override` keeps the reason you give, and its code, in two files on your machine:
 the session's record under `~/.actualai/actual/plan-check-sessions/` and
 `~/.actualai/actual/plan-check-overrides.log`. The reason stays out of every
 prompt above, but it does come back to the agent. Later `--claude-hook` rounds
