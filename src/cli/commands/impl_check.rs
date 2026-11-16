@@ -1724,6 +1724,7 @@ mod tests {
             attribute(&records[1], "actual.detection.method"),
             "implementation"
         );
+        assert_eq!(attribute(&records[1], "actual.adr.verdict"), "conflicting");
         assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
         assert_eq!(attribute(&records[2], "actual.gate.type"), "implementation");
 

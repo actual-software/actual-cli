@@ -1521,6 +1521,7 @@ mod tests {
             attribute(&records[1], "actual.detection.method"),
             "planning"
         );
+        assert_eq!(attribute(&records[1], "actual.adr.verdict"), "conflicting");
         assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
         assert_eq!(attribute(&records[2], "actual.gate.type"), "planning");
         let (started, completed) = (&records[0], &records[3]);

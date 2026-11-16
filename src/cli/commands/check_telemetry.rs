@@ -571,6 +571,35 @@ pub(super) mod tests {
         });
     }
 
+    /// An ADR's verdict is its strongest rule's even when that rule is judged
+    /// after a weaker one, so the first rule's verdict does not stick.
+    #[test]
+    fn test_a_stronger_verdict_judged_second_replaces_the_first() {
+        with_config(WITH_FILE, |home| {
+            round(
+                home,
+                ArtifactKind::Plan,
+                Some("s1"),
+                &[
+                    judged("signing-a2", Verdict::Followed),
+                    judged("signing-a1", Verdict::RequiresDecision),
+                ],
+            );
+            assert_eq!(
+                reported("s1"),
+                [
+                    detected(
+                        "planning",
+                        "grp-sign",
+                        json!(["adr-sign-2", "adr-sign-1"]),
+                        "requires_decision"
+                    ),
+                    breached("planning", "grp-sign", json!(["adr-sign-1"])),
+                ]
+            );
+        });
+    }
+
     /// Each event goes once per ADR per session and stage: a plan breach and
     /// a later implementation breach of one ADR are two of each, and the next
     /// Stop that blocks on it again sends nothing. Another session, the

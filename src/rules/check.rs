@@ -679,6 +679,19 @@ mod tests {
         assert_eq!(Verdict::NotApplicable.as_str(), "not_applicable");
     }
 
+    /// PRIVACY.md and the changelog promise this order for an ADR's verdict.
+    #[test]
+    fn test_strength_ranks_conflicting_then_requires_decision_then_followed_then_not_applicable() {
+        let ranks = [
+            Verdict::Conflicting,
+            Verdict::RequiresDecision,
+            Verdict::Followed,
+            Verdict::NotApplicable,
+        ]
+        .map(Verdict::strength);
+        assert!(ranks.windows(2).all(|w| w[0] > w[1]), "{ranks:?}");
+    }
+
     #[test]
     fn test_only_conflicting_blocks() {
         assert!(!Verdict::Followed.blocks());
