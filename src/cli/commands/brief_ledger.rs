@@ -1273,6 +1273,13 @@ pub(super) mod tests {
         assert_eq!(round(Followed), ["grp-1"]);
         assert_eq!(round(NotApplicable), Vec::<String>::new());
         assert_eq!(round(Followed), Vec::<String>::new());
+        assert_eq!(round(RequiresDecision), ["grp-1"]);
+        assert_eq!(
+            load(dir.path(), &s1).reported_verdicts["plan"]["grp-1"],
+            RequiresDecision
+        );
+        assert_eq!(round(Followed), Vec::<String>::new());
+        assert_eq!(round(RequiresDecision), Vec::<String>::new());
         assert_eq!(round(Conflicting), ["grp-1"]);
         assert_eq!(round(RequiresDecision), Vec::<String>::new());
         assert_eq!(
