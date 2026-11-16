@@ -231,28 +231,28 @@ fn scope_text(decision: &Decision) -> String {
 
 /// The decision `create` saved.
 #[derive(Debug, Serialize)]
-struct Created {
-    adr_id: String,
+pub(super) struct Created {
+    pub(super) adr_id: String,
     /// `accepted` or `draft`, as it was saved.
-    status: String,
-    title: String,
-    repo_unique_id: String,
+    pub(super) status: String,
+    pub(super) title: String,
+    pub(super) repo_unique_id: String,
 }
 
 /// What `adr create` did, for `--json`.
 #[derive(Debug, Serialize)]
-struct CreateOutcome {
+pub(super) struct CreateOutcome {
     #[serde(flatten)]
-    created: Created,
+    pub(super) created: Created,
     #[serde(skip_serializing_if = "Option::is_none")]
-    files: Option<RenameOutcome>,
+    pub(super) files: Option<RenameOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    scope_problem: Option<String>,
+    pub(super) scope_problem: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    publish_problem: Option<String>,
+    pub(super) publish_problem: Option<String>,
     /// The status the pushed files had, when the save gave them another.
     #[serde(skip_serializing_if = "Option::is_none")]
-    local_status_was: Option<String>,
+    pub(super) local_status_was: Option<String>,
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
@@ -376,7 +376,7 @@ async fn create_from_flags(
 /// and publish it for an accepted save. A step after the save that fails
 /// leaves a draft and says how to finish. The pair is then renamed to the
 /// names the repository sync gives the saved decision.
-async fn create_from_file(
+pub(super) async fn create_from_file(
     session: &Session,
     repo: &Repo,
     root: &Path,
@@ -1193,6 +1193,7 @@ mod tests {
             status: None,
             repo: Some(REPO.to_string()),
             allow_duplicate: false,
+            all: false,
             api: api(server),
         }
     }
@@ -1419,6 +1420,7 @@ mod tests {
             status: None,
             repo: None,
             allow_duplicate: false,
+            all: false,
             api: api(server),
         }
     }
