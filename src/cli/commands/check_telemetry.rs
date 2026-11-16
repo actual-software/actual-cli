@@ -443,8 +443,8 @@ pub(super) mod tests {
                 Some("s1"),
                 &[
                     judged("signing-a1", Verdict::Conflicting),
-                    judged("rotation", Verdict::Conforming),
-                    judged("signing-a2", Verdict::Conforming),
+                    judged("rotation", Verdict::NotApplicable),
+                    judged("signing-a2", Verdict::Followed),
                     judged("legacy", Verdict::Conflicting),
                 ],
             );
@@ -478,7 +478,7 @@ pub(super) mod tests {
     /// The hooks deny on `requires_decision` as on `conflicting`, so it is a
     /// breach too, and a round with nothing blocking breaches nothing.
     #[test]
-    fn test_requires_decision_breaches_and_conforming_only_uses() {
+    fn test_requires_decision_breaches_and_a_passing_verdict_only_uses() {
         with_config(WITH_FILE, |home| {
             round(
                 home,
@@ -508,7 +508,7 @@ pub(super) mod tests {
                 home,
                 ArtifactKind::Diff,
                 Some("s2"),
-                &[judged("rotation", Verdict::Conforming)],
+                &[judged("rotation", Verdict::NotApplicable)],
             );
             assert_eq!(
                 reported("s2"),
@@ -566,7 +566,7 @@ pub(super) mod tests {
                 home,
                 ArtifactKind::Diff,
                 Some("s1"),
-                &[judged("signing-a2", Verdict::Conforming)],
+                &[judged("signing-a2", Verdict::Followed)],
             );
             assert_eq!(
                 reported("s1"),
@@ -584,7 +584,7 @@ pub(super) mod tests {
                 Some("s1"),
                 &[
                     judged("signing-a1", Verdict::Conflicting),
-                    judged("signing-a2", Verdict::Conforming),
+                    judged("signing-a2", Verdict::Followed),
                 ],
             );
             assert_eq!(
@@ -897,23 +897,23 @@ pub(super) mod tests {
     #[test]
     fn test_a_direct_run_warns_for_a_decision_and_for_partial_coverage() {
         let decision = judged("signing-a1", Verdict::RequiresDecision);
-        let conforming = judged("signing-a2", Verdict::Conforming);
+        let followed = judged("signing-a2", Verdict::Followed);
         let conflicting = judged("rotation", Verdict::Conflicting);
         for (verdicts, partial, expected) in [
-            (vec![conforming.clone()], false, vec![]),
+            (vec![followed.clone()], false, vec![]),
             (vec![conflicting], false, vec![]),
             (
-                vec![conforming.clone(), decision.clone()],
+                vec![followed.clone(), decision.clone()],
                 false,
                 vec![WarnReason::RequiresDecision],
             ),
             (
-                vec![conforming.clone()],
+                vec![followed.clone()],
                 true,
                 vec![WarnReason::PartialCoverage],
             ),
             (
-                vec![decision, conforming],
+                vec![decision, followed],
                 true,
                 vec![WarnReason::RequiresDecision, WarnReason::PartialCoverage],
             ),

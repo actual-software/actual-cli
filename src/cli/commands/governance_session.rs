@@ -131,7 +131,7 @@ pub struct LoopState {
     /// increment this — nothing was actually checked.
     pub rounds: u32,
     /// `"{doc_slug}::{rule_id}"` -> the digest of the artifact text that was
-    /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
+    /// last judged passing ([`crate::rules::check::Verdict::passes`]) for it (see
     /// [`content_digest`]). A later clearance for the same rule simply
     /// overwrites the entry — only the most recent judgment matters, so this
     /// holds one entry per rule ever cleared, not one per round.
