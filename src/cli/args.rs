@@ -818,7 +818,7 @@ pub enum CacheAction {
 /// Arguments for the `adr` command
 #[derive(Parser, Debug)]
 #[command(
-    after_help = "Local commands (new, check) need no sign-in. The others act on \
+    after_help = "Local commands (new, check, discover) need no sign-in. The others act on \
     your organization's decisions in Actual AI and need `actual login`. See docs/ADR_COMMANDS.md."
 )]
 pub struct AdrArgs {
@@ -834,6 +834,10 @@ pub enum AdrAction {
     /// Check decision files with Actual AI's save rules and list likely
     /// duplicates
     Check(AdrCheckArgs),
+
+    /// List the ADR files this repository keeps in the folders ADR tools use,
+    /// with each file's layout, title and status
+    Discover(AdrDiscoverArgs),
 
     /// List your organization's decisions
     List(AdrListArgs),
@@ -953,6 +957,18 @@ pub struct AdrCheckArgs {
     pub api: AdrApiOptions,
 }
 
+/// Arguments for `adr discover`
+#[derive(Parser, Debug)]
+pub struct AdrDiscoverArgs {
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    /// Print the list as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Arguments for `adr list`
 #[derive(Parser, Debug)]
 pub struct AdrListArgs {
@@ -990,7 +1006,7 @@ pub struct AdrShowArgs {
 
 /// Arguments for `adr create`
 #[derive(Parser, Debug)]
-#[command(group(clap::ArgGroup::new("source").required(true).args(["file", "title"])))]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["file", "title", "all"])))]
 pub struct AdrCreateArgs {
     /// A decision file to push, such as one `actual adr new` wrote. Its pair
     /// is renamed to the file names Actual AI's sync uses for the new
@@ -1018,6 +1034,11 @@ pub struct AdrCreateArgs {
     /// Send it even if the repository has decisions that look the same.
     #[arg(long)]
     pub allow_duplicate: bool,
+
+    /// Send every decision file under docs/adr/ that Actual AI doesn't have
+    /// yet, one at a time. Each keeps the status its header names.
+    #[arg(long, conflicts_with_all = ["title", "context", "policies", "status"])]
+    pub all: bool,
 
     #[command(flatten)]
     pub api: AdrApiOptions,

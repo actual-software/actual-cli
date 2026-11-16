@@ -1,10 +1,12 @@
 //! `actual adr`: write and check ADRs in this repository, and manage the
 //! organization's decisions in Actual AI.
 //!
-//! `new` and `check` work on local files and need no sign-in; the rest call
-//! the decision routes with the signed-in session's token.
+//! `new`, `check` and `discover` work on local files and need no sign-in;
+//! the rest call the decision routes with the signed-in session's token.
 
+mod batch;
 mod cloud;
+mod discover;
 mod local;
 mod telemetry;
 
@@ -30,8 +32,10 @@ pub fn exec(args: &AdrArgs) -> Result<(), ActualError> {
     match &args.action {
         AdrAction::New(a) => local::exec_new(a),
         AdrAction::Check(a) => local::exec_check(a),
+        AdrAction::Discover(a) => discover::exec_discover(a),
         AdrAction::List(a) => cloud::exec_list(a),
         AdrAction::Show(a) => cloud::exec_show(a),
+        AdrAction::Create(a) if a.all => batch::exec_create_all(a),
         AdrAction::Create(a) => cloud::exec_create(a),
         AdrAction::Update(a) => cloud::exec_update(a),
         AdrAction::Publish(a) => cloud::exec_lifecycle(a, LifecycleAction::Publish),
@@ -383,12 +387,15 @@ mod tests {
         for args in [
             vec!["new", "T", "--root", root],
             vec!["check", "--root", root, "--no-cloud"],
+            vec!["discover", "--root", root],
+            vec!["create", "--all"],
         ] {
             let mut argv = vec!["actual", "adr"];
             argv.extend(args.iter().copied());
             let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
             // `new` with no context or policy fails the save check; `check`
-            // of an empty repository passes.
+            // and `discover` of an empty repository pass, and `create --all`
+            // from the crate root finds no decision file to send.
             let _ = exec(&adr);
         }
     }

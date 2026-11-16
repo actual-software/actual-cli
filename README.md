@@ -61,7 +61,7 @@ These rules apply to every HTTP handler under `src/api/`.
 
 Write them by hand, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
 
-`actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. Signed in, `actual adr create` saves a decision to your Actual AI account, where `list`, `show`, `update`, `publish` and the other `actual adr` commands manage it. [ADR commands](docs/ADR_COMMANDS.md) covers each one.
+`actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. `actual adr discover` lists the ADRs a repository already keeps in the folders adr-tools, MADR, log4brains and Backstage use. Signed in, `actual adr create` saves a decision to your Actual AI account, and `create --all` saves every decision file it doesn't have yet; `list`, `show`, `update`, `publish` and the other `actual adr` commands manage them there. [ADR commands](docs/ADR_COMMANDS.md) covers each one.
 
 ## Checking plans and changes
 

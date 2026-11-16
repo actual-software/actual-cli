@@ -19,7 +19,7 @@ pub const RULES_DIR: &str = ".actual/rules";
 pub const MAX_FILE_SIZE: u64 = 1024 * 1024;
 
 /// How deep under `docs/adr/` discovery looks, `docs/adr/drafts/` included.
-const MAX_DEPTH: usize = 3;
+pub(crate) const MAX_DEPTH: usize = 3;
 
 /// A decision doc read from disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,7 +183,7 @@ pub fn discover(root: &Path) -> Discovered {
 /// Push every `.md` file under `dir` onto `out`, `depth` levels down. A
 /// directory that can't be listed contributes nothing; symlinks are not
 /// followed.
-fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+pub(crate) fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

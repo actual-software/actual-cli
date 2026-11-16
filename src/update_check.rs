@@ -195,6 +195,7 @@ pub fn applies_to(command: &Command) -> bool {
         Command::Adr(adr) => match &adr.action {
             AdrAction::New(args) => !args.json,
             AdrAction::Check(args) => !args.api.json,
+            AdrAction::Discover(args) => !args.json,
             AdrAction::List(args) => !args.api.json,
             AdrAction::Show(args) => !args.api.json,
             AdrAction::Create(args) => !args.api.json,
@@ -731,6 +732,7 @@ mod tests {
             &["session", "summary", "--session", "s1"],
             &["adr", "new", "T"],
             &["adr", "check"],
+            &["adr", "discover"],
             &["adr", "list"],
             &["adr", "show", "d1"],
             &["adr", "create", "--title", "T"],
@@ -767,6 +769,7 @@ mod tests {
             &["session", "summary", "--session", "s1", "--json"],
             &["adr", "new", "T", "--json"],
             &["adr", "check", "--json"],
+            &["adr", "discover", "--json"],
             &["adr", "list", "--json"],
             &["adr", "show", "d1", "--json"],
             &["adr", "create", "--title", "T", "--json"],

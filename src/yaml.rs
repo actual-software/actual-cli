@@ -40,6 +40,20 @@ pub(crate) fn from_repo_str<T: DeserializeOwned>(input: &str) -> Result<T, serde
     )
 }
 
+/// Parses each document of a multi-document YAML file from the repository
+/// under analysis, such as a Backstage `catalog-info.yaml`, with
+/// [`from_repo_str`]'s options.
+pub(crate) fn from_repo_multiple<T: DeserializeOwned>(
+    input: &str,
+) -> Result<Vec<T>, serde_saphyr::Error> {
+    serde_saphyr::from_multiple_with_options(
+        input,
+        serde_saphyr::options! {
+            with_snippet: false,
+        },
+    )
+}
+
 /// Serializes a value as YAML, keeping every scalar on its key's line.
 ///
 /// Block scalars are off because `actual config show` redacts secrets line by
@@ -89,6 +103,16 @@ mod tests {
                 "error quotes a secret: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_repo_files_read_every_document() {
+        let docs: Vec<std::collections::BTreeMap<String, u8>> =
+            from_repo_multiple("a: 1\n---\nb: 2\n").expect("parse");
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[1]["b"], 2);
+        let err = from_repo_multiple::<Vec<u8>>("a: [\n").unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]

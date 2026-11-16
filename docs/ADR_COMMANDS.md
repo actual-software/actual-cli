@@ -1,12 +1,14 @@
 # ADR commands
 
-`actual adr` writes and checks Architecture Decision Records (ADRs) in your repository, and manages your organization's decisions in Actual AI from the terminal. `new` and `check` work on local files and need no sign-in. The other ten commands act on the decisions in your Actual AI account and need `actual login`.
+`actual adr` writes and checks Architecture Decision Records (ADRs) in your repository, and manages your organization's decisions in Actual AI from the terminal. `new`, `check` and `discover` work on local files and need no sign-in. The other ten commands act on the decisions in your Actual AI account and need `actual login`.
 
 ```bash
 actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
 actual adr check                      # check every decision file under docs/adr/
+actual adr discover                   # every ADR file in the folders ADR tools use
 actual adr list                       # this repository's decisions in Actual AI
 actual adr create --file docs/adr/<file>.md
+actual adr create --all               # every decision file Actual AI doesn't have yet
 actual adr publish <id>
 ```
 
@@ -56,6 +58,35 @@ actual adr check --no-cloud            # compare only with the files in this rep
 
 Two decisions look the same when their titles share at least half their content words, or when any policy of one does with any policy of the other. Content words leave out common English words and the policy levels, and the comparison runs locally with no model.
 
+### Finding the ADRs a repository already has
+
+```bash
+actual adr discover
+actual adr discover --root ../web --json
+```
+
+`adr discover` lists the ADR files in the folders ADR tools use, with each file's layout, title and status, and the id its Actual header names. It only reads: nothing is written or sent, and it needs no sign-in.
+
+| Folder | Read for |
+|--------|----------|
+| `docs/adr/` | Actual, whose `adr new` and repository sync write there |
+| The folder `.adr-dir` names, else `doc/adr/` | adr-tools |
+| `docs/decisions/` | MADR |
+| Each `adrFolder` in `.log4brains.yml`, packages included | log4brains |
+| The `backstage.io/adr-location` annotation in `catalog-info.yaml` | Backstage |
+| `docs/adrs/`, `docs/architecture/decisions/`, `architecture/decisions/`, `adr/` and `decisions/` | Common folders |
+
+Each folder is read three levels deep. A file's layout is one of four:
+
+| Layout | How it's recognized |
+|--------|---------------------|
+| `actual` | Actual's header, as `adr new` and the sync write it |
+| `madr` | MADR's front matter, its Context and Problem Statement, Considered Options or Decision Outcome section, or a `- Status:` line as log4brains writes it |
+| `nygard` | Status, Context, Decision and Consequences sections, as adr-tools writes them |
+| `other` | None of the layouts above: any such file in a tool's folder, and in a common folder a numbered one such as `0007-use-postgres.md` |
+
+An index, a README or a template is listed apart, as not an ADR. A folder a configuration file names that leads outside the repository isn't read, nor is a URL in `catalog-info.yaml`, and the list says so. `adr new` writes a random local id into the header, so an id in the list doesn't mean Actual AI has the decision: `create --all` finds that out. Only files in Actual's format can be sent with `create`.
+
 ## Accepted or draft
 
 An accepted decision governs at once: `plan-check` and `impl-check` read its rules. A draft is read by no check until it's published.
@@ -102,6 +133,21 @@ actual adr create --title "Use Postgres for storage" --policy "MUST: Services st
 
 `--deciders` belongs to `adr new`: a decision saved from flags has no Deciders line, and a file keeps its own.
 
+### Saving every decision file
+
+```bash
+actual adr create --all
+```
+
+`create --all` sends each decision file under `docs/adr/` that Actual AI doesn't have yet, one at a time, through the steps `create --file` takes. It reads the repository's decisions once, then takes the files in path order:
+
+- A file whose id is already one of those decisions is skipped, so a second run sends nothing twice.
+- Each file keeps the status its header names. An accepted decision is saved, published and written into the repository by Actual AI's sync pull request, and a draft stays a draft, whoever is at the terminal; `--all` takes no `--status`. A status under which a decision doesn't govern, such as `superseded` or `rejected`, keeps the file from being sent.
+- A file that looks like a decision in Actual AI, or like one saved earlier in the run, is skipped by the rule in [Checking decision files](#checking-decision-files). `--allow-duplicate` sends it anyway.
+- A file that doesn't parse, or that Actual AI refuses, isn't saved, and the run goes on to the next.
+
+Each saved pair is renamed to the names the sync uses for its new id, as with `--file`, and a step after the save that fails leaves a draft and says how to finish. A line on standard error reports each file as the run reaches it, and the summary lists what was skipped or not saved, with the reason. A file takes up to four requests: the save, a read of the repository's decisions and a write when its header names a scope, and the publish when it's accepted. The run stops at the first save whose outcome is unknown (exit 3), and at the first error that isn't about the file, such as an expired sign-in, and names the files it never sent.
+
 ### Changing a decision
 
 ```bash
@@ -123,7 +169,7 @@ Every command takes `--json` and prints its result as JSON on standard output. E
 | Exit code | Meaning |
 |-----------|---------|
 | 0 | Done |
-| 1 | A decision failed a check: the local save check, a `--policy` or `--level` value that doesn't parse, a blank `update --title` or policy statement, Actual AI's refusal of its content on `create` or `update`, `adr check`, or `create`'s duplicate refusal |
+| 1 | A decision failed a check: the local save check, a `--policy` or `--level` value that doesn't parse, a blank `update --title` or policy statement, Actual AI's refusal of its content on `create` or `update`, `adr check`, `create`'s duplicate refusal, or a file `create --all` didn't save |
 | 2 | Signed out, a sign-in without access to the decision, no connected repository could be chosen, or a value refused while the command line is read, such as a blank `--reason` |
 | 3 | Actual AI couldn't be reached or answered with another error; no decision has the id given, or `update` names a policy the decision doesn't have; the decision can't take the change (such as publishing a decision that's already active); or a `create` whose outcome is unknown |
 | 5 | A local file couldn't be read or written |
