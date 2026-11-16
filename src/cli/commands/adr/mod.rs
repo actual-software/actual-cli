@@ -6,6 +6,7 @@
 
 mod cloud;
 mod local;
+mod telemetry;
 
 use std::io::IsTerminal;
 use std::path::Path;
