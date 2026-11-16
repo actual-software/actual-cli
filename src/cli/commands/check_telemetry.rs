@@ -121,10 +121,7 @@ pub(super) fn report(
     warn_reasons: &[WarnReason],
     records: Vec<otlp::LogRecord>,
 ) {
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
-        return;
-    };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
         return;
     };
     let origin = otlp::Origin::resolve();
@@ -152,12 +149,12 @@ pub(super) fn report(
         &warn_reasons,
         action.started.instant.elapsed(),
     ));
-    if action.hook {
+    if action.hook && destination.sends() {
         if let Some(session_id) = action.session_id.filter(|id| !id.is_empty()) {
             super::session_end::record_check(session_id, decision == PlanGovernanceDecision::Block);
         }
     }
-    brief_telemetry::dispatch(&outputs, all);
+    destination.deliver(all);
 }
 
 /// [`report`] for a hook round, with the round's ADR records.
@@ -189,12 +186,9 @@ pub(super) fn adr_records(
     let Some(session_id) = run.session_id.filter(|id| !id.is_empty()) else {
         return Vec::new();
     };
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some(destination) = brief_telemetry::Destination::resolve_quietly() else {
         return Vec::new();
     };
-    if otlp::Outputs::resolve(&config).is_none() {
-        return Vec::new();
-    }
     let used = adrs_of(headers, verdicts.iter());
     if used.is_empty() {
         return Vec::new();
@@ -206,8 +200,13 @@ pub(super) fn adr_records(
         rules_dir: &rules_dir,
     };
     let stage = stage(run.kind);
+    let report = if destination.sends() {
+        brief_ledger::report_checks
+    } else {
+        brief_ledger::unreported_checks
+    };
     let (new_used, new_breached) = brief_ledger::ledger_dir()
-        .map(|dir| brief_ledger::report_checks(&dir, &key, stage, &keys(&used), &keys(&breached)))
+        .map(|dir| report(&dir, &key, stage, &keys(&used), &keys(&breached)))
         .unwrap_or_default();
     if new_used.is_empty() && new_breached.is_empty() {
         return Vec::new();
@@ -351,6 +350,8 @@ pub(super) mod tests {
             "ACTUAL_OTLP_LOGS_ENDPOINT",
             "ACTUAL_OTLP_FILE",
             "TRACEPARENT",
+            crate::telemetry::debug::ENV,
+            crate::telemetry::debug::ID_ENV,
         ]
         .into_iter()
         .map(EnvGuard::remove)
@@ -1034,5 +1035,22 @@ pub(super) mod tests {
             report_one_run_under(crate::testutil::LOADABLE_TELEMETRY_ON),
             2
         );
+    }
+
+    /// Telemetry off in debug mode: a round builds its ADR records against
+    /// the ledger without writing it, so the next round builds them again.
+    #[test]
+    fn test_debug_mode_with_telemetry_off_builds_adr_records_without_the_ledger_write() {
+        let off = "telemetry:\n  enabled: false\n  otlp_file: /tmp/actual-otlp-check-test.jsonl\n";
+        with_config(off, |home| {
+            let _debug = EnvGuard::set(crate::telemetry::debug::ENV, "1");
+            let blocking = [judged("signing-a1", Verdict::Conflicting)];
+
+            round(home, ArtifactKind::Plan, Some("s1"), &blocking);
+            assert_eq!(reported("s1").len(), 2);
+            round(home, ArtifactKind::Plan, Some("s1"), &blocking);
+            assert_eq!(reported("s1").len(), 2);
+            assert!(!home.join("brief-ledger").exists());
+        });
     }
 }

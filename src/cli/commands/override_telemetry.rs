@@ -61,10 +61,7 @@ pub(super) fn report(
     reason_code: Option<OverrideReasonCode>,
     reason: Option<&str>,
 ) {
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
-        return;
-    };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
         return;
     };
     let documents = crate::rules::read_rule_sources_in(rules_dir)
@@ -101,7 +98,7 @@ pub(super) fn report(
             )
         })
         .collect();
-    brief_telemetry::dispatch(&outputs, records);
+    destination.deliver(records);
 }
 
 /// The gates, planning first, an override record names.

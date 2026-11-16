@@ -676,6 +676,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, plan or diff text + rule text for `plan-check`, `impl-check` and `rules select`, and, for `actual models`, a request for the model list that holds only your API key | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`, and for `actual models`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
 | The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, check events and session-end events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, check events and session-end events, one OTLP/JSON request per line | Local file, readable only by the owner |
+| The telemetry debug log, only with `ACTUAL_TELEMETRY_DEBUG=1` | Every telemetry event the CLI queues, sends or holds back, as it goes out, plus your account and organization on signed-in runs; never a token. See "Seeing what telemetry sends" below | Local file, readable only by the owner |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject
 non-HTTPS API URLs.
@@ -725,6 +726,22 @@ export ACTUAL_NO_TELEMETRY=1
 
 If you build from source, `cargo build --release --no-default-features` leaves
 telemetry out of the binary.
+
+## Seeing what telemetry sends
+
+Set `ACTUAL_TELEMETRY_DEBUG=1` and each run that records an event prints one line on stderr:
+
+```
+telemetry debug: 7f3c2a91 -> ~/.actualai/actual/telemetry-debug/7f3c2a91.jsonl
+```
+
+The file holds one JSON line for each stage of each event: `queued` when it enters a spool, then `sent`, `refused` (with the status), `retained` for a later run, or `dropped` when it reached nobody. `event` is the record, batch or request body in the form the endpoint receives, with OTLP in its JSON encoding. A coding-agent hook logs under its session id, so one session's hooks share a file. The Actual plugin's gate hooks show the line in the session; its turn-start and session-end hooks log without showing it.
+
+Signed in, a line whose event goes out tied to your account carries `local_only`, naming the account and organization. That field is written only to this file. A request that carried your sign-in's token says `"authorization": "bearer (stored sign-in)"` and never holds the token. Signed out, the log holds the pseudonymous form that goes out.
+
+With telemetry off, the CLI still builds each event in the form your sign-in would send and logs it as `not_sent` with `reason: telemetry_off`. Nothing is spooled or sent, and no telemetry id or session state is written. A config file that won't load sends nothing, and the log says so with `reason: config_unreadable` and no event.
+
+The directory is readable only by you (`0700`, files `0600`). Nothing deletes the logs, so remove `~/.actualai/actual/telemetry-debug/` when you're done.
 
 ## Data retention
 

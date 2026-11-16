@@ -39,6 +39,43 @@ pub fn load_if_enabled() -> Option<Config> {
         .filter(|config| !is_disabled(config))
 }
 
+/// What a sender may do with its events this run.
+#[derive(Debug)]
+pub(crate) enum Gate {
+    /// Telemetry is on: send under this config.
+    Send(Config),
+    /// Telemetry is off and debug mode is on: build the events under this
+    /// config and log them as not sent, and spool, send or store nothing.
+    DebugOnly(Config),
+    /// Send nothing and build nothing.
+    Off,
+}
+
+/// [`load_if_enabled`]'s answer, with debug mode's exception: when telemetry
+/// is off and `ACTUAL_TELEMETRY_DEBUG` is on, [`Gate::DebugOnly`]. A config
+/// file that won't load is still [`Gate::Off`], and in debug mode `stream`'s
+/// sender logs a `not_sent` line saying so.
+pub(crate) fn gate(stream: crate::telemetry::debug::Stream) -> Gate {
+    let gate = quiet_gate();
+    if matches!(gate, Gate::Off)
+        && crate::telemetry::debug::enabled()
+        && crate::config::paths::load().is_err()
+    {
+        crate::telemetry::debug::config_unreadable(stream);
+    }
+    gate
+}
+
+/// [`gate`] without the `config_unreadable` line, for a step that runs
+/// within a sender whose own [`gate`] logs it.
+pub(crate) fn quiet_gate() -> Gate {
+    match crate::config::paths::load() {
+        Ok(config) if !is_disabled(&config) => Gate::Send(config),
+        Ok(config) if crate::telemetry::debug::enabled() => Gate::DebugOnly(config),
+        _ => Gate::Off,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +131,66 @@ mod tests {
         let opted_out = "telemetry:\n  enabled: false\nbatch_size: 10\n";
         assert!(load_if_enabled_with(opted_out, None).is_none());
         assert!(load_if_enabled_with(LOADABLE_TELEMETRY_ON, Some("1")).is_none());
+    }
+
+    /// [`gate`]'s answer with `contents` in the config file, `no_telemetry`
+    /// as `ACTUAL_NO_TELEMETRY` and `debug` as `ACTUAL_TELEMETRY_DEBUG`, and
+    /// the debug log's lines.
+    fn gate_with(
+        contents: &str,
+        no_telemetry: Option<&str>,
+        debug: bool,
+    ) -> (Gate, Vec<serde_json::Value>) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _guards = crate::telemetry::debug::tests::debug_on(home.path(), "gate");
+        let _debug = (!debug).then(|| EnvGuard::remove(crate::telemetry::debug::ENV));
+        let _env = match no_telemetry {
+            Some(value) => EnvGuard::set("ACTUAL_NO_TELEMETRY", value),
+            None => EnvGuard::remove("ACTUAL_NO_TELEMETRY"),
+        };
+        std::fs::write(home.path().join("config.yaml"), contents).unwrap();
+        let gate = gate(crate::telemetry::debug::Stream::Otlp);
+        (gate, crate::telemetry::debug::tests::logged("gate"))
+    }
+
+    #[test]
+    fn test_gate_sends_when_telemetry_is_on_in_either_mode() {
+        for debug in [false, true] {
+            let (gate, lines) = gate_with(LOADABLE_TELEMETRY_ON, None, debug);
+            assert!(matches!(gate, Gate::Send(c) if c.batch_size == Some(10)));
+            assert!(lines.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_gate_is_debug_only_when_telemetry_is_off_in_debug_mode() {
+        let opted_out = "telemetry:\n  enabled: false\nbatch_size: 10\n";
+        assert!(matches!(gate_with(opted_out, None, false).0, Gate::Off));
+        assert!(matches!(
+            gate_with(opted_out, None, true).0,
+            Gate::DebugOnly(c) if c.batch_size == Some(10)
+        ));
+        assert!(matches!(
+            gate_with(LOADABLE_TELEMETRY_ON, Some("1"), true).0,
+            Gate::DebugOnly(_)
+        ));
+    }
+
+    /// An unloadable config still sends nothing, debug mode or not, and debug
+    /// mode logs one line with no event.
+    #[test]
+    fn test_gate_is_off_for_an_unloadable_config_and_debug_mode_says_why() {
+        let (gate, lines) = gate_with(UNLOADABLE_TELEMETRY_OPT_OUT, None, false);
+        assert!(matches!(gate, Gate::Off));
+        assert!(lines.is_empty());
+
+        let (gate, lines) = gate_with(UNLOADABLE_TELEMETRY_OPT_OUT, None, true);
+        assert!(matches!(gate, Gate::Off));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["stage"], "not_sent");
+        assert_eq!(lines[0]["reason"], "config_unreadable");
+        assert!(lines[0].get("event").is_none());
     }
 
     #[test]

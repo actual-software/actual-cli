@@ -852,12 +852,13 @@ fn spool_governance_events(
 /// `violations` — never a rule's span, statement, or reason text; see
 /// `PRIVACY.md`.
 ///
-/// Checks `opt_out::load_if_enabled` first, before any repo-identity hashing or
+/// Checks `plan_governance::gate` first, before any repo-identity hashing or
 /// `distinct_id()` — an opted-out user must not have a persistent telemetry
 /// id written to disk (or git subprocesses spawned) just because a check
 /// ran; the uploader's own opt-out check is too late for that, since by
 /// then the id file already exists. See `PRIVACY.md`'s "How to opt out of
-/// telemetry."
+/// telemetry." Telemetry debug mode with telemetry off builds the events with
+/// no id written and logs them as not sent.
 #[cfg(feature = "telemetry")]
 pub(super) fn send_governance_events(
     command: &str,
@@ -868,16 +869,16 @@ pub(super) fn send_governance_events(
     violations: &[(&str, &str, crate::api::types::PlanGovernanceDecision)],
     rounds: Option<(u32, u32)>,
 ) {
-    use crate::telemetry::plan_governance::EventContext;
+    use crate::telemetry::plan_governance::{self, EventContext};
 
-    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some((cfg, send)) = plan_governance::gate() else {
         return;
     };
 
     let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
     let identity = identity_envelope(&cfg, &repo_url);
-    let mut ctx = EventContext::new(command)
+    let mut ctx = EventContext::with_distinct_id(command, plan_governance::distinct_id_for(send))
         .with_repo_hashes(repo_hash, repo_url_hash)
         .with_identity(identity);
     if let Some((round_index, round_total)) = rounds {
@@ -899,7 +900,11 @@ pub(super) fn send_governance_events(
         events.push(ctx.violation_event(rule_id, rule_source, *v_decision));
     }
 
-    dispatch_governance_events(events);
+    if send {
+        dispatch_governance_events(events);
+    } else {
+        plan_governance::hold_back(&events);
+    }
 }
 
 /// Emit one `plan_governance_rule_override` event per rule an
@@ -912,7 +917,7 @@ pub(super) fn send_governance_events(
 /// `governance_session::key`), validated against the rule corpus by
 /// [`validate_override_rules`] before this is ever called.
 ///
-/// Checks `opt_out::load_if_enabled` first, before any repo-identity hashing or
+/// Checks `plan_governance::gate` first, before any repo-identity hashing or
 /// `distinct_id()` — see `send_governance_events`'s doc comment for why
 /// that ordering matters.
 #[cfg(feature = "telemetry")]
@@ -927,9 +932,9 @@ fn send_override_events(
         PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
         PlanGovernanceEventProperties,
     };
-    use crate::telemetry::plan_governance::{distinct_id, reason_summary};
+    use crate::telemetry::plan_governance::{self, reason_summary};
 
-    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some((cfg, send)) = plan_governance::gate() else {
         return;
     };
 
@@ -937,7 +942,7 @@ fn send_override_events(
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
     // Same hashed identity/timestamp envelope every other governance event carries.
     let identity = identity_envelope(&cfg, &repo_url);
-    let id = distinct_id();
+    let id = plan_governance::distinct_id_for(send);
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
     // The reason is customer free text: events carry only its length bucket
@@ -979,7 +984,11 @@ fn send_override_events(
         })
         .collect();
 
-    dispatch_governance_events(events);
+    if send {
+        dispatch_governance_events(events);
+    } else {
+        plan_governance::hold_back(&events);
+    }
 }
 
 /// `--claude-hook`-mode wrapper around [`send_governance_events`]: every
@@ -5943,5 +5952,72 @@ pub(crate) mod tests {
             override_events_under(crate::testutil::LOADABLE_TELEMETRY_ON),
             (1, true)
         );
+    }
+
+    /// Telemetry off in debug mode: the check's and the override's events
+    /// are built and logged as not sent, none is handed to the spool, and no
+    /// telemetry id is written.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_debug_mode_with_telemetry_off_logs_governance_events_and_writes_no_id() {
+        use crate::telemetry::debug::{self, tests::logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::set(debug::ID_ENV, "governance-off");
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let events = with_captured_plan_governance_events(|| {
+            send_governance_events(
+                "plan-check",
+                repo.path(),
+                std::time::Instant::now(),
+                crate::api::types::PlanGovernanceDecision::Allow,
+                0,
+                &[],
+                None,
+            );
+        });
+        let args = PlanCheckOverrideArgs {
+            session: Some("sess-debug-1".to_string()),
+            rules: vec![governance_session::key("doc", "R-A-001")],
+            reason: Some("reviewed and accepted".to_string()),
+            reason_code: None,
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+            claude_hook: false,
+            via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
+        };
+        let override_events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+
+        assert!(events.is_empty());
+        assert!(override_events.is_empty());
+        assert!(!home.path().join("telemetry-id").exists());
+        let lines: Vec<_> = logged("governance-off")
+            .into_iter()
+            .filter(|line| line["stream"] == "governance")
+            .collect();
+        let names: Vec<&str> = lines
+            .iter()
+            .map(|line| line["event"]["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "plan_governance_check_started",
+                "plan_governance_check_completed",
+                "plan_governance_rule_override"
+            ]
+        );
+        for line in &lines {
+            assert_eq!(line["stage"], "not_sent");
+            assert_eq!(line["reason"], "telemetry_off");
+            assert!(uuid::Uuid::parse_str(line["event"]["distinct_id"].as_str().unwrap()).is_ok());
+        }
     }
 }
