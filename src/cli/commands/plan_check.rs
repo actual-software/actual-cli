@@ -153,7 +153,6 @@ use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
 use crate::cli::commands::{rules_brief, rules_scope};
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-#[cfg(feature = "telemetry")]
 use crate::rules::check::{ArtifactKind, CheckedRule};
 use crate::rules::scope::{self, Query};
 
@@ -1049,7 +1048,7 @@ mod tests {
                 serde_json::json!({
                     "doc_slug": "cross-cutting-many-abcd",
                     "rule_id": format!("R-X-{i:04}"),
-                    "verdict": "conforming",
+                    "verdict": "not_applicable",
                     "span": "",
                     "reason": "not touched",
                 })
@@ -1605,7 +1604,7 @@ mod tests {
             verdicts.push(serde_json::json!({
                 "doc_slug": "cross-cutting-many-abcd",
                 "rule_id": format!("R-X-{i:04}"),
-                "verdict": "conforming",
+                "verdict": "not_applicable",
                 "span": "",
                 "reason": "not touched",
             }));
@@ -1678,7 +1677,7 @@ mod tests {
                 serde_json::json!({
                     "doc_slug": "cross-cutting-many-abcd",
                     "rule_id": format!("R-X-{i:04}"),
-                    "verdict": "conforming",
+                    "verdict": "not_applicable",
                     "span": "",
                     "reason": "not touched",
                 })
