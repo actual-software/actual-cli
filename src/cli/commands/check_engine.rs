@@ -1383,6 +1383,8 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
         return None;
     }
     let session_id = env.session_id.filter(|s| !s.is_empty())?;
+    #[cfg(feature = "telemetry")]
+    crate::telemetry::debug::use_session(&session_id);
     let root = repo_root(args.repo.as_ref());
     let rules_dir = args
         .rules_dir
@@ -4677,6 +4679,47 @@ pub(crate) mod tests {
         );
         let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"source\":\"session_dialog\""), "{log}");
+    }
+
+    /// An override typed in a telemetry debug session is logged in that
+    /// session's file, beside the gates' events.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_override_hook_in_debug_mode_logs_under_the_session_id() {
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _fresh = FreshId::new();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::remove(debug::ID_ENV);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let k = governance_session::key("doc", "R-A-001");
+        let mut session = governance_session::load("sess-debug-o1", &rules_dir);
+        session.plan.record_denial(&k);
+        governance_session::store("sess-debug-o1", &rules_dir, &session);
+
+        exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env(
+                "UserPromptSubmit",
+                "sess-debug-o1",
+                "/actual-cli:override all",
+            ),
+        )
+        .expect("hook output");
+
+        let names: Vec<String> = logged("sess-debug-o1")
+            .iter()
+            .filter(|line| line["stream"] == "governance")
+            .map(|line| line["event"]["event"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["plan_governance_rule_override"]);
     }
 
     /// The dialog's pick rides as the first word after the target: it is

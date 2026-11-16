@@ -312,8 +312,12 @@ mod tests {
     /// session's own id, and no session state is written.
     #[test]
     fn debug_mode_with_telemetry_off_logs_the_end_and_writes_no_state() {
-        use crate::telemetry::debug::{self, tests::logged};
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _fresh = FreshId::new();
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _config = EnvGuard::remove("ACTUAL_CONFIG");

@@ -442,6 +442,23 @@ pub(crate) mod tests {
         ]
     }
 
+    /// Clears the id this process chose, now and on drop, so a test of
+    /// [`use_session`] names its own file whatever test ran before it.
+    pub(crate) struct FreshId;
+
+    impl FreshId {
+        pub(crate) fn new() -> Self {
+            *ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            Self
+        }
+    }
+
+    impl Drop for FreshId {
+        fn drop(&mut self) {
+            *ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
     /// The lines logged under `id`, parsed.
     pub(crate) fn logged(id: &str) -> Vec<Value> {
         std::fs::read_to_string(path_for(id).unwrap())
