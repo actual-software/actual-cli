@@ -211,6 +211,18 @@ impl Verdict {
         }
     }
 
+    /// How much the verdict says the rule bore on the change, weakest first:
+    /// not applicable, followed, requires a decision, conflicting. An ADR's
+    /// verdict in a round is the strongest of its rules'.
+    pub fn strength(self) -> u8 {
+        match self {
+            Verdict::NotApplicable => 0,
+            Verdict::Followed => 1,
+            Verdict::RequiresDecision => 2,
+            Verdict::Conflicting => 3,
+        }
+    }
+
     /// True for the one verdict that may ever gate the tool call.
     pub fn blocks(self) -> bool {
         matches!(self, Verdict::Conflicting)

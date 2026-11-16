@@ -513,7 +513,8 @@ impl Origin {
     }
 
     /// The [`ADR_DETECTED`] record for one logical ADR a gate judged rules of,
-    /// with that gate, `planning` or `implementation`, as how it was detected.
+    /// with that gate, `planning` or `implementation`, as how it was detected,
+    /// and the strongest verdict the round gave any of its rules.
     pub(crate) fn used(
         &self,
         session_id: &str,
@@ -521,11 +522,13 @@ impl Origin {
         adr_ref: &str,
         adr_ids: &[String],
         gate: &str,
+        verdict: &str,
     ) -> LogRecord {
         let mut record = self.adr_record(ADR_DETECTED, session_id, agent_id, adr_ref, adr_ids);
-        record
-            .attributes
-            .push(text("actual.detection.method", Some(gate)));
+        record.attributes.extend([
+            text("actual.detection.method", Some(gate)),
+            text("actual.adr.verdict", Some(verdict)),
+        ]);
         record
     }
 
@@ -1633,10 +1636,18 @@ mod tests {
             "grp-1",
             &ids(&["adr-1", "adr-2"]),
             "planning",
+            "not_applicable",
         ));
         assert_eq!(used["eventName"], ADR_DETECTED);
         assert_eq!(used["severityNumber"], 9);
         let mut used = shared(&used);
+        assert_eq!(
+            used.pop().unwrap(),
+            (
+                "actual.adr.verdict".to_string(),
+                serde_json::json!({"stringValue": "not_applicable"})
+            )
+        );
         assert_eq!(
             used.pop().unwrap(),
             (
@@ -1934,7 +1945,14 @@ mod tests {
         vec![
             origin.context_added("session-1", None, "grp-1", &ids(&["adr-1", "adr-2"])),
             origin.context_added("session-1", Some("agent-2"), "adr-3", &ids(&["adr-3"])),
-            origin.used("session-1", None, "grp-1", &ids(&["adr-1"]), "planning"),
+            origin.used(
+                "session-1",
+                None,
+                "grp-1",
+                &ids(&["adr-1"]),
+                "planning",
+                "followed",
+            ),
             origin.breached(
                 "session-1",
                 Some("agent-2"),
@@ -2039,6 +2057,11 @@ mod tests {
         let Some(common::any_value::Value::ArrayValue(ids)) = ids else { panic!("actual.adr.ids is not a list: {ids:?}") };
         let ids: Vec<&str> = ids.values.iter().map(|id| string(Some(id))).collect();
         assert_eq!(ids, ["adr-1", "adr-2"]);
+
+        let used = &request.resource_logs[0].scope_logs[0].log_records[2];
+        let verdict = used.attributes.last().unwrap();
+        assert_eq!(verdict.key, "actual.adr.verdict");
+        assert_eq!(string(verdict.value.as_ref()), "followed");
     }
 
     /// A record with no trace context goes out with no ids and no flags.

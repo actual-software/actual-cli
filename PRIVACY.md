@@ -277,7 +277,9 @@ The CLI sends OpenTelemetry log events about ADRs on four occasions:
 - `actual.adr.detected`, with `actual.detection.method` set to the gate,
   `planning` or `implementation`, when `plan-check --claude-hook` or
   `impl-check --claude-hook` judges any of an ADR's rules, whatever the
-  verdict. It counts an ADR once per session at each gate.
+  verdict, with `actual.adr.verdict` set to the strongest verdict the check
+  gave any of those rules. It counts an ADR once per session at each gate, and
+  again when a later check at that gate gives it a stronger verdict.
 - `actual.gate.evaluated`, with `actual.gate.outcome` set to `breached` and
   `actual.gate.type` naming the gate, when either gate blocks on one of an
   ADR's rules with a `conflicting` or `requires_decision` verdict, counted the
@@ -375,7 +377,8 @@ included.
 
 Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
-on `actual.adr.detected` events, `actual.gate.outcome` on
+on `actual.adr.detected` events, plus `actual.adr.verdict` on those from a
+gate, `actual.gate.outcome` on
 `actual.gate.evaluated` events, `actual.gate.type` on breach events and
 `actual.gate.denied_types`, `actual.override.blocking_types`,
 `actual.override.source` and `actual.override.reason` on override events, plus
@@ -410,6 +413,7 @@ has only the classes its fields carry below:
 | `actual.adr.ref` | The ADR: its group id from its rule files' header, or its one file's `adr_id` when they name no group | first-party identity-linked |
 | `actual.adr.ids` | The `adr_id` of each of the ADR's rule files with at least one rule in the brief that added it; on an event from a gate, with at least one rule the gate judged, or for a breach blocked on; on an override event, with at least one rule the override named | first-party identity-linked |
 | `actual.detection.method` | How the ADR was detected: `context` when a brief added it to an agent's context, or the gate that judged its rules, `planning` for `plan-check` and `implementation` for `impl-check` | anonymous |
+| `actual.adr.verdict` | The strongest verdict a gate's check gave any of the ADR's rules, strongest first: `conflicting`, `requires_decision`, `followed` (the change falls within the rule's domain and meets it) or `not_applicable`. Only the word is sent; the line a `followed` verdict quotes stays on your machine | anonymous |
 | `actual.gate.outcome` | What the evaluation came to: `breached` when a gate blocked on the ADR's rules, `overridden` when a human overrode them | anonymous |
 | `actual.gate.type` | The gate that blocked on the rules: `planning` for `plan-check`, `implementation` for `impl-check` | anonymous |
 | `actual.gate.denied_types` | Which gates, `planning` and `implementation`, had denied any of the overridden rules at any point in the session, and an empty list when none had: overridden before any denial | anonymous |
