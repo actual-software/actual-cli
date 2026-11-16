@@ -735,7 +735,7 @@ Set `ACTUAL_TELEMETRY_DEBUG=1` and each run that records an event prints one lin
 telemetry debug: 7f3c2a91 -> ~/.actualai/actual/telemetry-debug/7f3c2a91.jsonl
 ```
 
-The file holds one JSON line for each stage of each event: `queued` when it enters a spool, then `sent`, `refused` (with the status), `retained` for a later run, or `dropped` when it reached nobody. `event` is the record, batch or request body in the form the endpoint receives, with OTLP in its JSON encoding. A coding-agent hook logs under its session id, so one session's hooks share a file. The Actual plugin's gate hooks show the line in the session; its turn-start and session-end hooks log without showing it.
+The file holds one JSON line for each stage of each event: `queued` when it enters a spool, then `sent`, `refused` (with the status), `retained` for a later run, or `dropped` when it reached nobody. `event` is the record, batch or request body in the form the endpoint receives, with OTLP in its JSON encoding. A coding-agent hook logs under its session id, so one session's hooks share a file. The Actual plugin's gate hooks show the line in the session; its session-end hook and `/actual-cli:override` log without showing it.
 
 Signed in, a line whose event goes out tied to your account carries `local_only`, naming the account and organization. That field is written only to this file. A request that carried your sign-in's token says `"authorization": "bearer (stored sign-in)"` and never holds the token. Signed out, the log holds the pseudonymous form that goes out.
 
