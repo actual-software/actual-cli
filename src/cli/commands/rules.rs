@@ -31,6 +31,7 @@ pub fn exec(args: &RulesArgs) -> Result<(), ActualError> {
         RulesAction::Select(select) => rules_scope::exec_select(select),
         RulesAction::Eval(eval) => rules_scope::exec_eval(eval),
         RulesAction::Brief(brief) => rules_brief::exec(brief),
+        RulesAction::ReportUse(report) => super::adr_report::exec(report),
     }
 }
 

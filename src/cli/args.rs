@@ -1107,6 +1107,50 @@ pub enum RulesAction {
 
     /// The rules governing one file, for a Claude Code hook
     Brief(RulesBriefArgs),
+
+    /// Answer the Stop hook's question: which of this session's ADRs shaped
+    /// this turn's change, and where
+    ReportUse(RulesReportUseArgs),
+}
+
+/// Arguments for `rules report-use`
+///
+/// The coding agent runs this once per turn, when the Stop hook asks it which
+/// ADRs it used. Each claim names an ADR and a line: one the turn added or
+/// changed, or one of the plan `plan-check` judged this turn. The answer and
+/// the lines it names stay on this machine; the CLI checks each claim and
+/// sends only whether it held.
+#[derive(Parser, Debug)]
+pub struct RulesReportUseArgs {
+    /// The Claude Code session the question was asked in.
+    #[arg(long, value_name = "ID")]
+    pub claude_session: String,
+
+    /// The turn token the question named.
+    #[arg(long, value_name = "TOKEN")]
+    pub turn: String,
+
+    /// An ADR and the line it shaped, as `<adr>=<file>:<line>`. Repeat for
+    /// each ADR.
+    #[arg(long = "claim", value_name = "ADR=FILE:LINE")]
+    pub claims: Vec<String>,
+
+    /// An ADR and the line of this turn's plan it shaped, as `<adr>=<line>`.
+    #[arg(long = "plan-claim", value_name = "ADR=LINE")]
+    pub plan_claims: Vec<String>,
+
+    /// No ADR shaped this turn's change. With no claim and no `--none`, the
+    /// claims are read as JSON from stdin.
+    #[arg(long, conflicts_with_all = ["claims", "plan_claims"])]
+    pub none: bool,
+
+    /// Repository root. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Rule directory, when it is not `<repo>/.actual/rules`.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: Option<std::path::PathBuf>,
 }
 
 /// Arguments for `rules brief`

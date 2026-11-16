@@ -393,6 +393,9 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         .map(|id| governance_session::load(id, &rules_dir))
         .unwrap_or_default();
     let plan_digest = governance_session::content_digest(&plan_text);
+    if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+        super::adr_report::keep_plan(session_id, &rules_dir, &plan_text);
+    }
 
     // Noted before the judge runs, so a judge that outlasts the hook's
     // timeout cannot lose them.
@@ -434,6 +437,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             root: &root,
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
+            ask: None,
             #[cfg(feature = "telemetry")]
             started,
         },

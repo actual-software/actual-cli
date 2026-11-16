@@ -333,7 +333,7 @@ fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
 /// [`working_tree_diff`] against `base` instead of `HEAD`. The throwaway
 /// index still starts from `HEAD`, so a file committed since `base` is
 /// tracked there and shows up as added, and one deleted since as deleted.
-fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError> {
+pub(super) fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError> {
     let tmp = tempfile::tempdir().map_err(ActualError::IoError)?;
     let index = tmp.path().join("index");
     for (args, what) in [
@@ -502,6 +502,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         return;
     }
     let diff_digest = governance_session::content_digest(&diff_text);
+    let ask = super::adr_report::prepare(session_id, &session, &root, &rules_dir, &diff_digest);
 
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
@@ -538,6 +539,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
             root: &root,
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
+            ask: ask.as_ref(),
             #[cfg(feature = "telemetry")]
             started,
         },
@@ -570,6 +572,7 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
     // event, and storing a copy loaded before it would drop the override.
     governance_session::update(session_id, &rules_dir, |session| {
         session.turn_start = turn_start;
+        session.turn = session.turn.saturating_add(1);
     });
 }
 
@@ -580,7 +583,7 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
 /// commit is no longer behind `HEAD`, and diffing from it would hand the
 /// judge commits this turn may not have written, such as everything a
 /// `git pull --rebase` brought in.
-fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
+pub(super) fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
     let start = session.turn_start.as_ref()?;
     let usable = start.root == checkout_root(root)
         && is_object_id(&start.head)
@@ -596,7 +599,7 @@ fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
 /// runs from whatever directory the session is in, so the recorded turn and
 /// the check that ends it can see different paths for one checkout: a
 /// subdirectory, a symlink, a relative `--repo`. Both sides compare this.
-fn checkout_root(root: &Path) -> PathBuf {
+pub(super) fn checkout_root(root: &Path) -> PathBuf {
     git_command(root, None)
         .args(["rev-parse", "--show-toplevel"])
         .output()
@@ -2162,6 +2165,209 @@ mod tests {
         let session = governance_session::load("sess-turn-clean", &rules);
         assert!(session.turn_start.is_some());
         assert_eq!(session.diff.rounds, 0);
+    }
+
+    // ── the ADR question (agent-reported ADR use) ──────────────────────
+
+    /// A repo whose one rule file has a v2 header and is briefed in
+    /// `session`, a fake judge answering `verdict` for both rules that counts
+    /// its calls in the returned file, and args pointing at both.
+    #[cfg(unix)]
+    fn briefed_repo(
+        session: &str,
+        verdict: &str,
+    ) -> (TempDir, TempDir, PathBuf, ImplCheckArgs, EnvGuard) {
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("cross-cutting-token-signing-1c57.md"),
+            super::super::check_telemetry::tests::with_header("adr-sign", None, OAUTH_DOC),
+        )
+        .unwrap();
+        let index = crate::rules::scope::resolve_in(&rules, repo.path(), false)
+            .unwrap()
+            .index;
+        let ledger_rules = super::super::rules_brief::resolve(&rules);
+        crate::cli::commands::brief_ledger::record(
+            &crate::cli::commands::brief_ledger::ledger_dir().unwrap(),
+            &crate::cli::commands::brief_ledger::LedgerKey {
+                session_id: session,
+                rules_dir: &ledger_rules,
+            },
+            index
+                .documents
+                .iter()
+                .map(|document| document.decision_key())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str),
+        );
+        let bin = tempdir().unwrap();
+        let calls = bin.path().join("calls");
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": verdict, "span": "", "reason": "judged"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "judged"},
+        ]));
+        let script = fake_claude(bin.path(), &response);
+        let body = std::fs::read_to_string(&script).unwrap();
+        let counted = body.replacen(
+            "fi\n",
+            &format!("fi\necho call >> '{}'\n", calls.display()),
+            1,
+        );
+        std::fs::write(&script, counted).unwrap();
+        let binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        (repo, bin, calls, args, binary)
+    }
+
+    fn judge_calls(calls: &StdPath) -> usize {
+        std::fs::read_to_string(calls).map_or(0, |text| text.lines().count())
+    }
+
+    fn stop(args: &ImplCheckArgs, session: &str) -> Vec<serde_json::Value> {
+        super::super::check_engine::tests::take_emitted();
+        exec_hook_with(
+            args,
+            &serde_json::json!({"session_id": session, "hook_event_name": "Stop"}).to_string(),
+        );
+        super::super::check_engine::tests::take_emitted()
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn deny_reason(output: &serde_json::Value) -> &str {
+        assert_eq!(
+            output["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{output}"
+        );
+        output["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+    }
+
+    const QUESTION: &str = "Which of these ADRs did you use this turn?";
+
+    /// A passing turn blocks once with the question. The Stop after the
+    /// answer changes no file, so it finds every rule cleared and calls no
+    /// judge, and asks nothing. The next turn asks again.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_passing_turn_asks_once_and_the_stop_after_the_answer_calls_no_judge() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let (repo, _bin, calls, mut args, _binary) = briefed_repo("sess-ask", "conforming");
+        let start = |args: &ImplCheckArgs| {
+            let mut start_args = turn_start_args(repo.path());
+            start_args.runner = args.runner.clone();
+            exec_hook_with(&start_args, &serde_json::json!({"session_id": "sess-ask", "hook_event_name": "UserPromptSubmit"}).to_string());
+        };
+        start(&args);
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); }\n",
+        )
+        .unwrap();
+
+        let first = stop(&args, "sess-ask");
+        assert_eq!(first.len(), 1);
+        let reason = deny_reason(&first[0]);
+        assert!(reason.starts_with(QUESTION), "{reason}");
+        assert!(
+            reason.contains("- `cross-cutting-token-signing-1c57`: Sign With Asymmetric Keys"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("--claude-session sess-ask --turn 1-"),
+            "{reason}"
+        );
+        assert_eq!(judge_calls(&calls), 1);
+
+        assert!(
+            stop(&args, "sess-ask").is_empty(),
+            "the second Stop is a silent pass"
+        );
+        assert_eq!(judge_calls(&calls), 1, "and calls no judge");
+
+        start(&args);
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); sign_again(); }\n",
+        )
+        .unwrap();
+        let next = stop(&args, "sess-ask");
+        assert!(deny_reason(&next[0]).contains("--turn 2-"), "{next:?}");
+        assert_eq!(judge_calls(&calls), 2);
+
+        // A session nothing was briefed in is never asked.
+        args.rules_dir = None;
+        let quiet = stop(&args, "sess-never-briefed");
+        assert!(
+            quiet
+                .iter()
+                .all(|out| out["hookSpecificOutput"]["permissionDecision"] != "deny"),
+            "{quiet:?}"
+        );
+    }
+
+    /// On a block the question follows the judge's reason, and the block
+    /// after the fix asks nothing more.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_blocked_turn_carries_the_question_after_the_judges_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let (repo, _bin, _calls, args, _binary) = briefed_repo("sess-block", "conflicting");
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_hs256(); }\n",
+        )
+        .unwrap();
+
+        let first = stop(&args, "sess-block");
+        let reason = deny_reason(&first[0]);
+        let (judge, question) = reason.split_once("\n\nWhich of these ADRs").unwrap();
+        assert!(judge.contains("R-A-001"), "{judge}");
+        assert!(
+            question.starts_with(" did you use this turn?"),
+            "{question}"
+        );
+
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_hs512(); }\n",
+        )
+        .unwrap();
+        let again = stop(&args, "sess-block");
+        assert!(!deny_reason(&again[0]).contains(QUESTION), "{again:?}");
+    }
+
+    /// A round that would only have shown a notice blocks with the question
+    /// instead, and the notice stays beside it for the user.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_notice_round_asks_and_keeps_the_notice() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let (repo, _bin, _calls, args, _binary) = briefed_repo("sess-notice", "conforming");
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); }\n",
+        )
+        .unwrap();
+
+        let out = stop(&args, "sess-notice");
+        assert!(deny_reason(&out[0]).starts_with(QUESTION), "{out:?}");
+        let notice = out[0]["systemMessage"].as_str().unwrap();
+        assert!(notice.contains("did not run"), "{notice}");
     }
 
     #[test]

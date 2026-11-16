@@ -1692,7 +1692,41 @@ pub(super) fn round_limit_message(
 /// either `--claude-hook` command, so "stdout is exactly one JSON object, or
 /// nothing" is enforceable by inspection rather than by discipline.
 pub(super) fn emit(json: String) {
+    #[cfg(test)]
+    tests::EMITTED.with(|cell| cell.borrow_mut().push(json.clone()));
     println!("{json}");
+}
+
+/// What a hook round answers, before the ADR question is folded in.
+enum Reply {
+    Silent,
+    Notice(String),
+    Deny(String),
+}
+
+/// Emit `reply`, carrying `run`'s ADR question when this round is the one that
+/// asks it: after a deny's reason, as the reason of a block that would
+/// otherwise have been a notice (which stays beside it for the user), or as
+/// the reason of a block on an otherwise silent pass.
+fn reply(run: &HookRun<'_>, reply: Reply) {
+    let question = run
+        .ask
+        .zip(run.session_id)
+        .filter(|(ask, session_id)| super::adr_report::mark(session_id, run.rules_dir, ask))
+        .map(|(ask, _)| ask.text());
+    let json = match (reply, question) {
+        (Reply::Silent, None) => return,
+        (Reply::Notice(message), None) => plan_check_hook::render_notice(&message),
+        (Reply::Deny(reason), None) => plan_check_hook::render_deny(&reason),
+        (Reply::Silent, Some(question)) => plan_check_hook::render_deny(question),
+        (Reply::Notice(message), Some(question)) => {
+            plan_check_hook::render_deny_with_notice(question, &message)
+        }
+        (Reply::Deny(reason), Some(question)) => {
+            plan_check_hook::render_deny(&format!("{reason}\n\n{question}"))
+        }
+    };
+    emit(json);
 }
 
 /// Everything [`finish_hook`] needs from a `--claude-hook` command that is
@@ -1714,6 +1748,8 @@ pub(super) struct HookRun<'a> {
     pub root: &'a Path,
     pub rules_dir: &'a Path,
     pub max_rounds: u32,
+    /// The ADR question, when this round may be the turn's first to ask it.
+    pub ask: Option<&'a super::adr_report::PreparedAsk>,
     #[cfg(feature = "telemetry")]
     pub started: super::check_telemetry::Started,
 }
@@ -1744,22 +1780,28 @@ pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, ou
                     s.loop_state_mut(run.kind).blocking.clear();
                 });
             }
-            emit(plan_check_hook::render_notice(&format!(
-                "No committed rule under .actual/rules/ applies to this {}.",
-                copy.noun
-            )));
+            reply(
+                run,
+                Reply::Notice(format!(
+                    "No committed rule under .actual/rules/ applies to this {}.",
+                    copy.noun
+                )),
+            );
         }
         Outcome::NoRunner { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "{} did not run: no runner available ({reason}).",
-                copy.governance
-            )));
+            reply(
+                run,
+                Reply::Notice(format!(
+                    "{} did not run: no runner available ({reason}).",
+                    copy.governance
+                )),
+            );
         }
         Outcome::CheckFailed { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "{} did not run: {reason}",
-                copy.governance
-            )));
+            reply(
+                run,
+                Reply::Notice(format!("{} did not run: {reason}", copy.governance)),
+            );
         }
         Outcome::Verdicts {
             verdicts,
@@ -1879,9 +1921,7 @@ fn finish_verdicts(
                 // undecorated -- the override reminder is only appended to
                 // what the human actually sees, same spirit as the
                 // silent-path `notes` below.
-                emit(plan_check_hook::render_notice(&with_override_reminder(
-                    message, session,
-                )));
+                reply(run, Reply::Notice(with_override_reminder(message, session)));
                 // Every rule here is `blocked: false` -- the round limit let
                 // the call through this round -- so this is `warn`, not
                 // `block`, distinct from a clean pass.
@@ -1916,10 +1956,10 @@ fn finish_verdicts(
         // that this session still carries a recorded override elsewhere. See
         // `plan_check`'s module doc, "override visibility".
         let deny_reason = hook_deny_reason(&blocking, session_id, partial, kind);
-        emit(plan_check_hook::render_deny(&with_override_reminder(
-            deny_reason,
-            session,
-        )));
+        reply(
+            run,
+            Reply::Deny(with_override_reminder(deny_reason, session)),
+        );
         #[cfg(feature = "telemetry")]
         super::check_telemetry::report_round(
             run,
@@ -1985,8 +2025,10 @@ fn finish_verdicts(
     if let Some(reminder) = reminder {
         notes.push(reminder);
     }
-    if !notes.is_empty() {
-        emit(plan_check_hook::render_notice(&notes.join("\n")));
+    if notes.is_empty() {
+        reply(run, Reply::Silent);
+    } else {
+        reply(run, Reply::Notice(notes.join("\n")));
     }
     #[cfg(feature = "telemetry")]
     {
@@ -2093,6 +2135,16 @@ pub(crate) mod tests {
 
     use crate::rules::types::RuleLevel;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    thread_local! {
+        pub(in crate::cli::commands) static EMITTED: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Every hook line [`emit`] printed on this thread since the last call.
+    pub(in crate::cli::commands) fn take_emitted() -> Vec<String> {
+        EMITTED.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
 
     // ── plan-governance telemetry capture (AK-678) ──
     //
@@ -4021,6 +4073,7 @@ pub(crate) mod tests {
             root: rules_dir,
             rules_dir,
             max_rounds,
+            ask: None,
             #[cfg(feature = "telemetry")]
             started: super::super::check_telemetry::Started::now(),
         }
