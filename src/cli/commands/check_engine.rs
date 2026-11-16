@@ -1966,8 +1966,8 @@ fn finish_verdicts(
     // An active override on an otherwise-clean round is still worth
     // distinguishing from a truly clean allow -- something was once wrong here
     // and a human waived it, which is exactly the kind of fact this stream
-    // exists to preserve. `verdicts` this round holds no non-`Conforming`
-    // entries by construction (any such rule would already be in `blocking`,
+    // exists to preserve. `verdicts` this round holds only passing entries
+    // ([`Verdict::passes`]) by construction (any such rule would already be in `blocking`,
     // handled above), so no violation events are emitted here regardless.
     #[cfg(feature = "telemetry")]
     let has_override_reminder = reminder.is_some();
