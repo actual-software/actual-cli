@@ -3204,3 +3204,35 @@ fn test_adr_new_then_check_work_signed_out() {
         .assert()
         .success();
 }
+
+/// `rules report-use` with no question open refuses and records nothing,
+/// whether the answer comes as a flag or as JSON on stdin.
+#[test]
+fn test_rules_report_use_refuses_without_an_open_question() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    for (flag, stdin) in [(Some("--none"), ""), (None, "[]")] {
+        let mut command = cmd();
+        command
+            .env("ACTUAL_CONFIG_DIR", home.path())
+            .env("ACTUAL_NO_TELEMETRY", "1")
+            .args([
+                "rules",
+                "report-use",
+                "--claude-session",
+                "s1",
+                "--turn",
+                "0-x",
+                "--repo",
+            ])
+            .arg(repo.path());
+        command.args(flag);
+        command
+            .write_stdin(stdin)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "no ADR question is open for session s1",
+            ));
+    }
+}

@@ -188,6 +188,7 @@ pub fn applies_to(command: &Command) -> bool {
             RulesAction::Select(args) => !args.json,
             RulesAction::Eval(args) => !args.json,
             RulesAction::Brief(args) => !(args.claude_hook || args.claude_session_start),
+            RulesAction::ReportUse(_) => false,
         },
         Command::Session(session) => match &session.action {
             SessionAction::Summary(args) => !(args.claude_hook || args.json),
@@ -763,6 +764,15 @@ mod tests {
             &["rules", "eval", "--golden", "golden.json", "--json"],
             &["rules", "brief", "--claude-hook"],
             &["rules", "brief", "--claude-session-start"],
+            &[
+                "rules",
+                "report-use",
+                "--claude-session",
+                "s1",
+                "--turn",
+                "1-abc",
+                "--none",
+            ],
             &["session", "summary", "--claude-hook"],
             &["session", "summary", "--session", "s1", "--json"],
             &["adr", "new", "T", "--json"],

@@ -8,6 +8,7 @@ use crate::generation::format::{CURSOR_RULES_DIR, CURSOR_RULES_FILENAME};
 use crate::generation::OutputFormat;
 
 pub mod adr;
+mod adr_report;
 pub mod advisor;
 pub mod auth;
 pub(crate) mod brief_ledger;

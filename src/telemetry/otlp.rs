@@ -46,10 +46,10 @@
 //! gain no identity field. [`crate::telemetry::sign_in`] decides which records
 //! the token covers, and a 401 sends the batch again once, signed out.
 //!
-//! **Typed reason text and decision ids go only with the token.** A request
-//! without it, and the file sink's copy of that request, leaves out
-//! [`REASON_TEXT`] and [`DECISION_ID`], since Actual can restrict and delete
-//! only events it can tie to an organization.
+//! **Typed reason text, decision ids and reported file paths go only with
+//! the token.** A request without it, and the file sink's copy of that
+//! request, leaves out the attributes in [`SIGNED_IN_ONLY`], since Actual
+//! can restrict and delete only events it can tie to an organization.
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -93,6 +93,10 @@ pub(crate) const ADR_DISCOVERED: &str = "actual.adr.discovered";
 /// `reject`, `publish`, `unpublish`, `delete`, `restore` or `update`.
 pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
 
+/// The event `rules report-use` sends for each ADR the agent says it used in
+/// a turn, in answer to the Stop hook's question.
+pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
+
 /// The typed reason of an `other` override, which only a request carrying the
 /// sign-in's token holds.
 const REASON_TEXT: &str = "actual.override.reason_text";
@@ -101,8 +105,12 @@ const REASON_TEXT: &str = "actual.override.reason_text";
 /// sign-in's token holds.
 const DECISION_ID: &str = "actual.adr.decision_id";
 
+/// The repository path an agent's report anchors a claim to, which only a
+/// request carrying the sign-in's token holds.
+const REPORT_FILE_PATH: &str = "actual.report.file_path";
+
 /// The attributes [`LogRecord::signed_out`] leaves out.
-const SIGNED_IN_ONLY: [&str; 2] = [REASON_TEXT, DECISION_ID];
+const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 /// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
@@ -256,7 +264,7 @@ impl LogRecord {
     }
 
     /// This record as a request without the sign-in's token carries it:
-    /// without [`SIGNED_IN_ONLY`]'s attributes.
+    /// without the attributes in [`SIGNED_IN_ONLY`].
     fn signed_out(mut self) -> Self {
         self.attributes
             .retain(|kv| !SIGNED_IN_ONLY.contains(&kv.key.as_str()));
@@ -632,6 +640,31 @@ impl Origin {
         record
     }
 
+    /// The [`ADR_REPORTED`] record for one ADR an agent named in its answer
+    /// to the Stop hook's question. `report.adr` is `None` for a name that
+    /// matched no ADR in the session, sent with an empty ref and no ids.
+    pub(crate) fn reported(&self, session_id: &str, report: &AdrReport<'_>) -> LogRecord {
+        let (adr_ref, adr_ids) = report.adr.unwrap_or_default();
+        let mut record = self.adr_record(ADR_REPORTED, session_id, None, adr_ref, adr_ids);
+        record.attributes.extend([
+            int(
+                "actual.turn.index",
+                i64::try_from(report.turn).unwrap_or(i64::MAX),
+            ),
+            text(
+                "actual.report.check_action_id",
+                Some(report.check_action_id),
+            ),
+            text("actual.report.evidence", Some(report.evidence)),
+            text("actual.report.evidence_reason", report.reason),
+            text("actual.report.anchor", Some(report.anchor)),
+        ]);
+        if let Some(path) = report.file_path {
+            record.attributes.push(text(REPORT_FILE_PATH, Some(path)));
+        }
+        record
+    }
+
     /// A record carrying the attributes every event shares, each present on
     /// every record and an empty string when unknown: its own event id, which
     /// `log.record.uid` repeats, the schema version, and the action, session
@@ -687,6 +720,30 @@ fn adr_run(run: AdrRun<'_>) -> [KeyValue; 4] {
             i64::try_from(run.duration.as_millis()).unwrap_or(i64::MAX),
         ),
     ]
+}
+
+/// One ADR an agent reported using, as an [`ADR_REPORTED`] record names it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AdrReport<'a> {
+    /// The logical ADR's ref and the `adr_id` of each of its files.
+    pub adr: Option<(&'a str, &'a [String])>,
+    /// The session's turn the question was asked in: `actual.turn.index`.
+    pub turn: u64,
+    /// The `actual.action.id` of the `impl-check` run that asked.
+    pub check_action_id: &'a str,
+    /// `verified` or `unverified`.
+    pub evidence: &'a str,
+    /// Why a claim is unverified, sent empty when it is verified.
+    pub reason: Option<&'a str>,
+    /// `diff` or `plan`.
+    pub anchor: &'a str,
+    /// The file a diff anchor names, sent only signed in.
+    pub file_path: Option<&'a str>,
+}
+
+/// This execution's `actual.action.id`, the one its records carry.
+pub(crate) fn current_action_id() -> &'static str {
+    action_id()
 }
 
 /// This execution's `actual.action.id`: a UUIDv7 made the first time a record
@@ -3531,6 +3588,94 @@ mod tests {
         assert!(!signed_out.contains(REASON_TEXT), "{signed_out}");
         assert!(signed_out.contains("\"other\""), "{signed_out}");
         assert_eq!(both.matches(REASON_TEXT).count(), 1, "{both}");
+    }
+
+    fn reported_record(file_path: Option<&str>) -> LogRecord {
+        let ids = ids(&["adr-1"]);
+        origin(None).reported(
+            "session-1",
+            &AdrReport {
+                adr: Some(("grp-1", &ids)),
+                turn: 3,
+                check_action_id: "check-1",
+                evidence: "verified",
+                reason: None,
+                anchor: "diff",
+                file_path,
+            },
+        )
+    }
+
+    /// A report's attributes, and the file path only a request carrying the
+    /// token keeps: a signed-out copy drops it and nothing else.
+    #[test]
+    fn test_a_reported_record_keeps_its_file_path_only_signed_in() {
+        let built = reported_record(Some("src/orders.rs"));
+        let record = serde_json::to_value(&built).unwrap();
+        assert_eq!(record["eventName"], ADR_REPORTED);
+        let keys: Vec<&str> = record["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kv| kv["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys[6..],
+            [
+                "actual.adr.ref",
+                "actual.adr.ids",
+                "actual.turn.index",
+                "actual.report.check_action_id",
+                "actual.report.evidence",
+                "actual.report.evidence_reason",
+                "actual.report.anchor",
+                REPORT_FILE_PATH,
+            ]
+        );
+        let signed_out = serde_json::to_value(built.signed_out()).unwrap();
+        let mut expected = record.clone();
+        expected["attributes"].as_array_mut().unwrap().pop();
+        assert_eq!(signed_out, expected);
+        let plan = serde_json::to_string(&reported_record(None)).unwrap();
+        assert!(!plan.contains(REPORT_FILE_PATH), "{plan}");
+        let unknown =
+            serde_json::to_string(&origin(None).reported("s", &AdrReport::default())).unwrap();
+        assert!(
+            unknown.contains(r#"{"key":"actual.adr.ref","value":{"stringValue":""}}"#),
+            "{unknown}"
+        );
+    }
+
+    /// Recorded signed out, a report's file path never reaches the spool.
+    #[test]
+    fn test_a_reported_file_path_is_spooled_only_under_a_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let spool_file = home.path().join("otlp-logs-spool.jsonl");
+        spool(&outputs, &[reported_record(Some("src/out.rs"))]);
+        let signed_out = std::fs::read_to_string(&spool_file).unwrap();
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &[reported_record(Some("src/in.rs"))]);
+        let both = std::fs::read_to_string(&spool_file).unwrap();
+        assert!(!signed_out.contains(REPORT_FILE_PATH), "{signed_out}");
+        assert!(
+            signed_out.contains("actual.report.evidence"),
+            "{signed_out}"
+        );
+        assert!(
+            both.contains("src/in.rs") && !both.contains("src/out.rs"),
+            "{both}"
+        );
     }
 
     /// Signed in, a custom endpoint still never gets the text: it never gets

@@ -211,6 +211,22 @@ pub struct GovernanceSession {
     /// this format version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_start: Option<TurnStart>,
+    /// How many turns have started in this session, counted on the same
+    /// `UserPromptSubmit` event that records [`Self::turn_start`]. The ADR
+    /// question is asked at most once per value.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub turn: u64,
+    /// The latest turn's ADR question and, once given, the agent's answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adr_ask: Option<super::adr_report::AdrAsk>,
+    /// The plan `plan-check` last judged, kept so an answer can anchor a
+    /// claim to one of its lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_plan: Option<super::adr_report::TurnPlan>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Where and from which commit a Claude Code turn started.
@@ -626,7 +642,7 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             blocking: BTreeSet::new(),
         },
         diff: LoopState::default(),
-        turn_start: None,
+        ..GovernanceSession::default()
     }
 }
 
