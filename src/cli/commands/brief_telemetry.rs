@@ -18,7 +18,9 @@
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved (a release build has its default), [`report`] returns before it
-//! reads an id, writes the ledger or spawns anything.
+//! reads an id, writes the ledger or spawns anything. Telemetry debug mode
+//! is the exception: with telemetry off it builds the records against the
+//! ledger as it stands, logs them as not sent, and writes nothing.
 //!
 //! `check-override`'s event and the gates' events group ADRs with
 //! [`logical_adrs`] or [`group_headers`] and send with [`dispatch`] too, so
@@ -28,6 +30,8 @@ use std::path::Path;
 
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::rules::types::{AdrMeta, RuleDocument};
+use crate::telemetry::debug::Stream;
+use crate::telemetry::opt_out::{self, Gate};
 use crate::telemetry::otlp;
 
 /// One logical ADR among the documents a brief carried rules from.
@@ -84,17 +88,19 @@ pub(super) fn report<'a>(
     agent_id: Option<&str>,
     documents: impl IntoIterator<Item = &'a RuleDocument>,
 ) {
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
-        return;
-    };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
+    let Some(destination) = Destination::resolve() else {
         return;
     };
     let adrs = logical_adrs(documents);
     if adrs.is_empty() {
         return;
     }
-    let added = brief_ledger::report_adrs(ledger_dir, key, adrs.iter().map(|adr| adr.key.as_str()));
+    let keys = adrs.iter().map(|adr| adr.key.as_str());
+    let added = if destination.sends() {
+        brief_ledger::report_adrs(ledger_dir, key, keys)
+    } else {
+        brief_ledger::unreported_adrs(ledger_dir, key, keys)
+    };
     if added.is_empty() {
         return;
     }
@@ -104,7 +110,60 @@ pub(super) fn report<'a>(
         .filter(|adr| added.contains(&adr.key))
         .map(|adr| origin.context_added(key.session_id, agent_id, &adr.key, &adr.adr_ids))
         .collect();
-    dispatch(&outputs, records);
+    destination.deliver(records);
+}
+
+/// Where an OTLP sender's records go this run: sent to `outputs`, or, in
+/// telemetry debug mode with telemetry off, built in the form they would be
+/// sent in and logged as not sent.
+pub(super) struct Destination {
+    outputs: otlp::Outputs,
+    send: bool,
+}
+
+impl Destination {
+    /// This run's destination, or `None` when the sender should build
+    /// nothing. In debug mode, a config file that won't load is logged.
+    pub(super) fn resolve() -> Option<Self> {
+        Self::from_gate(opt_out::gate(Stream::Otlp))
+    }
+
+    /// [`Destination::resolve`] without the log line, for a step within a
+    /// sender that resolves its own.
+    pub(super) fn resolve_quietly() -> Option<Self> {
+        Self::from_gate(opt_out::quiet_gate())
+    }
+
+    fn from_gate(gate: Gate) -> Option<Self> {
+        match gate {
+            Gate::Send(config) => otlp::Outputs::resolve(&config).map(|outputs| Self {
+                outputs,
+                send: true,
+            }),
+            Gate::DebugOnly(config) => {
+                otlp::Outputs::resolve_ignoring_opt_out(&config).map(|outputs| Self {
+                    outputs,
+                    send: false,
+                })
+            }
+            Gate::Off => None,
+        }
+    }
+
+    /// Whether the records are sent, so the sender may keep the state that
+    /// sending them keeps.
+    pub(super) fn sends(&self) -> bool {
+        self.send
+    }
+
+    /// Send `records`, or log them as not sent.
+    pub(super) fn deliver(&self, records: Vec<otlp::LogRecord>) {
+        if self.send {
+            dispatch(&self.outputs, records);
+        } else {
+            otlp::hold_back(&self.outputs, &records);
+        }
+    }
 }
 
 /// Spool the records for `outputs` and start the uploader, waiting on neither.
@@ -231,6 +290,8 @@ pub(super) mod tests {
             "ACTUAL_OTLP_LOGS_ENDPOINT",
             "ACTUAL_OTLP_FILE",
             "TRACEPARENT",
+            crate::telemetry::debug::ENV,
+            crate::telemetry::debug::ID_ENV,
         ]
         .into_iter()
         .map(EnvGuard::remove)
@@ -390,6 +451,81 @@ pub(super) mod tests {
 
             assert!(take_captured().is_empty());
             assert!(!ledger.exists());
+        });
+    }
+
+    // ── telemetry debug mode ────────────────────────────────────────────
+
+    /// Telemetry off in debug mode: the record is logged as not sent in the
+    /// form the brief would send, nothing is dispatched, and the ledger is
+    /// left as it was, so turning telemetry on still sends the ADR. The
+    /// record sent then has the logged one's shape.
+    #[test]
+    fn test_debug_mode_with_telemetry_off_logs_the_record_and_writes_nothing() {
+        use crate::telemetry::debug::{self, tests::logged};
+        let off = "telemetry:\n  enabled: false\n  otlp_file: /tmp/actual-otlp-test.jsonl\n";
+        with_config(off, |home| {
+            let _debug = EnvGuard::set(debug::ENV, "1");
+            let _id = EnvGuard::set(debug::ID_ENV, "brief-off");
+            let ledger = home.join("brief-ledger");
+            let documents = [document(Some("adr-9"), None)];
+
+            report(&ledger, &ledger_key("s1"), None, &documents);
+
+            assert!(take_captured().is_empty());
+            assert!(brief_ledger::load(&ledger, &ledger_key("s1"))
+                .reported_adrs
+                .is_empty());
+            let lines = logged("brief-off");
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0]["stage"], "not_sent");
+            assert_eq!(lines[0]["reason"], "telemetry_off");
+            assert_eq!(lines[0]["auth"], "signed_out");
+            let held = &lines[0]["event"];
+            assert_eq!(held["eventName"], otlp::ADR_DETECTED);
+            assert_eq!(attribute(held, "actual.adr.ref"), "adr-9");
+
+            std::fs::write(home.join("config.yaml"), WITH_FILE).unwrap();
+            report(&ledger, &ledger_key("s1"), None, &documents);
+            let sent = take_captured();
+            assert_eq!(sent.len(), 1);
+            let keys = |record: &serde_json::Value| -> Vec<serde_json::Value> {
+                record["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|kv| kv["key"].clone())
+                    .collect()
+            };
+            assert_eq!(keys(held), keys(&sent[0]));
+        });
+    }
+
+    /// A config file that won't load sends nothing in debug mode either; the
+    /// log says why, with no event. The output is named in the environment so
+    /// the file's loadability alone decides.
+    #[test]
+    fn test_debug_mode_logs_an_unloadable_config_and_sends_nothing() {
+        use crate::telemetry::debug::{self, tests::logged};
+        with_config(crate::testutil::UNLOADABLE_TELEMETRY_OPT_OUT, |home| {
+            let _debug = EnvGuard::set(debug::ENV, "1");
+            let _id = EnvGuard::set(debug::ID_ENV, "brief-unloadable");
+            let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/actual-otlp-test.jsonl");
+            let ledger = home.join("brief-ledger");
+
+            report(
+                &ledger,
+                &ledger_key("s1"),
+                None,
+                &[document(Some("adr-9"), None)],
+            );
+
+            assert!(take_captured().is_empty());
+            let lines = logged("brief-unloadable");
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0]["stream"], "otlp");
+            assert_eq!(lines[0]["reason"], "config_unreadable");
+            assert!(lines[0].get("event").is_none());
         });
     }
 }

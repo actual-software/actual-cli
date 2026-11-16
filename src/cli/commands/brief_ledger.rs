@@ -466,6 +466,39 @@ pub(super) fn prune_stale(dir: &Path) {
     }
 }
 
+/// The keys [`report_adrs`] would add, read without the lock and written
+/// nowhere, for a telemetry debug run that keeps no state of its own.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn unreported_adrs<'k>(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    adr_keys: impl IntoIterator<Item = &'k str>,
+) -> Vec<String> {
+    let mut reported = load(dir, key).reported_adrs;
+    adr_keys
+        .into_iter()
+        .filter(|adr| reported.insert(adr.to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The keys [`report_checks`] would add, read without the lock and written
+/// nowhere, likewise.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn unreported_checks(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    stage: &str,
+    used: &[&str],
+    breached: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let mut recorded = load(dir, key);
+    (
+        add_new(&mut recorded.reported_used, stage, used),
+        add_new(&mut recorded.reported_breached, stage, breached),
+    )
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -1221,5 +1254,33 @@ pub(super) mod tests {
             (keys(&["grp-1"]), vec![])
         );
         assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
+    }
+
+    /// The read-only twins answer what the writes would add, and write
+    /// nothing.
+    #[test]
+    fn test_unreported_twins_answer_like_the_writes_and_write_nothing() {
+        let dir = tempdir().unwrap();
+        let key = LedgerKey {
+            session_id: "s",
+            rules_dir: Path::new("/repo/.actual/rules"),
+        };
+        assert_eq!(report_adrs(dir.path(), &key, ["a"]), ["a"]);
+        assert_eq!(
+            report_checks(dir.path(), &key, "plan", &["u1"], &["b1"]),
+            (vec!["u1".to_string()], vec!["b1".to_string()])
+        );
+        let before = load(dir.path(), &key);
+
+        assert_eq!(unreported_adrs(dir.path(), &key, ["a", "b", "b"]), ["b"]);
+        assert_eq!(
+            unreported_checks(dir.path(), &key, "plan", &["u1", "u2"], &["b1"]),
+            (vec!["u2".to_string()], Vec::new())
+        );
+        assert_eq!(
+            unreported_checks(dir.path(), &key, "impl", &["u1"], &[]),
+            (vec!["u1".to_string()], Vec::new())
+        );
+        assert_eq!(load(dir.path(), &key), before);
     }
 }

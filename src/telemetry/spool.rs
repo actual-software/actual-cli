@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 
 use crate::api::types::{PlanGovernanceEvent, PlanGovernanceEventName};
 use crate::config::types::Config;
+use crate::telemetry::debug::{self, Entry, Stage, Stream};
 use crate::telemetry::plan_governance::{deliver_events, Delivery, MAX_EVENTS_PER_BATCH};
 
 /// Filename under the config dir holding the pending events, scope and check
@@ -67,12 +68,14 @@ const LOCK_FILE: &str = "scope-telemetry-spool.lock";
 pub(crate) struct Spool {
     file: &'static str,
     lock: &'static str,
+    stream: Stream,
 }
 
 /// The scope-selection events this module delivers.
 const SCOPE: Spool = Spool {
     file: SPOOL_FILE,
     lock: LOCK_FILE,
+    stream: Stream::Governance,
 };
 
 /// The OpenTelemetry log records [`crate::telemetry::otlp`] sends, one record
@@ -80,6 +83,7 @@ const SCOPE: Spool = Spool {
 pub(crate) const OTLP_LOGS: Spool = Spool {
     file: "otlp-logs-spool.jsonl",
     lock: "otlp-logs-spool.lock",
+    stream: Stream::Otlp,
 };
 
 impl Spool {
@@ -106,6 +110,12 @@ impl Spool {
     /// pass [`MAX_SPOOL_EVENTS`] lines the oldest are dropped so the file stays
     /// bounded.
     pub(crate) fn append_lines(&self, new: &[String]) -> std::io::Result<()> {
+        let appended = self.append_lines_unlogged(new);
+        debug::spooled(self.stream, new, appended.is_ok());
+        appended
+    }
+
+    fn append_lines_unlogged(&self, new: &[String]) -> std::io::Result<()> {
         let Some(path) = self.path() else {
             return Ok(());
         };
@@ -348,6 +358,31 @@ fn remove_delivered(delivered: &HashSet<String>) {
     };
 }
 
+/// Log what the proxy did with `batch` in debug mode: `sent` when it recorded
+/// all of it, `refused`, or `retained` for a later flush after an outage. The
+/// request is signed in when any of its events carries a sign-in's hashed ids.
+fn log_delivery(batch: &[PlanGovernanceEvent], delivery: Delivery, api_url: &str) {
+    if !debug::enabled() {
+        return;
+    }
+    let stage = match delivery {
+        Delivery::Delivered => Stage::Sent,
+        Delivery::Refused => Stage::Refused,
+        Delivery::Failed => Stage::Retained,
+        Delivery::Skipped => return,
+    };
+    let body = serde_json::json!({ "events": batch });
+    let signed_in = body["events"]
+        .as_array()
+        .is_some_and(|events| events.iter().any(debug::governance_signed_in));
+    debug::record(
+        Entry::new(Stream::Governance, stage)
+            .signed_in(signed_in)
+            .to(format!("{api_url}/plan-governance/record"))
+            .event(body),
+    );
+}
+
 /// Send what the spool holds and drop each chunk the proxy recorded in full and
 /// each event it refused on its own, leaving the rest queued for a later try.
 ///
@@ -396,7 +431,9 @@ pub(crate) async fn flush(config: &Config, api_url: &str) -> Delivery {
             .map(|chunk| chunk.to_vec())
             .collect();
         while let Some(batch) = batches.pop_front() {
-            match deliver_events(batch.clone(), config, api_url).await {
+            let delivery = deliver_events(batch.clone(), config, api_url).await;
+            log_delivery(&batch, delivery, api_url);
+            match delivery {
                 Delivery::Delivered => to_remove.extend(batch.into_iter().map(|e| e.insert_id)),
                 // A non-empty chunk is only ever Skipped when telemetry is opted out,
                 // which applies to the whole run: stop and remove nothing.
@@ -1725,5 +1762,120 @@ mod tests {
 
         assert_eq!(OTLP_LOGS.take(3), otlp_lines(3));
         assert!(!home.path().join("otlp-logs-spool.jsonl").exists());
+    }
+
+    // ── telemetry debug mode ────────────────────────────────────────────
+
+    /// Each event is logged as queued as the spool holds it, and each request
+    /// as the proxy received it: sent, refused, or retained after an outage.
+    /// A signed-in event carries its hashed ids, so its request is signed in.
+    #[tokio::test]
+    async fn test_debug_mode_logs_governance_events_queued_and_each_request() {
+        use crate::telemetry::debug::tests::{debug_on, logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "governance");
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let mut signed = sample_event("run-1", "id-1");
+        signed.properties.as_mut().unwrap().user_id_hash = Some("u-hash".to_string());
+        let unsigned = sample_event("run-2", "id-2");
+        append(&signed).unwrap();
+        append(&unsigned).unwrap();
+        let spooled: Vec<serde_json::Value> = std::fs::read_to_string(home.path().join(SPOOL_FILE))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let body = serde_json::json!({ "events": [&signed, &unsigned] });
+
+        let mut server = mockito::Server::new_async().await;
+        let outage = server
+            .mock("POST", "/plan-governance/record")
+            .match_body(mockito::Matcher::Json(body.clone()))
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        assert_eq!(
+            flush(&cfg_for(&server.url()), &server.url()).await,
+            Delivery::Failed
+        );
+        outage.assert_async().await;
+        outage.remove_async().await;
+        let delivered = server
+            .mock("POST", "/plan-governance/record")
+            .match_body(mockito::Matcher::Json(body.clone()))
+            .with_status(200)
+            .with_body(r#"{"recorded":2,"failed":0}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        assert_eq!(
+            flush(&cfg_for(&server.url()), &server.url()).await,
+            Delivery::Delivered
+        );
+        delivered.assert_async().await;
+
+        let lines = logged("governance");
+        let stages: Vec<&str> = lines.iter().map(|l| l["stage"].as_str().unwrap()).collect();
+        assert_eq!(stages, ["queued", "queued", "retained", "sent"]);
+        assert_eq!(lines[0]["event"], spooled[0]);
+        assert_eq!(lines[0]["auth"], "signed_in");
+        assert_eq!(lines[1]["event"], spooled[1]);
+        assert_eq!(lines[1]["auth"], "signed_out");
+        for line in &lines[2..] {
+            assert_eq!(line["stream"], "governance");
+            assert_eq!(line["event"], body);
+            assert_eq!(line["auth"], "signed_in");
+            assert_eq!(
+                line["to"],
+                format!("{}/plan-governance/record", server.url())
+            );
+        }
+    }
+
+    /// A refused batch is logged, then each event of its one-at-a-time resend.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_refused_batch_and_its_resends() {
+        use crate::telemetry::debug::tests::{debug_on, logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "refused-batch");
+        let _no_tel = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        append(&sample_event("run-1", "id-1")).unwrap();
+        append(&sample_event("run-2", "id-2")).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _refused = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(400)
+            .expect(3)
+            .create_async()
+            .await;
+        flush(&cfg_for(&server.url()), &server.url()).await;
+
+        let lines = logged("refused-batch");
+        let refused: Vec<usize> = lines
+            .iter()
+            .filter(|l| l["stage"] == "refused")
+            .map(|l| l["event"]["events"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(refused, [2, 1, 1]);
+    }
+
+    /// A batch nothing was attempted for has no outcome to log.
+    #[test]
+    fn test_debug_mode_logs_nothing_for_a_skipped_batch() {
+        use crate::telemetry::debug::tests::debug_on;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "skipped");
+        log_delivery(
+            &[sample_event("run-1", "id-1")],
+            Delivery::Skipped,
+            "http://x",
+        );
+        assert!(!home.path().join("telemetry-debug").exists());
     }
 }

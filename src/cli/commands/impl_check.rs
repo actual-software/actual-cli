@@ -473,6 +473,10 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     // fresh, even if `plan-check` already wrote overrides into the same file.
     // See the module doc.
     let session_id = envelope.session_id.as_deref();
+    #[cfg(feature = "telemetry")]
+    if let Some(id) = session_id {
+        crate::telemetry::debug::use_session(id);
+    }
     let mut session = session_id
         .map(|id| governance_session::load(id, &rules_dir))
         .unwrap_or_default();

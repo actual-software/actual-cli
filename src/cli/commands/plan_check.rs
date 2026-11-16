@@ -387,6 +387,10 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     // — no state read, no state written, no round/override language in the
     // output. See the module doc's "revision loop" section.
     let session_id = envelope.session_id.as_deref();
+    #[cfg(feature = "telemetry")]
+    if let Some(id) = session_id {
+        crate::telemetry::debug::use_session(id);
+    }
     let mut session = session_id
         .map(|id| governance_session::load(id, &rules_dir))
         .unwrap_or_default();
