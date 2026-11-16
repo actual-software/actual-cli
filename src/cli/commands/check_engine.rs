@@ -1007,7 +1007,7 @@ pub(super) fn send_hook_governance_events(
 ) {
     let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
         .iter()
-        .filter(|v| v.verdict != Verdict::Conforming)
+        .filter(|v| !v.verdict.passes())
         .map(|v| {
             (
                 v.rule_id.as_str(),
@@ -1786,7 +1786,7 @@ fn finish_verdicts(
         let state = session.loop_state_mut(kind);
         for v in &verdicts {
             let key = governance_session::key(&v.doc_slug, &v.rule_id);
-            if v.verdict == Verdict::Conforming {
+            if v.verdict.passes() {
                 state.cleared.insert(key, run.artifact_digest.to_string());
             } else {
                 // A rule that was cleared against an earlier artifact and is
@@ -2843,7 +2843,12 @@ pub(crate) mod tests {
         };
         let outcome = Outcome::Verdicts {
             selection,
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
+            verdicts: vec![checked(
+                "R-A-001",
+                Verdict::Followed,
+                "Sign every access token with RS256.",
+                "uses RS256",
+            )],
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: None,
             headers: BTreeMap::new(),
@@ -2874,7 +2879,12 @@ pub(crate) mod tests {
         };
         let outcome = Outcome::Verdicts {
             selection,
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
+            verdicts: vec![checked(
+                "R-A-001",
+                Verdict::Followed,
+                "Sign every access token with RS256.",
+                "uses RS256",
+            )],
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: Some((60, 85)),
             headers: BTreeMap::new(),
@@ -2939,7 +2949,7 @@ pub(crate) mod tests {
         };
         let conforming = Outcome::Verdicts {
             selection: selection.clone(),
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
+            verdicts: vec![checked("R-A-001", Verdict::NotApplicable, "", "")],
             runner_label: None,
             partial: None,
             headers: BTreeMap::new(),
@@ -2973,7 +2983,7 @@ pub(crate) mod tests {
 
         let partial = Outcome::Verdicts {
             selection: selection.clone(),
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
+            verdicts: vec![checked("R-A-001", Verdict::NotApplicable, "", "")],
             runner_label: None,
             partial: Some((60, 85)),
             headers: BTreeMap::new(),
@@ -3222,7 +3232,7 @@ pub(crate) mod tests {
             dir,
             &check_output(serde_json::json!([
                 {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "skips signing", "reason": "unsigned"},
-                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "fine"},
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "fine"},
             ])),
         )
     }
@@ -3701,8 +3711,8 @@ pub(crate) mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -4015,7 +4025,7 @@ pub(crate) mod tests {
             finish_hook(
                 &run,
                 &mut session,
-                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+                verdicts_outcome(vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")]),
             );
 
             let own = session.loop_state(kind);
@@ -4044,7 +4054,7 @@ pub(crate) mod tests {
             finish_hook(
                 &run,
                 &mut session,
-                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+                verdicts_outcome(vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")]),
             );
         });
 
@@ -4295,7 +4305,7 @@ pub(crate) mod tests {
         let rules = tempdir().unwrap();
         let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
         let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
-        let conforming = vec![checked("R-A-001", Verdict::Conforming, "", "ok")];
+        let conforming = vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")];
 
         for (exit, max_rounds, earlier_denials, verdicts, outcome) in [
             ("the round limit's pass", 2, 2, conflict(), "warn"),
@@ -4361,7 +4371,7 @@ pub(crate) mod tests {
         .unwrap();
         let rules = tempdir().unwrap();
         let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
-        let conforming = || vec![checked("R-A-001", Verdict::Conforming, "", "ok")];
+        let conforming = || vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")];
         let over_some_rules = |verdicts| {
             let mut outcome = verdicts_outcome(verdicts);
             if let Outcome::Verdicts { partial, .. } = &mut outcome {

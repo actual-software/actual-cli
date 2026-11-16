@@ -91,7 +91,7 @@ pub fn distinct_id() -> String {
 /// only record governance activity leaves behind.
 pub fn rule_decision(verdict: Verdict, blocked: bool) -> PlanGovernanceDecision {
     match verdict {
-        Verdict::Conforming => PlanGovernanceDecision::Allow,
+        Verdict::Followed | Verdict::NotApplicable => PlanGovernanceDecision::Allow,
         Verdict::Conflicting | Verdict::RequiresDecision => {
             if blocked {
                 PlanGovernanceDecision::Block
@@ -347,15 +347,11 @@ mod tests {
     // --- rule_decision ---
 
     #[test]
-    fn test_rule_decision_conforming_is_always_allow() {
-        assert_eq!(
-            rule_decision(Verdict::Conforming, false),
-            PlanGovernanceDecision::Allow
-        );
-        assert_eq!(
-            rule_decision(Verdict::Conforming, true),
-            PlanGovernanceDecision::Allow
-        );
+    fn test_rule_decision_a_passing_verdict_is_always_allow() {
+        for verdict in [Verdict::Followed, Verdict::NotApplicable] {
+            assert_eq!(rule_decision(verdict, false), PlanGovernanceDecision::Allow);
+            assert_eq!(rule_decision(verdict, true), PlanGovernanceDecision::Allow);
+        }
     }
 
     #[test]
