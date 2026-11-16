@@ -24,6 +24,7 @@ use crate::cli::args::{AdrCheckArgs, AdrNewArgs};
 use crate::cli::commands::sync::resolve_cwd;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
+use crate::telemetry::otlp::CheckCounts;
 
 // ── new ────────────────────────────────────────────────────────────────────
 
@@ -199,8 +200,21 @@ impl CheckReport {
 }
 
 pub(super) fn exec_check(args: &AdrCheckArgs) -> Result<(), ActualError> {
+    let run = super::telemetry::Run::start();
+    let mut counts = CheckCounts::default();
+    let result = check_and_print(args, &mut counts);
+    super::telemetry::report_check(&run, counts, &result);
+    result
+}
+
+fn check_and_print(args: &AdrCheckArgs, counts: &mut CheckCounts) -> Result<(), ActualError> {
     let root = args.root.clone().unwrap_or_else(resolve_cwd);
     let report = runtime()?.block_on(run_check(args, &root, &today()));
+    *counts = CheckCounts {
+        files: report.files.len(),
+        failed: report.failed(),
+        duplicates: report.duplicates.len(),
+    };
     if args.api.json {
         println!("{}", json_text(&report));
     } else {
@@ -949,5 +963,54 @@ mod tests {
         assert!(text.contains("warning: No title"), "{text}");
         assert!(text.contains("2 files under"), "{text}");
         assert!(text.contains("Compared with 1 decision in o/r."), "{text}");
+    }
+
+    /// A check run, end to end, sends one event counting what it found, and
+    /// none of the files' paths, titles or text.
+    #[test]
+    fn check_sends_one_event_with_counts_and_no_content() {
+        use super::super::telemetry::tests::{own, sending_to_a_file};
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _telemetry = sending_to_a_file(home.path());
+        let tmp = tempdir().unwrap();
+        mixed_repository(tmp.path());
+        for _ in 0..2 {
+            write_new(
+                &new_args("Zeta title", &["MUST: Zeta policy."], &["zeta/**"]),
+                tmp.path(),
+                true,
+                TODAY,
+            )
+            .unwrap();
+        }
+        let mut args = check_args(&[]);
+        args.root = Some(tmp.path().to_path_buf());
+
+        assert!(exec_check(&args).is_err());
+
+        let records = take_captured();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["eventName"],
+            crate::telemetry::otlp::ADR_DISCOVERED
+        );
+        assert_eq!(
+            serde_json::Value::Object(own(&records[0])),
+            serde_json::json!({
+                "actual.adr.check.files": 5,
+                "actual.adr.check.failed_files": 2,
+                "actual.adr.check.duplicates": 1,
+                "actual.adr.command.outcome": "failed",
+                "actual.adr.command.exit_code": 1,
+                "actual.adr.command.stdin_is_terminal": interactive(),
+            })
+        );
+        let sent = records[0].to_string().to_lowercase();
+        for content in ["zeta", "postgres", "docs/adr", "bad.md"] {
+            assert!(!sent.contains(content), "{content} in {sent}");
+        }
     }
 }
