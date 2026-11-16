@@ -83,7 +83,6 @@ use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-#[cfg(feature = "telemetry")]
 use crate::rules::check::{ArtifactKind, CheckedRule};
 
 #[cfg(feature = "telemetry")]
