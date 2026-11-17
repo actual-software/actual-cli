@@ -1141,8 +1141,8 @@ pub struct RulesReportUseArgs {
     #[arg(long, value_name = "TOKEN")]
     pub turn: String,
 
-    /// An ADR and the line it shaped, as `<adr>=<file>:<line>`. Repeat for
-    /// each ADR.
+    /// An ADR you used and the line that best shows its effect, as
+    /// `<adr>=<file>:<line>`. Repeat for each ADR.
     #[arg(long = "claim", value_name = "ADR=FILE:LINE")]
     pub claims: Vec<String>,
 

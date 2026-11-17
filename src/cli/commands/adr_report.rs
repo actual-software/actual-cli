@@ -19,8 +19,10 @@
 //!
 //! **The check is deterministic.** A claim holds when its ADR was in the
 //! question and its line is one this turn added or changed, or one of the
-//! plan `plan-check` judged this turn. Anything else is unverified, with the
-//! first check it failed as the reason.
+//! plan `plan-check` judged this turn. A diff claim a few lines off still
+//! holds on the nearest added line in the same hunk, within
+//! [`LINE_TOLERANCE`], and records the line it matched. Anything else is
+//! unverified, with the first check it failed as the reason.
 //!
 //! **Only the verdict leaves the machine.** The claims, the lines they quote
 //! and anything the agent wrote stay in the session file under the config
@@ -57,6 +59,15 @@ const MAX_KEPT_CHARS: usize = 500;
 
 /// Longest ADR title shown in the question, in characters.
 const MAX_LABEL_CHARS: usize = 120;
+
+/// The question's first paragraph, which says what counts as used.
+const QUESTION_HEAD: &str = "Which of these ADRs did you use this turn? \
+     An ADR counts only if it changed or decided what you wrote. \
+     Leave out any your change merely complies with or happens to agree with.";
+
+/// How far, in lines, a diff claim may miss the added or changed line it
+/// means, within one hunk.
+const LINE_TOLERANCE: u64 = 3;
 
 /// A turn's question, and the answer once given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,9 +133,16 @@ pub struct CheckedClaim {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     pub line: u64,
+    /// The added or changed line a diff claim verified on, when it is not
+    /// `line` itself but one near it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_line: Option<u64>,
+    /// `matched_line - line`, when there is a matched line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_offset: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<Unverified>,
-    /// The anchored line's text, when the line exists.
+    /// The text of the line the claim verified on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<String>,
     /// What the agent wrote beside the claim, from JSON input.
@@ -381,13 +399,14 @@ fn question(
         command.push_str(&shell_word(&rules_dir.to_string_lossy()));
     }
     format!(
-        "Which of these ADRs did you use this turn? For each, name the file and line it shaped.\n\n\
+        "{QUESTION_HEAD}\n\n\
          {}\n\n\
          Answer with one command, then end your turn:\n\
          {command} --claim <adr>=<file>:<line>\n\n\
-         Repeat --claim for each ADR you used, naming a line you added or changed this turn. \
+         Repeat --claim for each ADR you used, naming the line you added or changed this turn that best shows its effect. \
          For a line of the plan approved this turn, use --plan-claim <adr>=<line>. \
-         If none of these ADRs shaped this turn's change, run the command with --none in place of the claims.",
+         When no listed ADR shaped the change, run the command with --none in place of the claims. \
+         That is a normal, expected answer.",
         list.join("\n")
     )
 }
@@ -628,7 +647,7 @@ fn json_claims(json: &str) -> Result<Vec<Claim>, ActualError> {
 fn check(
     claim: Claim,
     ask: &AdrAsk,
-    changed: &BTreeMap<String, BTreeMap<u64, String>>,
+    changed: &BTreeMap<String, ChangedFile>,
     plan: Option<&str>,
     checkout: &Path,
 ) -> CheckedClaim {
@@ -637,14 +656,18 @@ fn check(
         .as_deref()
         .map(|file| repository_path(file, checkout));
     let line = |text: &str| Some(clean(text, MAX_KEPT_CHARS));
+    let mut matched_line = None;
     let (reason, quote) = if ask.find(&claim.adr).is_none() {
         (Some(Unverified::AdrNotInSession), None)
     } else {
         match (claim.anchor, file.as_deref(), plan) {
             (Anchor::Diff, Some(file), _) => match changed.get(file) {
                 None => (Some(Unverified::FileNotChanged), None),
-                Some(lines) => match lines.get(&claim.line) {
-                    Some(text) => (None, line(text)),
+                Some(changed) => match changed.nearest(claim.line) {
+                    Some((matched, text)) => {
+                        matched_line = (matched != claim.line).then_some(matched);
+                        (None, line(text))
+                    }
                     None => (Some(Unverified::LineNotInDiff), None),
                 },
             },
@@ -666,9 +689,21 @@ fn check(
         anchor: claim.anchor,
         file,
         line: claim.line,
+        matched_line,
+        line_offset: matched_line.map(|matched| offset(claim.line, matched)),
         reason,
         quote,
         note: claim.note,
+    }
+}
+
+/// `to - from` as a signed line count.
+fn offset(from: u64, to: u64) -> i64 {
+    let distance = i64::try_from(from.abs_diff(to)).unwrap_or(i64::MAX);
+    if to >= from {
+        distance
+    } else {
+        -distance
     }
 }
 
@@ -697,10 +732,36 @@ fn repository_path(file: &str, checkout: &Path) -> String {
         .join("/")
 }
 
+/// One file's lines this turn added, and the new-side lines each hunk spans.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ChangedFile {
+    /// Each added line's text and the index of its hunk, by line number.
+    lines: BTreeMap<u64, (usize, String)>,
+    /// Each hunk's new-side lines, context included, as `first..end`.
+    hunks: Vec<std::ops::Range<u64>>,
+}
+
+impl ChangedFile {
+    /// The added line a claim on `line` means, and its text: `line` itself,
+    /// else the nearest added line in the same hunk at most
+    /// [`LINE_TOLERANCE`] away, the earlier on a tie.
+    fn nearest(&self, line: u64) -> Option<(u64, &str)> {
+        if let Some((_, text)) = self.lines.get(&line) {
+            return Some((line, text));
+        }
+        let hunk = self.hunks.iter().position(|hunk| hunk.contains(&line))?;
+        self.lines
+            .range(line.saturating_sub(LINE_TOLERANCE)..=line.saturating_add(LINE_TOLERANCE))
+            .filter(|(_, (of, _))| *of == hunk)
+            .min_by_key(|(added, _)| (added.abs_diff(line), **added))
+            .map(|(added, (_, text))| (*added, text.as_str()))
+    }
+}
+
 /// The lines a unified diff adds, by new-side file path and line number.
-/// A deleted file adds none and is absent.
-fn changed_lines(diff: &str) -> BTreeMap<String, BTreeMap<u64, String>> {
-    let mut changed: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
+/// A file that adds none, deleted or not, is absent.
+fn changed_lines(diff: &str) -> BTreeMap<String, ChangedFile> {
+    let mut changed: BTreeMap<String, ChangedFile> = BTreeMap::new();
     let mut file: Option<String> = None;
     let mut next = 0u64;
     let mut in_hunk = false;
@@ -713,23 +774,36 @@ fn changed_lines(diff: &str) -> BTreeMap<String, BTreeMap<u64, String>> {
         } else if let Some(header) = line.strip_prefix("@@ ") {
             next = hunk_start(header).unwrap_or(0);
             in_hunk = true;
+            if let Some(file) = &file {
+                changed
+                    .entry(file.clone())
+                    .or_default()
+                    .hunks
+                    .push(next..next);
+            }
         } else if in_hunk {
+            let current = file.as_ref().and_then(|file| changed.get_mut(file));
             match line.as_bytes().first() {
                 Some(b'+') => {
-                    if let Some(file) = &file {
-                        changed
-                            .entry(file.clone())
-                            .or_default()
-                            .insert(next, line[1..].to_string());
+                    if let Some(current) = current {
+                        let hunk = current.hunks.len() - 1;
+                        current.lines.insert(next, (hunk, line[1..].to_string()));
+                        current.hunks[hunk].end = next + 1;
                     }
                     next += 1;
                 }
-                Some(b' ') => next += 1,
+                Some(b' ') => {
+                    if let Some(hunk) = current.and_then(|current| current.hunks.last_mut()) {
+                        hunk.end = next + 1;
+                    }
+                    next += 1;
+                }
                 Some(b'-' | b'\\') => {}
                 _ => in_hunk = false,
             }
         }
     }
+    changed.retain(|_, file| !file.lines.is_empty());
     changed
 }
 
@@ -1019,8 +1093,9 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let changed = changed_lines(diff);
         let lines = |file: &str| {
             changed[file]
+                .lines
                 .iter()
-                .map(|(n, t)| (*n, t.as_str()))
+                .map(|(n, (_, t))| (*n, t.as_str()))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -1029,12 +1104,43 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         );
         assert_eq!(lines("new.rs"), [(1, "one"), (2, "two")]);
         assert_eq!(lines("sp aceé.rs"), [(1, "y")]);
+        assert_eq!(changed["src/a.rs"].hunks, vec![1..5]);
+        assert_eq!(changed["new.rs"].hunks, vec![1..3]);
         assert!(!changed.contains_key("gone.rs"), "{changed:?}");
         assert_eq!(changed.len(), 3);
         // A line that is no part of a hunk ends it.
         let stray = changed_lines("+++ b/x.rs\n@@ -1 +1 @@\n+kept\nnot a diff line\n+dropped\n");
-        assert_eq!(stray["x.rs"].len(), 1);
+        assert_eq!(stray["x.rs"].lines.len(), 1);
+        // A file whose hunks only remove lines adds none.
+        let removed = changed_lines("+++ b/y.rs\n@@ -1,2 +1 @@\n keep\n-drop\n");
+        assert!(removed.is_empty(), "{removed:?}");
         assert_eq!(hunk_start("-1 +x @@"), None);
+    }
+
+    /// A claim holds on its own line when that line was added, else on the
+    /// nearest added line within three in the same hunk, the earlier on a tie.
+    #[test]
+    fn test_nearest_prefers_the_exact_line_then_the_closest_in_its_hunk() {
+        let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n\
+@@ -1,10 +1,11 @@\n+a\n 2\n 3\n 4\n 5\n 6\n+b\n 8\n 9\n 10\n 11\n\
+@@ -20,2 +12,3 @@\n 12\n+c\n 14\n";
+        let changed = changed_lines(diff);
+        let file = &changed["f.rs"];
+        assert_eq!(file.hunks, [1..12, 12..15]);
+        let nearest = |line| file.nearest(line);
+        assert_eq!(nearest(7), Some((7, "b")), "exact hit");
+        assert_eq!(nearest(9), Some((7, "b")), "near hit, after");
+        assert_eq!(nearest(3), Some((1, "a")), "near hit, before");
+        assert_eq!(nearest(4), Some((1, "a")), "a tie goes to the earlier line");
+        assert_eq!(nearest(10), Some((7, "b")), "three away still holds");
+        assert_eq!(
+            nearest(11),
+            None,
+            "too far: four from b, and c is in another hunk"
+        );
+        assert_eq!(nearest(12), Some((13, "c")), "its own hunk");
+        assert_eq!(nearest(16), None, "past every hunk");
+        assert_eq!((offset(9, 7), offset(3, 1), offset(12, 13)), (-2, -2, 1));
     }
 
     #[test]
@@ -1169,7 +1275,20 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         )
         .unwrap();
         let text = ask.text();
-        assert!(text.starts_with("Which of these ADRs did you use this turn? For each, name the file and line it shaped."), "{text}");
+        assert!(text.starts_with(&format!("{QUESTION_HEAD}\n\n")), "{text}");
+        assert!(
+            text.contains("An ADR counts only if it changed or decided what you wrote."),
+            "{text}"
+        );
+        assert!(
+            text.contains("merely complies with or happens to agree with"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the line you added or changed this turn that best shows its effect"),
+            "{text}"
+        );
+        assert!(text.contains("run the command with --none in place of the claims. That is a normal, expected answer."), "{text}");
         for line in [
             "- `api-errors-001`: Typed API Errors",
             "- `legacy-naming`: Legacy Naming",
@@ -1183,7 +1302,6 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             text.contains(&format!("actual rules report-use --claude-session s1 --turn 0-01234567 --repo {} --claim <adr>=<file>:<line>", shell_word(&repo))),
             "{text}"
         );
-        assert!(text.contains("--none"), "{text}");
         assert!(!text.contains("--rules-dir"), "{text}");
         let errors = ask
             .adrs
@@ -1288,30 +1406,38 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             "logging-001=src/new.rs:1",
             "logging-001=src/untouched.rs:1",
             "made-up-adr=src/orders.rs:2",
+            "logging-001=src/orders.rs:9",
         ]
         .map(str::to_string)
         .to_vec();
         let reply = answer(&args, None::<&[u8]>).unwrap();
         assert_eq!(
             reply,
-            "Recorded 5 ADR claims for this turn. You can end your turn."
+            "Recorded 6 ADR claims for this turn. You can end your turn."
         );
         let recorded = fx.answer("s1").unwrap();
         assert_eq!(
             reasons(&recorded),
             [
                 None,
-                Some("line_not_in_diff"),
+                None,
                 None,
                 Some("file_not_changed"),
-                Some("adr_not_in_session")
+                Some("adr_not_in_session"),
+                Some("line_not_in_diff")
             ]
         );
-        assert_eq!(
-            recorded.claims[0].quote.as_deref(),
-            Some("fn b() -> Result<(), ApiError> {}")
-        );
-        assert_eq!(recorded.claims[0].file.as_deref(), Some("src/orders.rs"));
+        let changed_b = Some("fn b() -> Result<(), ApiError> {}");
+        let exact = &recorded.claims[0];
+        assert_eq!(exact.quote.as_deref(), changed_b);
+        assert_eq!(exact.file.as_deref(), Some("src/orders.rs"));
+        assert_eq!((exact.matched_line, exact.line_offset), (None, None));
+        // One line off the changed line: it holds on that line and says so.
+        let near = &recorded.claims[1];
+        assert_eq!(near.line, 1);
+        assert_eq!((near.matched_line, near.line_offset), (Some(2), Some(1)));
+        assert_eq!(near.quote.as_deref(), changed_b);
+        assert_eq!(recorded.claims[5].quote, None);
 
         assert_eq!(answer(&args, None::<&[u8]>).unwrap(), ALREADY);
         assert_eq!(
@@ -1450,7 +1576,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                 "api-errors-001=src/orders.rs:1",
                 "legacy-naming=src/orders.rs:2",
                 "made-up=src/orders.rs:2",
-                "logging-001=src/orders.rs:1",
+                "logging-001=src/orders.rs:9",
             ]
             .map(str::to_string)
             .to_vec();
