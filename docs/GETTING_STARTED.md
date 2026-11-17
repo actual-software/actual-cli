@@ -226,3 +226,4 @@ telemetry:
 | `ACTUAL_NO_TELEMETRY` | Set to any non-empty value for the same effect as `telemetry.enabled: false`, for CI and one-off runs |
 | `ACTUAL_OTLP_LOGS_ENDPOINT` | OTLP logs URL for ADR context, use, breach and override events, check events and session-end events (overrides config file) |
 | `ACTUAL_OTLP_FILE` | Local file for ADR context, use, breach and override events, check events and session-end events (overrides config file) |
+| `ACTUAL_TELEMETRY_DEBUG` | Set to `1` to log every telemetry event a run queues, sends or holds back, telemetry off included, under `~/.actualai/actual/telemetry-debug/` (see [PRIVACY.md](../PRIVACY.md#seeing-what-telemetry-sends)) |

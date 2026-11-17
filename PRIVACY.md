@@ -739,7 +739,7 @@ The file holds one JSON line for each stage of each event: `queued` when it ente
 
 Signed in, a line whose event goes out tied to your account carries `local_only`, naming the account and organization. That field is written only to this file. A request that carried your sign-in's token says `"authorization": "bearer (stored sign-in)"` and never holds the token. Signed out, the log holds the pseudonymous form that goes out.
 
-With telemetry off, the CLI still builds each event in the form your sign-in would send and logs it as `not_sent` with `reason: telemetry_off`. Nothing is spooled or sent, and no telemetry id or session state is written. A config file that won't load sends nothing, and the log says so with `reason: config_unreadable` and no event.
+With telemetry off, the CLI still builds each event in the form your sign-in would send and logs it as `not_sent` with `reason: telemetry_off`. Nothing is spooled or sent, and no telemetry id or session state is written. Without that state, a record that goes out once per session is logged again on every run that would send it: each `rules brief` run logs its ADRs again, each check round its ADR use and breach records, and each repeated session end its record. An off-mode log can therefore hold more records than the same session would send with telemetry on. A config file that won't load sends nothing, and the log says so with `reason: config_unreadable` and no event.
 
 The directory is readable only by you (`0700`, files `0600`). Nothing deletes the logs, so remove `~/.actualai/actual/telemetry-debug/` when you're done.
 
