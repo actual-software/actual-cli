@@ -265,7 +265,7 @@ network send: an opted-out run never touches git for telemetry and never writes
 
 ### ADR, check and session events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
 
-The CLI sends OpenTelemetry log events about ADRs on four occasions:
+The CLI sends OpenTelemetry log events about ADRs on five occasions:
 
 - `actual.adr.detected`, with `actual.detection.method` set to `context`, the
   first time any of an ADR's rules is added to an agent's context during a
@@ -288,6 +288,8 @@ The CLI sends OpenTelemetry log events about ADRs on four occasions:
 - `actual.gate.evaluated`, with `actual.gate.outcome` set to `overridden`, each
   time a human records an override with `actual check-override`: one event per
   ADR with a rule the command names, every time it runs.
+- `actual.adr.reported`, when the agent answers the end-of-turn question about
+  which ADRs it used (described below): one event per ADR it names.
 
 A rule file without a v2 header sends none of them.
 
@@ -305,6 +307,8 @@ They're sent on the same runs as the plan-governance `check_started` and
 below. A run outside a Claude Code hook sends them with no session or agent.
 
 The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
+
+At the end of each Claude Code turn that changed files, `impl-check --claude-hook` asks the agent which of the session's ADRs it used, and the agent answers with `actual rules report-use`, naming an ADR and a line for each claim. The CLI checks each claim on your machine: it holds when the ADR was one the question listed and the line is one the turn added or changed, or a line of the plan `plan-check` judged that turn. For each ADR named it sends `actual.adr.reported`, with the turn, the check's verdict on the claim and, for a claim on a changed line, the file's repository path in a signed-in request only. The claims, the lines they point to and anything the agent wrote beside them stay in the session's state under `plan-check-sessions/` in the user config directory, which is pruned after 7 days like the rest of that state. A claim naming an ADR the question never listed sends an event with an empty ADR reference, and the name itself is never sent. An answer of `--none` sends nothing.
 
 The `actual adr` commands send one event per run:
 
@@ -369,11 +373,11 @@ account or organization, go in a request of their own without the token. A
 request Actual refuses with a 401 is sent once more without it. Any other
 endpoint, a custom one included, never gets the token. The default endpoint is
 at that address unless the config file's `api_url` or `ACTUAL_API_URL` names
-another one. Typed reason text, `actual.override.reason_text`, and the decision
-a review command acted on, `actual.adr.decision_id`, go only in a request that
-carries the token: every request without it, and the file sink's copy of that
-request, leaves both attributes out and keeps the rest, the reason code
-included.
+another one. Typed reason text, `actual.override.reason_text`, the decision a
+review command acted on, `actual.adr.decision_id`, and a reported claim's file
+path, `actual.report.file_path`, go only in a request that carries the token:
+every request without it, and the file sink's copy of that request, leaves
+those attributes out and keeps the rest, the reason code included.
 
 Every event carries the first six attributes below. An ADR event adds
 `actual.adr.ref` and `actual.adr.ids`, then its own: `actual.detection.method`
@@ -393,10 +397,12 @@ event adds `actual.adr.check.files`, `actual.adr.check.failed_files` and
 `actual.adr.decision_id` in a request that carries your sign-in's token; and
 both add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
 `actual.adr.command.stdin_is_terminal` and `actual.adr.command.duration_ms`.
+A report event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.turn.index`, `actual.report.check_action_id`, `actual.report.evidence`, `actual.report.evidence_reason` and `actual.report.anchor`, plus `actual.report.file_path` in a signed-in request.
 An unknown value is sent as an empty string. Apart from
-`actual.override.reason_text`, which holds whatever a person typed, and
-`actual.adr.decision_id`, both of which go only in a signed-in request, none
-of them names you, your organization, your repository or this installation, so an event
+`actual.override.reason_text`, which holds whatever a person typed,
+`actual.adr.decision_id` and `actual.report.file_path`, all of which go only
+in a signed-in request, none of them names you, your organization, your
+repository or this installation, so an event
 carries the same other fields signed in or out. Only the token on a signed-in request to Actual's API, described above,
 says whose events they are, and it makes every event in that request
 first-party identity-linked. Sent signed out or to another endpoint, an event
@@ -406,7 +412,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `4` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, and 4 added `actual.adr.verdict`) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `5` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, and 5 added `actual.adr.reported` and its attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -439,6 +445,12 @@ has only the classes its fields carry below:
 | `actual.adr.command.exit_code` | The exit code the run ended with, `0` on success | anonymous |
 | `actual.adr.command.stdin_is_terminal` | Whether standard input was a terminal, which tells a person at the keyboard from a coding agent, script or CI job | anonymous |
 | `actual.adr.command.duration_ms` | How long the run took, in milliseconds | anonymous |
+| `actual.turn.index` | Which turn of the session the agent's report answers, counted from the session's first prompt | anonymous |
+| `actual.report.check_action_id` | The `actual.action.id` of the `impl-check` run that asked the question, so a report can be read beside that run's verdict | anonymous |
+| `actual.report.evidence` | Whether the claim checked out on your machine: `verified` or `unverified` | anonymous |
+| `actual.report.evidence_reason` | Why a claim is unverified, and empty when it is verified: `adr_not_in_session` (the ADR wasn't one the question listed), `file_not_changed` (the file has no change this turn, or no plan was judged this turn) or `line_not_in_diff` (the line isn't one the turn added or changed, or isn't a line of the plan) | anonymous |
+| `actual.report.anchor` | What the claim's line is a line of: `diff` or `plan` | anonymous |
+| `actual.report.file_path` | The repository-relative path of the file a `diff` claim names, sent only in a request that carries your sign-in's token. The line itself, its text and anything the agent wrote are never sent | first-party identity-linked |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also
@@ -447,10 +459,11 @@ release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
 override was recorded, when a check started or completed, when the session ended, or when an `actual adr` run finished), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
-**Apart from the `actual.override.reason_text` of an `other` override, no event
-carries rule text, plan or diff text, override reasons, decision titles,
-context, policies or scope globs, rejection reasons, file paths, raw account
-identifiers, identity hashes or installation id.**
+**Apart from the `actual.override.reason_text` of an `other` override and the
+`actual.report.file_path` of a signed-in report, no event carries rule text,
+plan or diff text, override reasons, decision titles, context, policies or
+scope globs, rejection reasons, file paths, raw account identifiers, identity
+hashes or installation id.**
 
 `actual.override.reason_text` carries whatever the human typed under "Other"
 in the override dialog, as a typed `/actual-cli:override` reason whose first
@@ -517,9 +530,9 @@ signed out by the time they're sent or your sign-in has expired and can't be
 renewed, when Actual refused the token, and when the endpoint isn't at the
 address `actual advisor` uses, as when the config file's `api_url` or
 `ACTUAL_API_URL` names another one. The events still carry the fields in the
-table above, with the classes given there, except `actual.override.reason_text`
-and `actual.adr.decision_id`, which a request without your sign-in never
-carries:
+table above, with the classes given there, except `actual.override.reason_text`,
+`actual.adr.decision_id` and `actual.report.file_path`, which a request without
+your sign-in never carries:
 
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. The ADR references lead to the repository the

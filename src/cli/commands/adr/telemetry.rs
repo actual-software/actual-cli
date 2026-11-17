@@ -267,7 +267,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 4);
+                assert_eq!(all["actual.event.schema_version"], 5);
             }
         });
     }
