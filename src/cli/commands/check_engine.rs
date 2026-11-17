@@ -2949,7 +2949,10 @@ pub(crate) mod tests {
         };
         let conforming = Outcome::Verdicts {
             selection: selection.clone(),
-            verdicts: vec![checked("R-A-001", Verdict::NotApplicable, "", "")],
+            verdicts: vec![
+                checked("R-A-001", Verdict::Followed, "Sign with RS256.", ""),
+                checked("R-A-002", Verdict::NotApplicable, "", ""),
+            ],
             runner_label: None,
             partial: None,
             headers: BTreeMap::new(),
@@ -2958,6 +2961,10 @@ pub(crate) mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conforming");
         assert!(value.get("partial").is_none());
+        assert_eq!(value["verdicts"][0]["verdict"], "followed");
+        assert_eq!(value["verdicts"][0]["span"], "Sign with RS256.");
+        assert_eq!(value["verdicts"][1]["verdict"], "not_applicable");
+        assert_eq!(value["verdicts"][1]["span"], "");
 
         let conflicting = Outcome::Verdicts {
             selection: selection.clone(),
