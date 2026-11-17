@@ -805,11 +805,23 @@ fn spool_lines(outputs: &Outputs, records: &[LogRecord]) -> Vec<String> {
 /// The records spooled `lines` hold, with their stamps. A line is dropped when
 /// it isn't a record, or when its time or ids won't encode.
 fn records(lines: &[String]) -> Vec<Spooled<LogRecord>> {
+    lines.iter().filter_map(|line| decode(line)).collect()
+}
+
+/// The spooled `lines` [`records`] drops.
+fn unreadable(lines: &[String]) -> Vec<String> {
     lines
         .iter()
-        .filter_map(|line| serde_json::from_str::<Spooled<LogRecord>>(line).ok())
-        .filter(|spooled| spooled.record.to_proto().is_some())
+        .filter(|line| decode(line).is_none())
+        .cloned()
         .collect()
+}
+
+/// The record a spool line holds, when it is one that will encode.
+fn decode(line: &str) -> Option<Spooled<LogRecord>> {
+    serde_json::from_str::<Spooled<LogRecord>>(line)
+        .ok()
+        .filter(|spooled| spooled.record.to_proto().is_some())
 }
 
 /// The requests `spooled` goes out in: the records `sign_in` covers, flagged
@@ -896,8 +908,9 @@ fn protobuf_request(records: &[LogRecord]) -> Vec<u8> {
 /// Each request's records are taken out of the spool before it is sent, so
 /// they are gone whatever the outcome. A request gets what is left of the
 /// budget. The upload ends when the budget runs out or a request is dropped,
-/// since a dropped request means the time left can't hold another try, and
-/// the records it didn't reach stay in the spool for the next one. The
+/// since a dropped request means the time left can't hold another try. The
+/// records it hadn't taken stay in the spool for the next one, and the rest of
+/// the batch it had taken is dropped with it. The
 /// request is appended to the file sink as OTLP/JSON when one is set and
 /// POSTed as protobuf when an endpoint is. A batch with no record left in it
 /// sends nothing, since a sender should not send an empty envelope. An
@@ -931,7 +944,11 @@ async fn flush_within(config: &Config, budget: Duration) {
         if lines.is_empty() {
             return;
         }
-        for (records, signed) in requests(records(&lines), sign_in.as_ref()) {
+        if debug::enabled() {
+            debug::spooled(Stream::Otlp, &unreadable(&lines), false);
+        }
+        let mut pending = requests(records(&lines), sign_in.as_ref()).into_iter();
+        while let Some((records, signed)) = pending.next() {
             let filed = outputs.file.as_ref().is_some_and(|file| {
                 let line = format!("{}\n", json_request(&records));
                 crate::config::paths::append_secure(file, line.as_bytes()).is_ok()
@@ -956,6 +973,9 @@ async fn flush_within(config: &Config, budget: Duration) {
             }
             tracing::debug!("otlp logs: {} records: {sent:?}", records.len());
             if sent == Sent::Dropped {
+                for (records, signed) in pending {
+                    log_request(&records, signed, Some(Sent::Dropped), false, &outputs);
+                }
                 return;
             }
         }
@@ -4054,6 +4074,69 @@ mod tests {
         let dropped = at_stage(&lines, "dropped");
         assert_eq!(dropped.len(), 1, "{lines:?}");
         assert_eq!(dropped[0]["to"], format!("file:{}", file.display()));
+    }
+
+    /// When the signed request is dropped, the signed-out request the upload
+    /// had already taken from the spool is dropped with it, and says so.
+    #[tokio::test]
+    async fn test_debug_mode_logs_the_request_after_a_dropped_one_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let _debug = debug_on(home.path(), "abandoned");
+        let (signed, _) = logs(&mut server, Some("Bearer token-a"), 503, 1).await;
+        let (unsigned, _) = logs(&mut server, None, 200, 0).await;
+        let (outputs, config) = at(&server);
+        spool(&outputs, &adrs("before", 2));
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &adrs("org-a", 1));
+
+        flush_within(&config, Duration::from_millis(200)).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        assert!(OTLP_LOGS.is_empty());
+        let lines = logged("abandoned");
+        assert!(at_stage(&lines, "sent").is_empty(), "{lines:?}");
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 2, "{lines:?}");
+        assert_eq!(dropped[0]["auth"], "signed_in");
+        assert_eq!(dropped[1]["auth"], "signed_out");
+        assert!(dropped[1].get("authorization").is_none());
+        assert_eq!(dropped[1]["to"], outputs.endpoint.clone().unwrap());
+        let event = dropped[1]["event"].to_string();
+        assert!(adr_refs("before", 2).iter().all(|adr| event.contains(adr)));
+    }
+
+    /// A spool line the uploader can't read leaves the spool unsent, and is
+    /// logged as dropped.
+    #[tokio::test]
+    async fn test_debug_mode_logs_an_unreadable_spool_line_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "unreadable");
+        OTLP_LOGS
+            .append_lines(&["not json".to_string(), "[1, 2]".to_string()])
+            .unwrap();
+        spool(&no_outputs(), &adrs("a", 1));
+        let file = home.path().join("otlp.jsonl");
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        let lines = logged("unreadable");
+        assert_eq!(at_stage(&lines, "queued").len(), 3);
+        assert_eq!(at_stage(&lines, "sent").len(), 1);
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 2, "{lines:?}");
+        assert!(dropped[0].get("event").is_none());
+        assert_eq!(dropped[1]["event"], serde_json::json!([1, 2]));
     }
 
     /// Telemetry off: the records are built in the form the current sign-in
