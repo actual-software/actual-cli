@@ -1231,14 +1231,14 @@ done
 // ── plan-check-override: the interactive-terminal gate ──────────────────
 //
 // `exec_override` refuses unless stdin is a real terminal *and*
-// `running_under_claude_code()` is false (see that function's own doc for
+// `running_under_agent_host()` is false (see that function's own doc for
 // why those two markers are trustworthy). Only the terminal half needs a
 // subprocess test: whether a test *process's* own stdin happens to be a
 // terminal depends on how the test binary itself was launched, which a
 // `--lib` unit test cannot control. `assert_cmd::Command` gives every
 // subprocess here piped (non-terminal) stdin by default, which is exactly
 // the condition this gate exists to catch — an agent's own shell tool calls
-// never get a pty either. `running_under_claude_code()` carries no such
+// never get a pty either. `running_under_agent_host()` carries no such
 // restriction and is covered directly by `--lib` unit tests instead.
 
 #[test]
