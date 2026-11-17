@@ -812,7 +812,7 @@ impl GovernedPlanCheck {
         )
         .unwrap();
 
-        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}}"#;
         let fake_claude = config_dir.path().join("fake-claude.sh");
         std::fs::write(
             &fake_claude,
@@ -855,7 +855,7 @@ impl GovernedPlanCheck {
     /// Swap in a judge that finds R-A-001 violated, so the run denies the plan
     /// and `--claude-hook` prints that verdict rather than an empty allow.
     fn judge_finds_r_a_001_violated(&self) {
-        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}}"#;
         std::fs::write(
             &self.fake_claude,
             format!(
@@ -1142,7 +1142,7 @@ fn test_plan_check_codex_runner_is_read_only_and_keeps_stdin_out_of_codex() {
         scratch.path().join("argv.txt"),
         scratch.path().join("stdin.txt"),
     );
-    let verdicts = r#"{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}"#;
+    let verdicts = r#"{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}"#;
     let fake_codex = scratch.path().join("fake-codex.sh");
     std::fs::write(
         &fake_codex,
@@ -1193,6 +1193,22 @@ done
 
     let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(report["status"], "conforming", "{report}");
+    let verdict_of = |rule_id: &str| {
+        report["verdicts"]
+            .as_array()
+            .and_then(|vs| vs.iter().find(|v| v["rule_id"] == rule_id))
+            .unwrap_or_else(|| panic!("no verdict for {rule_id}: {report}"))
+            .clone()
+    };
+    let followed = verdict_of("R-A-001");
+    assert_eq!(followed["verdict"], "followed", "{report}");
+    assert_eq!(
+        followed["span"], "Sign every access token with RS256.",
+        "{report}"
+    );
+    let not_applicable = verdict_of("R-A-002");
+    assert_eq!(not_applicable["verdict"], "not_applicable", "{report}");
+    assert_eq!(not_applicable["span"], "", "{report}");
     let args = std::fs::read_to_string(&argv).unwrap();
     assert!(args.starts_with("exec\n--sandbox\nread-only\n"), "{args}");
     assert_eq!(std::fs::read_to_string(&stdin).unwrap(), "");
@@ -1507,7 +1523,7 @@ impl GovernedImplCheck {
         )
         .unwrap();
 
-        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}}"#;
         let fake_claude = config_dir.path().join("fake-claude.sh");
         std::fs::write(
             &fake_claude,
@@ -1861,7 +1877,7 @@ fn test_check_override_is_gated_the_same_way_for_a_session_impl_check_denied() {
     let rules = fixture.repo.path().join(".actual/rules");
     // A conflicting verdict this time, so the hook run actually denies
     // rather than passing silently.
-    let deny_envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conflicting","span":"logs the key","reason":"forbidden"}]}}"#;
+    let deny_envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conflicting","span":"logs the key","reason":"forbidden"}]}}"#;
     std::fs::write(
         &fixture.fake_claude,
         format!(

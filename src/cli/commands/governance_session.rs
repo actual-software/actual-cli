@@ -49,7 +49,7 @@
 //! not — deliberately different.** A cleared rule guards against exactly one
 //! thing: a non-deterministic judge asked the *same* question twice giving a
 //! different answer. It is not a standing pass. So each loop's `cleared` map
-//! keys a rule to the digest of the plan or diff that was judged conforming
+//! keys a rule to the digest of the plan or diff that was judged passing
 //! for it ([`content_digest`]), and [`GovernanceSession::excludes`] only
 //! honors that entry for *that* [`crate::rules::check::ArtifactKind`] while
 //! the *current* artifact's digest still matches — edit the plan or the
@@ -131,7 +131,7 @@ pub struct LoopState {
     /// increment this — nothing was actually checked.
     pub rounds: u32,
     /// `"{doc_slug}::{rule_id}"` -> the digest of the artifact text that was
-    /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
+    /// last judged passing ([`crate::rules::check::Verdict::passes`]) for it (see
     /// [`content_digest`]). A later clearance for the same rule simply
     /// overwrites the entry — only the most recent judgment matters, so this
     /// holds one entry per rule ever cleared, not one per round.
@@ -421,7 +421,7 @@ impl GovernanceSession {
     /// True when `key` must never be sent to the judge again for an artifact
     /// of `kind` whose digest is `artifact_digest`: either explicitly
     /// overridden (session-scoped, regardless of kind or wording), or judged
-    /// conforming against this *exact* artifact text already in *this* loop
+    /// passing against this *exact* artifact text already in *this* loop
     /// (content-scoped — see the module doc). A rule cleared against a plan
     /// that has since been edited, or cleared in the other loop, is not
     /// excluded: `artifact_digest` / `kind` will not match, so it is judged

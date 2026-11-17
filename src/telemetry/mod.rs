@@ -5,6 +5,7 @@
 /// be disabled at runtime via the `ACTUAL_NO_TELEMETRY` env var or the
 /// `telemetry.enabled` config flag, or at compile time by disabling the
 /// `telemetry` Cargo feature.
+pub mod debug;
 pub mod identity;
 pub mod metrics;
 pub mod opt_out;

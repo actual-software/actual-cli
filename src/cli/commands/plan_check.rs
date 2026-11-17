@@ -99,10 +99,10 @@
 //!    recorded human decision, and the epic this belongs to (AK-662) asks
 //!    for the deliberate case to be "surfaced for explicit architectural
 //!    review," not silently allowed past. So it gets the same deny + per-rule
-//!    round-limit + override treatment as [`Verdict::Conflicting`], not a
+//!    round-limit + override treatment as [`Verdict::Conflicting`](crate::rules::check::Verdict::Conflicting), not a
 //!    notice the agent can simply proceed past.
 //! 2. **Never re-litigate a cleared rule.** Every rule the judge has already
-//!    called [`Verdict::Conforming`] for this session, against this exact
+//!    called passing ([`Verdict::passes`](crate::rules::check::Verdict::passes)) for this session, against this exact
 //!    plan text, is excluded from the next judge call outright — not merely
 //!    re-asked and hoped to agree. A judge is a model call, not a
 //!    deterministic function; without this, a borderline rule could flip
@@ -153,8 +153,6 @@ use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
 use crate::cli::commands::{rules_brief, rules_scope};
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-#[cfg(feature = "telemetry")]
-use crate::rules::check::Verdict;
 use crate::rules::check::{ArtifactKind, CheckedRule};
 use crate::rules::scope::{self, Query};
 
@@ -258,7 +256,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
         let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
             .iter()
-            .filter(|v| v.verdict != Verdict::Conforming)
+            .filter(|v| !v.verdict.passes())
             .map(|v| {
                 (
                     v.rule_id.as_str(),
@@ -387,6 +385,10 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     // — no state read, no state written, no round/override language in the
     // output. See the module doc's "revision loop" section.
     let session_id = envelope.session_id.as_deref();
+    #[cfg(feature = "telemetry")]
+    if let Some(id) = session_id {
+        crate::telemetry::debug::use_session(id);
+    }
     let mut session = session_id
         .map(|id| governance_session::load(id, &rules_dir))
         .unwrap_or_default();
@@ -894,8 +896,8 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -970,8 +972,8 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1050,7 +1052,7 @@ mod tests {
                 serde_json::json!({
                     "doc_slug": "cross-cutting-many-abcd",
                     "rule_id": format!("R-X-{i:04}"),
-                    "verdict": "conforming",
+                    "verdict": "not_applicable",
                     "span": "",
                     "reason": "not touched",
                 })
@@ -1112,8 +1114,8 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1153,7 +1155,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1339,7 +1341,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1357,7 +1359,7 @@ mod tests {
 
     /// AK-678: a real deny must emit a `block`-decision batch with exactly
     /// one `plan_governance_rule_violation` event for the conflicting rule
-    /// (not the conforming one), and no event for `R-A-001`.
+    /// (not the followed one), and no event for `R-A-001`.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_hook_with_deny_emits_block_governance_events() {
@@ -1367,7 +1369,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1464,7 +1466,7 @@ mod tests {
         )]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1519,6 +1521,7 @@ mod tests {
             attribute(&records[1], "actual.detection.method"),
             "planning"
         );
+        assert_eq!(attribute(&records[1], "actual.adr.verdict"), "conflicting");
         assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
         assert_eq!(attribute(&records[2], "actual.gate.type"), "planning");
         let (started, completed) = (&records[0], &records[3]);
@@ -1551,7 +1554,7 @@ mod tests {
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "requires_decision", "span": "moves to HS256", "reason": "deliberate supersession"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1606,7 +1609,7 @@ mod tests {
             verdicts.push(serde_json::json!({
                 "doc_slug": "cross-cutting-many-abcd",
                 "rule_id": format!("R-X-{i:04}"),
-                "verdict": "conforming",
+                "verdict": "not_applicable",
                 "span": "",
                 "reason": "not touched",
             }));
@@ -1679,7 +1682,7 @@ mod tests {
                 serde_json::json!({
                     "doc_slug": "cross-cutting-many-abcd",
                     "rule_id": format!("R-X-{i:04}"),
-                    "verdict": "conforming",
+                    "verdict": "not_applicable",
                     "span": "",
                     "reason": "not touched",
                 })
@@ -1727,8 +1730,8 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1754,8 +1757,8 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1809,11 +1812,11 @@ mod tests {
         let rules_dir = crate::rules::rules_dir(root.path());
 
         // Round 1: a plan that does not touch signing at all -- both rules
-        // come back conforming (vacuously) and get cleared.
+        // come back not_applicable and get cleared.
         let bin1 = tempdir().unwrap();
         let round1_response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "plan does not touch signing"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "plan does not touch logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "not_applicable", "span": "", "reason": "plan does not touch signing"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "plan does not touch logging"},
         ]));
         {
             let _binary = EnvGuard::set(
@@ -1846,7 +1849,7 @@ mod tests {
         let bin2 = tempdir().unwrap();
         let round2_response = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "signs with HS256", "reason": "violates RS256 requirement"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "still does not log the key"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "still does not log the key"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1864,8 +1867,9 @@ mod tests {
 
         // R-A-001 must have been re-judged (not silently excluded): its
         // cleared entry must be gone (the judge called it conflicting this
-        // round, not conforming), and R-A-002's clearance updates to the new
-        // plan's digest rather than staying pinned to the old one.
+        // round, after not_applicable in round 1), and R-A-002's clearance
+        // updates to the new plan's digest rather than staying pinned to the
+        // old one.
         let after_round2 = governance_session::load("sess-rejudge-1", &rules_dir);
         let key_a001 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
         let key_a002 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
@@ -1880,8 +1884,8 @@ mod tests {
         );
     }
 
-    /// End-to-end through `exec_hook_with`: a mixed conforming/conflicting
-    /// round must persist the conforming rule as cleared and count as one
+    /// End-to-end through `exec_hook_with`: a mixed followed/conflicting
+    /// round must persist the followed rule as cleared and count as one
     /// round, for the session named in the envelope.
     #[cfg(unix)]
     #[test]
@@ -1892,7 +1896,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1937,7 +1941,7 @@ mod tests {
         // Always conflicting on R-A-002, so this session never resolves on
         // its own -- the only way it stops denying is the round limit.
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1990,7 +1994,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -2055,8 +2059,8 @@ mod tests {
         args.max_rounds = 1;
 
         let clean_response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let bin_clean = tempdir().unwrap();
         {
@@ -2095,7 +2099,7 @@ mod tests {
         // fail-open immediately instead of denying.
         let conflict_response = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "signs with HS256", "reason": "violates RS256 requirement"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let bin_conflict = tempdir().unwrap();
         let _binary = EnvGuard::set(
@@ -2149,7 +2153,7 @@ mod tests {
         // Round 1: only R-A-001 conflicts (count -> 1, not yet exceeded).
         let round1 = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "signs with HS256", "reason": "violates RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         {
             let bin = tempdir().unwrap();
@@ -2206,7 +2210,7 @@ mod tests {
         // gate now stops blocking.
         let round3 = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "still signs with HS256", "reason": "still violates RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no longer logs the key"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no longer logs the key"},
         ]));
         let bin = tempdir().unwrap();
         let _binary = EnvGuard::set(

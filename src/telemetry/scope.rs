@@ -50,6 +50,11 @@ pub struct ScopeMetrics {
 impl ScopeMetrics {
     /// Build the `scope_select` event for this run.
     pub fn to_event(&self) -> PlanGovernanceEvent {
+        self.to_event_with_id(crate::telemetry::plan_governance::distinct_id())
+    }
+
+    /// [`ScopeMetrics::to_event`], carrying `distinct_id`.
+    pub fn to_event_with_id(&self, distinct_id: String) -> PlanGovernanceEvent {
         let mut properties = PlanGovernanceEventProperties {
             cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             command: Some("rules select".to_string()),
@@ -70,7 +75,7 @@ impl ScopeMetrics {
         self.identity.apply_to(&mut properties);
         PlanGovernanceEvent {
             event: PlanGovernanceEventName::PlanGovernanceScopeSelect,
-            distinct_id: crate::telemetry::plan_governance::distinct_id(),
+            distinct_id,
             properties: Some(properties),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
             insert_id: new_insert_id(),

@@ -152,14 +152,10 @@ pub(super) fn report_review<T>(
 
 #[cfg(feature = "telemetry")]
 fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
         return;
     };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
-        return;
-    };
-    let record = build(&otlp::Origin::resolve());
-    brief_telemetry::dispatch(&outputs, vec![record]);
+    destination.deliver(vec![build(&otlp::Origin::resolve())]);
 }
 
 #[cfg(not(feature = "telemetry"))]
@@ -224,6 +220,8 @@ pub(super) mod tests {
             "ACTUAL_OTLP_LOGS_ENDPOINT",
             "ACTUAL_OTLP_FILE",
             "TRACEPARENT",
+            crate::telemetry::debug::ENV,
+            crate::telemetry::debug::ID_ENV,
         ]
         .into_iter()
         .map(EnvGuard::remove)
@@ -300,7 +298,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 3);
+                assert_eq!(all["actual.event.schema_version"], 4);
             }
         });
     }
@@ -430,6 +428,26 @@ pub(super) mod tests {
         });
         with_config(WITH_FILE, |_| {
             assert_eq!(report_both().len(), 2, "the positive control");
+        });
+    }
+
+    /// Telemetry off in debug mode: both events are built and logged as not
+    /// sent, and nothing is sent.
+    #[test]
+    fn debug_mode_logs_both_events_as_not_sent_with_telemetry_off() {
+        let reviewed = Reviewed::of(&decision("d-1", None, &[]));
+        with_config(&format!("{WITH_FILE}  enabled: false\n"), |home| {
+            let _debug = crate::telemetry::debug::tests::debug_on(home, "adr-off");
+            report_check(&run(true), COUNTS, &Ok(()));
+            report_review(&run(true), "accept", Some(&reviewed), &Ok(()));
+            assert!(take_captured().is_empty());
+            let lines = crate::telemetry::debug::tests::logged("adr-off");
+            let names: Vec<_> = lines.iter().map(|l| &l["event"]["eventName"]).collect();
+            assert_eq!(names, [otlp::ADR_DISCOVERED, otlp::ADR_REVIEWED]);
+            for line in &lines {
+                assert_eq!(line["stage"], "not_sent");
+                assert_eq!(line["reason"], "telemetry_off");
+            }
         });
     }
 }
