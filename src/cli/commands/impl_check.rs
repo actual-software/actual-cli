@@ -350,6 +350,10 @@ pub(super) fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, 
         .args([
             "diff",
             "--no-ext-diff",
+            // Pinned so a user's diff.context can't move the hunk bounds a
+            // report-use claim's line tolerance stays within.
+            "--unified=3",
+            "--inter-hunk-context=0",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             base,
