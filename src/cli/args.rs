@@ -1118,8 +1118,8 @@ pub enum RulesAction {
 /// The coding agent runs this once per turn, when the Stop hook asks it which
 /// ADRs it used. Each claim names an ADR and a line: one the turn added or
 /// changed, or one of the plan `plan-check` judged this turn. The answer and
-/// the lines it names stay on this machine; the CLI checks each claim and
-/// sends only whether it held.
+/// the lines it quotes stay on this machine; the CLI checks each claim and
+/// sends whether it held, plus the file a diff claim names when signed in.
 #[derive(Parser, Debug)]
 pub struct RulesReportUseArgs {
     /// The Claude Code session the question was asked in.
