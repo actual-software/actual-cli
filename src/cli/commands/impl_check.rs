@@ -502,6 +502,9 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         return;
     }
     let diff_digest = governance_session::content_digest(&diff_text);
+    if super::adr_report::settled(&session, &diff_digest) {
+        return;
+    }
     let ask = super::adr_report::prepare(session_id, &session, &root, &rules_dir, &diff_digest);
 
     #[cfg(feature = "telemetry")]
@@ -566,6 +569,9 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     let turn_start = head_commit(&root).map(|head| TurnStart {
         root: checkout_root(&root),
+        diff_digest: working_tree_diff_from(&root, &head)
+            .ok()
+            .map(|diff| governance_session::content_digest(&diff)),
         head,
     });
     // Under the session lock, on a fresh copy: `/override` runs on the same
@@ -1945,6 +1951,7 @@ mod tests {
             Some(TurnStart {
                 root: checkout_root(repo.path()),
                 head,
+                diff_digest: Some(governance_session::content_digest("")),
             })
         };
 
@@ -1971,7 +1978,18 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(
             governance_session::load("sess-turn-1", &rules).turn_start,
-            recorded(second)
+            recorded(second.clone())
+        );
+
+        // Work an earlier turn left uncommitted is in the recorded digest.
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 8 }\n").unwrap();
+        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        let dirty = working_tree_diff_from(repo.path(), &second).unwrap();
+        assert_eq!(
+            governance_session::load("sess-turn-1", &rules)
+                .turn_start
+                .and_then(|start| start.diff_digest),
+            Some(governance_session::content_digest(&dirty))
         );
     }
 
@@ -1989,6 +2007,7 @@ mod tests {
         stale.turn_start = Some(TurnStart {
             root: checkout_root(unborn.path()),
             head: "a".repeat(40),
+            diff_digest: None,
         });
         governance_session::store("sess-turn-unborn", &rules, &stale);
 
@@ -2028,6 +2047,7 @@ mod tests {
         session.turn_start = Some(TurnStart {
             root: canonical.clone(),
             head: start.clone(),
+            diff_digest: None,
         });
         assert_eq!(
             turn_base(&session, &root),
@@ -2064,6 +2084,7 @@ mod tests {
         session.turn_start = Some(TurnStart {
             root: canonical.clone(),
             head: head_of(repo.path()),
+            diff_digest: None,
         });
         run_git(repo.path(), &["commit", "-q", "--amend", "-m", "rewritten"]);
         assert_eq!(
@@ -2075,6 +2096,7 @@ mod tests {
         session.turn_start = Some(TurnStart {
             root: canonical,
             head: "--output=/tmp/injected".to_string(),
+            diff_digest: None,
         });
         assert_eq!(turn_base(&session, repo.path()), None, "not an object id");
     }
@@ -2304,6 +2326,15 @@ mod tests {
         assert!(deny_reason(&next[0]).contains("--turn 2-"), "{next:?}");
         assert_eq!(judge_calls(&calls), 2);
 
+        // A turn that only reads, with the earlier turns' edits still
+        // uncommitted, has a diff but changed nothing, so it is not asked.
+        start(&args);
+        assert!(
+            stop(&args, "sess-ask").is_empty(),
+            "a read-only turn is not asked"
+        );
+        assert_eq!(judge_calls(&calls), 2);
+
         // A session nothing was briefed in is never asked.
         args.rules_dir = None;
         let quiet = stop(&args, "sess-never-briefed");
@@ -2323,7 +2354,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
-        let (repo, _bin, _calls, args, _binary) = briefed_repo("sess-block", "conflicting");
+        let (repo, _bin, calls, args, _binary) = briefed_repo("sess-block", "conflicting");
         std::fs::write(
             repo.path().join("oauth.rs"),
             "fn sign() { sign_with_hs256(); }\n",
@@ -2338,6 +2369,12 @@ mod tests {
             question.starts_with(" did you use this turn?"),
             "{question}"
         );
+
+        // Answering the question settles nothing: the same diff is judged,
+        // and blocked, again.
+        let same = stop(&args, "sess-block");
+        assert!(!deny_reason(&same[0]).contains(QUESTION), "{same:?}");
+        assert_eq!(judge_calls(&calls), 2);
 
         std::fs::write(
             repo.path().join("oauth.rs"),
@@ -2368,6 +2405,23 @@ mod tests {
         assert!(deny_reason(&out[0]).starts_with(QUESTION), "{out:?}");
         let notice = out[0]["systemMessage"].as_str().unwrap();
         assert!(notice.contains("did not run"), "{notice}");
+
+        // The answer changed no file, so the next Stop ends the turn without
+        // running the check again, and without repeating the notice.
+        assert!(stop(&args, "sess-notice").is_empty());
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs512(); }\n",
+        )
+        .unwrap();
+        let changed = stop(&args, "sess-notice");
+        assert!(
+            changed[0]["systemMessage"]
+                .as_str()
+                .unwrap()
+                .contains("did not run"),
+            "{changed:?}"
+        );
     }
 
     #[test]
