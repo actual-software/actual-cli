@@ -983,7 +983,7 @@ fn send_override_events(
 }
 
 /// `--claude-hook`-mode wrapper around [`send_governance_events`]: every
-/// non-conforming verdict this round gets a violation event with the same
+/// non-passing verdict this round gets a violation event with the same
 /// `blocked` outcome, since (per the module doc's "revision loop" section) a
 /// round either denies the tool call over every rule in `blocking` together
 /// or lets all of them through together — there is no per-rule split within
@@ -1789,9 +1789,9 @@ fn finish_verdicts(
             if v.verdict.passes() {
                 state.cleared.insert(key, run.artifact_digest.to_string());
             } else {
-                // A rule that was cleared against an earlier artifact and is
-                // no longer conforming against this one must not leave a
-                // stale entry behind -- it is no longer a true fact about the
+                // A rule that was cleared against an earlier artifact and no
+                // longer passes against this one must not leave a stale
+                // entry behind -- it is no longer a true fact about the
                 // current artifact, digest mismatch or not.
                 state.cleared.remove(&key);
             }
@@ -3633,7 +3633,7 @@ pub(crate) mod tests {
                 serde_json::json!({
                     "doc_slug": "cross-cutting-many-abcd",
                     "rule_id": format!("R-X-{i:04}"),
-                    "verdict": "conforming",
+                    "verdict": "not_applicable",
                     "span": "",
                     "reason": "not touched",
                 })

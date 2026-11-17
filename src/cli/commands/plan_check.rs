@@ -1355,7 +1355,7 @@ mod tests {
 
     /// AK-678: a real deny must emit a `block`-decision batch with exactly
     /// one `plan_governance_rule_violation` event for the conflicting rule
-    /// (not the conforming one), and no event for `R-A-001`.
+    /// (not the followed one), and no event for `R-A-001`.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_exec_hook_with_deny_emits_block_governance_events() {
@@ -1807,7 +1807,7 @@ mod tests {
         let rules_dir = crate::rules::rules_dir(root.path());
 
         // Round 1: a plan that does not touch signing at all -- both rules
-        // come back conforming (vacuously) and get cleared.
+        // come back not_applicable and get cleared.
         let bin1 = tempdir().unwrap();
         let round1_response = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "not_applicable", "span": "", "reason": "plan does not touch signing"},
@@ -1862,8 +1862,9 @@ mod tests {
 
         // R-A-001 must have been re-judged (not silently excluded): its
         // cleared entry must be gone (the judge called it conflicting this
-        // round, not conforming), and R-A-002's clearance updates to the new
-        // plan's digest rather than staying pinned to the old one.
+        // round, after not_applicable in round 1), and R-A-002's clearance
+        // updates to the new plan's digest rather than staying pinned to the
+        // old one.
         let after_round2 = governance_session::load("sess-rejudge-1", &rules_dir);
         let key_a001 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
         let key_a002 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
@@ -1878,8 +1879,8 @@ mod tests {
         );
     }
 
-    /// End-to-end through `exec_hook_with`: a mixed conforming/conflicting
-    /// round must persist the conforming rule as cleared and count as one
+    /// End-to-end through `exec_hook_with`: a mixed followed/conflicting
+    /// round must persist the followed rule as cleared and count as one
     /// round, for the session named in the envelope.
     #[cfg(unix)]
     #[test]
