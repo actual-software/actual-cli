@@ -112,12 +112,15 @@ impl Spool {
     pub(crate) fn append_lines(&self, new: &[String]) -> std::io::Result<()> {
         let appended = self.append_lines_unlogged(new);
         debug::spooled(self.stream, new, appended.is_ok());
-        appended
+        debug::spooled(self.stream, &appended?, false);
+        Ok(())
     }
 
-    fn append_lines_unlogged(&self, new: &[String]) -> std::io::Result<()> {
+    /// [`Spool::append_lines`] without the debug log, returning the lines the
+    /// cap pushed out.
+    fn append_lines_unlogged(&self, new: &[String]) -> std::io::Result<Vec<String>> {
         let Some(path) = self.path() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         // `path()` always lives under the config dir, so it has a parent; the
         // `unwrap_or` is a total fallback that keeps this branch-free — and so
@@ -149,9 +152,11 @@ impl Spool {
         if lines.len() + new.len() > MAX_SPOOL_EVENTS {
             lines.extend(new.iter().map(String::as_str));
             let drop = lines.len() - MAX_SPOOL_EVENTS;
-            crate::config::paths::write_secure(&path, joined(&lines[drop..]).as_bytes())
+            crate::config::paths::write_secure(&path, joined(&lines[drop..]).as_bytes())?;
+            Ok(lines[..drop].iter().map(|line| line.to_string()).collect())
         } else {
-            crate::config::paths::append_secure(&path, joined(new).as_bytes())
+            crate::config::paths::append_secure(&path, joined(new).as_bytes())?;
+            Ok(Vec::new())
         }
     }
 
@@ -1718,6 +1723,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(OTLP_LOGS.take(usize::MAX), all[10..]);
+    }
+
+    /// In debug mode, each line the cap pushes out of the spool gets a
+    /// `dropped` line after its `queued` one.
+    #[test]
+    fn test_debug_mode_logs_lines_the_cap_trims_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _debug = crate::telemetry::debug::tests::debug_on(home.path(), "trim");
+        let all = otlp_lines(MAX_SPOOL_EVENTS + 10);
+        OTLP_LOGS.append_lines(&all[..MAX_SPOOL_EVENTS]).unwrap();
+        OTLP_LOGS.append_lines(&all[MAX_SPOOL_EVENTS..]).unwrap();
+
+        let logged = crate::telemetry::debug::tests::logged("trim");
+        let stages: Vec<&str> = logged.iter().filter_map(|l| l["stage"].as_str()).collect();
+        assert_eq!(stages.len(), MAX_SPOOL_EVENTS + 20);
+        assert!(stages[..MAX_SPOOL_EVENTS + 10]
+            .iter()
+            .all(|s| *s == "queued"));
+        let dropped: Vec<String> = logged[MAX_SPOOL_EVENTS + 10..]
+            .iter()
+            .map(|line| line["event"].to_string())
+            .collect();
+        assert_eq!(dropped, all[..10]);
+        assert!(stages[MAX_SPOOL_EVENTS + 10..]
+            .iter()
+            .all(|s| *s == "dropped"));
     }
 
     /// Nothing is taken without a config dir, without the lock, or from a

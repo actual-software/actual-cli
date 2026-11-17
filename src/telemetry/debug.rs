@@ -359,20 +359,23 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 /// The entries for `lines` entering `stream`'s spool at `stage`: an OTLP line
 /// without the spool's own sign-in stamp, which neither the file sink nor the
 /// endpoint receives, and signed in when it had one; a governance event signed
-/// in when it carries a hashed user or organization id.
+/// in when it carries a hashed user or organization id. A line that isn't JSON
+/// still gets its entry, with no event.
 pub(crate) fn spool_entries(stream: Stream, stage: Stage, lines: &[String]) -> Vec<Entry> {
     lines
         .iter()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .map(|mut event| {
-            let signed_in = match stream {
-                Stream::Otlp => event
-                    .as_object_mut()
-                    .and_then(|record| record.remove("actualSignIn"))
-                    .is_some(),
-                Stream::Governance | Stream::Metrics => governance_signed_in(&event),
-            };
-            Entry::new(stream, stage).signed_in(signed_in).event(event)
+        .map(|line| match serde_json::from_str::<Value>(line) {
+            Ok(mut event) => {
+                let signed_in = match stream {
+                    Stream::Otlp => event
+                        .as_object_mut()
+                        .and_then(|record| record.remove("actualSignIn"))
+                        .is_some(),
+                    Stream::Governance | Stream::Metrics => governance_signed_in(&event),
+                };
+                Entry::new(stream, stage).signed_in(signed_in).event(event)
+            }
+            Err(_) => Entry::new(stream, stage),
         })
         .collect()
 }
@@ -385,7 +388,8 @@ pub(crate) fn governance_signed_in(event: &Value) -> bool {
         .any(|key| properties[key].as_str().is_some_and(|v| !v.is_empty()))
 }
 
-/// Log `lines` entering `stream`'s spool, or turned away from it.
+/// Log `lines` entering `stream`'s spool, or `dropped`: turned away from it,
+/// or out of it with nobody receiving them.
 pub(crate) fn spooled(stream: Stream, lines: &[String], accepted: bool) {
     if !enabled() {
         return;
@@ -588,10 +592,11 @@ pub(crate) mod tests {
             "not json".to_string(),
         ];
         let entries = spool_entries(Stream::Otlp, Stage::Queued, &lines);
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert!(entries[0].signed_in);
         assert_eq!(entries[0].event, Some(json!({"eventName": "a"})));
         assert!(!entries[1].signed_in);
+        assert_eq!(entries[2].event, None);
 
         let governance = vec![
             r#"{"event":"x","properties":{"user_id_hash":"h"}}"#.to_string(),
