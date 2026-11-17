@@ -802,7 +802,7 @@ fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
             .iter_mut()
             .find(|(known, first)| named(*known, first) == name)
         {
-            Some(entry) if !entry.1.verified() => entry.1 = claim,
+            Some(entry) if !entry.1.verified() && claim.verified() => entry.1 = claim,
             Some(_) => {}
             None => per_adr.push((adr, claim)),
         }
@@ -1450,6 +1450,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                 "api-errors-001=src/orders.rs:1",
                 "legacy-naming=src/orders.rs:2",
                 "made-up=src/orders.rs:2",
+                "logging-001=src/orders.rs:1",
             ]
             .map(str::to_string)
             .to_vec();
@@ -1510,9 +1511,9 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                     (
                         s("adr-logging"),
                         s("unverified"),
-                        s("file_not_changed"),
-                        s("plan"),
-                        None
+                        s("line_not_in_diff"),
+                        s("diff"),
+                        Some(s("src/orders.rs"))
                     ),
                 ]
             );
