@@ -932,19 +932,19 @@ async fn flush_within(config: &Config, budget: Duration) {
             return;
         }
         for (records, signed) in requests(records(&lines), sign_in.as_ref()) {
-            if let Some(file) = &outputs.file {
+            let filed = outputs.file.as_ref().is_some_and(|file| {
                 let line = format!("{}\n", json_request(&records));
-                let _ = crate::config::paths::append_secure(file, line.as_bytes());
-            }
+                crate::config::paths::append_secure(file, line.as_bytes()).is_ok()
+            });
             let (Some(client), Some(endpoint)) = (&client, &outputs.endpoint) else {
-                log_request(&records, false, None, &outputs);
+                log_request(&records, false, None, filed, &outputs);
                 continue;
             };
             let body = protobuf_request(&records);
             let token = sign_in.as_ref().filter(|_| signed).map(SignIn::token);
             let left = deadline.saturating_duration_since(Instant::now());
             let mut sent = post(client, endpoint, body, token, left, tokio::time::sleep).await;
-            log_request(&records, token.is_some(), Some(sent), &outputs);
+            log_request(&records, token.is_some(), Some(sent), filed, &outputs);
             if token.is_some() && sent == Sent::Rejected(401) {
                 sign_in = None;
                 let unsigned: Vec<LogRecord> =
@@ -952,7 +952,7 @@ async fn flush_within(config: &Config, budget: Duration) {
                 let body = protobuf_request(&unsigned);
                 let left = deadline.saturating_duration_since(Instant::now());
                 sent = post(client, endpoint, body, None, left, tokio::time::sleep).await;
-                log_request(&unsigned, false, Some(sent), &outputs);
+                log_request(&unsigned, false, Some(sent), filed, &outputs);
             }
             tracing::debug!("otlp logs: {} records: {sent:?}", records.len());
             if sent == Sent::Dropped {
@@ -964,29 +964,36 @@ async fn flush_within(config: &Config, budget: Duration) {
 
 /// Log one request in debug mode, in its OTLP/JSON form: `sent` when the
 /// endpoint accepted it, `refused` with the status it gave, `dropped` when it
-/// got no answer in time. With no `sent`, the request went nowhere over the
-/// network: `sent` to the file sink when there is no endpoint, else `dropped`,
-/// since the endpoint never got it.
-fn log_request(records: &[LogRecord], signed: bool, sent: Option<Sent>, outputs: &Outputs) {
+/// got no answer in time or was never tried. With no `sent`, the request went
+/// nowhere over the network: `sent` to the file sink when `filed` says it was
+/// written there, else `dropped`, since nobody got it.
+fn log_request(
+    records: &[LogRecord],
+    signed: bool,
+    sent: Option<Sent>,
+    filed: bool,
+    outputs: &Outputs,
+) {
     if !debug::enabled() {
         return;
     }
     let event = json_request_value(records);
-    let mut entry = match (sent, &outputs.endpoint) {
-        (Some(Sent::Accepted), _) => Entry::new(Stream::Otlp, Stage::Sent),
-        (Some(Sent::Rejected(status)), _) => {
-            Entry::new(Stream::Otlp, Stage::Refused).status(status)
-        }
-        (Some(Sent::Dropped), _) | (None, Some(_)) => Entry::new(Stream::Otlp, Stage::Dropped),
-        (None, None) => Entry::new(Stream::Otlp, Stage::Sent).to(outputs
-            .file
-            .iter()
-            .map(|file| format!("file:{}", file.display()))
-            .collect::<String>()),
+    let endpoint = outputs.endpoint.clone();
+    let file = outputs
+        .file
+        .as_ref()
+        .map(|file| format!("file:{}", file.display()));
+    let (entry, to) = match sent {
+        Some(Sent::Accepted) => (Entry::new(Stream::Otlp, Stage::Sent), endpoint),
+        Some(Sent::Rejected(status)) => (
+            Entry::new(Stream::Otlp, Stage::Refused).status(status),
+            endpoint,
+        ),
+        Some(Sent::Dropped) => (Entry::new(Stream::Otlp, Stage::Dropped), endpoint),
+        None if filed => (Entry::new(Stream::Otlp, Stage::Sent), file),
+        None => (Entry::new(Stream::Otlp, Stage::Dropped), endpoint.or(file)),
     };
-    if let Some(endpoint) = &outputs.endpoint {
-        entry = entry.to(endpoint.clone());
-    }
+    let entry = to.into_iter().fold(entry, |entry, to| entry.to(to));
     debug::record(entry.signed_in(signed).bearer(signed).event(event));
 }
 
@@ -4026,6 +4033,27 @@ mod tests {
         let written: Value =
             serde_json::from_str(std::fs::read_to_string(&file).unwrap().trim()).unwrap();
         assert_eq!(sent[0]["event"], written);
+    }
+
+    /// A file sink that can't be written is not sent to: with only that sink,
+    /// the request is dropped and names the file it missed.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_failed_file_write_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "file-failed");
+        let file = home.path().join("missing").join("otlp.jsonl");
+        spool(&no_outputs(), &adrs("a", 1));
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        assert!(!file.exists());
+        let lines = logged("file-failed");
+        assert!(at_stage(&lines, "sent").is_empty(), "{lines:?}");
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 1, "{lines:?}");
+        assert_eq!(dropped[0]["to"], format!("file:{}", file.display()));
     }
 
     /// Telemetry off: the records are built in the form the current sign-in
