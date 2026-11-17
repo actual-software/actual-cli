@@ -308,7 +308,7 @@ below. A run outside a Claude Code hook sends them with no session or agent.
 
 The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
 
-At the end of each Claude Code turn that changed files, `impl-check --claude-hook` asks the agent which of the session's ADRs it used, and the agent answers with `actual rules report-use`, naming an ADR and a line for each claim. The CLI checks each claim on your machine: it holds when the ADR was one the question listed and the line is one the turn added or changed (or within three lines of one, in the same hunk), or a line of the plan `plan-check` judged that turn. For each ADR named it sends `actual.adr.reported`, with the turn, the check's verdict on the claim and, for a claim on a changed line, the file's repository path in a signed-in request only. The claims, the lines they point to and anything the agent wrote beside them stay in the session's state under `plan-check-sessions/` in the user config directory, which is pruned after 7 days like the rest of that state. A claim naming an ADR the question never listed sends an event with an empty ADR reference, and the name itself is never sent. An answer of `--none` sends nothing.
+At the end of each Claude Code turn that changed files, `impl-check --claude-hook` asks the agent which of the session's ADRs it used, and the agent answers with `actual rules report-use`, naming an ADR and a line for each claim. The CLI checks each claim on your machine: it holds when the ADR was one the question listed and the line is one the turn added or changed (or within three lines of one, in the same hunk), or a line of the plan `plan-check` judged that turn. For each ADR named it sends `actual.adr.reported`, with the turn and the check's verdict on the claim. Only a verified diff claim sends its file's repository path, and only in a signed-in request; an unverified claim sends no path. A path outside the repository, one that climbs with `..` and one longer than 1024 bytes name no file, so their claims are unverified and the session state keeps no path for them. The claims, the lines they point to and anything the agent wrote beside them stay in the session's state under `plan-check-sessions/` in the user config directory, which is pruned after 7 days like the rest of that state. A claim naming an ADR the question never listed sends an event with an empty ADR reference, and the name itself is never sent. An answer of `--none` sends nothing.
 
 The `actual adr` commands send one event per run:
 
@@ -450,7 +450,7 @@ has only the classes its fields carry below:
 | `actual.report.evidence` | Whether the claim checked out on your machine: `verified` or `unverified` | anonymous |
 | `actual.report.evidence_reason` | Why a claim is unverified, and empty when it is verified: `adr_not_in_session` (the ADR wasn't one the question listed), `file_not_changed` (the file has no change this turn, or no plan was judged this turn) or `line_not_in_diff` (the line isn't one the turn added or changed or within three lines of one in the same hunk, or isn't a line of the plan) | anonymous |
 | `actual.report.anchor` | What the claim's line is a line of: `diff` or `plan` | anonymous |
-| `actual.report.file_path` | The repository-relative path of the file a `diff` claim names, sent only in a request that carries your sign-in's token. The line itself, its text and anything the agent wrote are never sent | first-party identity-linked |
+| `actual.report.file_path` | The repository-relative path of the file a verified `diff` claim names, sent only in a request that carries your sign-in's token. An unverified claim sends no path. The line itself, its text and anything the agent wrote are never sent | first-party identity-linked |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also
@@ -460,7 +460,7 @@ release builds) and the surface (`coding-agent`), records when it happened
 override was recorded, when a check started or completed, when the session ended, or when an `actual adr` run finished), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
 **Apart from the `actual.override.reason_text` of an `other` override and the
-`actual.report.file_path` of a signed-in report, no event carries rule text,
+`actual.report.file_path` of a verified, signed-in report, no event carries rule text,
 plan or diff text, override reasons, decision titles, context, policies or
 scope globs, rejection reasons, file paths, raw account identifiers, identity
 hashes or installation id.**

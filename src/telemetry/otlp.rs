@@ -738,7 +738,7 @@ pub(crate) struct AdrReport<'a> {
     pub reason: Option<&'a str>,
     /// `diff` or `plan`.
     pub anchor: &'a str,
-    /// The file a diff anchor names, sent only signed in.
+    /// The file a verified diff claim names, sent only signed in.
     pub file_path: Option<&'a str>,
 }
 
