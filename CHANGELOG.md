@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The OpenTelemetry `actual.adr.detected` event a `plan-check` or `impl-check` hook sends for an ADR it judged now carries `actual.adr.verdict`: the strongest verdict the check gave any of the ADR's rules, from `conflicting`, `requires_decision`, `followed` and `not_applicable`, in that order. The event still goes once per ADR per session at each gate, and again each time a later check there gives the ADR a stronger verdict, so a rule that didn't apply on an early Stop and is followed on a later one is reported as `followed`. The word is sent and the quoted line stays on the machine. `actual.event.schema_version` is now `4`
 - The judge behind `plan-check` and `impl-check` splits the per-rule verdict `conforming` into `followed` and `not_applicable`. `followed` means the plan or diff falls within the rule's domain and meets it, and its `span` quotes the one line that shows it; `not_applicable` means nothing in the change falls within the rule's domain. Neither blocks, and a rule judged either way is cleared for the session as before. In the `--json` report each rule's `verdict` now reads `followed` or `not_applicable` where it read `conforming`; the report's own `status` still reads `conforming` when nothing conflicts
 
+### Changed
+- The README and `docs/GETTING_STARTED.md` send new decisions to `docs/adr/` through `actual adr new` or the pull request app.actual.ai opens, both of which write the rule file the checks read, and no longer show a rule file to write by hand. Optional sign-in now comes right after installation, and the README and `docs/HOW_IT_WORKS.md` point at this repository's docs for the commands in place of actual.ai/cli/docs
+
 ## [0.14.0] - 2026-11-16
 
 ### Added
