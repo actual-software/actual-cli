@@ -1275,34 +1275,23 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         )
         .unwrap();
         let text = ask.text();
-        assert!(text.starts_with(&format!("{QUESTION_HEAD}\n\n")), "{text}");
-        assert!(
-            text.contains("An ADR counts only if it changed or decided what you wrote."),
-            "{text}"
-        );
-        assert!(
-            text.contains("merely complies with or happens to agree with"),
-            "{text}"
-        );
-        assert!(
-            text.contains("the line you added or changed this turn that best shows its effect"),
-            "{text}"
-        );
-        assert!(text.contains("run the command with --none in place of the claims. That is a normal, expected answer."), "{text}");
+        assert!(text.starts_with(&format!("{QUESTION_HEAD}\n\n")));
+        assert!(text.contains("An ADR counts only if it changed or decided what you wrote."));
+        assert!(text.contains("merely complies with or happens to agree with"));
+        assert!(text.contains("the line you added or changed this turn that best shows its effect"));
+        assert!(text.contains("run the command with --none in place of the claims. That is a normal, expected answer."));
         for line in [
             "- `api-errors-001`: Typed API Errors",
             "- `legacy-naming`: Legacy Naming",
             "- `logging-001`: Structured Logging",
         ] {
-            assert!(text.contains(line), "{line} in {text}");
+            assert!(text.contains(line), "{line}");
         }
-        assert!(!text.contains("api-errors-002"), "{text}");
+        assert!(!text.contains("api-errors-002"));
         let repo = fx.repo.path().to_string_lossy();
-        assert!(
-            text.contains(&format!("actual rules report-use --claude-session s1 --turn 0-01234567 --repo {} --claim <adr>=<file>:<line>", shell_word(&repo))),
-            "{text}"
-        );
-        assert!(!text.contains("--rules-dir"), "{text}");
+        let command = format!("actual rules report-use --claude-session s1 --turn 0-01234567 --repo {} --claim <adr>=<file>:<line>", shell_word(&repo));
+        assert!(text.contains(&command));
+        assert!(!text.contains("--rules-dir"));
         let errors = ask
             .adrs
             .iter()
@@ -1325,13 +1314,10 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
 
         let other_rules = fx.repo.path().join("other-rules");
         let text = question("s1", "0-x", fx.repo.path(), &other_rules, &[]);
-        assert!(
-            text.contains(&format!(
-                " --rules-dir {} --claim",
-                shell_word(&other_rules.to_string_lossy())
-            )),
-            "{text}"
-        );
+        assert!(text.contains(&format!(
+            " --rules-dir {} --claim",
+            shell_word(&other_rules.to_string_lossy())
+        )));
     }
 
     #[test]
@@ -1650,6 +1636,32 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                     "{text}"
                 );
             }
+        }
+
+        /// A verified plan claim reports its ADR anchored to the plan, with no
+        /// file path to send.
+        #[test]
+        fn test_report_sends_a_plan_claim_with_no_file_path() {
+            let _lock = lock();
+            let fx = Fixture::new(WITH_FILE);
+            let rules = fx.rules_dir();
+            let token = fx.ask("s1");
+            keep_plan("s1", &rules, "# Plan\n\nLog every order as JSON.\n");
+            take_captured();
+            let mut args = fx.args("s1", &token);
+            args.plan_claims = vec!["logging-001=3".to_string()];
+            answer(&args, None::<&[u8]>).unwrap();
+            let records = take_captured();
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
+            assert_eq!(attribute(record, "actual.adr.ref"), "adr-logging");
+            assert_eq!(attribute(record, "actual.report.evidence"), "verified");
+            assert_eq!(attribute(record, "actual.report.anchor"), "plan");
+            assert!(!record["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kv| kv["key"] == "actual.report.file_path"));
         }
 
         #[test]
