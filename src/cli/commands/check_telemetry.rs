@@ -4,8 +4,9 @@
 //! [`otlp::ACTION_COMPLETED`] record with its outcome, what made a `warn` one,
 //! and its duration. A hook round also sends, between those two, one
 //! [`otlp::ADR_DETECTED`] record per logical ADR it judged a rule of, with the
-//! gate as how it was detected, and one [`otlp::GATE_EVALUATED`] record per
-//! logical ADR it blocked on, with the outcome `breached` and the gate.
+//! gate as how it was detected and the ADR's verdict, and one
+//! [`otlp::GATE_EVALUATED`] record per logical ADR it blocked on, with the
+//! outcome `breached` and the gate.
 //!
 //! # Design
 //!
@@ -23,16 +24,25 @@
 //! sends both events. A rule the session already settled never reaches the
 //! judge, so it uses nothing.
 //!
+//! **An ADR's verdict is its strongest rule's.** The used record carries, as
+//! `actual.adr.verdict`, the strongest verdict the round gave any of the ADR's
+//! rules, in [`Verdict::strength`]'s order: `conflicting`, then
+//! `requires_decision`, then `followed`, then `not_applicable`. Only the
+//! verdict word is sent, never the quote that backs a `followed`.
+//!
 //! **Breached means blocked on.** The two verdicts the hooks deny on,
 //! `conflicting` and `requires_decision`, breach their ADR. A round the round
 //! limit lets through still breaches, though the denials that reached the
 //! limit have normally sent the event already.
 //!
-//! **Once per ADR per session and stage.** impl-check judges again at every
-//! Stop, so each event's keys go into the session's brief ledger beside the
-//! context event's, one set per stage, and a record is built only for a key
-//! that write added. A missed lock or a failed write therefore undercounts,
-//! and nothing is sent twice.
+//! **Once per ADR per session and stage, and again for a stronger verdict.**
+//! impl-check judges again at every Stop, so each event's keys go into the
+//! session's brief ledger beside the context event's, one set per stage, and a
+//! record is built only for a key that write added. A used ADR is added again
+//! when a round's verdict for it is stronger than the one already sent, so a
+//! `not_applicable` on an early Stop can't hide a later `followed`. A missed
+//! lock or a failed write therefore undercounts, and nothing is sent twice at
+//! the same verdict.
 //!
 //! **No session, no ADR events.** Direct mode, and a hook envelope without a
 //! session id, have nothing to count an ADR once against. Their action events
@@ -121,10 +131,7 @@ pub(super) fn report(
     warn_reasons: &[WarnReason],
     records: Vec<otlp::LogRecord>,
 ) {
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
-        return;
-    };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
         return;
     };
     let origin = otlp::Origin::resolve();
@@ -152,12 +159,12 @@ pub(super) fn report(
         &warn_reasons,
         action.started.instant.elapsed(),
     ));
-    if action.hook {
+    if action.hook && destination.sends() {
         if let Some(session_id) = action.session_id.filter(|id| !id.is_empty()) {
             super::session_end::record_check(session_id, decision == PlanGovernanceDecision::Block);
         }
     }
-    brief_telemetry::dispatch(&outputs, all);
+    destination.deliver(all);
 }
 
 /// [`report`] for a hook round, with the round's ADR records.
@@ -189,16 +196,18 @@ pub(super) fn adr_records(
     let Some(session_id) = run.session_id.filter(|id| !id.is_empty()) else {
         return Vec::new();
     };
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some(destination) = brief_telemetry::Destination::resolve_quietly() else {
         return Vec::new();
     };
-    if otlp::Outputs::resolve(&config).is_none() {
-        return Vec::new();
-    }
     let used = adrs_of(headers, verdicts.iter());
     if used.is_empty() {
         return Vec::new();
     }
+    let strongest = strongest_verdicts(headers, verdicts);
+    let used_verdicts: Vec<(&str, Verdict)> = used
+        .iter()
+        .filter_map(|adr| Some((adr.key.as_str(), *strongest.get(&adr.key)?)))
+        .collect();
     let breached = adrs_of(headers, blocking.iter().copied());
     let rules_dir = super::rules_brief::resolve(run.rules_dir);
     let key = LedgerKey {
@@ -206,8 +215,13 @@ pub(super) fn adr_records(
         rules_dir: &rules_dir,
     };
     let stage = stage(run.kind);
+    let report = if destination.sends() {
+        brief_ledger::report_checks
+    } else {
+        brief_ledger::unreported_checks
+    };
     let (new_used, new_breached) = brief_ledger::ledger_dir()
-        .map(|dir| brief_ledger::report_checks(&dir, &key, stage, &keys(&used), &keys(&breached)))
+        .map(|dir| report(&dir, &key, stage, &used_verdicts, &keys(&breached)))
         .unwrap_or_default();
     if new_used.is_empty() && new_breached.is_empty() {
         return Vec::new();
@@ -216,7 +230,16 @@ pub(super) fn adr_records(
     let gate = gate(run.kind);
     let mut records = Vec::new();
     for adr in used.iter().filter(|adr| new_used.contains(&adr.key)) {
-        records.push(origin.used(session_id, run.agent_id, &adr.key, &adr.adr_ids, gate));
+        if let Some(verdict) = strongest.get(&adr.key) {
+            records.push(origin.used(
+                session_id,
+                run.agent_id,
+                &adr.key,
+                &adr.adr_ids,
+                gate,
+                verdict.as_str(),
+            ));
+        }
     }
     for adr in breached
         .iter()
@@ -234,6 +257,27 @@ fn adrs_of<'a>(
     judged: impl Iterator<Item = &'a CheckedRule>,
 ) -> Vec<BriefedAdr> {
     brief_telemetry::group_headers(judged.filter_map(|verdict| headers.get(&verdict.doc_slug)))
+}
+
+/// The strongest verdict `verdicts` gave any rule of each logical ADR, by key.
+fn strongest_verdicts(
+    headers: &BTreeMap<String, AdrMeta>,
+    verdicts: &[CheckedRule],
+) -> BTreeMap<String, Verdict> {
+    let mut strongest = BTreeMap::new();
+    for judged in verdicts {
+        for adr in adrs_of(headers, std::iter::once(judged)) {
+            strongest
+                .entry(adr.key)
+                .and_modify(|held: &mut Verdict| {
+                    if judged.verdict.strength() > held.strength() {
+                        *held = judged.verdict;
+                    }
+                })
+                .or_insert(judged.verdict);
+        }
+    }
+    strongest
 }
 
 fn keys(adrs: &[BriefedAdr]) -> Vec<&str> {
@@ -351,6 +395,8 @@ pub(super) mod tests {
             "ACTUAL_OTLP_LOGS_ENDPOINT",
             "ACTUAL_OTLP_FILE",
             "TRACEPARENT",
+            crate::telemetry::debug::ENV,
+            crate::telemetry::debug::ID_ENV,
         ]
         .into_iter()
         .map(EnvGuard::remove)
@@ -387,22 +433,27 @@ pub(super) mod tests {
         brief_telemetry::dispatch(&outputs, adr_records(&run, &headers(), verdicts, &blocking));
     }
 
-    /// The records reported since the last call as (event, gate, ADR ref, ADR
-    /// ids), after checking the session and agent each carries. A detected
-    /// record names its gate as how it was detected, and an evaluated one as
-    /// its gate type, beside the outcome `breached`.
-    fn reported(session: &str) -> Vec<(String, String, String, serde_json::Value)> {
+    /// One reported record as (event, gate, ADR ref, ADR ids, verdict).
+    type Reported = (String, String, String, serde_json::Value, String);
+
+    /// The records reported since the last call, after checking the session
+    /// and agent each carries. A detected record names its gate as how it was
+    /// detected, beside the ADR's verdict, and an evaluated one as its gate
+    /// type, beside the outcome `breached` and no verdict.
+    fn reported(session: &str) -> Vec<Reported> {
         take_captured()
             .iter()
             .map(|record| {
                 assert_eq!(attribute(record, "actual.session.id"), session);
                 assert_eq!(attribute(record, "actual.agent.id"), "agent-1");
                 let event = record["eventName"].as_str().unwrap().to_string();
-                let gate = if event == otlp::GATE_EVALUATED {
+                let (gate, verdict) = if event == otlp::GATE_EVALUATED {
                     assert_eq!(attribute(record, "actual.gate.outcome"), "breached");
-                    attribute(record, "actual.gate.type")
+                    (attribute(record, "actual.gate.type"), String::new())
                 } else {
-                    attribute(record, "actual.detection.method")
+                    let verdict = attribute(record, "actual.adr.verdict");
+                    let verdict = verdict.as_str().unwrap().to_string();
+                    (attribute(record, "actual.detection.method"), verdict)
                 };
                 (
                     event,
@@ -412,28 +463,36 @@ pub(super) mod tests {
                         .unwrap()
                         .to_string(),
                     attribute(record, "actual.adr.ids"),
+                    verdict,
                 )
             })
             .collect()
     }
 
-    fn record(
-        event: &str,
-        gate: &str,
-        adr_ref: &str,
-        ids: serde_json::Value,
-    ) -> (String, String, String, serde_json::Value) {
+    fn detected(gate: &str, adr_ref: &str, ids: serde_json::Value, verdict: &str) -> Reported {
         (
-            event.to_string(),
+            otlp::ADR_DETECTED.to_string(),
             gate.to_string(),
             adr_ref.to_string(),
             ids,
+            verdict.to_string(),
         )
     }
 
-    /// Every ADR the round judged a rule of is used, listing the files judged,
-    /// and each it blocked on is breached too, listing the files blocked on.
-    /// A file without a v2 header names no ADR either way.
+    fn breached(gate: &str, adr_ref: &str, ids: serde_json::Value) -> Reported {
+        (
+            otlp::GATE_EVALUATED.to_string(),
+            gate.to_string(),
+            adr_ref.to_string(),
+            ids,
+            String::new(),
+        )
+    }
+
+    /// Every ADR the round judged a rule of is used, listing the files judged
+    /// and carrying the strongest verdict of its rules, and each it blocked on
+    /// is breached too, listing the files blocked on. A file without a v2
+    /// header names no ADR either way.
     #[test]
     fn test_a_round_uses_each_judged_adr_and_breaches_each_blocking_one() {
         with_config(WITH_FILE, |home| {
@@ -443,8 +502,8 @@ pub(super) mod tests {
                 Some("s1"),
                 &[
                     judged("signing-a1", Verdict::Conflicting),
-                    judged("rotation", Verdict::Conforming),
-                    judged("signing-a2", Verdict::Conforming),
+                    judged("rotation", Verdict::NotApplicable),
+                    judged("signing-a2", Verdict::Followed),
                     judged("legacy", Verdict::Conflicting),
                 ],
             );
@@ -452,24 +511,19 @@ pub(super) mod tests {
             assert_eq!(
                 reported("s1"),
                 [
-                    record(
-                        otlp::ADR_DETECTED,
+                    detected(
                         "planning",
                         "grp-sign",
-                        json!(["adr-sign-1", "adr-sign-2"])
+                        json!(["adr-sign-1", "adr-sign-2"]),
+                        "conflicting"
                     ),
-                    record(
-                        otlp::ADR_DETECTED,
+                    detected(
                         "planning",
                         "adr-rotate",
-                        json!(["adr-rotate"])
+                        json!(["adr-rotate"]),
+                        "not_applicable"
                     ),
-                    record(
-                        otlp::GATE_EVALUATED,
-                        "planning",
-                        "grp-sign",
-                        json!(["adr-sign-1"])
-                    ),
+                    breached("planning", "grp-sign", json!(["adr-sign-1"])),
                 ]
             );
         });
@@ -478,7 +532,7 @@ pub(super) mod tests {
     /// The hooks deny on `requires_decision` as on `conflicting`, so it is a
     /// breach too, and a round with nothing blocking breaches nothing.
     #[test]
-    fn test_requires_decision_breaches_and_conforming_only_uses() {
+    fn test_requires_decision_breaches_and_a_passing_verdict_only_uses() {
         with_config(WITH_FILE, |home| {
             round(
                 home,
@@ -489,18 +543,13 @@ pub(super) mod tests {
             assert_eq!(
                 reported("s1"),
                 [
-                    record(
-                        otlp::ADR_DETECTED,
+                    detected(
                         "implementation",
                         "adr-rotate",
-                        json!(["adr-rotate"])
+                        json!(["adr-rotate"]),
+                        "requires_decision"
                     ),
-                    record(
-                        otlp::GATE_EVALUATED,
-                        "implementation",
-                        "adr-rotate",
-                        json!(["adr-rotate"])
-                    ),
+                    breached("implementation", "adr-rotate", json!(["adr-rotate"])),
                 ]
             );
 
@@ -508,16 +557,45 @@ pub(super) mod tests {
                 home,
                 ArtifactKind::Diff,
                 Some("s2"),
-                &[judged("rotation", Verdict::Conforming)],
+                &[judged("rotation", Verdict::NotApplicable)],
             );
             assert_eq!(
                 reported("s2"),
-                [record(
-                    otlp::ADR_DETECTED,
+                [detected(
                     "implementation",
                     "adr-rotate",
-                    json!(["adr-rotate"])
+                    json!(["adr-rotate"]),
+                    "not_applicable"
                 )]
+            );
+        });
+    }
+
+    /// An ADR's verdict is its strongest rule's even when that rule is judged
+    /// after a weaker one, so the first rule's verdict does not stick.
+    #[test]
+    fn test_a_stronger_verdict_judged_second_replaces_the_first() {
+        with_config(WITH_FILE, |home| {
+            round(
+                home,
+                ArtifactKind::Plan,
+                Some("s1"),
+                &[
+                    judged("signing-a2", Verdict::Followed),
+                    judged("signing-a1", Verdict::RequiresDecision),
+                ],
+            );
+            assert_eq!(
+                reported("s1"),
+                [
+                    detected(
+                        "planning",
+                        "grp-sign",
+                        json!(["adr-sign-2", "adr-sign-1"]),
+                        "requires_decision"
+                    ),
+                    breached("planning", "grp-sign", json!(["adr-sign-1"])),
+                ]
             );
         });
     }
@@ -532,13 +610,8 @@ pub(super) mod tests {
             let blocking = [judged("signing-a1", Verdict::Conflicting)];
             let both = |stage: &str| {
                 [
-                    record(otlp::ADR_DETECTED, stage, "grp-sign", json!(["adr-sign-1"])),
-                    record(
-                        otlp::GATE_EVALUATED,
-                        stage,
-                        "grp-sign",
-                        json!(["adr-sign-1"]),
-                    ),
+                    detected(stage, "grp-sign", json!(["adr-sign-1"]), "conflicting"),
+                    breached(stage, "grp-sign", json!(["adr-sign-1"])),
                 ]
             };
 
@@ -558,7 +631,8 @@ pub(super) mod tests {
     }
 
     /// The two events count apart: an ADR used on a clean round is still
-    /// breached when a later round blocks on it, and only the breach is new.
+    /// breached when a later round blocks on it. The blocking round's verdict
+    /// is stronger, so the ADR is used again with it, beside the breach.
     #[test]
     fn test_a_used_adr_is_still_breached_later() {
         with_config(WITH_FILE, |home| {
@@ -566,15 +640,15 @@ pub(super) mod tests {
                 home,
                 ArtifactKind::Diff,
                 Some("s1"),
-                &[judged("signing-a2", Verdict::Conforming)],
+                &[judged("signing-a2", Verdict::Followed)],
             );
             assert_eq!(
                 reported("s1"),
-                [record(
-                    otlp::ADR_DETECTED,
+                [detected(
                     "implementation",
                     "grp-sign",
-                    json!(["adr-sign-2"])
+                    json!(["adr-sign-2"]),
+                    "followed"
                 )]
             );
 
@@ -584,18 +658,53 @@ pub(super) mod tests {
                 Some("s1"),
                 &[
                     judged("signing-a1", Verdict::Conflicting),
-                    judged("signing-a2", Verdict::Conforming),
+                    judged("signing-a2", Verdict::Followed),
                 ],
             );
             assert_eq!(
                 reported("s1"),
-                [record(
-                    otlp::GATE_EVALUATED,
-                    "implementation",
-                    "grp-sign",
-                    json!(["adr-sign-1"])
-                )]
+                [
+                    detected(
+                        "implementation",
+                        "grp-sign",
+                        json!(["adr-sign-1", "adr-sign-2"]),
+                        "conflicting"
+                    ),
+                    breached("implementation", "grp-sign", json!(["adr-sign-1"])),
+                ]
             );
+        });
+    }
+
+    /// A rule that didn't apply on an early Stop and is followed on a later
+    /// one sends the ADR again with `followed`. Going back to `not_applicable`,
+    /// or judging `followed` again, sends nothing.
+    #[test]
+    fn test_a_later_followed_verdict_is_sent_after_not_applicable() {
+        with_config(WITH_FILE, |home| {
+            let at = |verdict| [judged("rotation", verdict)];
+            let rotation = |verdict| {
+                [detected(
+                    "implementation",
+                    "adr-rotate",
+                    json!(["adr-rotate"]),
+                    verdict,
+                )]
+            };
+
+            round(
+                home,
+                ArtifactKind::Diff,
+                Some("s1"),
+                &at(Verdict::NotApplicable),
+            );
+            assert_eq!(reported("s1"), rotation("not_applicable"));
+            round(home, ArtifactKind::Diff, Some("s1"), &at(Verdict::Followed));
+            assert_eq!(reported("s1"), rotation("followed"));
+            for verdict in [Verdict::NotApplicable, Verdict::Followed] {
+                round(home, ArtifactKind::Diff, Some("s1"), &at(verdict));
+                assert_eq!(reported("s1"), [], "{verdict:?}");
+            }
         });
     }
 
@@ -769,6 +878,7 @@ pub(super) mod tests {
                 "grp-sign",
                 &["adr-sign-1".to_string()],
                 "planning",
+                "followed",
             );
 
             report(
@@ -897,23 +1007,23 @@ pub(super) mod tests {
     #[test]
     fn test_a_direct_run_warns_for_a_decision_and_for_partial_coverage() {
         let decision = judged("signing-a1", Verdict::RequiresDecision);
-        let conforming = judged("signing-a2", Verdict::Conforming);
+        let followed = judged("signing-a2", Verdict::Followed);
         let conflicting = judged("rotation", Verdict::Conflicting);
         for (verdicts, partial, expected) in [
-            (vec![conforming.clone()], false, vec![]),
+            (vec![followed.clone()], false, vec![]),
             (vec![conflicting], false, vec![]),
             (
-                vec![conforming.clone(), decision.clone()],
+                vec![followed.clone(), decision.clone()],
                 false,
                 vec![WarnReason::RequiresDecision],
             ),
             (
-                vec![conforming.clone()],
+                vec![followed.clone()],
                 true,
                 vec![WarnReason::PartialCoverage],
             ),
             (
-                vec![decision, conforming],
+                vec![decision, followed],
                 true,
                 vec![WarnReason::RequiresDecision, WarnReason::PartialCoverage],
             ),
@@ -1034,5 +1144,22 @@ pub(super) mod tests {
             report_one_run_under(crate::testutil::LOADABLE_TELEMETRY_ON),
             2
         );
+    }
+
+    /// Telemetry off in debug mode: a round builds its ADR records against
+    /// the ledger without writing it, so the next round builds them again.
+    #[test]
+    fn test_debug_mode_with_telemetry_off_builds_adr_records_without_the_ledger_write() {
+        let off = "telemetry:\n  enabled: false\n  otlp_file: /tmp/actual-otlp-check-test.jsonl\n";
+        with_config(off, |home| {
+            let _debug = EnvGuard::set(crate::telemetry::debug::ENV, "1");
+            let blocking = [judged("signing-a1", Verdict::Conflicting)];
+
+            round(home, ArtifactKind::Plan, Some("s1"), &blocking);
+            assert_eq!(reported("s1").len(), 2);
+            round(home, ArtifactKind::Plan, Some("s1"), &blocking);
+            assert_eq!(reported("s1").len(), 2);
+            assert!(!home.join("brief-ledger").exists());
+        });
     }
 }

@@ -66,9 +66,24 @@ fn with_state(session_id: &str, wait: Duration, change: impl FnOnce(&mut State))
     Some(state)
 }
 
+/// The state for `session_id`, read without the lock and written nowhere, for
+/// a telemetry debug run that keeps no state of its own.
+#[cfg(feature = "telemetry")]
+fn read_state(session_id: &str) -> State {
+    crate::config::paths::config_dir()
+        .ok()
+        .map(|dir| {
+            dir.join("session-telemetry")
+                .join(format!("{:x}.json", Sha256::digest(session_id.as_bytes())))
+        })
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(feature = "telemetry")]
 fn report(raw: &str) {
-    use crate::telemetry::{opt_out, otlp};
+    use crate::telemetry::otlp;
 
     let Ok(envelope) = serde_json::from_str::<Envelope>(raw) else {
         return;
@@ -79,34 +94,38 @@ fn report(raw: &str) {
     {
         return;
     }
-    let Some(config) = opt_out::load_if_enabled() else {
+    crate::telemetry::debug::use_session(&envelope.session_id);
+    let Some(destination) = super::brief_telemetry::Destination::resolve() else {
         return;
     };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
-        return;
+    let state = if destination.sends() {
+        let mut fresh = false;
+        let Some(state) = with_state(&envelope.session_id, END_LOCK_WAIT, |state| {
+            fresh = !state.ended;
+            state.ended = true;
+        }) else {
+            return;
+        };
+        if !fresh {
+            return;
+        }
+        state
+    } else {
+        let state = read_state(&envelope.session_id);
+        if state.ended {
+            return;
+        }
+        state
     };
-    let mut fresh = false;
-    let Some(state) = with_state(&envelope.session_id, END_LOCK_WAIT, |state| {
-        fresh = !state.ended;
-        state.ended = true;
-    }) else {
-        return;
-    };
-    if !fresh {
-        return;
-    }
     let reason = match envelope.reason.as_str() {
         "clear" | "resume" | "logout" | "prompt_input_exit" => envelope.reason.as_str(),
         _ => "other",
     };
-    super::brief_telemetry::dispatch(
-        &outputs,
-        vec![otlp::Origin::resolve().session_ended(
-            &envelope.session_id,
-            reason,
-            state.last_check_blocked,
-        )],
-    );
+    destination.deliver(vec![otlp::Origin::resolve().session_ended(
+        &envelope.session_id,
+        reason,
+        state.last_check_blocked,
+    )]);
 }
 
 #[cfg(all(test, feature = "telemetry"))]
@@ -287,5 +306,46 @@ mod tests {
         assert!(start.elapsed() >= END_LOCK_WAIT);
         assert!(END_LOCK_WAIT < Duration::from_secs(1));
         assert!(take_captured().is_empty());
+    }
+
+    /// Telemetry off in debug mode: the end is logged as not sent, under the
+    /// session's own id, and no session state is written.
+    #[test]
+    fn debug_mode_with_telemetry_off_logs_the_end_and_writes_no_state() {
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _fresh = FreshId::new();
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::remove(debug::ID_ENV);
+        take_captured();
+
+        report(&envelope("debug-session-1", "clear"));
+
+        assert!(take_captured().is_empty());
+        assert!(!home.path().join("session-telemetry").exists());
+        let lines = logged("debug-session-1");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["stage"], "not_sent");
+        assert_eq!(
+            lines[0]["event"]["eventName"],
+            crate::telemetry::otlp::SESSION_ENDED
+        );
+
+        // A session already ended with telemetry on has nothing more to send.
+        let _on = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        report(&envelope("debug-session-2", "clear"));
+        assert_eq!(take_captured().len(), 1);
+        let _off_again = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        report(&envelope("debug-session-2", "clear"));
+        assert!(take_captured().is_empty());
+        assert_eq!(logged("debug-session-2").len(), 0);
     }
 }

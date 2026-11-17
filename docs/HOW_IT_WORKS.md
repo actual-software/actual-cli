@@ -51,7 +51,7 @@ Governance never gets in the way of unrelated work. Infrastructure failures fail
 
 Every round and override is recorded in `~/.actualai/actual/plan-check-overrides.log`. Governance relies on Claude Code hooks, which the skill installs.
 
-`plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`.
+`plan-check` and `impl-check` report one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review), or `not_checked`. Only `conflicting` exits non-zero, so a CI job that needs to tell "checked and clean" from "could not check" should read the `status` field from `--json`. Each rule in the `--json` report's `verdicts` list carries its own verdict: `followed` (the change falls within the rule's domain and meets it, with the one line that shows it in `span`), `not_applicable`, `conflicting` or `requires_decision`.
 
 <details>
 <summary><strong>Direct CLI</strong></summary>
