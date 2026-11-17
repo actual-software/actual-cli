@@ -115,8 +115,9 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 /// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
 /// the [`ADR_DISCOVERED`] and [`ADR_REVIEWED`] events; 4 adds
-/// `actual.adr.verdict`.
-const SCHEMA_VERSION: i64 = 4;
+/// `actual.adr.verdict`; 5 adds [`ADR_REPORTED`] and its `actual.turn.index`
+/// and `actual.report.*` attributes.
+const SCHEMA_VERSION: i64 = 5;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -1517,7 +1518,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "4"})
+            serde_json::json!({"intValue": "5"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2102,7 +2103,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(4))
+            Some(&common::any_value::Value::IntValue(5))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2148,7 +2149,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"4"}"#, r#"{"intValue":"four"}"#),
+            whole.replace(r#"{"intValue":"5"}"#, r#"{"intValue":"five"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
