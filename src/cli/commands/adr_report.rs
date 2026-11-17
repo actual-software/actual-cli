@@ -27,8 +27,8 @@
 //! **Only the verdict leaves the machine.** The claims, the lines they quote
 //! and anything the agent wrote stay in the session file under the config
 //! directory. [`otlp::ADR_REPORTED`] carries the ADR, the turn, whether the
-//! claim held and why not, and the file path, which only a signed-in request
-//! keeps.
+//! claim held and why not, and, for a verified diff claim only, the file
+//! path, which only a signed-in request keeps.
 //!
 //! **Flags as well as stdin.** Claude Code runs the answer as a Bash command,
 //! and stdin there takes a pipe or a redirect, which the skill's permission
@@ -68,6 +68,9 @@ const QUESTION_HEAD: &str = "Which of these ADRs did you use this turn? \
 /// How far, in lines, a diff claim may miss the added or changed line it
 /// means, within one hunk.
 const LINE_TOLERANCE: u64 = 3;
+
+/// Longest repository path a claim may name, in bytes.
+const MAX_PATH_BYTES: usize = 1024;
 
 /// A turn's question, and the answer once given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -654,7 +657,7 @@ fn check(
     let file = claim
         .file
         .as_deref()
-        .map(|file| repository_path(file, checkout));
+        .and_then(|file| repository_path(file, checkout));
     let line = |text: &str| Some(clean(text, MAX_KEPT_CHARS));
     let mut matched_line = None;
     let (reason, quote) = if ask.find(&claim.adr).is_none() {
@@ -709,8 +712,9 @@ fn offset(from: u64, to: u64) -> i64 {
 
 /// `file` relative to the checkout, `/`-separated: an absolute path inside it
 /// loses the checkout's prefix, resolved through symlinks when it must be,
-/// and `.` segments go.
-fn repository_path(file: &str, checkout: &Path) -> String {
+/// and `.` segments go. `None` for a path outside the checkout, one with a
+/// `..` segment, and one longer than [`MAX_PATH_BYTES`].
+fn repository_path(file: &str, checkout: &Path) -> Option<String> {
     let path = Path::new(file);
     let resolved = path
         .parent()
@@ -722,14 +726,15 @@ fn repository_path(file: &str, checkout: &Path) -> String {
         .ok()
         .or_else(|| resolved.as_deref()?.strip_prefix(checkout).ok())
         .unwrap_or(path);
-    relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(parts.join("/")).filter(|joined| !joined.is_empty() && joined.len() <= MAX_PATH_BYTES)
 }
 
 /// One file's lines this turn added, and the new-side lines each hunk spans.
@@ -857,7 +862,8 @@ fn unquote(path: &str) -> Option<String> {
 /// One [`crate::telemetry::otlp::ADR_REPORTED`] record per ADR the answer
 /// names. An ADR named more than once counts as verified when any of its
 /// claims held, and reports the first one that did, else its first claim. An
-/// ADR without a v2 header sends nothing, as it does on every ADR event.
+/// ADR without a v2 header sends nothing, as it does on every ADR event. Only
+/// a verified claim sends its file path.
 #[cfg(feature = "telemetry")]
 fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
     use crate::telemetry::otlp::{AdrReport, Origin};
@@ -903,7 +909,7 @@ fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
                     },
                     reason: claim.reason.map(Unverified::as_str),
                     anchor: claim.anchor.as_str(),
-                    file_path: claim.file.as_deref(),
+                    file_path: claim.file.as_deref().filter(|_| claim.verified()),
                 },
             )
         })
@@ -1171,11 +1177,12 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let checkout = tempdir().unwrap();
         let real = checkout.path().canonicalize().unwrap();
         std::fs::create_dir_all(real.join("src")).unwrap();
-        assert_eq!(repository_path("./src/a.rs", &real), "src/a.rs");
+        let some = |path: &str| Some(path.to_string());
+        assert_eq!(repository_path("./src/a.rs", &real), some("src/a.rs"));
         let absolute = real.join("src/a.rs");
         assert_eq!(
             repository_path(absolute.to_str().unwrap(), &real),
-            "src/a.rs"
+            some("src/a.rs")
         );
         let link_parent = tempdir().unwrap();
         let link = link_parent.path().join("link");
@@ -1183,9 +1190,32 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let through_link = link.join("src/a.rs");
         assert_eq!(
             repository_path(through_link.to_str().unwrap(), &real),
-            "src/a.rs"
+            some("src/a.rs")
         );
-        assert_eq!(repository_path("/elsewhere/a.rs", &real), "elsewhere/a.rs");
+    }
+
+    /// A path that leaves the checkout, climbs with `..` or runs past the
+    /// cap names no repository file.
+    #[test]
+    fn test_repository_path_rejects_paths_outside_the_checkout() {
+        let checkout = tempdir().unwrap();
+        let real = checkout.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        let escape = format!("{}/src/../../other/secret.txt", real.display());
+        let long = format!("src/{}.rs", "a".repeat(MAX_PATH_BYTES));
+        for path in [
+            "/Users/me/other/secret.txt",
+            "../other/secret.txt",
+            "src/../src/a.rs",
+            escape.as_str(),
+            long.as_str(),
+            ".",
+            real.to_str().unwrap(),
+        ] {
+            assert_eq!(repository_path(path, &real), None, "{path}");
+        }
+        let at_cap = format!("src/{}", "a".repeat(MAX_PATH_BYTES - 4));
+        assert_eq!(repository_path(&at_cap, &real), Some(at_cap.clone()));
     }
 
     #[test]
@@ -1433,6 +1463,31 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         );
     }
 
+    /// A claim on a path outside the checkout, through `..`, or past the cap
+    /// names no file: it is unverified and the session keeps no path for it.
+    #[test]
+    fn test_answer_keeps_no_path_outside_the_checkout() {
+        let _lock = lock();
+        let fx = Fixture::new(NO_TELEMETRY);
+        let token = fx.ask("s1");
+        std::fs::write(
+            fx.repo.path().join("src/orders.rs"),
+            "fn a() {}\nfn b2() {}\n",
+        )
+        .unwrap();
+        let mut args = fx.args("s1", &token);
+        args.claims = vec![
+            "api-errors-001=/Users/me/other/secret.txt:1".to_string(),
+            "api-errors-001=../other/secret.txt:1".to_string(),
+            "api-errors-001=src/../src/orders.rs:2".to_string(),
+            format!("api-errors-001=src/{}.rs:2", "a".repeat(MAX_PATH_BYTES)),
+        ];
+        answer(&args, None::<&[u8]>).unwrap();
+        let recorded = fx.answer("s1").unwrap();
+        assert_eq!(reasons(&recorded), [Some("file_not_changed"); 4]);
+        assert!(recorded.claims.iter().all(|claim| claim.file.is_none()));
+    }
+
     /// A plan claim holds on a non-blank line of the plan judged this turn.
     #[test]
     fn test_answer_checks_plan_claims_against_this_turns_plan() {
@@ -1537,9 +1592,9 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         const WITH_FILE: &str = "telemetry:\n  otlp_file: /tmp/actual-otlp-report-test.jsonl\n";
 
         /// One event per ADR named: verified when any of its claims held, with
-        /// the asking check's action id and the file path, and one with an
-        /// empty ref for a name the question never listed. The ADR without a
-        /// v2 header sends nothing.
+        /// the asking check's action id, and the file path only when verified,
+        /// and one with an empty ref for a name the question never listed. The
+        /// ADR without a v2 header sends nothing.
         #[test]
         fn test_report_sends_one_event_per_named_adr() {
             let _lock = lock();
@@ -1618,14 +1673,14 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                         s("unverified"),
                         s("adr_not_in_session"),
                         s("diff"),
-                        Some(s("src/orders.rs"))
+                        None
                     ),
                     (
                         s("adr-logging"),
                         s("unverified"),
                         s("line_not_in_diff"),
                         s("diff"),
-                        Some(s("src/orders.rs"))
+                        None
                     ),
                 ]
             );
