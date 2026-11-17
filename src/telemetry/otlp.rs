@@ -732,7 +732,8 @@ pub(crate) struct AdrReport<'a> {
     pub turn: u64,
     /// The `actual.action.id` of the `impl-check` run that asked.
     pub check_action_id: &'a str,
-    /// `verified` or `unverified`.
+    /// `verified` or `unverified`. Verified means the ADR was listed and the
+    /// line is one the turn changed or planned, not that the ADR shaped it.
     pub evidence: &'a str,
     /// Why a claim is unverified, sent empty when it is verified.
     pub reason: Option<&'a str>,

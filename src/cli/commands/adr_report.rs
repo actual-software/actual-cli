@@ -22,7 +22,9 @@
 //! plan `plan-check` judged this turn. A diff claim a few lines off still
 //! holds on the nearest added line in the same hunk, within
 //! [`LINE_TOLERANCE`], and records the line it matched. Anything else is
-//! unverified, with the first check it failed as the reason.
+//! unverified, with the first check it failed as the reason. Verified means
+//! the claim points at this turn's work, not that the ADR shaped it: any
+//! listed ADR verifies on any changed line.
 //!
 //! **Only the verdict leaves the machine.** The claims, the lines they quote
 //! and anything the agent wrote stay in the session file under the config
