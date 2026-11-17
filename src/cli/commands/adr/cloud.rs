@@ -889,7 +889,7 @@ mod tests {
     use crate::cli::args::{AdrApiOptions, AdrContentArgs, AdrNewArgs};
     use crate::testutil::ENV_MUTEX;
     use mockito::Matcher;
-    use serde_json::{json, Value};
+    use serde_json::json;
     use tempfile::tempdir;
 
     const ADR: &str = "33333333-3333-4333-8333-333333333333";
@@ -2256,11 +2256,13 @@ mod tests {
     /// Each review command, end to end through `adr::exec`, sends one event
     /// naming the command, the decision it found and how the run ended, and
     /// nothing of the decision's content, the flags' text or the typed reason.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn review_commands_send_one_event_and_none_of_the_content() {
         use super::super::telemetry::tests::{own, sending_to_a_file};
         use crate::cli::commands::brief_telemetry::tests::take_captured;
         use clap::Parser;
+        use serde_json::Value;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
