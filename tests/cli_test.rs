@@ -1193,6 +1193,22 @@ done
 
     let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(report["status"], "conforming", "{report}");
+    let verdict_of = |rule_id: &str| {
+        report["verdicts"]
+            .as_array()
+            .and_then(|vs| vs.iter().find(|v| v["rule_id"] == rule_id))
+            .unwrap_or_else(|| panic!("no verdict for {rule_id}: {report}"))
+            .clone()
+    };
+    let followed = verdict_of("R-A-001");
+    assert_eq!(followed["verdict"], "followed", "{report}");
+    assert_eq!(
+        followed["span"], "Sign every access token with RS256.",
+        "{report}"
+    );
+    let not_applicable = verdict_of("R-A-002");
+    assert_eq!(not_applicable["verdict"], "not_applicable", "{report}");
+    assert_eq!(not_applicable["span"], "", "{report}");
     let args = std::fs::read_to_string(&argv).unwrap();
     assert!(args.starts_with("exec\n--sandbox\nread-only\n"), "{args}");
     assert_eq!(std::fs::read_to_string(&stdin).unwrap(), "");
