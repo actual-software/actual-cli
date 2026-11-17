@@ -509,7 +509,14 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     if super::adr_report::settled(&session, &diff_digest) {
         return;
     }
-    let ask = super::adr_report::prepare(session_id, &session, &root, &rules_dir, &diff_digest);
+    let ask = super::adr_report::prepare(
+        session_id,
+        &session,
+        &root,
+        &rules_dir,
+        base.as_deref(),
+        &diff_digest,
+    );
 
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
@@ -573,9 +580,7 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     let turn_start = head_commit(&root).map(|head| TurnStart {
         root: checkout_root(&root),
-        diff_digest: working_tree_diff_from(&root, &head)
-            .ok()
-            .map(|diff| governance_session::content_digest(&diff)),
+        diff_digest: turn_start_digest(&root, &head),
         head,
     });
     // Under the session lock, on a fresh copy: `/override` runs on the same
@@ -584,6 +589,27 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
         session.turn_start = turn_start;
         session.turn = session.turn.saturating_add(1);
     });
+}
+
+/// The digest of the working-tree diff against `head`, which is `HEAD`. A
+/// tree `git status` reports clean has an empty diff, so the digest skips the
+/// throwaway-index diff, which rehashes every tracked file.
+fn turn_start_digest(root: &Path, head: &str) -> Option<String> {
+    let clean = git_command(root, None)
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.is_empty());
+    let diff = if clean {
+        String::new()
+    } else {
+        working_tree_diff_from(root, head).ok()?
+    };
+    Some(governance_session::content_digest(&diff))
 }
 
 /// The commit this turn started from, when the session recorded one in this
@@ -2338,6 +2364,17 @@ mod tests {
             "a read-only turn is not asked"
         );
         assert_eq!(judge_calls(&calls), 2);
+
+        // Reworded, the turn's commit is no longer behind HEAD, so the diff
+        // is taken from HEAD. Its digest matches the turn start's, but from
+        // another base, so the turn is asked.
+        start(&args);
+        run_git(repo.path(), &["commit", "-q", "--amend", "-m", "reworded"]);
+        let reworded = stop(&args, "sess-ask");
+        assert!(
+            deny_reason(&reworded[0]).contains("--turn 4-"),
+            "{reworded:?}"
+        );
 
         // A session nothing was briefed in is never asked.
         args.rules_dir = None;

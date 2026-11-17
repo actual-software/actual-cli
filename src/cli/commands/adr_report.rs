@@ -226,20 +226,21 @@ impl PreparedAsk {
 }
 
 /// The question for this round, or `None` when the turn was already asked,
-/// there is no session, or nothing was briefed in it.
+/// there is no session, nothing was briefed in it, or the diff from `base`
+/// is the one the turn started with. A diff taken from any other base than
+/// the turn's recorded commit is never read as unchanged.
 pub(super) fn prepare(
     session_id: Option<&str>,
     session: &GovernanceSession,
     root: &Path,
     rules_dir: &Path,
+    base: Option<&str>,
     diff_digest: &str,
 ) -> Option<PreparedAsk> {
     let session_id = session_id.filter(|id| !id.is_empty())?;
-    let unchanged = session
-        .turn_start
-        .as_ref()
-        .and_then(|start| start.diff_digest.as_deref())
-        == Some(diff_digest);
+    let unchanged = session.turn_start.as_ref().is_some_and(|start| {
+        base == Some(start.head.as_str()) && start.diff_digest.as_deref() == Some(diff_digest)
+    });
     let asked = session
         .adr_ask
         .as_ref()
@@ -1038,6 +1039,7 @@ pub(super) mod tests {
                 &state,
                 self.repo.path(),
                 &self.rules_dir(),
+                None,
                 "0123456789abcdef",
             )
             .unwrap();
@@ -1303,6 +1305,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             &state,
             fx.repo.path(),
             &fx.rules_dir(),
+            None,
             "0123456789abcdef",
         )
         .unwrap();
@@ -1358,23 +1361,51 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let fx = Fixture::new(NO_TELEMETRY);
         let state = GovernanceSession::default();
         let (root, rules) = (fx.repo.path(), fx.rules_dir());
-        assert!(prepare(None, &state, root, &rules, "d").is_none());
-        assert!(prepare(Some(""), &state, root, &rules, "d").is_none());
+        assert!(prepare(None, &state, root, &rules, None, "d").is_none());
+        assert!(prepare(Some(""), &state, root, &rules, None, "d").is_none());
         assert!(
-            prepare(Some("s1"), &state, root, &rules, "d").is_none(),
+            prepare(Some("s1"), &state, root, &rules, None, "d").is_none(),
             "nothing briefed"
         );
         let token = fx.ask("s1");
         assert_eq!(token, "0-01234567");
         let state = governance_session::load("s1", &rules);
         assert!(
-            prepare(Some("s1"), &state, root, &rules, "d").is_none(),
+            prepare(Some("s1"), &state, root, &rules, None, "d").is_none(),
             "asked this turn"
         );
         governance_session::update("s1", &rules, |s| s.turn += 1);
         let state = governance_session::load("s1", &rules);
-        let next = prepare(Some("s1"), &state, root, &rules, "d").unwrap();
+        let next = prepare(Some("s1"), &state, root, &rules, None, "d").unwrap();
         assert_eq!(next.token, "1-d");
+    }
+
+    /// A diff matching the one the turn started with asks nothing only when it
+    /// was taken from the turn's recorded commit. Taken from `HEAD` after
+    /// that commit stopped being an ancestor, the same digest still asks.
+    #[test]
+    fn test_prepare_reads_a_diff_as_unchanged_only_from_the_turns_own_base() {
+        let _lock = lock();
+        let fx = Fixture::new(NO_TELEMETRY);
+        let (root, rules) = (fx.repo.path(), fx.rules_dir());
+        fx.brief_all("s1");
+        let head = "a".repeat(40);
+        governance_session::update("s1", &rules, |s| {
+            s.turn_start = Some(governance_session::TurnStart {
+                root: root.to_path_buf(),
+                head: head.clone(),
+                diff_digest: Some("d".to_string()),
+            });
+        });
+        let state = governance_session::load("s1", &rules);
+        assert!(prepare(Some("s1"), &state, root, &rules, Some(&head), "d").is_none());
+        assert!(prepare(Some("s1"), &state, root, &rules, Some(&head), "e").is_some());
+        assert!(
+            prepare(Some("s1"), &state, root, &rules, None, "d").is_some(),
+            "a fallback to HEAD asks"
+        );
+        let other = "b".repeat(40);
+        assert!(prepare(Some("s1"), &state, root, &rules, Some(&other), "d").is_some());
     }
 
     #[test]
@@ -1393,7 +1424,15 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let rules = fx.rules_dir();
         fx.brief_all("s1");
         let state = governance_session::load("s1", &rules);
-        let ask = prepare(Some("s1"), &state, fx.repo.path(), &rules, "abcdef0123").unwrap();
+        let ask = prepare(
+            Some("s1"),
+            &state,
+            fx.repo.path(),
+            &rules,
+            None,
+            "abcdef0123",
+        )
+        .unwrap();
         governance_session::update("s1", &rules, |s| s.turn = 4);
         assert!(!mark("s1", &rules, &ask, false), "the turn moved on");
         governance_session::update("s1", &rules, |s| s.turn = 0);
