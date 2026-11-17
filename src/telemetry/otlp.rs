@@ -46,9 +46,10 @@
 //! gain no identity field. [`crate::telemetry::sign_in`] decides which records
 //! the token covers, and a 401 sends the batch again once, signed out.
 //!
-//! **Typed reason text goes only with the token.** A request without it, and
-//! the file sink's copy of that request, leaves out [`REASON_TEXT`], since
-//! Actual can restrict and delete only events it can tie to an organization.
+//! **Typed reason text and decision ids go only with the token.** A request
+//! without it, and the file sink's copy of that request, leaves out
+//! [`REASON_TEXT`] and [`DECISION_ID`], since Actual can restrict and delete
+//! only events it can tie to an organization.
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -84,13 +85,28 @@ pub(crate) const ACTION_COMPLETED: &str = "actual.action.completed";
 
 pub(crate) const SESSION_ENDED: &str = "actual.session.ended";
 
-/// The typed reason of an `other` override, the one attribute only a request
-/// carrying the sign-in's token holds.
+/// The event an `actual adr check` run sends once it has checked the files.
+pub(crate) const ADR_DISCOVERED: &str = "actual.adr.discovered";
+
+/// The event a run of an `actual adr` review command sends: `accept`,
+/// `reject`, `publish`, `unpublish`, `delete`, `restore` or `update`.
+pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
+
+/// The typed reason of an `other` override, which only a request carrying the
+/// sign-in's token holds.
 const REASON_TEXT: &str = "actual.override.reason_text";
 
+/// The decision a review command acted on, which only a request carrying the
+/// sign-in's token holds.
+const DECISION_ID: &str = "actual.adr.decision_id";
+
+/// The attributes [`LogRecord::signed_out`] leaves out.
+const SIGNED_IN_ONLY: [&str; 2] = [REASON_TEXT, DECISION_ID];
+
 /// The version of the attributes below, sent as `actual.event.schema_version`.
-/// 2 adds `actual.override.reason` and `actual.override.reason_text`.
-const SCHEMA_VERSION: i64 = 2;
+/// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
+/// the [`ADR_DISCOVERED`] and [`ADR_REVIEWED`] events.
+const SCHEMA_VERSION: i64 = 3;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -228,9 +244,10 @@ impl LogRecord {
     }
 
     /// This record as a request without the sign-in's token carries it:
-    /// without [`REASON_TEXT`].
+    /// without [`SIGNED_IN_ONLY`]'s attributes.
     fn signed_out(mut self) -> Self {
-        self.attributes.retain(|kv| kv.key != REASON_TEXT);
+        self.attributes
+            .retain(|kv| !SIGNED_IN_ONLY.contains(&kv.key.as_str()));
         self
     }
 }
@@ -319,6 +336,17 @@ fn int(key: &'static str, value: i64) -> KeyValue {
     }
 }
 
+fn count(key: &'static str, value: usize) -> KeyValue {
+    int(key, i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn boolean(key: &'static str, value: bool) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::BoolValue(value),
+    }
+}
+
 /// The bytes `hex` spells, or `None` when it isn't whole hex digit pairs.
 fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
     let digit = |byte: u8| char::from(byte).to_digit(16);
@@ -354,6 +382,44 @@ pub(crate) struct OverrideReason<'a> {
     pub text: Option<&'a str>,
 }
 
+/// How one run of an `actual adr` command ended, which both of its events
+/// record.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdrRun<'a> {
+    /// `actual.adr.command.outcome`.
+    pub outcome: &'a str,
+    /// The exit code the run ends with: `actual.adr.command.exit_code`.
+    pub exit_code: i32,
+    /// Whether standard input was a terminal:
+    /// `actual.adr.command.stdin_is_terminal`.
+    pub interactive: bool,
+    pub duration: Duration,
+}
+
+/// What an `adr check` run found, as its [`ADR_DISCOVERED`] record counts it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CheckCounts {
+    /// Decision files checked, unreadable ones included.
+    pub files: usize,
+    /// Those that failed the save rules.
+    pub failed: usize,
+    /// Likely duplicates listed.
+    pub duplicates: usize,
+}
+
+/// The decision a review command acted on, as its [`ADR_REVIEWED`] record
+/// names it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ReviewedDecision<'a> {
+    /// The decision's id, once the run found it: [`DECISION_ID`], sent empty
+    /// before then.
+    pub id: Option<&'a str>,
+    /// Whether it is an AI-grouped decision, which takes the group routes.
+    pub grouped: bool,
+    /// For a grouped decision, the rows its group action covers, else 0.
+    pub group_rows: usize,
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -384,10 +450,7 @@ impl Origin {
         let mut record = self.record(SESSION_ENDED, session_id, None);
         record.attributes.extend([
             text("actual.session.end_reason", Some(reason)),
-            KeyValue {
-                key: "actual.session.last_check_blocked".to_string(),
-                value: AnyValue::BoolValue(last_check_blocked),
-            },
+            boolean("actual.session.last_check_blocked", last_check_blocked),
         ]);
         record
     }
@@ -522,6 +585,38 @@ impl Origin {
         record
     }
 
+    /// The [`ADR_DISCOVERED`] record for one `adr check` run: what it found,
+    /// then how the run ended.
+    pub(crate) fn adr_discovered(&self, counts: CheckCounts, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_DISCOVERED, "", None);
+        record.attributes.extend([
+            count("actual.adr.check.files", counts.files),
+            count("actual.adr.check.failed_files", counts.failed),
+            count("actual.adr.check.duplicates", counts.duplicates),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
+    /// The [`ADR_REVIEWED`] record for one run of review command `action`:
+    /// the command, the decision it acted on, then how the run ended.
+    pub(crate) fn adr_reviewed(
+        &self,
+        action: &str,
+        decision: ReviewedDecision<'_>,
+        run: AdrRun<'_>,
+    ) -> LogRecord {
+        let mut record = self.record(ADR_REVIEWED, "", None);
+        record.attributes.extend([
+            text("actual.adr.review.action", Some(action)),
+            text(DECISION_ID, decision.id),
+            boolean("actual.adr.review.grouped", decision.grouped),
+            count("actual.adr.review.group_rows", decision.group_rows),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
     /// A record carrying the attributes every event shares, each present on
     /// every record and an empty string when unknown: its own event id, which
     /// `log.record.uid` repeats, the schema version, and the action, session
@@ -564,6 +659,19 @@ impl Origin {
         ]);
         record
     }
+}
+
+/// The attributes both `actual adr` events end with.
+fn adr_run(run: AdrRun<'_>) -> [KeyValue; 4] {
+    [
+        text("actual.adr.command.outcome", Some(run.outcome)),
+        int("actual.adr.command.exit_code", i64::from(run.exit_code)),
+        boolean("actual.adr.command.stdin_is_terminal", run.interactive),
+        int(
+            "actual.adr.command.duration_ms",
+            i64::try_from(run.duration.as_millis()).unwrap_or(i64::MAX),
+        ),
+    ]
 }
 
 /// This execution's `actual.action.id`: a UUIDv7 made the first time a record
@@ -1256,7 +1364,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "2"})
+            serde_json::json!({"intValue": "3"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -1826,7 +1934,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(2))
+            Some(&common::any_value::Value::IntValue(3))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -1867,7 +1975,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"2"}"#, r#"{"intValue":"two"}"#),
+            whole.replace(r#"{"intValue":"3"}"#, r#"{"intValue":"three"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -3502,5 +3610,165 @@ mod tests {
             stamp.as_ref().and_then(Value::as_str)
         );
         assert_eq!(parsed[1].sign_in, None);
+    }
+
+    // ── the `actual adr` events ─────────────────────────────────────────
+
+    /// One `adr check` event and one review event naming decision `id`.
+    fn adr_events(id: &str) -> Vec<LogRecord> {
+        let origin = origin(None);
+        let run = AdrRun {
+            outcome: "succeeded",
+            exit_code: 0,
+            interactive: false,
+            duration: Duration::from_millis(5),
+        };
+        let decision = ReviewedDecision {
+            id: Some(id),
+            grouped: true,
+            group_rows: 2,
+        };
+        vec![
+            origin.adr_discovered(CheckCounts::default(), run),
+            origin.adr_reviewed("accept", decision, run),
+        ]
+    }
+
+    /// Each record in each request `received` holds, as its event name and
+    /// its decision id, if it carries one.
+    fn adr_events_received(received: &Received) -> Vec<Vec<(String, Option<String>)>> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| {
+                collector::ExportLogsServiceRequest::decode(body.as_slice())
+                    .unwrap()
+                    .resource_logs[0]
+                    .scope_logs[0]
+                    .log_records
+                    .iter()
+                    .map(|record| {
+                        let id = record
+                            .attributes
+                            .iter()
+                            .find(|kv| kv.key == DECISION_ID)
+                            .map(|kv| string(kv.value.as_ref()).to_string());
+                        (record.event_name.clone(), id)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Both events carry the same attributes signed in or out, except the
+    /// decision id, which a signed-out copy leaves out.
+    #[test]
+    fn test_adr_events_name_a_decision_only_signed_in() {
+        let events = adr_events("d-1");
+        let keys = |record: &LogRecord| -> Vec<String> {
+            record.attributes.iter().map(|kv| kv.key.clone()).collect()
+        };
+        assert_eq!(events[0].event_name, ADR_DISCOVERED);
+        assert_eq!(events[1].event_name, ADR_REVIEWED);
+        assert_ne!(ADR_DISCOVERED, ADR_DETECTED);
+        assert_ne!(ADR_REVIEWED, ADR_DETECTED);
+        assert_eq!(keys(&events[0]), keys(&events[0].clone().signed_out()));
+        let review = keys(&events[1]);
+        let signed_out = keys(&events[1].clone().signed_out());
+        assert!(review.iter().any(|key| key == DECISION_ID));
+        assert_eq!(
+            review
+                .into_iter()
+                .filter(|key| key != DECISION_ID)
+                .collect::<Vec<_>>(),
+            signed_out
+        );
+    }
+
+    /// Recorded signed out, neither event gets a stamp and the review event
+    /// is spooled without its decision id. Recorded signed in, both are
+    /// stamped and the id waits in the spool.
+    #[test]
+    fn test_adr_events_are_spooled_with_the_sign_in_they_were_recorded_under() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (_home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let creds = signed_in("org-a", "token-a", ChronoDuration::hours(1), None);
+
+        spool(&outputs, &adr_events("out-1"));
+        save(&creds);
+        spool(&outputs, &adr_events("in-1"));
+
+        let spooled = records(&OTLP_LOGS.take(usize::MAX));
+        let stamp = crate::telemetry::sign_in::stamp(&creds);
+        let seen: Vec<(Option<&str>, &str, bool)> = spooled
+            .iter()
+            .map(|line| {
+                (
+                    line.sign_in.as_deref(),
+                    line.record.event_name.as_str(),
+                    line.record
+                        .attributes
+                        .iter()
+                        .any(|kv| kv.key == DECISION_ID),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (None, ADR_DISCOVERED, false),
+                (None, ADR_REVIEWED, false),
+                (Some(stamp.as_str()), ADR_DISCOVERED, false),
+                (Some(stamp.as_str()), ADR_REVIEWED, true),
+            ]
+        );
+    }
+
+    /// The events recorded under the current sign-in go with its token and
+    /// name the decision. Those recorded signed out go without it, and the
+    /// review event among them names none.
+    #[tokio::test]
+    async fn test_adr_events_go_with_the_token_only_when_recorded_signed_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (_home, _api) = isolated(&server.url());
+        let (signed, signed_bodies) = logs(&mut server, Some("Bearer token-a"), 200, 1).await;
+        let (unsigned, unsigned_bodies) = logs(&mut server, None, 200, 1).await;
+        let (outputs, config) = at(&server);
+
+        spool(&outputs, &adr_events("out-1"));
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &adr_events("in-1"));
+
+        flush(&config).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        assert_eq!(
+            adr_events_received(&signed_bodies),
+            [vec![
+                (ADR_DISCOVERED.to_string(), None),
+                (ADR_REVIEWED.to_string(), Some("in-1".to_string())),
+            ]]
+        );
+        assert_eq!(
+            adr_events_received(&unsigned_bodies),
+            [vec![
+                (ADR_DISCOVERED.to_string(), None),
+                (ADR_REVIEWED.to_string(), None),
+            ]]
+        );
     }
 }
