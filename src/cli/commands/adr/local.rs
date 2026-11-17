@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::telemetry::CheckCounts;
 use super::{
     content_from_flags, interactive, json_text, pick_repo, rule_spelling, runtime, save_status,
     session, today, RepoPick,
@@ -24,7 +25,6 @@ use crate::cli::args::{AdrCheckArgs, AdrNewArgs};
 use crate::cli::commands::sync::resolve_cwd;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
-use crate::telemetry::otlp::CheckCounts;
 
 // ── new ────────────────────────────────────────────────────────────────────
 
@@ -967,6 +967,7 @@ mod tests {
 
     /// A check run, end to end, sends one event counting what it found, and
     /// none of the files' paths, titles or text.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn check_sends_one_event_with_counts_and_no_content() {
         use super::super::telemetry::tests::{own, sending_to_a_file};
