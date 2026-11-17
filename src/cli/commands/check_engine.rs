@@ -1085,9 +1085,8 @@ pub(super) fn send_hook_governance_events(
 ///
 /// Codex's own markers count too. Every command Codex's shell tool runs
 /// carries `CODEX_THREAD_ID` and `CODEX_SESSION_ID` (observed on Codex CLI
-/// 0.167.0), so an agent in Codex is refused the same way. The name stays,
-/// since Claude Code was the first agent it covered.
-fn running_under_claude_code() -> bool {
+/// 0.167.0), so an agent in Codex is refused the same way.
+fn running_under_agent_host() -> bool {
     [
         "CLAUDECODE",
         "CLAUDE_CODE_ENTRYPOINT",
@@ -1112,7 +1111,7 @@ fn running_under_claude_code() -> bool {
 /// standard input must be a real terminal (the coding agent's own tool calls
 /// do not get a pty — only a human actually typing at an interactive shell
 /// does, though a tool that allocates its own pty, e.g. `script`, `expect`,
-/// or `socat`, could still spoof one), and [`running_under_claude_code`]
+/// or `socat`, could still spoof one), and [`running_under_agent_host`]
 /// must be false (an agent's default tool-execution environment carries
 /// Claude Code's own markers — see that function's doc for exactly what
 /// this does and does not close). Neither check is a cryptographic proof of
@@ -1129,7 +1128,7 @@ fn running_under_claude_code() -> bool {
 /// under CI), so asserting on it in-process would be either untestable or
 /// flaky depending on the environment. See `tests/cli_test.rs` for the
 /// subprocess test, which controls this safely by piping stdin the same way
-/// every other `--claude-hook` stdin test there does. [`running_under_claude_code`]
+/// every other `--claude-hook` stdin test there does. [`running_under_agent_host`]
 /// carries no such restriction and is exercised directly. Everything else
 /// that does not depend on the real terminal lives in [`exec_override_impl`],
 /// which is also exercised directly.
@@ -1166,10 +1165,10 @@ pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     // line that *is* exercised every time (the terminal check itself) is
     // what keeps coverage honest about what's actually tested, rather than
     // manufacturing a fake terminal in a test just to satisfy a line count.
-    // `running_under_claude_code()` joins the same condition for the same
+    // `running_under_agent_host()` joins the same condition for the same
     // reason: whichever half is false, the line executed is identical.
     #[rustfmt::skip]
-    let result = if std::io::stdin().is_terminal() && !running_under_claude_code() { exec_override_impl(args) } else { Err(not_interactive()) };
+    let result = if std::io::stdin().is_terminal() && !running_under_agent_host() { exec_override_impl(args) } else { Err(not_interactive()) };
     result
 }
 
@@ -4732,18 +4731,18 @@ pub(crate) mod tests {
     /// Unlike the terminal check, this one carries no restriction on being
     /// exercised in-process — it only reads the environment.
     #[test]
-    fn test_running_under_claude_code_false_when_neither_marker_is_set() {
+    fn test_running_under_agent_host_false_when_neither_marker_is_set() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("CLAUDECODE");
         let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
         let _g3 = EnvGuard::remove("CODEX_THREAD_ID");
         let _g4 = EnvGuard::remove("CODEX_SESSION_ID");
-        assert!(!running_under_claude_code());
+        assert!(!running_under_agent_host());
     }
 
     /// An agent's shell in Codex is refused too.
     #[test]
-    fn test_running_under_claude_code_true_under_codex() {
+    fn test_running_under_agent_host_true_under_codex() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("CLAUDECODE");
         let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
@@ -4754,24 +4753,24 @@ pub(crate) mod tests {
                 "CODEX_THREAD_ID"
             });
             let _g = EnvGuard::set(name, "01a1c2fe");
-            assert!(running_under_claude_code(), "{name}");
+            assert!(running_under_agent_host(), "{name}");
         }
     }
 
     #[test]
-    fn test_running_under_claude_code_true_when_claudecode_is_set() {
+    fn test_running_under_agent_host_true_when_claudecode_is_set() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CLAUDECODE", "1");
         let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
-        assert!(running_under_claude_code());
+        assert!(running_under_agent_host());
     }
 
     #[test]
-    fn test_running_under_claude_code_true_when_entrypoint_is_set() {
+    fn test_running_under_agent_host_true_when_entrypoint_is_set() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("CLAUDECODE");
         let _g2 = EnvGuard::set("CLAUDE_CODE_ENTRYPOINT", "cli");
-        assert!(running_under_claude_code());
+        assert!(running_under_agent_host());
     }
 
     /// The testable core (see `exec_override`'s own doc comment for why the
