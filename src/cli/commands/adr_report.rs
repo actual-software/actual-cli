@@ -862,11 +862,12 @@ fn unquote(path: &str) -> Option<String> {
 
 // ── telemetry ────────────────────────────────────────────────────────────
 
-/// One [`crate::telemetry::otlp::ADR_REPORTED`] record per ADR the answer
-/// names. An ADR named more than once counts as verified when any of its
-/// claims held, and reports the first one that did, else its first claim. An
-/// ADR without a v2 header sends nothing, as it does on every ADR event. Only
-/// a verified claim sends its file path.
+/// One [`crate::telemetry::otlp::ADR_REPORTED`] record per listed ADR the
+/// answer names, and one more for all the names the question never listed.
+/// An ADR named more than once counts as verified when any of its claims
+/// held, and reports the first one that did, else its first claim. An ADR
+/// without a v2 header sends nothing, as it does on every ADR event. Only a
+/// verified claim sends its file path.
 #[cfg(feature = "telemetry")]
 fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
     use crate::telemetry::otlp::{AdrReport, Origin};
@@ -875,15 +876,11 @@ fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
         return;
     };
     let mut per_adr: Vec<(Option<&AskedAdr>, &CheckedClaim)> = Vec::new();
-    let named = |adr: Option<&AskedAdr>, claim: &CheckedClaim| {
-        adr.map_or(claim.adr.clone(), |adr| adr.key.clone())
-    };
     for claim in claims {
         let adr = ask.find(&claim.adr);
-        let name = named(adr, claim);
         match per_adr
             .iter_mut()
-            .find(|(known, first)| named(*known, first) == name)
+            .find(|(known, _)| known.map(|known| &known.key) == adr.map(|adr| &adr.key))
         {
             Some(entry) if !entry.1.verified() && claim.verified() => entry.1 = claim,
             Some(_) => {}
@@ -1731,6 +1728,44 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                     !text.contains("fn b2()") && !text.contains("made-up"),
                     "{text}"
                 );
+            }
+        }
+
+        /// Fifty names the question never listed send one event between them,
+        /// and no claim that failed its check sends a path, even one outside
+        /// the checkout.
+        #[test]
+        fn test_report_sends_one_event_for_every_unlisted_name() {
+            let _lock = lock();
+            let fx = Fixture::new(WITH_FILE);
+            let token = fx.ask("s1");
+            std::fs::write(
+                fx.repo.path().join("src/orders.rs"),
+                "fn a() {}\nfn b2() {}\n",
+            )
+            .unwrap();
+            take_captured();
+            let mut args = fx.args("s1", &token);
+            args.claims = (0..MAX_CLAIMS - 2)
+                .map(|n| format!("unlisted-{n}=src/orders.rs:2"))
+                .chain([
+                    "api-errors-001=/Users/me/other/secret.txt:1".to_string(),
+                    "unlisted-x=/Users/me/other/secret.txt:1".to_string(),
+                ])
+                .collect();
+            assert_eq!(args.claims.len(), 50);
+            answer(&args, None::<&[u8]>).unwrap();
+            let records = take_captured();
+            assert_eq!(records.len(), 2, "{records:?}");
+            let refs: Vec<_> = records
+                .iter()
+                .map(|record| attribute(record, "actual.adr.ref"))
+                .collect();
+            assert_eq!(refs, ["", "grp-errors"]);
+            for record in &records {
+                let text = record.to_string();
+                assert!(!text.contains("actual.report.file_path"), "{text}");
+                assert!(!text.contains("unlisted") && !text.contains("secret"));
             }
         }
 
