@@ -238,6 +238,11 @@ pub struct TurnStart {
     pub root: PathBuf,
     /// `HEAD`'s full commit id when the turn started.
     pub head: String,
+    /// The digest of the working-tree diff against `head` when the turn
+    /// started. A check whose diff still matches it is looking at nothing this
+    /// turn changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_digest: Option<String>,
 }
 
 /// One explicit override: a human, outside the agent's control, telling this
@@ -1266,6 +1271,7 @@ mod tests {
         let turn = TurnStart {
             root: PathBuf::from("/repo"),
             head: "a".repeat(40),
+            diff_digest: None,
         };
         update("session-race", &rd(), |s| s.turn_start = Some(turn.clone()));
         update("session-race", &rd(), |s| {
@@ -1295,6 +1301,7 @@ mod tests {
             s.turn_start = Some(TurnStart {
                 root: PathBuf::from("/repo"),
                 head: "b".repeat(40),
+                diff_digest: None,
             });
         });
         let loaded = load("session-turn-race", &rd());
@@ -1599,6 +1606,7 @@ mod tests {
         let turn = TurnStart {
             root: PathBuf::from("/repo"),
             head: "a".repeat(40),
+            diff_digest: None,
         };
         let session = GovernanceSession {
             turn_start: Some(turn.clone()),

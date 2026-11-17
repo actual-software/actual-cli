@@ -8,7 +8,9 @@
 //! `impl-check --claude-hook` [`prepare`]s the question before it judges and
 //! [`mark`]s the turn asked just before it prints, so every later Stop in the
 //! turn, including the one after the answer, asks nothing. A turn is the
-//! session's [`GovernanceSession::turn`], counted on `UserPromptSubmit`.
+//! session's [`GovernanceSession::turn`], counted on `UserPromptSubmit`. A
+//! diff that still matches the one recorded when the turn started holds only
+//! earlier turns' uncommitted work, so that turn is not asked.
 //!
 //! **The list is the brief ledger, unfiltered.** It names every decision that
 //! reached the session through `rules brief`, which is keyed on the session
@@ -66,6 +68,12 @@ pub struct AdrAsk {
     #[serde(default)]
     pub action_id: String,
     pub adrs: Vec<AskedAdr>,
+    /// The digest of the diff the asking round judged.
+    #[serde(default)]
+    pub diff_digest: String,
+    /// Whether the asking round denied, so the question rode on a block.
+    #[serde(default)]
+    pub on_block: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
 }
@@ -183,6 +191,7 @@ pub struct TurnPlan {
 pub struct PreparedAsk {
     turn: u64,
     token: String,
+    diff_digest: String,
     adrs: Vec<AskedAdr>,
     text: String,
 }
@@ -203,11 +212,16 @@ pub(super) fn prepare(
     diff_digest: &str,
 ) -> Option<PreparedAsk> {
     let session_id = session_id.filter(|id| !id.is_empty())?;
-    if session
+    let unchanged = session
+        .turn_start
+        .as_ref()
+        .and_then(|start| start.diff_digest.as_deref())
+        == Some(diff_digest);
+    let asked = session
         .adr_ask
         .as_ref()
-        .is_some_and(|ask| ask.turn == session.turn)
-    {
+        .is_some_and(|ask| ask.turn == session.turn);
+    if unchanged || asked {
         return None;
     }
     let ledger_rules_dir = super::rules_brief::resolve(rules_dir);
@@ -234,6 +248,7 @@ pub(super) fn prepare(
     Some(PreparedAsk {
         turn: session.turn,
         token,
+        diff_digest: diff_digest.to_string(),
         adrs: listed.into_iter().map(|(adr, _)| adr).collect(),
         text,
     })
@@ -242,7 +257,7 @@ pub(super) fn prepare(
 /// Record `ask` as this turn's question, unless one already was. True only
 /// when this call recorded it and the session reads it back, so a session
 /// that cannot be written never asks, and never asks again after its answer.
-pub(super) fn mark(session_id: &str, rules_dir: &Path, ask: &PreparedAsk) -> bool {
+pub(super) fn mark(session_id: &str, rules_dir: &Path, ask: &PreparedAsk, on_block: bool) -> bool {
     let mut marked = false;
     governance_session::update(session_id, rules_dir, |session| {
         let asked = session
@@ -257,6 +272,8 @@ pub(super) fn mark(session_id: &str, rules_dir: &Path, ask: &PreparedAsk) -> boo
             token: ask.token.clone(),
             action_id: action_id(),
             adrs: ask.adrs.clone(),
+            diff_digest: ask.diff_digest.clone(),
+            on_block,
             answer: None,
         });
         marked = true;
@@ -265,6 +282,18 @@ pub(super) fn mark(session_id: &str, rules_dir: &Path, ask: &PreparedAsk) -> boo
         && governance_session::load(session_id, rules_dir)
             .adr_ask
             .is_some_and(|recorded| recorded.token == ask.token)
+}
+
+/// Whether this turn's question was asked on a round that let the diff
+/// through, and the diff is unchanged since: the answer changed no file, so
+/// the Stop after it has nothing new to judge. A rule a round limit waved
+/// through stays uncleared, and would otherwise be judged again here. A
+/// question asked on a block never settles the diff, so the block stands
+/// until the diff changes.
+pub(super) fn settled(session: &GovernanceSession, diff_digest: &str) -> bool {
+    session.adr_ask.as_ref().is_some_and(|ask| {
+        ask.turn == session.turn && !ask.on_block && ask.diff_digest == diff_digest
+    })
 }
 
 #[cfg(feature = "telemetry")]
@@ -930,7 +959,7 @@ pub(super) mod tests {
                 "0123456789abcdef",
             )
             .unwrap();
-            assert!(mark(session, &self.rules_dir(), &ask));
+            assert!(mark(session, &self.rules_dir(), &ask, false));
             ask.token
         }
 
@@ -1230,10 +1259,10 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let state = governance_session::load("s1", &rules);
         let ask = prepare(Some("s1"), &state, fx.repo.path(), &rules, "abcdef0123").unwrap();
         governance_session::update("s1", &rules, |s| s.turn = 4);
-        assert!(!mark("s1", &rules, &ask), "the turn moved on");
+        assert!(!mark("s1", &rules, &ask, false), "the turn moved on");
         governance_session::update("s1", &rules, |s| s.turn = 0);
-        assert!(mark("s1", &rules, &ask));
-        assert!(!mark("s1", &rules, &ask), "already asked");
+        assert!(mark("s1", &rules, &ask, false));
+        assert!(!mark("s1", &rules, &ask, false), "already asked");
         let recorded = governance_session::load("s1", &rules).adr_ask.unwrap();
         assert_eq!(recorded.token, "0-abcdef01");
         assert!(!recorded.action_id.is_empty());

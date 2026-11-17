@@ -1709,10 +1709,13 @@ enum Reply {
 /// otherwise have been a notice (which stays beside it for the user), or as
 /// the reason of a block on an otherwise silent pass.
 fn reply(run: &HookRun<'_>, reply: Reply) {
+    let on_block = matches!(reply, Reply::Deny(_));
     let question = run
         .ask
         .zip(run.session_id)
-        .filter(|(ask, session_id)| super::adr_report::mark(session_id, run.rules_dir, ask))
+        .filter(|(ask, session_id)| {
+            super::adr_report::mark(session_id, run.rules_dir, ask, on_block)
+        })
         .map(|(ask, _)| ask.text());
     let json = match (reply, question) {
         (Reply::Silent, None) => return,
