@@ -1142,7 +1142,7 @@ pub struct RulesReportUseArgs {
     pub turn: String,
 
     /// An ADR you used and the line that best shows its effect, as
-    /// `<adr>=<file>:<line>`. Repeat for each ADR.
+    /// `<adr>=<repo-relative-path>:<line>`. Repeat for each ADR.
     #[arg(long = "claim", value_name = "ADR=FILE:LINE")]
     pub claims: Vec<String>,
 

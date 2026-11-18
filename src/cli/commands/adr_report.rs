@@ -645,7 +645,7 @@ fn flag_claims(args: &RulesReportUseArgs) -> Result<Vec<Claim>, ActualError> {
                 .filter(|claim| !claim.adr.is_empty() && claim.file.as_deref() != Some(""))
                 .ok_or_else(|| {
                     usage(&format!(
-                        "cannot read {given:?}: write --claim <adr>=<file>:<line> or --plan-claim <adr>=<line>"
+                        "cannot read {given:?}: write --claim <adr>=<repo-relative-path>:<line> or --plan-claim <adr>=<line>"
                     ))
                 })
         })
@@ -1307,7 +1307,10 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_default();
-            assert!(err.contains("--claim <adr>=<file>:<line>"), "{bad}: {err}");
+            assert!(
+                err.contains("--claim <adr>=<repo-relative-path>:<line>"),
+                "{bad}: {err}"
+            );
         }
         args.claims.clear();
         args.plan_claims = vec!["logging-001".to_string()];
