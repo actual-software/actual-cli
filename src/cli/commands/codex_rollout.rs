@@ -328,6 +328,9 @@ mod tests {
         assert_eq!(facts(&[task_started(TURN, "default")]).picker, None);
         assert_eq!(facts(&[tools("Default or Plan mode")]).picker, None);
         assert_eq!(picker_modes_in("{\"type\":\"response_item\"}"), None);
+        // A tool of that name without a description says nothing either.
+        let bare = serde_json::json!({"type":"response_item","payload":{"type":"additional_tools","tools":[{"name":"request_user_input"}]}}).to_string();
+        assert_eq!(picker_modes_in(&bare), None);
     }
 
     /// The rollout Phase 0 captured, trimmed: a Plan-mode turn whose plan

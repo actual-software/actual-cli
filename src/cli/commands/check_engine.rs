@@ -7622,4 +7622,218 @@ pub(crate) mod tests {
             Some(Pending::new("CONFLICT R-A-001".to_string()))
         );
     }
+
+    // ── coverage for the picker's other branches ──────────────────────────
+
+    /// The plan gate's picker words, its pending context and its gate.
+    #[test]
+    fn test_picker_and_pending_words_for_the_plan_gate() {
+        let rule = checked("R-A-001", Verdict::Conflicting, "HS256", "signs with HS256");
+        let ask = PickerAsk {
+            nonce: "abcd1234".to_string(),
+            stage: PickerStage::Choice,
+            digest: "d".to_string(),
+            override_label: "Override R-A-001".to_string(),
+        };
+        let reason = codex_picker_reason(&[&rule], None, check::ArtifactKind::Plan, &ask);
+        assert!(reason.contains("the plan conflicts with"), "{reason}");
+        let q = &picker_call(&reason)["questions"][0];
+        assert_eq!(q["header"], "Plan blocked");
+        assert_eq!(
+            q["question"],
+            "Plan blocked by 1 rule: R-A-001. What should happen?"
+        );
+        assert_eq!(
+            q["options"][0]["label"],
+            "Revise the plan to conform (Recommended)"
+        );
+        let context = codex_pending_context(check::ArtifactKind::Plan, "CONFLICT R-A-001");
+        assert!(context.contains("your plan conflicts"), "{context}");
+        assert!(context.contains("propose it again"), "{context}");
+    }
+
+    /// The why answer for a plan overrides what the plan gate is blocking;
+    /// an unanswered why question says nothing was overridden.
+    #[test]
+    fn test_picker_why_for_a_plan_and_unanswered_why() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let k = governance_session::key("doc", "R-A-001");
+        let reason_ask = |digest: &str| PickerAsk {
+            nonce: "abcd1234".to_string(),
+            stage: PickerStage::Reason,
+            digest: digest.to_string(),
+            override_label: "Override R-A-001".to_string(),
+        };
+        governance_session::update("s-pw", &rules_dir, |s| {
+            s.plan.record_denial(&k);
+            s.plan.pending = Some(Pending {
+                text: "CONFLICT R-A-001".to_string(),
+                ask: Some(reason_ask("d")),
+            });
+        });
+        let why = "actual_reason_abcd1234";
+        let reply = codex_answer_reply(
+            "s-pw",
+            Some(&answer_input(why)),
+            Some(&answer_output(why, "This ADR is wrong")),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        assert!(context(&reply).contains("overrode R-A-001 in the picker (reason: adr-wrong)"));
+        let session = governance_session::load("s-pw", &rules_dir);
+        assert_eq!(
+            session.overrides[0].gate,
+            Some(governance_session::OverrideGate::Plan)
+        );
+
+        governance_session::update("s-pw2", &rules_dir, |s| {
+            s.plan.pending = Some(Pending {
+                text: "CONFLICT R-A-001".to_string(),
+                ask: Some(reason_ask("d")),
+            });
+        });
+        let session = governance_session::load("s-pw2", &rules_dir);
+        let reply = codex_unanswered_picker(
+            HookHost::Codex,
+            check::ArtifactKind::Plan,
+            Some("s-pw2"),
+            &rules_dir,
+            &session,
+            "d",
+        )
+        .unwrap();
+        assert!(reply.contains("so nothing was overridden"), "{reply}");
+    }
+
+    /// A why answer with nothing left blocking, or with a blocking rule gone
+    /// from the rule set, overrides nothing and says so.
+    #[test]
+    fn test_picker_why_that_cannot_be_recorded() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let why = "actual_reason_abcd1234";
+        let seed_why = |session: &str, denied: Option<&str>| {
+            governance_session::update(session, &rules_dir, |s| {
+                if let Some(key) = denied {
+                    s.diff.record_denial(key);
+                }
+                s.diff.pending = Some(Pending {
+                    text: "conflicts".to_string(),
+                    ask: Some(PickerAsk {
+                        nonce: "abcd1234".to_string(),
+                        stage: PickerStage::Reason,
+                        digest: "d".to_string(),
+                        override_label: "Override R-A-001".to_string(),
+                    }),
+                });
+            });
+        };
+        let answer = |session: &str| {
+            codex_answer_reply(
+                session,
+                Some(&answer_input(why)),
+                Some(&answer_output(why, "This ADR is wrong")),
+                repo.path(),
+                &rules_dir,
+            )
+            .unwrap()
+        };
+
+        seed_why("s-none", None);
+        assert!(context(&answer("s-none"))
+            .starts_with("Nothing was overridden: no rules are currently blocking"));
+
+        seed_why("s-gone", Some("doc::R-Z-999"));
+        let text = context(&answer("s-gone"));
+        assert!(text.starts_with("Nothing was overridden:"), "{text}");
+        assert!(text.contains("R-Z-999"), "{text}");
+        assert!(governance_session::load("s-gone", &rules_dir)
+            .overrides
+            .is_empty());
+    }
+
+    /// A typed override while the plan gate is asking narrows `all` to the
+    /// plan's rules; a rule that isn't blocking is overridden and noted; a
+    /// blocking rule gone from the rule set is refused.
+    #[test]
+    fn test_codex_typed_override_other_paths() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let k1 = governance_session::key("doc", "R-A-001");
+
+        governance_session::update("s-tp", &rules_dir, |s| {
+            s.plan.record_denial(&k1);
+            s.plan.pending = Some(Pending::new("CONFLICT R-A-001".to_string()));
+        });
+        let reply = codex_prompt_reply(
+            "s-tp",
+            Some("actual override all accepted"),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        assert!(reply.contains("overrode R-A-001"), "{reply}");
+        assert_eq!(
+            governance_session::load("s-tp", &rules_dir).plan.pending,
+            None
+        );
+
+        let reply = codex_prompt_reply(
+            "s-nb",
+            Some("actual override R-A-002 not-here"),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        assert!(reply.contains("No check was blocking R-A-002"), "{reply}");
+
+        governance_session::update("s-gone2", &rules_dir, |s| {
+            s.diff.record_denial("doc::R-Z-999");
+        });
+        let reply = codex_prompt_reply(
+            "s-gone2",
+            Some("actual override all"),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        assert!(reply.contains("nothing was overridden"), "{reply}");
+        assert!(reply.contains("R-Z-999"), "{reply}");
+    }
+
+    /// An override with neither a code nor words is reminded as one with no
+    /// reason.
+    #[test]
+    fn test_override_reminder_without_any_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        governance_session::record_override(
+            "s-nr",
+            rules.path(),
+            &["doc::R-A-001".to_string()],
+            "",
+        );
+        let session = governance_session::load("s-nr", rules.path());
+        let reminder = override_reminder(&session).unwrap();
+        assert!(
+            reminder.contains("doc::R-A-001: manually overridden (no reason given)"),
+            "{reminder}"
+        );
+    }
 }

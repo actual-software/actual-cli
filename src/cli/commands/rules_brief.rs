@@ -3340,4 +3340,11 @@ mod tests {
         assert_eq!(NoBrief::BudgetSpent.token(), "budget-spent");
         assert!(NoBrief::BudgetSpent.sentence("a.ts").contains("a.ts"));
     }
+
+    #[test]
+    fn test_counted_uses_the_plural_past_one() {
+        assert_eq!(counted(1, "rule"), "1 rule");
+        assert_eq!(counted(2, "rule"), "2 rules");
+        assert_eq!(counted(0, "ADR"), "0 ADRs");
+    }
 }

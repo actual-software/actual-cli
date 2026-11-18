@@ -3034,4 +3034,44 @@ mod tests {
             Some(&1)
         );
     }
+
+    /// A picker question about this same plan that went unanswered ends the
+    /// turn with the text choices, without judging the plan again, and is
+    /// forgotten.
+    #[test]
+    fn test_exec_hook_with_codex_ends_an_unanswered_picker_without_judging() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let plan = "Sign access tokens with HS256";
+        governance_session::update("sess-codex-plan", &rules_dir, |s| {
+            s.plan.pending = Some(governance_session::Pending {
+                text: "CONFLICT R-A-001".to_string(),
+                ask: Some(governance_session::PickerAsk {
+                    nonce: "abcd1234".to_string(),
+                    stage: governance_session::PickerStage::Choice,
+                    digest: governance_session::content_digest(plan),
+                    override_label: "Override R-A-001".to_string(),
+                }),
+            });
+        });
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir.clone());
+        // No runner is set up, so a judge call would fail open and leave the
+        // question in place.
+        exec_hook_with(
+            &args,
+            HookHost::Codex,
+            &codex_stop(root.path(), "plan", Some(plan)),
+        );
+        let session = governance_session::load("sess-codex-plan", &rules_dir);
+        let pending = session
+            .plan
+            .pending
+            .expect("conflicts kept for the next prompt");
+        assert_eq!(pending.ask, None);
+        assert_eq!(session.plan.rounds, 0, "not judged again");
+    }
 }
