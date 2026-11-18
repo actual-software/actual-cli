@@ -43,11 +43,13 @@ pub struct AnalysisOutcome {
 /// Compute a deterministic SHA-256 hash of the config fields that affect
 /// analysis results: `include_categories`, `exclude_categories`,
 /// `include_general`, and `max_per_framework`.
+/// Includes the analysis revision to invalidate obsolete project lists.
 ///
 /// The hash is encoded as a lowercase hex string and is stable across runs
 /// (sorted vecs, canonical `None` representation).
 pub fn compute_config_hash(cfg: &Config) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"analysis:workspace-package-roots-v1\n");
 
     // include_categories — sort for determinism
     match &cfg.include_categories {
@@ -913,6 +915,28 @@ mod tests {
             compute_config_hash(&cfg_b),
             "config hash must be order-independent for categories"
         );
+    }
+
+    #[test]
+    fn test_cache_miss_for_legacy_workspace_discovery() {
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+        write_config_with_cache(
+            &config_path,
+            &repo_dir.path().to_string_lossy(),
+            Some(&head_hash),
+            // Default-config hash before package-root discovery.
+            Some("e8b37cb5821424fca38ef4b21b863b0e0f9265b7077411216b29ec69d3d6506c"),
+            valid_analysis(),
+        );
+
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
+        assert_ne!(outcome.analysis.projects[0].name, "test-project");
+        let cached = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(cached.cache_status, CacheStatus::Hit);
     }
 
     /// Cache miss when config_hash in the cached entry is absent (old-format cache).

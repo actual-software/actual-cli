@@ -730,3 +730,45 @@ fn bundle_context_excludes_sensitive_files() {
         "Cargo.toml should appear in file_tree"
     );
 }
+
+#[test]
+fn recursive_workspace_match_request_contains_only_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "pnpm-workspace.yaml",
+        "packages:\n  - apps/**\n  - packages/**\n",
+    );
+    for (path, name) in [("apps/web", "web"), ("packages/group/api", "api")] {
+        write_file(
+            dir.path(),
+            &format!("{path}/package.json"),
+            &format!(r#"{{"name":"{name}"}}"#),
+        );
+        write_file(
+            dir.path(),
+            &format!("{path}/src/__tests__/example.ts"),
+            "export const answer = 42;\n",
+        );
+        write_file(
+            dir.path(),
+            &format!("{path}/public/index.html"),
+            "<html></html>",
+        );
+    }
+    let analysis = run_static_analysis(dir.path()).unwrap();
+    let request = actual_cli::api::client::build_match_request(
+        &analysis,
+        &Default::default(),
+        &Default::default(),
+    );
+    let serialized = serde_json::to_value(request).unwrap();
+    let mut paths: Vec<_> = serialized["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, ["apps/web", "packages/group/api"]);
+}

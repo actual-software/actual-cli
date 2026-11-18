@@ -108,7 +108,7 @@ fn detect_pnpm(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
         return Ok(None);
     }
 
-    let projects = expand_glob_patterns(root, &patterns);
+    let projects = expand_package_patterns(root, &patterns);
     if projects.is_empty() {
         return Ok(None);
     }
@@ -139,7 +139,7 @@ fn detect_npm_workspaces(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
         return Ok(None);
     }
 
-    let projects = expand_glob_patterns(root, &patterns);
+    let projects = expand_package_patterns(root, &patterns);
     if projects.is_empty() {
         return Ok(None);
     }
@@ -205,7 +205,7 @@ fn detect_lerna(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
         return Ok(None);
     }
 
-    let projects = expand_glob_patterns(root, &patterns);
+    let projects = expand_package_patterns(root, &patterns);
     if projects.is_empty() {
         return Ok(None);
     }
@@ -439,6 +439,13 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 /// with deeply nested directory trees.
 const MAX_WALK_DEPTH: usize = 20;
 
+fn expand_package_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
+    expand_glob_patterns(root, patterns)
+        .into_iter()
+        .filter(|project| root.join(&project.path).join("package.json").is_file())
+        .collect()
+}
+
 /// Expand glob patterns relative to root and build project info for each match.
 ///
 /// Supports negation patterns (prefixed with `!`) which exclude matching directories
@@ -624,6 +631,82 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_javascript_workspace_globs_require_package_manifests() {
+        for (config_file, config, lockfile, workspace_type) in [
+            (
+                "pnpm-workspace.yaml",
+                "packages:\n  - apps/**\n  - packages/**\n  - '!packages/excluded'\n",
+                None,
+                WorkspaceType::Pnpm,
+            ),
+            (
+                "package.json",
+                r#"{"workspaces":["apps/**","packages/**","!packages/excluded"]}"#,
+                None,
+                WorkspaceType::Npm,
+            ),
+            (
+                "package.json",
+                r#"{"workspaces":{"packages":["apps/**","packages/**","!packages/excluded"]}}"#,
+                Some("yarn.lock"),
+                WorkspaceType::Yarn,
+            ),
+            (
+                "lerna.json",
+                r#"{"packages":["apps/**","packages/**","!packages/excluded"]}"#,
+                None,
+                WorkspaceType::Lerna,
+            ),
+        ] {
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            fs::write(root.join(config_file), config).unwrap();
+            if let Some(lockfile) = lockfile {
+                fs::write(root.join(lockfile), "").unwrap();
+            }
+            for path in ["apps/web", "packages/group/api", "packages/excluded"] {
+                fs::create_dir_all(root.join(path)).unwrap();
+                fs::write(root.join(path).join("package.json"), "{}").unwrap();
+            }
+            for path in [
+                "apps/web/src/__tests__",
+                "apps/web/public",
+                "packages/group/api/src",
+                "packages/not-a-package/package.json",
+            ] {
+                fs::create_dir_all(root.join(path)).unwrap();
+            }
+            fs::write(
+                root.join("packages/group/Cargo.toml"),
+                "[package]\nname = \"other-ecosystem\"\n",
+            )
+            .unwrap();
+
+            let info = detect_monorepo(root).unwrap();
+            assert_eq!(info.workspace_type, Some(workspace_type));
+            let mut paths: Vec<_> = info.projects.iter().map(|p| p.path.as_str()).collect();
+            paths.sort();
+            assert_eq!(paths, ["apps/web", "packages/group/api"]);
+        }
+    }
+
+    #[test]
+    fn test_pnpm_workspace_without_package_manifests_falls_through() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/**\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("apps/web/src")).unwrap();
+
+        let info = detect_monorepo(dir.path()).unwrap();
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
     fn test_pnpm_workspace_detection() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -635,7 +718,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("packages/app-a")).unwrap();
+        fs::write(root.join("packages/app-a/package.json"), "{}").unwrap();
         fs::create_dir_all(root.join("packages/app-b")).unwrap();
+        fs::write(root.join("packages/app-b/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -683,6 +768,7 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("apps/frontend")).unwrap();
+        fs::write(root.join("apps/frontend/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -704,6 +790,7 @@ mod tests {
         // yarn.lock presence → WorkspaceType::Yarn instead of Npm
         fs::write(root.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
         fs::create_dir_all(root.join("packages/ui")).unwrap();
+        fs::write(root.join("packages/ui/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -781,7 +868,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("packages/ui")).unwrap();
+        fs::write(root.join("packages/ui/package.json"), "{}").unwrap();
         fs::create_dir_all(root.join("packages/utils")).unwrap();
+        fs::write(root.join("packages/utils/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -805,6 +894,7 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("libs/shared")).unwrap();
+        fs::write(root.join("libs/shared/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -1098,7 +1188,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("apps/web")).unwrap();
+        fs::write(root.join("apps/web/package.json"), "{}").unwrap();
         fs::create_dir_all(root.join("libs/shared")).unwrap();
+        fs::write(root.join("libs/shared/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -1153,7 +1245,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("pnpm-pkgs/a")).unwrap();
+        fs::write(root.join("pnpm-pkgs/a/package.json"), "{}").unwrap();
         fs::create_dir_all(root.join("npm-pkgs/b")).unwrap();
+        fs::write(root.join("npm-pkgs/b/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -2009,7 +2103,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("packages/public")).unwrap();
+        fs::write(root.join("packages/public/package.json"), "{}").unwrap();
         fs::create_dir_all(root.join("packages/internal")).unwrap();
+        fs::write(root.join("packages/internal/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
@@ -2028,7 +2124,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::write(root.join("packages/app/package.json"), "{}").unwrap();
         fs::create_dir_all(root.join("packages/template")).unwrap();
+        fs::write(root.join("packages/template/package.json"), "{}").unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
