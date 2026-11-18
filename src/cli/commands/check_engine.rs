@@ -2145,6 +2145,7 @@ pub(crate) mod tests {
     }
 
     /// Every hook line [`emit`] printed on this thread since the last call.
+    #[cfg(feature = "telemetry")]
     pub(in crate::cli::commands) fn take_emitted() -> Vec<String> {
         EMITTED.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
     }
