@@ -1705,7 +1705,8 @@ enum Reply {
 }
 
 /// Emit `reply`, carrying `run`'s ADR question when this round is the one that
-/// asks it: after a deny's reason, as the reason of a block that would
+/// asks it: after a deny's reason, worded to be answered once that reason is
+/// fixed, as the reason of a block that would
 /// otherwise have been a notice (which stays beside it for the user), or as
 /// the reason of a block on an otherwise silent pass.
 fn reply(run: &HookRun<'_>, reply: Reply) {
@@ -1716,7 +1717,7 @@ fn reply(run: &HookRun<'_>, reply: Reply) {
         .filter(|(ask, session_id)| {
             super::adr_report::mark(session_id, run.rules_dir, ask, on_block)
         })
-        .map(|(ask, _)| ask.text());
+        .map(|(ask, _)| ask.text(on_block));
     let json = match (reply, question) {
         (Reply::Silent, None) => return,
         (Reply::Notice(message), None) => plan_check_hook::render_notice(&message),
