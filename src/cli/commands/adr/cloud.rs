@@ -10,12 +10,13 @@ use serde::Serialize;
 
 use super::telemetry::{self, Reviewed};
 use super::{
-    content_from_flags, interactive, json_text, missing_level, pick_repo, rule_spelling, runtime,
-    save_status, session, Repo, RepoPick, Session,
+    content_from_flags, interactive, json_text, local, missing_level, pick_repo, rule_spelling,
+    runtime, save_status, session, today, Repo, RepoPick, Session,
 };
 use crate::adr::context_file::{self, js_trim, ContextFile};
 use crate::adr::files::{self, DecisionFile, RenameOutcome};
 use crate::adr::overlap::{find_overlaps, ExistingDecision};
+use crate::adr::save_check::check_document;
 use crate::adr::workflow::{self, DecisionEdit, LevelEdit, Listed, PolicyEdit};
 use crate::api::adr_types::{
     CreateRequest, Decision, DecisionAction, DecisionList, ImportRequest, LifecycleAction,
@@ -323,10 +324,17 @@ async fn run_create(
     if !args.allow_duplicate {
         check_for_duplicates(&session, &repo, &outgoing).await?;
     }
-    let outcome = match &outgoing.file {
-        None => create_from_flags(&session, &repo, &outgoing.doc, status).await?,
-        Some(file) => create_from_file(&session, &repo, &root, file, &outgoing.doc, status).await?,
+    let Some(file) = &outgoing.file else {
+        let saved = create_from_flags(&session, &repo, &outgoing.doc, status).await?;
+        let named = args.repo.is_some();
+        let outcome = write_saved_pair(&session, &repo, named, &root, &outgoing.doc, saved).await;
+        return Ok(if args.api.json {
+            format!("{}\n", json_text(&outcome))
+        } else {
+            render_flags_created(&outcome, &repo)
+        });
     };
+    let outcome = create_from_file(&session, &repo, &root, file, &outgoing.doc, status).await?;
     Ok(if args.api.json {
         format!("{}\n", json_text(&outcome))
     } else {
@@ -369,6 +377,87 @@ async fn create_from_flags(
         publish_problem: None,
         local_status_was: None,
     })
+}
+
+/// What `adr create` from flags did, for `--json`: the save, and the
+/// decision doc and rule file it wrote for an accepted decision.
+#[derive(Debug, Serialize)]
+struct FlagsOutcome {
+    #[serde(flatten)]
+    saved: CreateOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_file: Option<PathBuf>,
+    /// Why an accepted decision's files weren't written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files_problem: Option<String>,
+}
+
+/// Write an accepted decision's doc and rule file under `root`, named for its
+/// id as the repository sync names them, so the sync's pull request rewrites
+/// these files in place. A draft gets none: the sync deletes a file named for
+/// a decision it doesn't render, drafts included. With `named` (a `--repo`
+/// flag), `root`'s origin remote must name the same repository.
+async fn write_saved_pair(
+    session: &Session,
+    repo: &Repo,
+    named: bool,
+    root: &Path,
+    doc: &ContextFile,
+    saved: CreateOutcome,
+) -> FlagsOutcome {
+    let mut outcome = FlagsOutcome {
+        saved,
+        decision_file: None,
+        rule_file: None,
+        files_problem: None,
+    };
+    if outcome.saved.created.status != SaveStatus::Accepted.as_str() {
+        return outcome;
+    }
+    let adr_id = &outcome.saved.created.adr_id;
+    match saved_pair(session, repo, named, root, doc, adr_id).await {
+        Ok((decision_file, rule_file)) => {
+            outcome.decision_file = Some(decision_file);
+            outcome.rule_file = Some(rule_file);
+        }
+        Err(reason) => {
+            outcome.files_problem = Some(format!(
+                "The decision was saved, but its files weren't written: {reason}"
+            ));
+        }
+    }
+    outcome
+}
+
+/// The pair `write_saved_pair` writes, or why it can't.
+async fn saved_pair(
+    session: &Session,
+    repo: &Repo,
+    named: bool,
+    root: &Path,
+    doc: &ContextFile,
+    adr_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let label = sanitize_server_text(&repo.label);
+    if named {
+        match pick_repo(session, None, root).await {
+            Ok(RepoPick::Chosen(found)) if found.id == repo.id => {}
+            Ok(_) => return Err(format!("this directory isn't a checkout of {label}.")),
+            Err(e) => {
+                return Err(format!(
+                    "couldn't tell whether this directory is a checkout of {label} ({e})."
+                ))
+            }
+        }
+    }
+    let doc = ContextFile {
+        title: stored_title(doc),
+        ..doc.clone()
+    };
+    let doc = check_document(&doc, false, &today()).map_err(|reasons| reasons.join(" "))?;
+    local::write_pair(root, &doc, adr_id, SaveStatus::Accepted, &[]).map_err(|e| format!("{e}."))
 }
 
 /// Save a decision file as the web app's Import does, which keeps the whole
@@ -608,6 +697,20 @@ fn render_created(outcome: &CreateOutcome, repo: &Repo) -> String {
         .flatten()
     {
         let _ = writeln!(out, "{} {problem}", theme::warning("warning:"));
+    }
+    out
+}
+
+fn render_flags_created(outcome: &FlagsOutcome, repo: &Repo) -> String {
+    let mut out = render_created(&outcome.saved, repo);
+    for file in [&outcome.decision_file, &outcome.rule_file]
+        .into_iter()
+        .flatten()
+    {
+        let _ = writeln!(out, "  wrote {}", file.display());
+    }
+    if let Some(problem) = &outcome.files_problem {
+        let _ = writeln!(out, "  {} {problem}", theme::warning("note:"));
     }
     out
 }
@@ -1362,6 +1465,178 @@ mod tests {
             matches!(&err, ActualError::AdrRepoRequired(message) if message.contains("no origin remote")),
             "{err:?}"
         );
+    }
+
+    /// A server that connects `REPO`, finds no decision like a new one, and
+    /// saves every create from flags as `ADR`, `saves` times.
+    fn flags_server(saves: usize) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        server
+            .mock("GET", READ)
+            .match_query(repo_read())
+            .with_status(200)
+            .with_body(read_body(&[]))
+            .create();
+        let create = server
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .with_status(200)
+            .with_body(created_body())
+            .expect(saves)
+            .create();
+        (server, create)
+    }
+
+    #[test]
+    fn create_from_flags_writes_an_accepted_decisions_files_under_its_id() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo_dir = tempdir().unwrap();
+        git_repo(
+            repo_dir.path(),
+            Some("https://github.com/actual-software/actual-cli"),
+        );
+        let (server, create) = flags_server(3);
+        let mut args = create_args(&server);
+        args.repo = None;
+
+        // A draft gets no file: the sync deletes one named for a draft.
+        let text = block(run_create(&args, repo_dir.path(), false)).unwrap();
+        assert!(text.contains("as draft"), "{text}");
+        assert!(!text.contains("wrote"), "{text}");
+        assert!(!repo_dir.path().join("docs").exists());
+
+        args.api.json = true;
+        let json = block(run_create(&args, repo_dir.path(), true)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let title = "Use Postgres for storage";
+        let doc = repo_dir
+            .path()
+            .join("docs/adr")
+            .join(crate::adr::names::decision_doc_file_name(ADR, title));
+        let rule = repo_dir
+            .path()
+            .join(".actual/rules")
+            .join(crate::adr::names::rule_file_name(ADR, title));
+        assert_eq!(value["status"], "accepted");
+        assert_eq!(value["decision_file"].as_str(), doc.to_str(), "{json}");
+        assert_eq!(value["rule_file"].as_str(), rule.to_str(), "{json}");
+        assert!(value.get("files_problem").is_none(), "{json}");
+        for written in [&doc, &rule] {
+            let meta = files::read_decision_file(written).unwrap().meta.unwrap();
+            assert_eq!(
+                (meta.adr_id.as_deref(), meta.status.as_deref()),
+                (Some(ADR), Some("accepted")),
+                "{written:?}"
+            );
+        }
+        let rules = files::read_decision_file(&rule).unwrap().body;
+        assert!(
+            rules.contains("MUST: Store relational data in Postgres."),
+            "{rules}"
+        );
+
+        // Saving it again leaves the files there as they are.
+        args.api.json = false;
+        let before = std::fs::read_to_string(&doc).unwrap();
+        let text = block(run_create(&args, repo_dir.path(), true)).unwrap();
+        create.assert();
+        assert!(
+            text.contains(
+                "note: The decision was saved, but its files weren't written: I/O error:"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("wrote"), "{text}");
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), before);
+    }
+
+    #[test]
+    fn create_from_flags_with_repo_writes_only_into_that_repositorys_checkout() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let (mut server, create) = flags_server(3);
+        let mut args = create_args(&server);
+        args.repo = Some("actual-cli".to_string());
+
+        let checkout = tempdir().unwrap();
+        git_repo(
+            checkout.path(),
+            Some("git@github.com:actual-software/actual-cli.git"),
+        );
+        let text = block(run_create(&args, checkout.path(), true)).unwrap();
+        assert_eq!(text.matches("  wrote ").count(), 2, "{text}");
+        assert!(files::find_rule_file(checkout.path(), ADR).is_some());
+
+        let elsewhere = tempdir().unwrap();
+        git_repo(
+            elsewhere.path(),
+            Some("https://github.com/someone/elsewhere.git"),
+        );
+        let text = block(run_create(&args, elsewhere.path(), true)).unwrap();
+        assert!(
+            text.contains(
+                "its files weren't written: this directory isn't a checkout of \
+                 actual-software/actual-cli."
+            ),
+            "{text}"
+        );
+        assert!(!elsewhere.path().join("docs").exists());
+
+        // An id needs no lookup to save, so the check of the checkout is the
+        // first read of the connected repositories, and here it fails.
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .create();
+        args.repo = Some(REPO.to_string());
+        let fresh = tempdir().unwrap();
+        git_repo(
+            fresh.path(),
+            Some("https://github.com/actual-software/actual-cli"),
+        );
+        let text = block(run_create(&args, fresh.path(), true)).unwrap();
+        create.assert();
+        assert!(
+            text.contains(&format!(
+                "couldn't tell whether this directory is a checkout of {REPO} (API request \
+                 failed: HTTP 500 Internal Server Error)."
+            )),
+            "{text}"
+        );
+        assert!(!fresh.path().join("docs").exists());
+    }
+
+    #[test]
+    fn create_from_flags_writes_no_file_the_save_check_refuses() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo_dir = tempdir().unwrap();
+        git_repo(
+            repo_dir.path(),
+            Some("https://github.com/actual-software/actual-cli"),
+        );
+        let (server, create) = flags_server(1);
+        let mut args = create_args(&server);
+        args.repo = None;
+        args.content.policies = vec!["MUST: Store relational data\nin Postgres.".to_string()];
+        let text = block(run_create(&args, repo_dir.path(), true)).unwrap();
+        create.assert();
+        assert!(text.contains("as accepted"), "{text}");
+        assert!(
+            text.contains("its files weren't written: Policy 1 runs over more than one line"),
+            "{text}"
+        );
+        assert!(!repo_dir.path().join("docs").exists());
     }
 
     #[test]

@@ -64,8 +64,25 @@ pub(super) fn write_new(
     let doc = check_document(&doc, status == SaveStatus::Draft, today)
         .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let adr_id = Uuid::new_v4().to_string();
-    let [(doc_name, doc_text), (rule_name, rule_text)] =
-        render_pair(&doc, &adr_id, status, &args.scope);
+    let (decision_file, rule_file) = write_pair(root, &doc, &adr_id, status, &args.scope)?;
+    Ok(Written {
+        adr_id,
+        status,
+        decision_file,
+        rule_file,
+    })
+}
+
+/// Write `doc`'s decision doc and rule file under `root` for decision
+/// `adr_id`, as the repository sync lays them out, and return both paths.
+pub(super) fn write_pair(
+    root: &Path,
+    doc: &ContextFile,
+    adr_id: &str,
+    status: SaveStatus,
+    scope: &[String],
+) -> Result<(PathBuf, PathBuf), ActualError> {
+    let [(doc_name, doc_text), (rule_name, rule_text)] = render_pair(doc, adr_id, status, scope);
     let decision_file = root.join(DECISION_DIR).join(doc_name);
     let rule_file = root.join(RULES_DIR).join(rule_name);
     write_new_file(&decision_file, &doc_text)?;
@@ -74,12 +91,7 @@ pub(super) fn write_new(
         let _ = std::fs::remove_file(&decision_file);
         return Err(e);
     }
-    Ok(Written {
-        adr_id,
-        status,
-        decision_file,
-        rule_file,
-    })
+    Ok((decision_file, rule_file))
 }
 
 /// The decision doc and the rule file for `doc` under `adr_id`, each as a
