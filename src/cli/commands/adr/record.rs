@@ -103,8 +103,8 @@ pub(super) struct Record {
     pub(super) files: BTreeMap<String, Entry>,
 }
 
-/// Whose record: the organization of the sign-in and the repository, named
-/// by its origin remote or, with none, by `--repo`.
+/// Whose record: the organization of the sign-in and the repository the run
+/// sends to, named as `--repo` gives it or, without one, by the origin remote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Key {
     pub(super) org_id: String,

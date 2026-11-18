@@ -245,10 +245,15 @@ struct Book {
 
 impl Book {
     async fn open(org_id: &str, repo_flag: Option<&str>, root: &Path) -> Self {
-        let origin = origin_remote_url(root).await;
-        let repo = match origin.as_deref().and_then(parse_git_remote_url) {
-            Some(remote) => Some(remote.slug()),
-            None => repo_flag.map(str::to_string),
+        // The repository the run sends to names the record: the one `--repo`
+        // names, as it names it, else the origin remote's.
+        let repo = match repo_flag {
+            Some(flag) => Some(flag.to_string()),
+            None => origin_remote_url(root)
+                .await
+                .as_deref()
+                .and_then(parse_git_remote_url)
+                .map(|remote| remote.slug()),
         };
         let place = record::dir().zip(repo.map(|repo| Key {
             org_id: org_id.to_string(),
@@ -2505,8 +2510,17 @@ mod tests {
         denied.assert();
         assert!(stop.is_none());
         assert!(report.stood_down.is_some(), "{report:?}");
-        let held = record::load(&tmp.path().join("adr-push"), &key);
+        // It holds the file in the record of the repository `--repo` names,
+        // and leaves the origin's alone.
+        let flagged = Key {
+            org_id: ORG.to_string(),
+            repo: REPO.to_string(),
+        };
+        let held = record::load(&tmp.path().join("adr-push"), &flagged);
         assert_eq!(held.files["docs/adr/a.md"].outcome, Outcome::StoodDown);
+        let origin = record::load(&tmp.path().join("adr-push"), &key);
+        assert!(!origin.files["docs/adr/a.md"]
+            .settles(&std::fs::read_to_string(&a).unwrap(), Utc::now()));
         // create --all says why instead.
         let err = publish(&args, root, create_all(true, false), &mut Vec::new())
             .map(|(_, stop)| stop)
@@ -2914,7 +2928,8 @@ mod tests {
         let _guards = sign_in(tmp.path());
         let repo = tempdir().unwrap();
         let root = repo.path();
-        pair(
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
             root,
             "a.md",
             "Use Postgres",
@@ -2923,7 +2938,7 @@ mod tests {
             true,
         );
         let mut server = mockito::Server::new();
-        let repos = connected(&mut server);
+        connected(&mut server);
         let args = AdrCreateArgs {
             repo: Some("ghost/repo".to_string()),
             ..all_args(&server)
@@ -2937,18 +2952,72 @@ mod tests {
                 .is_some_and(|reason| reason.contains("ghost/repo")),
             "{report:?}"
         );
-        repos.assert();
-        // The file waits out the hold, as for an origin Actual AI hasn't
-        // connected.
+        // The file waits out the hold in the record of the name `--repo`
+        // gave, as for an origin Actual AI hasn't connected.
         let key = Key {
             org_id: ORG.to_string(),
             repo: "ghost/repo".to_string(),
         };
         let held = record::load(&tmp.path().join("adr-push"), &key).files;
         assert_eq!(held["docs/adr/a.md"].outcome, Outcome::StoodDown);
+        assert!(
+            recorded(tmp.path()).is_empty(),
+            "the origin's record is untouched"
+        );
         // `create --all` says why.
         let err = publish(&args, root, create_all(false, false), &mut Vec::new()).unwrap_err();
         assert!(matches!(err, ActualError::RepoNotFound(_)), "{err:?}");
+        // The next plain run, for the checkout's own connected origin, sends
+        // the file.
+        read(&mut server, &[]);
+        let sent = import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        let (report, stop) = publish(&all_args(&server), root, push(10), &mut Vec::new()).unwrap();
+        sent.assert();
+        assert!(stop.is_none() && report.saved.len() == 1, "{report:?}");
+        assert_eq!(
+            recorded(tmp.path())["docs/adr/a.md"].outcome,
+            Outcome::Draft
+        );
+    }
+
+    #[test]
+    fn a_run_keeps_the_record_of_the_repository_it_sends_to() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some("https://github.com/someone/elsewhere"));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres",
+            "MUST: Use Postgres.",
+            &[],
+            true,
+        );
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[]);
+        let sent = import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        let args = AdrCreateArgs {
+            repo: Some("actual-software/actual-cli".to_string()),
+            ..all_args(&server)
+        };
+        let (report, stop) = publish(&args, root, push(10), &mut Vec::new()).unwrap();
+        sent.assert();
+        assert!(stop.is_none() && report.saved.len() == 1, "{report:?}");
+        assert_eq!(
+            recorded(tmp.path())["docs/adr/a.md"].outcome,
+            Outcome::Draft
+        );
+        let origin = Key {
+            org_id: ORG.to_string(),
+            repo: "someone/elsewhere".to_string(),
+        };
+        assert!(record::load(&tmp.path().join("adr-push"), &origin)
+            .files
+            .is_empty());
     }
 
     #[test]
