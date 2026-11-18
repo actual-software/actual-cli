@@ -563,7 +563,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
 }
 
 /// A `UserPromptSubmit` envelope: record `HEAD` as the commit this turn
-/// starts from. Emits nothing on any path, because a `UserPromptSubmit`
+/// starts from, and drop the last turn's plan. Emits nothing on any path, because a `UserPromptSubmit`
 /// hook's stdout is added to the prompt. When no commit can be named (an
 /// unborn branch, or not a repository), the record is cleared and the next
 /// check diffs against `HEAD`. An envelope without a session id leaves the
@@ -588,6 +588,7 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
     governance_session::update(session_id, &rules_dir, |session| {
         session.turn_start = turn_start;
         session.turn = session.turn.saturating_add(1);
+        session.turn_plan = None;
     });
 }
 

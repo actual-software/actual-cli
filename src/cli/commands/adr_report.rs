@@ -26,6 +26,11 @@
 //! the claim points at this turn's work, not that the ADR shaped it: any
 //! listed ADR verifies on any changed line.
 //!
+//! **Asked only when the answer is reported.** Nothing local reads the
+//! answer, so with telemetry off (and in a build without the `telemetry`
+//! feature) there is no question, and `plan-check` keeps no plan for one.
+//! Debug mode still asks, because it logs the records it would have sent.
+//!
 //! **Only the verdict leaves the machine.** The claims, the lines they quote
 //! and anything the agent wrote stay in the session file under the config
 //! directory. [`otlp::ADR_REPORTED`] carries the ADR, the turn, whether the
@@ -204,7 +209,11 @@ impl Unverified {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnPlan {
     pub turn: u64,
-    pub text: String,
+    /// The plan's text, dropped once the turn's answer is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub lines: usize,
 }
 
 // ── the question ─────────────────────────────────────────────────────────
@@ -226,9 +235,10 @@ impl PreparedAsk {
 }
 
 /// The question for this round, or `None` when the turn was already asked,
-/// there is no session, nothing was briefed in it, or the diff from `base`
-/// is the one the turn started with. A diff taken from any other base than
-/// the turn's recorded commit is never read as unchanged.
+/// there is no session, nothing was briefed in it, the answer would not be
+/// reported, or the diff from `base` is the one the turn started with. A
+/// diff taken from any other base than the turn's recorded commit is never
+/// read as unchanged.
 pub(super) fn prepare(
     session_id: Option<&str>,
     session: &GovernanceSession,
@@ -245,7 +255,7 @@ pub(super) fn prepare(
         .adr_ask
         .as_ref()
         .is_some_and(|ask| ask.turn == session.turn);
-    if unchanged || asked {
+    if unchanged || asked || !reported() {
         return None;
     }
     let ledger_rules_dir = super::rules_brief::resolve(rules_dir);
@@ -330,6 +340,21 @@ fn action_id() -> String {
     String::new()
 }
 
+/// Whether an answer would reach [`report`]: the opt-out gate is not
+/// [`Gate::Off`](crate::telemetry::opt_out::Gate::Off).
+#[cfg(feature = "telemetry")]
+fn reported() -> bool {
+    !matches!(
+        crate::telemetry::opt_out::quiet_gate(),
+        crate::telemetry::opt_out::Gate::Off
+    )
+}
+
+#[cfg(not(feature = "telemetry"))]
+fn reported() -> bool {
+    false
+}
+
 /// Each briefed decision as the question lists it, with its title, sorted by
 /// handle. A decision the rule set no longer holds is listed by its key.
 fn asked_adrs<'a>(
@@ -408,7 +433,7 @@ fn question(
         "{QUESTION_HEAD}\n\n\
          {}\n\n\
          Answer with one command, then end your turn:\n\
-         {command} --claim <adr>=<file>:<line>\n\n\
+         {command} --claim <adr>=<repo-relative-path>:<line>\n\n\
          Repeat --claim for each ADR you used, naming the line you added or changed this turn that best shows its effect. \
          For a line of the plan approved this turn, use --plan-claim <adr>=<line>. \
          When no listed ADR shaped the change, run the command with --none in place of the claims. \
@@ -441,12 +466,17 @@ fn is_plain(c: char) -> bool {
     c.is_ascii_alphanumeric() || "._/:=@+,-".contains(c)
 }
 
-/// Keep `plan` as the plan judged in this session's current turn.
+/// Keep `plan` as the plan judged in this session's current turn, unless no
+/// question will be asked for it to answer.
 pub(super) fn keep_plan(session_id: &str, rules_dir: &Path, plan: &str) {
+    if !reported() {
+        return;
+    }
     governance_session::update(session_id, rules_dir, |session| {
         session.turn_plan = Some(TurnPlan {
             turn: session.turn,
-            text: plan.to_string(),
+            text: Some(plan.to_string()),
+            lines: plan.lines().count(),
         });
     });
 }
@@ -534,7 +564,7 @@ fn exec_with(args: &RulesReportUseArgs, stdin: Option<&str>) -> Result<String, A
         .turn_plan
         .as_ref()
         .filter(|plan| plan.turn == ask.turn)
-        .map(|plan| plan.text.as_str());
+        .and_then(|plan| plan.text.as_deref());
     let checkout = impl_check::checkout_root(&root);
     let checked: Vec<CheckedClaim> = claims
         .into_iter()
@@ -553,6 +583,11 @@ fn exec_with(args: &RulesReportUseArgs, stdin: Option<&str>) -> Result<String, A
                 claims: checked.clone(),
             });
             stored = true;
+        }
+        if stored {
+            if let Some(plan) = session.turn_plan.as_mut() {
+                plan.text = None;
+            }
         }
     });
     if !stored {
@@ -713,12 +748,13 @@ fn offset(from: u64, to: u64) -> i64 {
     }
 }
 
-/// `file` relative to the checkout, `/`-separated: an absolute path inside it
-/// loses the checkout's prefix, resolved through symlinks when it must be,
-/// and `.` segments go. `None` for a path outside the checkout, one with a
-/// `..` segment, and one longer than [`MAX_PATH_BYTES`].
+/// `file` relative to the checkout, `/`-separated: a relative path is read
+/// from the checkout root, never the working directory, an absolute path
+/// inside it loses the checkout's prefix, resolved through symlinks when it
+/// must be, and `.` segments go. `None` for a path outside the checkout, one
+/// with a `..` segment, and one longer than [`MAX_PATH_BYTES`].
 fn repository_path(file: &str, checkout: &Path) -> Option<String> {
-    let path = Path::new(file);
+    let path = checkout.join(file);
     let resolved = path
         .parent()
         .and_then(|parent| parent.canonicalize().ok())
@@ -728,7 +764,7 @@ fn repository_path(file: &str, checkout: &Path) -> Option<String> {
         .strip_prefix(checkout)
         .ok()
         .or_else(|| resolved.as_deref()?.strip_prefix(checkout).ok())
-        .unwrap_or(path);
+        .unwrap_or(&path);
     let mut parts = Vec::new();
     for component in relative.components() {
         match component {
@@ -1089,6 +1125,9 @@ pub(super) mod tests {
             .collect()
     }
 
+    /// Telemetry on, with no output configured, so a test build sends nothing.
+    const TELEMETRY_ON: &str = "telemetry:\n  enabled: true\n";
+
     const NO_TELEMETRY: &str = "telemetry:\n  enabled: false\n";
 
     #[test]
@@ -1180,6 +1219,15 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         std::fs::create_dir_all(real.join("src")).unwrap();
         let some = |path: &str| Some(path.to_string());
         assert_eq!(repository_path("./src/a.rs", &real), some("src/a.rs"));
+        assert_eq!(repository_path("docs/new.md", &real), some("docs/new.md"));
+        // The working directory plays no part. Here it sits one level inside
+        // the checkout and holds its own `src/`, so a path read from it would
+        // come back prefixed with that directory's name.
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert!(cwd.join("src").is_dir(), "{}", cwd.display());
+        let around_cwd = cwd.parent().unwrap();
+        assert_eq!(repository_path("src/a.rs", around_cwd), some("src/a.rs"));
+        assert_eq!(repository_path("./src/a.rs", around_cwd), some("src/a.rs"));
         let absolute = real.join("src/a.rs");
         assert_eq!(
             repository_path(absolute.to_str().unwrap(), &real),
@@ -1294,7 +1342,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_prepare_lists_every_briefed_adr_and_the_command() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         fx.brief_all("s1");
         let state = governance_session::load("s1", &fx.rules_dir());
         let ask = prepare(
@@ -1321,7 +1369,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         }
         assert!(!text.contains("api-errors-002"));
         let repo = fx.repo.path().to_string_lossy();
-        let command = format!("actual rules report-use --claude-session s1 --turn 0-01234567 --repo {} --claim <adr>=<file>:<line>", shell_word(&repo));
+        let command = format!("actual rules report-use --claude-session s1 --turn 0-01234567 --repo {} --claim <adr>=<repo-relative-path>:<line>", shell_word(&repo));
         assert!(text.contains(&command));
         assert!(!text.contains("--rules-dir"));
         let errors = ask
@@ -1355,7 +1403,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_prepare_asks_nothing_without_a_session_a_brief_or_a_new_turn() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let state = GovernanceSession::default();
         let (root, rules) = (fx.repo.path(), fx.rules_dir());
         assert!(prepare(None, &state, root, &rules, None, "d").is_none());
@@ -1377,13 +1425,63 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         assert_eq!(next.token, "1-d");
     }
 
+    /// Whether `session`, with every decision briefed, gets a question, and
+    /// whether `plan-check` would keep its plan.
+    fn asks_and_keeps(fx: &Fixture, session: &str) -> (bool, bool) {
+        fx.brief_all(session);
+        let state = governance_session::load(session, &fx.rules_dir());
+        let asks = prepare(
+            Some(session),
+            &state,
+            fx.repo.path(),
+            &fx.rules_dir(),
+            None,
+            "d",
+        )
+        .is_some();
+        keep_plan(session, &fx.rules_dir(), "# Plan\n");
+        let keeps = governance_session::load(session, &fx.rules_dir())
+            .turn_plan
+            .is_some();
+        (asks, keeps)
+    }
+
+    /// With telemetry off nothing reads the answer, so nothing is asked and no
+    /// plan is kept, whichever opt-out turned it off. Debug mode, which logs
+    /// the records it would send, still asks.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_telemetry_off_asks_nothing_and_keeps_no_plan() {
+        let _lock = lock();
+        let fx = Fixture::new(TELEMETRY_ON);
+        assert_eq!(asks_and_keeps(&fx, "on"), (true, true));
+        let fx = Fixture::new(NO_TELEMETRY);
+        assert_eq!(asks_and_keeps(&fx, "config"), (false, false));
+        let fx = Fixture::new(TELEMETRY_ON);
+        let _env = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        assert_eq!(asks_and_keeps(&fx, "env"), (false, false));
+        let fx = Fixture::new(NO_TELEMETRY);
+        let _debug = EnvGuard::set(crate::telemetry::debug::ENV, "1");
+        assert_eq!(asks_and_keeps(&fx, "debug"), (true, true));
+    }
+
+    /// A build without the `telemetry` feature reports nothing, so it never
+    /// asks, even with telemetry on in the config.
+    #[cfg(not(feature = "telemetry"))]
+    #[test]
+    fn test_a_build_without_telemetry_asks_nothing_and_keeps_no_plan() {
+        let _lock = lock();
+        let fx = Fixture::new(TELEMETRY_ON);
+        assert_eq!(asks_and_keeps(&fx, "s1"), (false, false));
+    }
+
     /// A diff matching the one the turn started with asks nothing only when it
     /// was taken from the turn's recorded commit. Taken from `HEAD` after
     /// that commit stopped being an ancestor, the same digest still asks.
     #[test]
     fn test_prepare_reads_a_diff_as_unchanged_only_from_the_turns_own_base() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let (root, rules) = (fx.repo.path(), fx.rules_dir());
         fx.brief_all("s1");
         let head = "a".repeat(40);
@@ -1417,7 +1515,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_mark_records_the_question_once_and_only_for_its_turn() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let rules = fx.rules_dir();
         fx.brief_all("s1");
         let state = governance_session::load("s1", &rules);
@@ -1445,7 +1543,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_answer_checks_each_claim_against_the_turn() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let token = fx.ask("s1");
         std::fs::write(
             fx.repo.path().join("src/orders.rs"),
@@ -1506,7 +1604,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_answer_keeps_no_path_outside_the_checkout() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let token = fx.ask("s1");
         std::fs::write(
             fx.repo.path().join("src/orders.rs"),
@@ -1530,7 +1628,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_answer_checks_plan_claims_against_this_turns_plan() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let rules = fx.rules_dir();
         let token = fx.ask("s1");
         keep_plan("s1", &rules, "# Plan\n\nReturn ApiError from handlers.\n");
@@ -1548,9 +1646,12 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             recorded.claims[0].quote.as_deref(),
             Some("Return ApiError from handlers.")
         );
+        // The answer leaves only the plan's line count and the claimed lines.
+        let kept = governance_session::load("s1", &rules).turn_plan.unwrap();
+        assert_eq!((kept.text, kept.lines), (None, 3));
 
         // A plan kept in an earlier turn is not this turn's plan.
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let rules = fx.rules_dir();
         keep_plan("s2", &rules, "# Plan\n");
         governance_session::update("s2", &rules, |s| s.turn = 1);
@@ -1567,7 +1668,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_answer_reads_json_on_stdin_and_needs_some_answer() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let token = fx.ask("s1");
         let args = fx.args("s1", &token);
         let err = answer(&args, None::<&[u8]>).unwrap_err().to_string();
@@ -1605,7 +1706,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_answer_refuses_without_an_open_question() {
         let _lock = lock();
-        let fx = Fixture::new(NO_TELEMETRY);
+        let fx = Fixture::new(TELEMETRY_ON);
         let mut args = fx.args("s1", "0-01234567");
         args.none = true;
         let err = answer(&args, None::<&[u8]>).unwrap_err().to_string();
@@ -1795,11 +1896,13 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
                 .any(|kv| kv["key"] == "actual.report.file_path"));
         }
 
+        /// Opting out between the question and the answer sends nothing.
         #[test]
         fn test_report_sends_nothing_with_telemetry_off() {
             let _lock = lock();
-            let fx = Fixture::new(NO_TELEMETRY);
+            let fx = Fixture::new(WITH_FILE);
             let token = fx.ask("s1");
+            let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
             take_captured();
             let mut args = fx.args("s1", &token);
             args.claims = vec!["api-errors-001=src/orders.rs:1".to_string()];
