@@ -563,12 +563,12 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
 }
 
 /// A `UserPromptSubmit` envelope: record `HEAD` as the commit this turn
-/// starts from, and drop the last turn's plan. Emits nothing on any path, because a `UserPromptSubmit`
-/// hook's stdout is added to the prompt. When no commit can be named (an
-/// unborn branch, or not a repository), the record is cleared and the next
-/// check diffs against `HEAD`. An envelope without a session id leaves the
-/// previous turn's record in place, so the next check re-reads that turn's
-/// commits too rather than skipping this one's.
+/// starts from, and drop the last turn's plan. Emits nothing on any path,
+/// because a `UserPromptSubmit` hook's stdout is added to the prompt. When
+/// no commit can be named (an unborn branch, or not a repository), the record
+/// is cleared and the next check diffs against `HEAD`. An envelope without a
+/// session id leaves the previous turn's record in place, so the next check
+/// re-reads that turn's commits too rather than skipping this one's.
 fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
     let Some(session_id) = envelope.session_id.as_deref() else {
         return;
@@ -1993,11 +1993,18 @@ mod tests {
             recorded(first.clone())
         );
 
+        // The next prompt also drops the plan the last turn kept.
+        governance_session::update("sess-turn-1", &rules, |session| {
+            session.turn_plan = Some(super::super::adr_report::TurnPlan {
+                turn: session.turn,
+                text: Some("# Plan\n".to_string()),
+                lines: 1,
+            });
+        });
         exec_hook_with(&turn_start_args(repo.path()), &raw);
-        assert_eq!(
-            governance_session::load("sess-turn-1", &rules).turn_start,
-            recorded(first.clone())
-        );
+        let state = governance_session::load("sess-turn-1", &rules);
+        assert_eq!(state.turn_start, recorded(first.clone()));
+        assert_eq!(state.turn_plan, None);
 
         std::fs::write(repo.path().join("service.rs"), "fn handler() { 7 }\n").unwrap();
         run_git(
