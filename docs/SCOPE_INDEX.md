@@ -341,8 +341,10 @@ sign that a brief arrived: `Actual AI: briefed 2 ADRs · 7 rules · src/a.ts`,
 counted from the brief itself and naming only the files that got one, or a
 line saying briefing stopped when the budget note replaced a brief. Codex shows
 it to the user and keeps it out of the model's context. `--no-brief-notice`
-leaves it out. Codex envelopes carry no `agent_id`, so a Codex session has one
-memory.
+leaves it out. Codex's tool hooks inside a spawned subagent carry the root session's id and
+the subagent's own `agent_id`, so, as on Claude Code, each subagent has a
+memory of its own: it starts from its spawn prompt, without its parent's
+briefs.
 `--codex-session-start` is `--claude-session-start` for a Codex `SessionStart`
 envelope.
 

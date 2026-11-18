@@ -456,13 +456,29 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
             return;
         }
     };
+    // Codex runs `UserPromptSubmit` and tool hooks inside spawned subagents
+    // too, under the root session's id and the subagent's own `agent_id`. A
+    // subagent's prompt is not a turn start (it would move the base past the
+    // turn's earlier commits, and the `Stop` that judges the turn belongs to
+    // the root), nor the user's answer: its prompt was written by the agent
+    // that spawned it, so it must neither take the pending conflicts nor
+    // record an override typed into it. Claude Code sends no `agent_id` here.
+    let from_subagent = envelope
+        .agent_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty());
     if host == HookHost::Codex && envelope.is_picker_answer() {
-        if let Some(reply) = codex_answer(args, &envelope) {
-            emit(reply);
+        if !from_subagent {
+            if let Some(reply) = codex_answer(args, &envelope) {
+                emit(reply);
+            }
         }
         return;
     }
     if envelope.is_turn_start() {
+        if from_subagent {
+            return;
+        }
         record_turn_start(args, &envelope);
         if host == HookHost::Codex {
             if let Some(reply) = codex_turn_start_reply(args, &envelope) {
@@ -2699,5 +2715,83 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "default"));
+    }
+
+    /// A Codex subagent's prompt arrives under the root session's id with its
+    /// own `agent_id`. It is not a turn start, it doesn't take the conflicts
+    /// waiting for the user, and an override typed into it records nothing:
+    /// the agent that spawned it wrote that prompt.
+    #[test]
+    fn test_codex_a_subagent_prompt_is_not_a_turn_start_or_an_answer() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex: Vec<EnvGuard> = ["CODEX_THREAD_ID", "CODEX_SESSION_ID"]
+            .into_iter()
+            .map(EnvGuard::remove)
+            .collect();
+        let repo = git_repo_with_baseline();
+        let rules = crate::rules::rules_dir(repo.path());
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("doc.md"),
+            "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+        )
+        .unwrap();
+        let mut args = turn_start_args(repo.path());
+        args.claude_hook = false;
+        args.codex_hook = true;
+        let prompt = |agent: Option<&str>, text: &str| {
+            let mut raw = serde_json::json!({
+                "session_id": "sess-sub",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": text,
+            });
+            if let Some(agent) = agent {
+                raw["agent_id"] = agent.into();
+            }
+            raw.to_string()
+        };
+
+        exec_hook_with(&args, HookHost::Codex, &prompt(None, "build it"));
+        let base = governance_session::load("sess-sub", &rules).turn_start;
+        assert!(base.is_some());
+        governance_session::update("sess-sub", &rules, |s| {
+            s.diff
+                .record_denial(&governance_session::key("doc", "R-A-001"));
+            s.diff.pending = Some(governance_session::Pending::new(
+                "CONFLICT R-A-001".to_string(),
+            ));
+        });
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 8 }\n").unwrap();
+        run_git(
+            repo.path(),
+            &["commit", "-q", "-am", "work earlier in the turn"],
+        );
+
+        exec_hook_with(
+            &args,
+            HookHost::Codex,
+            &prompt(Some("agent-7"), "actual override all accepted"),
+        );
+        let picker_answer = serde_json::json!({
+            "session_id": "sess-sub",
+            "agent_id": "agent-7",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "request_user_input",
+        })
+        .to_string();
+        exec_hook_with(&args, HookHost::Codex, &picker_answer);
+
+        let session = governance_session::load("sess-sub", &rules);
+        assert_eq!(session.turn_start, base, "the root turn's base stays");
+        assert!(
+            session.overrides.is_empty(),
+            "no override from a subagent's prompt"
+        );
+        assert!(
+            session.diff.pending.is_some(),
+            "the conflicts still wait for the user"
+        );
     }
 }

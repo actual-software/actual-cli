@@ -126,6 +126,9 @@ struct CodexEnvelope {
     hook_event_name: Option<String>,
     tool_name: Option<String>,
     session_id: Option<String>,
+    /// Set on a tool hook inside a spawned subagent, whose `session_id` is the
+    /// root thread's (observed in Codex CLI 0.167.0's `subagent_hook_context`).
+    agent_id: Option<String>,
     cwd: Option<String>,
     tool_input: Option<CodexToolInput>,
 }
@@ -496,9 +499,12 @@ fn codex_hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     };
     let root = repo_root(args, || cwd.clone());
     let session_id = envelope.session_id.filter(|id| !id.is_empty());
+    // A subagent starts with only the prompt it was spawned with, so its
+    // context holds none of its parent's briefs: it gets a memory of its own,
+    // as on Claude Code.
     let session = session_id.as_deref().map(|session_id| SessionIdentity {
         session_id,
-        agent_id: None,
+        agent_id: envelope.agent_id.as_deref().filter(|id| !id.is_empty()),
     });
 
     let mut briefs = Vec::new();
@@ -707,11 +713,11 @@ fn brief_for(
             session_id: who.session_id,
             rules_dir: &key_dir,
         };
-        if brief_ledger::load(&dir, &key)
-            .briefed_chars
-            .saturating_add(chars)
-            > cap
-        {
+        // Once the session was told briefing has stopped, a smaller brief
+        // that would still fit stays out too: the notice says briefing is
+        // quiet from here.
+        let ledger = brief_ledger::load(&dir, &key);
+        if ledger.budget_spent || ledger.briefed_chars.saturating_add(chars) > cap {
             return Err(NoBrief::BudgetSpent);
         }
     }
@@ -3346,5 +3352,60 @@ mod tests {
         assert_eq!(counted(1, "rule"), "1 rule");
         assert_eq!(counted(2, "rule"), "2 rules");
         assert_eq!(counted(0, "ADR"), "0 ADRs");
+    }
+
+    /// A Codex subagent's tool hooks carry the root session's id and its own
+    /// `agent_id`: it is briefed on a file its parent already was, once.
+    #[test]
+    fn test_codex_a_subagent_is_briefed_independently_of_its_parent() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            let mut child: serde_json::Value = serde_json::from_str(&read).unwrap();
+            child["agent_id"] = "agent-7".into();
+            let child = child.to_string();
+            assert!(codex_hook_reply(&read, &a).is_some());
+            assert!(
+                codex_hook_reply(&child, &a).is_some(),
+                "the subagent never saw it"
+            );
+            assert_eq!(codex_hook_reply(&child, &a), None);
+            assert_eq!(codex_hook_reply(&read, &a), None);
+        });
+    }
+
+    /// Once the budget notice went out, briefing stays quiet, even for a brief
+    /// small enough to fit what is left of the cap.
+    #[test]
+    fn test_a_spent_budget_stays_quiet_for_a_brief_that_would_fit() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let mut a = codex_args(root.path());
+            a.max_session_chars = Some(1_000_000);
+            let rules_dir = resolve(&crate::rules::rules_dir(root.path()));
+            brief_ledger::update(
+                &brief_ledger::ledger_dir().unwrap(),
+                &LedgerKey {
+                    session_id: "s1",
+                    rules_dir: &rules_dir,
+                },
+                |ledger| ledger.budget_spent = true,
+            );
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            assert_eq!(codex_hook_reply(&read, &a), None);
+        });
     }
 }
