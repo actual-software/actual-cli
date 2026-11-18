@@ -134,7 +134,7 @@ Keep your team's architecture decisions under `docs/adr/`. From your own termina
 actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
 ```
 
-From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted; [ADR commands](ADR_COMMANDS.md) covers its flags. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes the same two files for each accepted decision. Then see what the CLI read:
+From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted. To accept a draft, change `status: draft` to `status: accepted` in the header of both files, or have the agent pass `--status accepted`; [ADR commands](ADR_COMMANDS.md) covers the other flags. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes the same two files for each accepted decision. Then see what the CLI read:
 
 ```bash
 actual rules ls
