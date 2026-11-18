@@ -2399,8 +2399,9 @@ mod tests {
         );
     }
 
-    /// On a block the question follows the judge's reason, and the block
-    /// after the fix asks nothing more.
+    /// On a block the question follows the judge's reason, asks for the
+    /// answer once that is fixed, and the block after the fix asks nothing
+    /// more.
     #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_a_blocked_turn_carries_the_question_after_the_judges_reason() {
@@ -2420,6 +2421,12 @@ mod tests {
         assert!(judge.contains("R-A-001"), "{judge}");
         assert!(
             question.starts_with(" did you use this turn?"),
+            "{question}"
+        );
+        assert!(
+            question.contains(
+                "\n\nAfter fixing the above, answer with one command, then end your turn:\n"
+            ),
             "{question}"
         );
 
@@ -2456,6 +2463,7 @@ mod tests {
 
         let out = stop(&args, "sess-notice");
         assert!(deny_reason(&out[0]).starts_with(QUESTION), "{out:?}");
+        assert!(!deny_reason(&out[0]).contains("After fixing"), "{out:?}");
         let notice = out[0]["systemMessage"].as_str().unwrap();
         assert!(notice.contains("did not run"), "{notice}");
 

@@ -72,6 +72,11 @@ const QUESTION_HEAD: &str = "Which of these ADRs did you use this turn? \
      An ADR counts only if it changed or decided what you wrote. \
      Leave out any your change merely complies with or happens to agree with.";
 
+const ANSWER: &str = "Answer with one command, then end your turn:";
+
+const ANSWER_ON_BLOCK: &str =
+    "After fixing the above, answer with one command, then end your turn:";
+
 /// How far, in lines, a diff claim may miss the added or changed line it
 /// means, within one hunk.
 const LINE_TOLERANCE: u64 = 3;
@@ -229,11 +234,18 @@ pub struct PreparedAsk {
     diff_digest: String,
     adrs: Vec<AskedAdr>,
     text: String,
+    text_on_block: String,
 }
 
 impl PreparedAsk {
-    pub(super) fn text(&self) -> &str {
-        &self.text
+    /// The question, worded on a block to be answered once the block's
+    /// reason is fixed, so the claims are checked against the fixed diff.
+    pub(super) fn text(&self, on_block: bool) -> &str {
+        if on_block {
+            &self.text_on_block
+        } else {
+            &self.text
+        }
     }
 }
 
@@ -281,13 +293,22 @@ pub(super) fn prepare(
         session.turn,
         diff_digest.get(..8).unwrap_or(diff_digest)
     );
-    let text = question(session_id, &token, root, rules_dir, &listed);
+    let text = question(session_id, &token, root, rules_dir, &listed, ANSWER);
+    let text_on_block = question(
+        session_id,
+        &token,
+        root,
+        rules_dir,
+        &listed,
+        ANSWER_ON_BLOCK,
+    );
     Some(PreparedAsk {
         turn: session.turn,
         token,
         diff_digest: diff_digest.to_string(),
         adrs: listed.into_iter().map(|(adr, _)| adr).collect(),
         text,
+        text_on_block,
     })
 }
 
@@ -417,6 +438,7 @@ fn question(
     root: &Path,
     rules_dir: &Path,
     adrs: &[(AskedAdr, String)],
+    answer: &str,
 ) -> String {
     let list: Vec<String> = adrs
         .iter()
@@ -435,7 +457,7 @@ fn question(
     format!(
         "{QUESTION_HEAD}\n\n\
          {}\n\n\
-         Answer with one command, then end your turn:\n\
+         {answer}\n\
          {command} --claim <adr>=<repo-relative-path>:<line>\n\n\
          Repeat --claim for each ADR you used, naming the line you added or changed this turn that best shows its effect. \
          For a line of the plan approved this turn, use --plan-claim <adr>=<line>. \
@@ -861,8 +883,10 @@ fn hunk_start(header: &str) -> Option<u64> {
 }
 
 /// A `+++` path as git wrote it: as is, or C-quoted when it holds unusual
-/// bytes. `/dev/null`, a deleted file's new side, is `None`.
+/// bytes, and followed by a tab when it holds a space. `/dev/null`, a
+/// deleted file's new side, is `None`.
 fn unquote(path: &str) -> Option<String> {
+    let path = path.strip_suffix('\t').unwrap_or(path);
     if path == "/dev/null" {
         return None;
     }
@@ -1205,6 +1229,11 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     #[test]
     fn test_unquote_reads_c_quoted_paths() {
         assert_eq!(unquote("b/plain.rs").as_deref(), Some("b/plain.rs"));
+        assert_eq!(unquote("b/a b.txt\t").as_deref(), Some("b/a b.txt"));
+        assert_eq!(
+            unquote("\"b/a b\\303\\251.txt\"\t").as_deref(),
+            Some("b/a bé.txt")
+        );
         assert_eq!(unquote("/dev/null"), None);
         assert_eq!(
             unquote(r#""b/\a\b\f\v\r\n\t\"\\\303\251""#).as_deref(),
@@ -1371,8 +1400,13 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             "0123456789abcdef",
         )
         .unwrap();
-        let text = ask.text();
+        let text = ask.text(false);
         assert!(text.starts_with(&format!("{QUESTION_HEAD}\n\n")));
+        assert!(text.contains(&format!("\n\n{ANSWER}\n")));
+        assert!(!text.contains(ANSWER_ON_BLOCK));
+        let on_block = ask.text(true);
+        assert!(on_block.contains(&format!("\n\n{ANSWER_ON_BLOCK}\n")));
+        assert_eq!(on_block.replace(ANSWER_ON_BLOCK, ANSWER), text);
         assert!(text.contains("An ADR counts only if it changed or decided what you wrote."));
         assert!(text.contains("merely complies with or happens to agree with"));
         assert!(text.contains("the line you added or changed this turn that best shows its effect"));
@@ -1410,7 +1444,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         assert_eq!((legacy.adr_ref.clone(), legacy.adr_ids.len()), (None, 0));
 
         let other_rules = fx.repo.path().join("other-rules");
-        let text = question("s1", "0-x", fx.repo.path(), &other_rules, &[]);
+        let text = question("s1", "0-x", fx.repo.path(), &other_rules, &[], ANSWER);
         assert!(text.contains(&format!(
             " --rules-dir {} --claim",
             shell_word(&other_rules.to_string_lossy())
@@ -1618,6 +1652,42 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             recorded,
             "a second answer changes nothing"
         );
+    }
+
+    /// Git ends a `+++` path holding a space with a tab, quoted or not, and
+    /// a claim on that file still holds: tracked or new.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_answer_verifies_claims_on_paths_with_spaces() {
+        let _lock = lock();
+        let fx = Fixture::new(TELEMETRY_ON);
+        let repo = fx.repo.path();
+        std::fs::write(repo.join("src/My Orders.rs"), "fn a() {}\n").unwrap();
+        git(repo, &["config", "core.quotePath", "true"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "spaced"]);
+        let token = fx.ask("s1");
+        std::fs::write(repo.join("src/My Orders.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        std::fs::create_dir(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/café notes.md"), "# Notes\n").unwrap();
+        let diff = impl_check::working_tree_diff_from(repo, "HEAD").unwrap();
+        assert!(diff.contains("+++ b/src/My Orders.rs\t\n"), "{diff}");
+        assert!(
+            diff.contains("+++ \"b/docs/caf\\303\\251 notes.md\"\t\n"),
+            "{diff}"
+        );
+        let mut args = fx.args("s1", &token);
+        args.claims = [
+            "api-errors-001=src/My Orders.rs:2",
+            "logging-001=docs/café notes.md:1",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        answer(&args, None::<&[u8]>).unwrap();
+        let recorded = fx.answer("s1").unwrap();
+        assert_eq!(reasons(&recorded), [None, None]);
+        let quotes: Vec<_> = recorded.claims.iter().map(|c| c.quote.as_deref()).collect();
+        assert_eq!(quotes, [Some("fn b() {}"), Some("# Notes")]);
     }
 
     /// A claim on a path outside the checkout, through `..`, or past the cap
