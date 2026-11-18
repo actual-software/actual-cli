@@ -128,6 +128,12 @@ fn tokenize(command: &str) -> Vec<Token> {
                 in_word = true;
                 word.push(c);
             }
+            // A newline ends a command as `;` does: a second line is a
+            // command of its own, never arguments of the first.
+            '\n' => {
+                flush(&mut tokens, &mut word, &mut in_word);
+                tokens.push(Token::Separator);
+            }
             c if c.is_whitespace() => flush(&mut tokens, &mut word, &mut in_word),
             '|' | ';' => {
                 flush(&mut tokens, &mut word, &mut in_word);
@@ -147,7 +153,9 @@ fn tokenize(command: &str) -> Vec<Token> {
             }
             '<' => {
                 flush(&mut tokens, &mut word, &mut in_word);
-                if chars.peek() == Some(&'<') {
+                // `<<` is a heredoc and `<(` a process substitution, which runs
+                // a command inside the stage: neither is a plain read.
+                if matches!(chars.peek(), Some(&'<') | Some(&'(')) {
                     tokens.push(Token::Unsafe);
                     chars.next();
                 } else {
@@ -297,11 +305,7 @@ pub fn shell_read_paths(command: &str, cwd: &Path, home: Option<&Path>) -> Vec<P
             Token::Word(w) => Some(w.as_str()),
             _ => None,
         });
-        if program == "sed"
-            && words
-                .clone()
-                .any(|w| w.starts_with("-i") || w == "--in-place")
-        {
+        if program == "sed" && words.clone().any(sed_edits_in_place) {
             return Vec::new();
         }
         for word in words {
@@ -348,6 +352,17 @@ pub fn patch_paths(patch: &str, cwd: &Path) -> Vec<PathBuf> {
     }
     paths.truncate(MAX_PATCH_PATHS);
     paths
+}
+
+/// Whether a `sed` argument asks it to edit files in place: `--in-place`,
+/// with or without a suffix, or a short-option cluster holding `i` (`-i`,
+/// `-i.bak`, `-Ei`, `-ni`).
+fn sed_edits_in_place(word: &str) -> bool {
+    if let Some(long) = word.strip_prefix("--") {
+        return long == "in-place" || long.starts_with("in-place=");
+    }
+    word.strip_prefix('-')
+        .is_some_and(|cluster| cluster.contains('i'))
 }
 
 #[cfg(test)]
@@ -459,6 +474,13 @@ mod tests {
             "cat src/app.ts | tee copy.ts",
             "sed -i 's/a/b/' src/app.ts",
             "sed --in-place 's/a/b/' src/app.ts",
+            "sed --in-place=.bak 's/a/b/' src/app.ts",
+            "sed -Ei 's/a/b/' src/app.ts",
+            "sed -ri 's/a/b/' src/app.ts",
+            "sed -ni 's/a/b/p' src/app.ts",
+            "cat src/app.ts\npython3 scripts/gen.py",
+            "cat src/app.ts\nrm src/db.ts",
+            "cat <(python3 x.py) src/app.ts",
             "python3 src/app.ts",
             "cat $(ls src/app.ts)",
             "cat `ls src/app.ts`",
@@ -477,6 +499,15 @@ mod tests {
     #[test]
     fn test_harmless_redirections_are_allowed() {
         let r = repo();
+        // Reads on separate lines are each a read; `sed` without in-place is one.
+        assert_eq!(
+            reads("cat src/app.ts\ncat src/db.ts", r.path()),
+            ["src/app.ts", "src/db.ts"]
+        );
+        assert_eq!(reads("sed -En '1,5p' src/app.ts", r.path()), ["src/app.ts"]);
+        assert!(!sed_edits_in_place("--in-placement"));
+        assert!(!sed_edits_in_place("-n"));
+        assert!(!sed_edits_in_place("s/i/x/"));
         assert_eq!(
             reads("cat src/app.ts 2>/dev/null", r.path()),
             ["src/app.ts"]

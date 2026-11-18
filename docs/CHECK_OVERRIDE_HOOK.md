@@ -97,5 +97,7 @@ Codex shows `stopReason` to the user and never to the model, and it outranks a b
 
 A question that goes unanswered (the agent didn't ask, the user dismissed it, or the answer never arrived) ends the turn at the next check of the same work with the plain `--codex-ask` stop, without judging again.
 
+Codex also runs `UserPromptSubmit` and tool hooks inside subagents the agent spawns, under the root session's id and the subagent's own `agent_id`. A subagent's first prompt is written by the agent that spawned it, so an envelope with an `agent_id` is never a turn start, never takes the waiting conflicts, and never records an override, typed or picked.
+
 An override never comes from the agent's own shell. Codex sets `CODEX_THREAD_ID` and `CODEX_SESSION_ID` there, and a Codex hook ran without either on Codex CLI 0.167.0. When either is set, nothing is recorded, and the stop reason names the variable.
 
