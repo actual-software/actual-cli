@@ -3386,6 +3386,91 @@ fn test_impl_check_codex_hook_checks_only_default_turns() {
         .stdout(predicate::str::is_empty());
 }
 
+/// `--codex-ask`, end to end: a conflict ends the turn for the user, the
+/// next prompt hands the agent the conflicts, and a typed override settles
+/// the rule so the next check lets the turn end.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_codex_ask_stops_hands_over_and_takes_an_override() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let session = "sess-codex-ask";
+    let stop = || codex_stop(fixture.repo.path(), session, "default", None);
+    let prompt = |text: &str| {
+        serde_json::json!({
+            "session_id": session,
+            "turn_id": "t2",
+            "cwd": fixture.repo.path(),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": text,
+        })
+        .to_string()
+    };
+    let run = |args: &[&str], input: String| {
+        fixture
+            .cmd()
+            .args(args)
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+
+    let stopped = run(&["--codex-hook", "--codex-ask"], stop());
+    assert!(String::from_utf8_lossy(&stopped).starts_with(r#"{"continue":false,"stopReason":""#));
+    let (keys, value) = codex_reply_keys(&stopped);
+    assert_eq!(keys, ["continue", "stopReason"]);
+    assert_eq!(value["continue"], false);
+    let reason = value["stopReason"].as_str().unwrap();
+    assert!(reason.contains("R-A-001"), "{reason}");
+    assert!(reason.contains("actual override all <code>"), "{reason}");
+
+    let handed = run(&["--codex-hook"], prompt("revise it"));
+    // The plugin forwards these only byte for byte, key order included.
+    assert!(String::from_utf8_lossy(&handed).starts_with(
+        r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":""#
+    ));
+    let (keys, value) = codex_reply_keys(&handed);
+    assert_eq!(keys, ["hookSpecificOutput"]);
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("R-A-001"), "{context}");
+
+    run(&["--codex-hook", "--codex-ask"], stop());
+    let (keys, value) = codex_reply_keys(&run(
+        &["--codex-hook"],
+        prompt("actual override all accepted"),
+    ));
+    assert_eq!(keys, ["continue", "stopReason"]);
+    let said = value["stopReason"].as_str().unwrap();
+    assert!(
+        said.contains("overrode R-A-001 (reason: accepted)"),
+        "{said}"
+    );
+
+    // Overridden, so the next check lets the turn end, saying an override
+    // is in force rather than blocking.
+    let (keys, _) = codex_reply_keys(&run(&["--codex-hook", "--codex-ask"], stop()));
+    assert_eq!(keys, ["systemMessage"]);
+}
+
+/// `--codex-ask` belongs to `--codex-hook`.
+#[test]
+fn test_codex_ask_requires_codex_hook() {
+    for command in ["plan-check", "impl-check"] {
+        cmd()
+            .args([command, "--codex-ask"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--codex-hook"));
+    }
+}
+
 /// A shell read of a governed file is briefed through `additionalContext`,
 /// and the `SessionStart` mode answers silently.
 #[test]

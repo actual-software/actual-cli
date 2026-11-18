@@ -154,6 +154,15 @@ pub struct LoopState {
     /// conflicting. A fail-open outcome (no runner, a failed judge call)
     /// leaves it alone: nothing was decided.
     pub blocking: BTreeSet<String>,
+    /// The conflicts a `--codex-ask` check stopped the last turn on, worded
+    /// for the agent, waiting to be handed to it with the user's next
+    /// message. Codex shows a stopped turn's reason to the user only, so
+    /// without this the agent would answer "revise" with no idea what to
+    /// revise. Taken when the next prompt arrives; dropped by the next judged
+    /// round (see [`begin_round`](Self::begin_round)), by a round that finds
+    /// nothing blocking, and once overrides leave nothing blocking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<String>,
 }
 
 impl LoopState {
@@ -164,6 +173,7 @@ impl LoopState {
     pub fn begin_round(&mut self) {
         self.rounds += 1;
         self.blocking.clear();
+        self.pending = None;
     }
 
     /// Record one more denial of `key` in this loop and return its new total.
@@ -645,6 +655,7 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             cleared: v2.cleared,
             deny_counts: v2.deny_counts,
             blocking: BTreeSet::new(),
+            pending: None,
         },
         diff: LoopState::default(),
         ..GovernanceSession::default()

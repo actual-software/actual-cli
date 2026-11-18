@@ -1593,6 +1593,16 @@ pub struct PlanCheckArgs {
     #[arg(long, conflicts_with = "claude_hook")]
     pub codex_hook: bool,
 
+    /// Under `--codex-hook`, end the turn on a conflict instead of sending the
+    /// agent back: the reply is `{"continue":false,"stopReason":…}`, which
+    /// shows the user the conflicts and how to answer (reply to revise, or
+    /// type `actual override <rule-id|all> [code]`), and the conflicts are
+    /// handed to the agent with the user's next message. Without it, a
+    /// conflict is a `{"decision":"block"}` that sends the agent back to
+    /// revise at once, which suits a run with nobody to ask.
+    #[arg(long, requires = "codex_hook")]
+    pub codex_ask: bool,
+
     /// Maximum number of rule documents to judge the plan against.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
@@ -1724,10 +1734,22 @@ pub struct ImplCheckArgs {
 
     /// The same check for a Codex `UserPromptSubmit` or `Stop` envelope. A
     /// `Stop` that ends a Plan-mode turn checks nothing, since Plan mode makes
-    /// no edits; a conflict is a `{"decision":"block"}` reply. Capability
-    /// marker: codex-hook
+    /// no edits; a conflict is a `{"decision":"block"}` reply. On a
+    /// `UserPromptSubmit`, besides recording the turn start, it hands the
+    /// agent the conflicts a `--codex-ask` check stopped the last turn on, and
+    /// records an override the user typed as `actual override <rule-id|all>
+    /// [code] [reason]`. Capability marker: codex-hook
     #[arg(long, conflicts_with = "claude_hook")]
     pub codex_hook: bool,
+
+    /// Under `--codex-hook`, end the turn on a conflict instead of sending the
+    /// agent back: the reply is `{"continue":false,"stopReason":…}`, which
+    /// shows the user the conflicts and how to answer, and the conflicts are
+    /// handed to the agent with the user's next message. Without it, a
+    /// conflict is a `{"decision":"block"}` that sends the agent back to
+    /// revise at once, which suits a run with nobody to ask.
+    #[arg(long, requires = "codex_hook")]
+    pub codex_ask: bool,
 
     /// Maximum number of rule documents to judge the diff against.
     #[arg(long, default_value_t = 20)]

@@ -39,6 +39,9 @@ pub struct HookEnvelope {
     /// tell a Plan-mode turn (no edits, nothing to check) from any other.
     pub transcript_path: Option<String>,
     pub turn_id: Option<String>,
+    /// Codex only: the text of a `UserPromptSubmit`, read for an override the
+    /// user typed (see `check_engine::codex_prompt_reply`).
+    pub prompt: Option<String>,
 }
 
 impl HookEnvelope {
