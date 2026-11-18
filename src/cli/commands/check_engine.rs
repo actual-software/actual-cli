@@ -21,7 +21,9 @@ use serde::Serialize;
 use crate::cli::args::{
     OverrideGateArg, OverrideVia, PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice,
 };
-use crate::cli::commands::governance_session::{self, GovernanceSession};
+use crate::cli::commands::governance_session::{
+    self, GovernanceSession, Pending, PickerAsk, PickerStage,
+};
 use crate::cli::commands::hook_host::HookHost;
 use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
@@ -1732,17 +1734,373 @@ fn codex_ask_reason(
     partial: Option<(usize, usize)>,
     kind: check::ArtifactKind,
 ) -> String {
+    let lines = hook_deny_reason_for(HookHost::Codex, blocking, None, partial, kind);
+    codex_ask_text(kind, &lines, "")
+}
+
+/// The text stop's words around the conflict `lines`; `aside` goes after the
+/// first sentence (the picker that went unanswered, say).
+fn codex_ask_text(kind: check::ArtifactKind, lines: &str, aside: &str) -> String {
     let copy = artifact_copy(kind);
     let (subject, plural, pronoun) = ask_subject(kind);
-    let lines = hook_deny_reason_for(HookHost::Codex, blocking, None, partial, kind);
     format!(
-        "{} stopped this turn: {subject} {} with this repository's rules.\n{lines}\n\
+        "{} stopped this turn: {subject} {} with this repository's rules.{aside}\n{lines}\n\
          To have the agent fix it, reply (for example, \"revise to conform\"). To keep \
          {pronoun}, type `actual override all <code>`, or a rule id in place of `all`. \
          Codes: {OVERRIDE_CODES}.",
         copy.governance,
         if plural { "conflict" } else { "conflicts" },
     )
+}
+
+/// The picker's copy for one gate, matching the Claude Code plugin's dialog.
+struct PickerCopy {
+    header: &'static str,
+    blocked: &'static str,
+    revise: &'static str,
+    revise_note: &'static str,
+    override_note: &'static str,
+    revised: &'static str,
+}
+
+fn picker_copy(kind: check::ArtifactKind) -> PickerCopy {
+    match kind {
+        check::ArtifactKind::Plan => PickerCopy {
+            header: "Plan blocked",
+            blocked: "Plan blocked by",
+            revise: "Revise the plan to conform (Recommended)",
+            revise_note: "The agent revises the plan so it follows these rules.",
+            override_note: "Keep the plan. These rules stop blocking for the rest of this session.",
+            revised: "The user chose to revise the plan so it conforms to these rules. Revise it \
+                      to satisfy every rule below and propose it again; the check runs again \
+                      when this turn ends. Don't suggest an override.",
+        },
+        check::ArtifactKind::Diff => PickerCopy {
+            // Codex, like Claude Code's dialog, clips a long header.
+            header: "Code blocked",
+            blocked: "Changes blocked by",
+            revise: "Revise the changes to conform (Recommended)",
+            revise_note: "The agent changes the code so it follows these rules.",
+            override_note: "Keep the changes. These rules stop blocking for the rest of this \
+                            session.",
+            revised: "The user chose to revise the changes so they conform to these rules. \
+                      Change the code to satisfy every rule below; the check runs again when \
+                      this turn ends. Don't suggest an override.",
+        },
+    }
+}
+
+/// The "why" options after Override, and the code each records. The picker
+/// takes three, so `adr-outdated` and `accepted` are typed under Other.
+const PICKER_REASONS: [(&str, &str, governance_session::OverrideReasonCode); 3] = [
+    (
+        "The check misread my change",
+        "The change does follow the rule.",
+        governance_session::OverrideReasonCode::Misread,
+    ),
+    (
+        "This ADR doesn't apply here",
+        "The rule is right, but not for this code.",
+        governance_session::OverrideReasonCode::NotHere,
+    ),
+    (
+        "This ADR is wrong",
+        "The decision itself should change.",
+        governance_session::OverrideReasonCode::AdrWrong,
+    ),
+];
+
+const PICKER_REASON_QUESTION: &str = "If the block is right and you're going ahead anyway, \
+     choose Other and type \"accepted\" (or \"adr-outdated\" if the ADR is out of date); \
+     anything else typed there may be sent to your organization's admins, with anything that \
+     looks like a secret removed, so don't type one. Otherwise, why override?";
+
+/// A short random id for one denial's picker questions.
+fn picker_nonce() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+/// The rule ids a picker names, in order and without repeats.
+fn picker_rule_ids(blocking: &[&CheckedRule]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for rule in blocking {
+        if !ids.contains(&rule.rule_id) {
+            ids.push(rule.rule_id.clone());
+        }
+    }
+    ids
+}
+
+/// The override option's label: the rule for one, a count for several.
+fn override_label(blocking: &[&CheckedRule]) -> String {
+    match picker_rule_ids(blocking).as_slice() {
+        [one] => format!("Override {one}"),
+        ids => format!("Override all {} rules", ids.len()),
+    }
+}
+
+/// `request_user_input`'s arguments for one question.
+fn picker_arguments(
+    id: String,
+    header: &str,
+    question: String,
+    options: &[(&str, &str)],
+) -> String {
+    let options: Vec<serde_json::Value> = options
+        .iter()
+        .map(|(label, description)| serde_json::json!({"label": label, "description": description}))
+        .collect();
+    serde_json::json!({"questions": [{
+        "id": id,
+        "header": header,
+        "question": question,
+        "options": options,
+    }]})
+    .to_string()
+}
+
+/// What a picker-mode deny tells the agent: the conflicts, and the exact
+/// `request_user_input` call that asks the user to revise or override.
+fn codex_picker_reason(
+    blocking: &[&CheckedRule],
+    partial: Option<(usize, usize)>,
+    kind: check::ArtifactKind,
+    picker: &PickerAsk,
+) -> String {
+    let copy = artifact_copy(kind);
+    let words = picker_copy(kind);
+    let (subject, plural, _) = ask_subject(kind);
+    let lines = hook_deny_reason_for(HookHost::Codex, blocking, None, partial, kind);
+    let ids = picker_rule_ids(blocking);
+    let what = if ids.len() == 1 {
+        "1 rule".to_string()
+    } else {
+        format!("{} rules", ids.len())
+    };
+    let arguments = picker_arguments(
+        format!("actual_choice_{}", picker.nonce),
+        words.header,
+        format!(
+            "{} {what}: {}. What should happen?",
+            words.blocked,
+            ids.join(", ")
+        ),
+        &[
+            (words.revise, words.revise_note),
+            (&picker.override_label, words.override_note),
+        ],
+    );
+    format!(
+        "{} found that {subject} {} with this repository's rules:\n{lines}\n\
+         Don't change, undo or override anything yet. Ask the user what to do: call \
+         request_user_input now with exactly these arguments, then follow the instructions its \
+         result brings back.\n{arguments}",
+        copy.governance,
+        if plural { "conflict" } else { "conflicts" },
+    )
+}
+
+/// The text stop for a picker question that went unanswered (the agent
+/// didn't ask, the user dismissed it, or the answer never reached actual),
+/// when the plan or diff is the one the question was about. Clears the
+/// question, so a later conflict asks again; the conflicts stay for the next
+/// prompt. `None` when there is no such question.
+pub(super) fn codex_unanswered_picker(
+    host: HookHost,
+    kind: check::ArtifactKind,
+    session_id: Option<&str>,
+    rules_dir: &Path,
+    session: &GovernanceSession,
+    digest: &str,
+) -> Option<String> {
+    if host != HookHost::Codex {
+        return None;
+    }
+    let session_id = session_id?;
+    let pending = session.loop_state(kind).pending.as_ref()?;
+    let ask = pending.ask.as_ref().filter(|ask| ask.digest == digest)?;
+    let aside = match ask.stage {
+        PickerStage::Choice => " The picker asking what to do went unanswered.",
+        PickerStage::Reason => {
+            " The picker asking why to override went unanswered, so nothing was overridden."
+        }
+    };
+    let text = codex_ask_text(kind, &pending.text, aside);
+    governance_session::update(session_id, rules_dir, |s| {
+        if let Some(pending) = s.loop_state_mut(kind).pending.as_mut() {
+            pending.ask = None;
+        }
+    });
+    Some(host.stop(&with_override_reminder(text, session)))
+}
+
+/// The user's answer to a gate's picker, from a Codex `PostToolUse` on
+/// `request_user_input`: what the agent should do next, as context, or `None`
+/// to say nothing. An answer counts only to a question this session asked,
+/// by its id, and only from a process without Codex's agent markers; anything
+/// else is left to [`codex_unanswered_picker`].
+pub(super) fn codex_answer_reply(
+    session_id: &str,
+    tool_input: Option<&serde_json::Value>,
+    tool_response: Option<&serde_json::Value>,
+    root: &Path,
+    rules_dir: &Path,
+) -> Option<String> {
+    #[cfg(not(feature = "telemetry"))]
+    let _ = root;
+    if codex_agent_marker().is_some() {
+        return None;
+    }
+    let asked: Vec<&str> = tool_input?
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .filter_map(|q| q.get("id")?.as_str())
+        .collect();
+    let answers = picker_answers(tool_response?)?;
+    let session = governance_session::load(session_id, rules_dir);
+    let (kind, pending, ask) = [check::ArtifactKind::Diff, check::ArtifactKind::Plan]
+        .into_iter()
+        .find_map(|kind| {
+            let pending = session.loop_state(kind).pending.clone()?;
+            let ask = pending.ask.clone()?;
+            Some((kind, pending, ask))
+        })?;
+    let id = match ask.stage {
+        PickerStage::Choice => format!("actual_choice_{}", ask.nonce),
+        PickerStage::Reason => format!("actual_reason_{}", ask.nonce),
+    };
+    if !asked.contains(&id.as_str()) {
+        return None;
+    }
+    let answer = answers
+        .get(&id)?
+        .get("answers")?
+        .as_array()?
+        .iter()
+        .filter_map(|a| a.as_str())
+        .find(|a| !a.trim().is_empty())?
+        .to_string();
+    let words = picker_copy(kind);
+    let set_pending = |pending: Option<Pending>| {
+        governance_session::update(session_id, rules_dir, |s| {
+            s.loop_state_mut(kind).pending = pending;
+        });
+    };
+    let reply = match ask.stage {
+        PickerStage::Choice if answer == words.revise => {
+            set_pending(None);
+            format!("{}\n\n{}", words.revised, pending.text)
+        }
+        PickerStage::Choice if answer == ask.override_label => {
+            let options: Vec<(&str, &str)> = PICKER_REASONS
+                .iter()
+                .map(|(label, description, _)| (*label, *description))
+                .collect();
+            let arguments = picker_arguments(
+                format!("actual_reason_{}", ask.nonce),
+                "Why override",
+                PICKER_REASON_QUESTION.to_string(),
+                &options,
+            );
+            set_pending(Some(Pending {
+                ask: Some(PickerAsk {
+                    stage: PickerStage::Reason,
+                    ..ask
+                }),
+                ..pending
+            }));
+            format!(
+                "The user chose to override. Ask why before anything else: call \
+                 request_user_input now with exactly these arguments, then follow the \
+                 instructions its result brings back. Don't change anything meanwhile.\n{arguments}"
+            )
+        }
+        PickerStage::Choice => {
+            set_pending(None);
+            format!(
+                "The user answered the picker: \"{answer}\". No rule was overridden. Act on their \
+                 answer; don't suggest an override.\n\n{}",
+                pending.text
+            )
+        }
+        PickerStage::Reason => {
+            let (reason_code, reason) =
+                match PICKER_REASONS.iter().find(|(label, ..)| *label == answer) {
+                    Some((_, _, code)) => (Some(*code), None),
+                    None => governance_session::OverrideReasonCode::split_reason(Some(&answer)),
+                };
+            let gate = match kind {
+                check::ArtifactKind::Plan => OverrideGateArg::Plan,
+                check::ArtifactKind::Diff => OverrideGateArg::Impl,
+            };
+            let keys = match resolve_override_target(&session, rules_dir, "all", Some(gate)) {
+                Ok(keys) => keys,
+                Err(msg) => {
+                    set_pending(None);
+                    return Some(codex_prompt_context(
+                        "PostToolUse",
+                        &format!(
+                            "Nothing was overridden: {msg}. Tell the user, then end your turn."
+                        ),
+                    ));
+                }
+            };
+            if let Err(e) = validate_override_rules(rules_dir, &keys) {
+                set_pending(None);
+                return Some(codex_prompt_context(
+                    "PostToolUse",
+                    &format!("Nothing was overridden: {e}. Tell the user, then end your turn."),
+                ));
+            }
+            let source = governance_session::OverrideSource::SessionDialog;
+            let reason = reason.as_deref();
+            let _gates = governance_session::record_override_with(
+                session_id,
+                rules_dir,
+                &keys,
+                reason,
+                reason_code,
+                source,
+            );
+            #[cfg(feature = "telemetry")]
+            send_override_events(root, &keys, reason.unwrap_or(""), source, &_gates);
+            #[cfg(feature = "telemetry")]
+            super::override_telemetry::report(
+                rules_dir,
+                session_id,
+                &keys,
+                source,
+                reason_code,
+                reason,
+            );
+            set_pending(None);
+            format!(
+                "The user overrode {} in the picker (reason: {}). These rules won't block again \
+                 this session. Keep the work as it is and end your turn with one line saying so. \
+                 Don't run `actual override` or `actual check-override` yourself.",
+                short_ids(&keys),
+                describe_reason(reason_code, reason),
+            )
+        }
+    };
+    Some(codex_prompt_context("PostToolUse", &reply))
+}
+
+/// The answers in a `request_user_input` result, `{"<id>": {"answers": [...]}}`.
+/// Codex hands a hook the result as JSON or as the JSON text, so both parse.
+fn picker_answers(
+    response: &serde_json::Value,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let parsed;
+    let value = match response {
+        serde_json::Value::String(text) => {
+            parsed = serde_json::from_str::<serde_json::Value>(text).ok()?;
+            &parsed
+        }
+        other => other,
+    };
+    value.get("answers")?.as_object().cloned()
 }
 
 /// What the agent is told with the user's message after a `--codex-ask`
@@ -1791,22 +2149,25 @@ pub(super) fn codex_prompt_reply(
     let mut pending = Vec::new();
     governance_session::update(session_id, rules_dir, |s| {
         for kind in [check::ArtifactKind::Diff, check::ArtifactKind::Plan] {
-            if let Some(text) = s.loop_state_mut(kind).pending.take() {
-                pending.push(codex_pending_context(kind, &text));
+            if let Some(waiting) = s.loop_state_mut(kind).pending.take() {
+                pending.push(codex_pending_context(kind, &waiting.text));
             }
         }
     });
     if pending.is_empty() {
         return None;
     }
-    Some(codex_prompt_context(&pending.join("\n\n")))
+    Some(codex_prompt_context(
+        "UserPromptSubmit",
+        &pending.join("\n\n"),
+    ))
 }
 
-/// Codex's `UserPromptSubmit` context reply, with `hookEventName` ahead of
-/// `additionalContext`. The plugin forwards a Codex reply only when its bytes
-/// match the shape exactly, and `serde_json::json!` sorts keys, which would
-/// put them the other way round.
-fn codex_prompt_context(context: &str) -> String {
+/// Codex's context reply for `event` (`UserPromptSubmit` or `PostToolUse`),
+/// with `hookEventName` ahead of `additionalContext`. The plugin forwards a
+/// Codex reply only when its bytes match the shape exactly, and
+/// `serde_json::json!` sorts keys, which would put them the other way round.
+fn codex_prompt_context(event: &'static str, context: &str) -> String {
     #[derive(Serialize)]
     struct Inner<'a> {
         #[serde(rename = "hookEventName")]
@@ -1821,7 +2182,7 @@ fn codex_prompt_context(context: &str) -> String {
     }
     serde_json::to_string(&Reply {
         hook_specific_output: Inner {
-            hook_event_name: "UserPromptSubmit",
+            hook_event_name: event,
             additional_context: context,
         },
     })
@@ -2098,6 +2459,10 @@ pub(super) struct HookRun<'a> {
     /// `--codex-ask`: on Codex, a conflict ends the turn for the user to
     /// answer (see [`HookHost::stop`]) instead of sending the agent back.
     pub codex_ask: bool,
+    /// With `codex_ask`: the agent can show a picker this turn (`--codex-picker`,
+    /// and the rollout says `request_user_input` works in the turn's mode),
+    /// so a conflict tells it to ask instead of ending the turn.
+    pub picker: bool,
     #[cfg(feature = "telemetry")]
     pub started: super::check_telemetry::Started,
 }
@@ -2302,10 +2667,16 @@ fn finish_verdicts(
             }
             if ask {
                 // Worded for the agent, without the line telling it how the
-                // user overrides: the user is told that in the stop reason.
-                session.loop_state_mut(kind).pending = Some(hook_deny_reason_for(
-                    run.host, &blocking, None, partial, kind,
-                ));
+                // user overrides: the user is told that in the stop reason,
+                // or chooses in the picker.
+                let text = hook_deny_reason_for(run.host, &blocking, None, partial, kind);
+                let ask = run.picker.then(|| PickerAsk {
+                    nonce: picker_nonce(),
+                    stage: PickerStage::Choice,
+                    digest: run.artifact_digest.to_string(),
+                    override_label: override_label(&blocking),
+                });
+                session.loop_state_mut(kind).pending = Some(Pending { text, ask });
             }
             governance_session::store_loop(
                 session_id,
@@ -2318,7 +2689,15 @@ fn finish_verdicts(
         // override" -- a different rule's conflict must not bury the fact
         // that this session still carries a recorded override elsewhere. See
         // `plan_check`'s module doc, "override visibility".
-        if ask {
+        let picker = ask
+            .then(|| session.loop_state(kind).pending.as_ref())
+            .flatten()
+            .and_then(|pending| pending.ask.clone());
+        if let Some(picker) = picker {
+            // Sent back to the agent, which shows the user the picker.
+            let reason = codex_picker_reason(&blocking, partial, kind, &picker);
+            emit(run.host.deny(&with_override_reminder(reason, session)));
+        } else if ask {
             let reason = codex_ask_reason(&blocking, partial, kind);
             emit(run.host.stop(&with_override_reminder(reason, session)));
         } else {
@@ -2590,6 +2969,7 @@ pub(crate) mod tests {
             claude_hook: false,
             codex_hook: false,
             codex_ask: false,
+            codex_picker: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -3175,6 +3555,7 @@ pub(crate) mod tests {
             claude_hook: false,
             codex_hook: true,
             codex_ask: false,
+            codex_picker: false,
             limit: 7,
             candidates: 9,
             no_rank: false,
@@ -4515,6 +4896,7 @@ pub(crate) mod tests {
             max_rounds,
             ask: None,
             codex_ask: false,
+            picker: false,
             #[cfg(feature = "telemetry")]
             started: super::super::check_telemetry::Started::now(),
         }
@@ -6620,7 +7002,7 @@ pub(crate) mod tests {
         let mut session = GovernanceSession::default();
         finish_hook(&run, &mut session, verdicts_outcome(conflict()));
         let pending = governance_session::load("s-ask", rules.path()).diff.pending;
-        let pending = pending.expect("conflicts kept for the next prompt");
+        let pending = pending.expect("conflicts kept for the next prompt").text;
         assert!(pending.contains("CONFLICT R-A-002"), "{pending}");
         assert!(!pending.contains("check-override"), "{pending}");
 
@@ -6679,7 +7061,7 @@ pub(crate) mod tests {
         let _codex = no_codex_markers();
         let rules = tempdir().unwrap();
         governance_session::update("s-p", rules.path(), |s| {
-            s.diff.pending = Some("CONFLICT R-A-002 (MUST): logs it".to_string());
+            s.diff.pending = Some(Pending::new("CONFLICT R-A-002 (MUST): logs it".to_string()));
         });
 
         let reply = codex_prompt_reply("s-p", Some("revise it"), rules.path(), rules.path())
@@ -6727,7 +7109,7 @@ pub(crate) mod tests {
         governance_session::update("s-o", &rules_dir, |s| {
             s.diff.record_denial(&k1);
             s.diff.record_denial(&k2);
-            s.diff.pending = Some("conflicts".to_string());
+            s.diff.pending = Some(Pending::new("conflicts".to_string()));
         });
 
         // One of two: the other still blocks, so the conflicts stay.
@@ -6863,5 +7245,382 @@ pub(crate) mod tests {
         let err = exec_override(&hook_args(repo.path())).unwrap_err();
         assert!(matches!(err, ActualError::NotInteractive(_)), "{err:?}");
         assert!(err.to_string().contains("CODEX_THREAD_ID"), "{err}");
+    }
+
+    // ── --codex-picker ────────────────────────────────────────────────────
+
+    fn picker_run<'a>(session_id: &'a str, rules_dir: &'a Path) -> HookRun<'a> {
+        HookRun {
+            picker: true,
+            ..codex_ask_run(check::ArtifactKind::Diff, session_id, rules_dir)
+        }
+    }
+
+    /// The `request_user_input` arguments a picker deny or reply carries: the
+    /// JSON after its last line break.
+    fn picker_call(text: &str) -> serde_json::Value {
+        let start = text.rfind("\n{").expect("arguments") + 1;
+        serde_json::from_str(&text[start..]).unwrap()
+    }
+
+    fn answer_input(id: &str) -> serde_json::Value {
+        serde_json::json!({"questions": [{"id": id, "header": "h", "question": "q", "options": []}]})
+    }
+
+    /// How Codex hands a hook the tool's result: the JSON text.
+    fn answer_output(id: &str, answer: &str) -> serde_json::Value {
+        serde_json::Value::String(
+            serde_json::json!({"answers": {id: {"answers": [answer]}}}).to_string(),
+        )
+    }
+
+    /// Two conflicts seeded as a picker deny would leave them, returning
+    /// the nonce.
+    fn seed_picker_deny(session: &str, rules_dir: &Path) -> String {
+        let k1 = governance_session::key("doc", "R-A-001");
+        let k2 = governance_session::key("doc", "R-A-002");
+        governance_session::update(session, rules_dir, |s| {
+            s.diff.record_denial(&k1);
+            s.diff.record_denial(&k2);
+            s.diff.pending = Some(Pending {
+                text: "CONFLICT R-A-001\nCONFLICT R-A-002".to_string(),
+                ask: Some(PickerAsk {
+                    nonce: "abcd1234".to_string(),
+                    stage: PickerStage::Choice,
+                    digest: "digest-1".to_string(),
+                    override_label: "Override all 2 rules".to_string(),
+                }),
+            });
+        });
+        "abcd1234".to_string()
+    }
+
+    fn context(reply: &str) -> String {
+        assert!(
+            reply.starts_with(
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":""#
+            ),
+            "{reply}"
+        );
+        let v: serde_json::Value = serde_json::from_str(reply).unwrap();
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// With the picker, a conflict sends the agent back with the exact
+    /// question to ask, and the question is remembered with its nonce.
+    #[test]
+    fn test_picker_deny_hands_the_agent_the_question() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let conflict = vec![
+            checked("R-A-001", Verdict::Conflicting, "HS256", "signs with HS256"),
+            checked("R-A-002", Verdict::Conflicting, "log(key)", "logs it"),
+        ];
+        let run = picker_run("s-pk", rules.path());
+        finish_hook(
+            &run,
+            &mut GovernanceSession::default(),
+            verdicts_outcome(conflict.clone()),
+        );
+        let pending = governance_session::load("s-pk", rules.path())
+            .diff
+            .pending
+            .unwrap();
+        let ask = pending.ask.expect("a picker question");
+        assert_eq!(ask.stage, PickerStage::Choice);
+        assert_eq!(ask.override_label, "Override all 2 rules");
+        assert_eq!(ask.digest, "digest-1");
+        assert_eq!(ask.nonce.len(), 8);
+
+        let blocking: Vec<&CheckedRule> = conflict.iter().collect();
+        let reason = codex_picker_reason(&blocking, None, check::ArtifactKind::Diff, &ask);
+        assert!(reason.contains("CONFLICT R-A-001"), "{reason}");
+        let call = picker_call(&reason);
+        let q = &call["questions"][0];
+        assert_eq!(q["id"], format!("actual_choice_{}", ask.nonce));
+        assert_eq!(q["header"], "Code blocked");
+        assert_eq!(
+            q["question"],
+            "Changes blocked by 2 rules: R-A-001, R-A-002. What should happen?"
+        );
+        assert_eq!(
+            q["options"][0]["label"],
+            "Revise the changes to conform (Recommended)"
+        );
+        assert_eq!(q["options"][1]["label"], "Override all 2 rules");
+    }
+
+    /// Revise drops the question and hands the agent the conflicts.
+    #[test]
+    fn test_picker_revise_answer() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let nonce = seed_picker_deny("s-r", &rules_dir);
+        let id = format!("actual_choice_{nonce}");
+        let reply = codex_answer_reply(
+            "s-r",
+            Some(&answer_input(&id)),
+            Some(&answer_output(
+                &id,
+                "Revise the changes to conform (Recommended)",
+            )),
+            repo.path(),
+            &rules_dir,
+        )
+        .expect("a reply");
+        let text = context(&reply);
+        assert!(
+            text.starts_with("The user chose to revise the changes"),
+            "{text}"
+        );
+        assert!(text.ends_with("CONFLICT R-A-002"), "{text}");
+        assert_eq!(
+            governance_session::load("s-r", &rules_dir).diff.pending,
+            None
+        );
+    }
+
+    /// Override asks why with a second picker; the why answer records the
+    /// override with its code and the picker as its source.
+    #[test]
+    fn test_picker_override_then_why() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let nonce = seed_picker_deny("s-o2", &rules_dir);
+        let choice = format!("actual_choice_{nonce}");
+        let reply = codex_answer_reply(
+            "s-o2",
+            Some(&answer_input(&choice)),
+            Some(&answer_output(&choice, "Override all 2 rules")),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        let call = picker_call(&context(&reply));
+        let q = &call["questions"][0];
+        let why = format!("actual_reason_{nonce}");
+        assert_eq!(q["id"], why);
+        assert_eq!(q["header"], "Why override");
+        assert_eq!(q["options"][1]["label"], "This ADR doesn't apply here");
+        assert!(governance_session::load("s-o2", &rules_dir)
+            .overrides
+            .is_empty());
+        let stage = governance_session::load("s-o2", &rules_dir)
+            .diff
+            .pending
+            .unwrap()
+            .ask
+            .unwrap()
+            .stage;
+        assert_eq!(stage, PickerStage::Reason);
+
+        let reply = codex_answer_reply(
+            "s-o2",
+            Some(&answer_input(&why)),
+            Some(&answer_output(&why, "This ADR doesn't apply here")),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        let text = context(&reply);
+        assert!(
+            text.starts_with("The user overrode R-A-001, R-A-002 in the picker (reason: not-here)"),
+            "{text}"
+        );
+        let session = governance_session::load("s-o2", &rules_dir);
+        assert_eq!(session.diff.pending, None);
+        assert_eq!(session.overrides.len(), 2);
+        assert!(session.overrides.iter().all(|o| o.source
+            == governance_session::OverrideSource::SessionDialog
+            && o.reason_code == Some(governance_session::OverrideReasonCode::NotHere)));
+    }
+
+    /// "accepted" typed under Other is the code; other words in the first
+    /// question override nothing.
+    #[test]
+    fn test_picker_other_answers() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+
+        let nonce = seed_picker_deny("s-ot", &rules_dir);
+        let choice = format!("actual_choice_{nonce}");
+        let reply = codex_answer_reply(
+            "s-ot",
+            Some(&answer_input(&choice)),
+            Some(&answer_output(&choice, "use the existing helper instead")),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        let text = context(&reply);
+        assert!(
+            text.contains("\"use the existing helper instead\". No rule was overridden"),
+            "{text}"
+        );
+        assert!(governance_session::load("s-ot", &rules_dir)
+            .overrides
+            .is_empty());
+
+        let nonce = seed_picker_deny("s-acc", &rules_dir);
+        governance_session::update("s-acc", &rules_dir, |s| {
+            s.diff.pending.as_mut().unwrap().ask.as_mut().unwrap().stage = PickerStage::Reason;
+        });
+        let why = format!("actual_reason_{nonce}");
+        codex_answer_reply(
+            "s-acc",
+            Some(&answer_input(&why)),
+            Some(&serde_json::json!({"answers": {why.clone(): {"answers": ["accepted, shipping today"]}}})),
+            repo.path(),
+            &rules_dir,
+        )
+        .unwrap();
+        let session = governance_session::load("s-acc", &rules_dir);
+        assert_eq!(
+            session.overrides[0].reason_code,
+            Some(governance_session::OverrideReasonCode::Accepted)
+        );
+        assert_eq!(
+            session.overrides[0].reason.as_deref(),
+            Some("shipping today")
+        );
+    }
+
+    /// An answer to some other question, an empty or aborted answer, or one
+    /// arriving with the agent's shell markers says nothing and records
+    /// nothing.
+    #[test]
+    fn test_picker_ignores_foreign_answers() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex = no_codex_markers();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let nonce = seed_picker_deny("s-f2", &rules_dir);
+        let choice = format!("actual_choice_{nonce}");
+        let other = "actual_choice_ffffffff";
+        let ask = |input: &str, output: serde_json::Value| {
+            codex_answer_reply(
+                "s-f2",
+                Some(&answer_input(input)),
+                Some(&output),
+                repo.path(),
+                &rules_dir,
+            )
+        };
+        assert_eq!(
+            ask(other, answer_output(other, "Override all 2 rules")),
+            None
+        );
+        assert_eq!(ask(&choice, answer_output(&choice, "  ")), None);
+        assert_eq!(
+            ask(
+                &choice,
+                serde_json::Value::String("aborted by user after 9.1s".into())
+            ),
+            None
+        );
+        {
+            let _thread = EnvGuard::set("CODEX_THREAD_ID", "t-1");
+            assert_eq!(
+                ask(&choice, answer_output(&choice, "Override all 2 rules")),
+                None
+            );
+        }
+        let session = governance_session::load("s-f2", &rules_dir);
+        assert!(session.overrides.is_empty());
+        assert_eq!(
+            session.diff.pending.unwrap().ask.unwrap().stage,
+            PickerStage::Choice
+        );
+    }
+
+    /// An unanswered question over the same work ends the turn with the text
+    /// choices and is forgotten; different work, or no question, judges as
+    /// usual.
+    #[test]
+    fn test_unanswered_picker_falls_back_to_the_text_stop() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        seed_picker_deny("s-u", rules.path());
+        let session = governance_session::load("s-u", rules.path());
+        let diff = check::ArtifactKind::Diff;
+
+        assert_eq!(
+            codex_unanswered_picker(
+                HookHost::Codex,
+                diff,
+                Some("s-u"),
+                rules.path(),
+                &session,
+                "other-digest"
+            ),
+            None
+        );
+        assert_eq!(
+            codex_unanswered_picker(
+                HookHost::Claude,
+                diff,
+                Some("s-u"),
+                rules.path(),
+                &session,
+                "digest-1"
+            ),
+            None
+        );
+        let reply = codex_unanswered_picker(
+            HookHost::Codex,
+            diff,
+            Some("s-u"),
+            rules.path(),
+            &session,
+            "digest-1",
+        )
+        .expect("the text stop");
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let text = v["stopReason"].as_str().unwrap();
+        assert!(text.contains("went unanswered"), "{text}");
+        assert!(text.contains("CONFLICT R-A-002"), "{text}");
+        assert!(text.contains("actual override all <code>"), "{text}");
+        let after = governance_session::load("s-u", rules.path())
+            .diff
+            .pending
+            .unwrap();
+        assert_eq!(after.ask, None);
+        assert!(
+            after.text.contains("R-A-001"),
+            "conflicts kept for the next prompt"
+        );
+    }
+
+    /// A session file written before picker questions holds the conflicts as
+    /// a bare string, and still loads.
+    #[test]
+    fn test_pending_loads_from_the_older_string_form() {
+        let state: governance_session::LoopState =
+            serde_json::from_str(r#"{"pending":"CONFLICT R-A-001"}"#).unwrap();
+        assert_eq!(
+            state.pending,
+            Some(Pending::new("CONFLICT R-A-001".to_string()))
+        );
     }
 }

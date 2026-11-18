@@ -28,6 +28,15 @@
 //!   block the turn over a plan nobody is proposing, round after round, until
 //!   the round limit (observed on Codex CLI 0.167.0).
 //!
+//! - the tools the session offers the agent are a `response_item` whose
+//!   payload is `additional_tools`. `request_user_input`'s description there
+//!   names the modes it works in: "…only available in Plan mode." by
+//!   default, "…in Default or Plan mode." with Codex's
+//!   `default_mode_request_user_input` feature on. That feature can be turned
+//!   on from the command line, so this is the one place a hook can learn
+//!   whether the agent can show the user a picker (observed on Codex CLI
+//!   0.169.0).
+//!
 //! Codex documents the rollout as "not a stable interface", so everything here
 //! fails open: an unreadable file, a compressed (`.zst`) rollout, an unknown
 //! line shape or a turn that never appears all read as "unknown", and the
@@ -57,6 +66,10 @@ pub struct TurnFacts {
     /// The plan the turn is proposing as it ends, without its tags: the
     /// latest one, unless a continuation withdrew it.
     pub plan: Option<String>,
+    /// `Some(true)` when the agent can call `request_user_input` in the
+    /// turn's mode, `Some(false)` when the rollout says it can't, `None` when
+    /// the rollout doesn't say (no tool list, or no mode for the turn).
+    pub picker: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -124,6 +137,8 @@ fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
     // with no plan in it now withdraws that plan.
     let mut hook_since_plan = false;
     let mut scanned: u64 = 0;
+    // The modes `request_user_input` works in, from the latest tool list.
+    let mut picker_modes: Option<String> = None;
 
     for line in BufReader::new(source).lines() {
         let Ok(line) = line else { break };
@@ -137,6 +152,12 @@ fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
         let item = line.contains("\"item_completed\"")
             && (line.contains("\"Plan\"") || line.contains("\"HookPrompt\""));
         let answer = in_turn && line.contains("\"final_answer\"");
+        if line.contains("\"additional_tools\"") && line.contains("\"request_user_input\"") {
+            if let Some(modes) = picker_modes_in(&line) {
+                picker_modes = Some(modes);
+            }
+            continue;
+        }
         if !(task_started || item || answer) {
             continue;
         }
@@ -199,7 +220,44 @@ fn scan_capped(source: impl Read, turn_id: &str, cap: u64) -> TurnFacts {
         }
     }
     facts.plan = plan;
+    facts.picker = match (facts.plan_mode, picker_modes) {
+        (Some(plan_mode), Some(modes)) => {
+            let mode = if plan_mode { "Plan" } else { "Default" };
+            Some(
+                modes
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|word| word == mode),
+            )
+        }
+        _ => None,
+    };
     facts
+}
+
+/// The part of `request_user_input`'s description in an `additional_tools`
+/// line that names its modes ("Default or Plan mode"), or `None` when the
+/// line has no such tool or the description says no such thing.
+fn picker_modes_in(line: &str) -> Option<String> {
+    fn find(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("name").and_then(|n| n.as_str()) == Some("request_user_input") {
+                    if let Some(description) = map.get("description").and_then(|d| d.as_str()) {
+                        return Some(description);
+                    }
+                }
+                map.values().find_map(find)
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let description = find(&value)?;
+    let start = description.find("available in ")? + "available in ".len();
+    let rest = &description[start..];
+    let end = rest.find('.').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
 }
 
 /// The last `<proposed_plan>` block in `text`, without its tags.
@@ -238,6 +296,38 @@ mod tests {
 
     fn facts(lines: &[String]) -> TurnFacts {
         scan(lines.join("\n").as_bytes(), TURN)
+    }
+
+    /// The tool list as Codex CLI 0.169.0 writes it, trimmed to the one tool,
+    /// with `request_user_input` available in `modes`.
+    fn tools(modes: &str) -> String {
+        serde_json::json!({"type":"response_item","payload":{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"request_user_input","description":format!("Request user input for one to three short questions and wait for the response. This tool is only available in {modes}.")}]}]}}).to_string()
+    }
+
+    /// The picker counts only in a mode its description names, and the
+    /// latest tool list wins.
+    #[test]
+    fn test_picker_follows_the_tool_description() {
+        let default_turn =
+            |modes: &str| facts(&[tools(modes), task_started(TURN, "default")]).picker;
+        assert_eq!(default_turn("Plan mode"), Some(false));
+        assert_eq!(default_turn("Default or Plan mode"), Some(true));
+        let plan_turn = facts(&[tools("Plan mode"), task_started(TURN, "plan")]);
+        assert_eq!(plan_turn.picker, Some(true));
+        let changed = facts(&[
+            tools("Plan mode"),
+            tools("Default or Plan mode"),
+            task_started(TURN, "default"),
+        ]);
+        assert_eq!(changed.picker, Some(true));
+    }
+
+    /// No tool list, or no mode for the turn, says nothing.
+    #[test]
+    fn test_picker_is_unknown_without_a_tool_list_or_a_mode() {
+        assert_eq!(facts(&[task_started(TURN, "default")]).picker, None);
+        assert_eq!(facts(&[tools("Default or Plan mode")]).picker, None);
+        assert_eq!(picker_modes_in("{\"type\":\"response_item\"}"), None);
     }
 
     /// The rollout Phase 0 captured, trimmed: a Plan-mode turn whose plan
