@@ -458,6 +458,11 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     };
     if envelope.is_turn_start() {
         record_turn_start(args, &envelope);
+        if host == HookHost::Codex {
+            if let Some(reply) = codex_turn_start_reply(args, &envelope) {
+                emit(reply);
+            }
+        }
         return;
     }
     // A Codex Plan-mode turn makes no edits, and its `Stop` belongs to the
@@ -565,6 +570,7 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
             ask: ask.as_ref(),
+            codex_ask: args.codex_ask,
             #[cfg(feature = "telemetry")]
             started,
         },
@@ -582,13 +588,29 @@ fn codex_plan_turn(envelope: &HookEnvelope) -> bool {
     codex_rollout::turn_facts(Path::new(path), turn_id).plan_mode == Some(true)
 }
 
+/// What a Codex `UserPromptSubmit` answers once the turn start is recorded:
+/// a typed override, or the conflicts a `--codex-ask` check stopped the last
+/// turn on (see `check_engine::codex_prompt_reply`). Claude Code's turn start
+/// answers nothing: its plugin's mod handles overrides and asks the user
+/// itself.
+fn codex_turn_start_reply(args: &ImplCheckArgs, envelope: &HookEnvelope) -> Option<String> {
+    let session_id = envelope.session_id.as_deref().filter(|id| !id.is_empty())?;
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    check_engine::codex_prompt_reply(session_id, envelope.prompt.as_deref(), &root, &rules_dir)
+}
+
 /// A `UserPromptSubmit` envelope: record `HEAD` as the commit this turn
-/// starts from, and drop the last turn's plan. Emits nothing on any path,
-/// because a `UserPromptSubmit` hook's stdout is added to the prompt. When
-/// no commit can be named (an unborn branch, or not a repository), the record
-/// is cleared and the next check diffs against `HEAD`. An envelope without a
-/// session id leaves the previous turn's record in place, so the next check
-/// re-reads that turn's commits too rather than skipping this one's.
+/// starts from, and drop the last turn's plan. Emits nothing itself: on Claude Code a `UserPromptSubmit`
+/// hook's stdout is added to the prompt, and on Codex the one reply comes from
+/// [`codex_turn_start_reply`]. When no commit can be named (an
+/// unborn branch, or not a repository), the record is cleared and the next
+/// check diffs against `HEAD`. An envelope without a session id leaves the
+/// previous turn's record in place, so the next check re-reads that turn's
+/// commits too rather than skipping this one's.
 fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
     let Some(session_id) = envelope.session_id.as_deref() else {
         return;
@@ -718,6 +740,7 @@ mod tests {
             rules_dir: None,
             claude_hook: false,
             codex_hook: false,
+            codex_ask: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,

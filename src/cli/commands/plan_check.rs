@@ -451,6 +451,7 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
             ask: None,
+            codex_ask: args.codex_ask,
             #[cfg(feature = "telemetry")]
             started,
         },
@@ -742,6 +743,7 @@ mod tests {
             rules_dir: None,
             claude_hook: false,
             codex_hook: false,
+            codex_ask: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,

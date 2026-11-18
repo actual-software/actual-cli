@@ -60,6 +60,24 @@ impl HookHost {
         }
     }
 
+    /// End the turn and hand the choice to the user: Codex's
+    /// `{"continue":false,"stopReason":…}`, which stops the turn without a
+    /// continuation and shows `reason` to the user, never to the model. It
+    /// also wins over a block from another `Stop` hook running alongside.
+    /// Used by `--codex-ask` and by a typed override on `UserPromptSubmit`,
+    /// where it keeps the prompt from reaching the model at all.
+    ///
+    /// Claude Code has no such reply here; its gates ask through the plugin's
+    /// mod, so this is [`deny`](Self::deny) there and no Claude path calls it.
+    pub fn stop(self, reason: &str) -> String {
+        match self {
+            Self::Claude => self.deny(reason),
+            Self::Codex => {
+                serde_json::json!({ "continue": false, "stopReason": reason }).to_string()
+            }
+        }
+    }
+
     /// A non-blocking message the user should see: a check that did not run,
     /// ran in part, or passed only because of an override or a round limit.
     pub fn notice(self, message: &str) -> String {
@@ -142,6 +160,15 @@ mod tests {
         let out = HookHost::Codex.notice("did not run");
         assert_eq!(keys(&out), ["systemMessage"]);
         assert!(!out.contains("hookSpecificOutput"));
+    }
+
+    /// Codex's turn-ending reply: exactly `continue: false` and `stopReason`,
+    /// in that order, which the plugin pins byte for byte.
+    #[test]
+    fn test_codex_stop_ends_the_turn() {
+        let out = HookHost::Codex.stop("Choose.");
+        assert_eq!(out, r#"{"continue":false,"stopReason":"Choose."}"#);
+        assert_eq!(HookHost::Claude.stop("x"), HookHost::Claude.deny("x"));
     }
 
     #[test]
