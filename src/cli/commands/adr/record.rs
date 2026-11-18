@@ -7,9 +7,11 @@
 //! own draft from reading as its duplicate, and remembers the accepted files
 //! saved as drafts until they reach the default branch.
 //!
-//! A missing, damaged or other-version record reads as empty. That costs
-//! requests and nothing else: the server's key on repository and path turns
-//! a file sent again into the decision its first save made.
+//! A missing, damaged or other-version record reads as empty, as a
+//! teammate's machine does: a file an earlier save made a draft from reads
+//! as that draft's look-alike and is skipped, and a draft waiting for the
+//! default branch is never accepted from here, until `create --all
+//! --allow-duplicate` sends the file and its path key returns that draft.
 //!
 //! Each change is one entry, written under the directory's lock from its
 //! read to its rename, as [`super::super::brief_ledger`] writes, so two runs
