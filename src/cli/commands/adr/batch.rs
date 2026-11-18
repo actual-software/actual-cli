@@ -693,18 +693,21 @@ fn unsent_by(e: ActualError, run: Run) -> Result<String, Next> {
 }
 
 /// The errors `push` meets by publishing nothing and saying nothing: a
-/// sign-in that is gone, and a repository Actual AI hasn't connected or a
-/// role that can't save decisions, whose files wait out the hold.
+/// sign-in that is gone, and a repository Actual AI hasn't connected, named
+/// by the origin remote or by `--repo`, or a role that can't save decisions,
+/// whose files wait out the hold.
 fn quiet(e: &ActualError) -> Option<StandDown> {
     match e {
         ActualError::NotLoggedIn => Some(StandDown {
             reason: "Not signed in.".to_string(),
             hold: false,
         }),
-        ActualError::AdrRepoRequired(reason) => Some(StandDown {
-            reason: reason.clone(),
-            hold: true,
-        }),
+        ActualError::AdrRepoRequired(reason) | ActualError::RepoNotFound(reason) => {
+            Some(StandDown {
+                reason: reason.clone(),
+                hold: true,
+            })
+        }
         ActualError::AdrAccessDenied { .. } => Some(StandDown {
             reason: e.to_string(),
             hold: true,
@@ -2902,6 +2905,50 @@ mod tests {
         for mock in &mocks {
             mock.assert();
         }
+    }
+
+    #[test]
+    fn push_stands_down_for_a_repository_flag_actual_ai_has_not_connected() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        pair(
+            root,
+            "a.md",
+            "Use Postgres",
+            "MUST: Use Postgres.",
+            &[],
+            true,
+        );
+        let mut server = mockito::Server::new();
+        let repos = connected(&mut server);
+        let args = AdrCreateArgs {
+            repo: Some("ghost/repo".to_string()),
+            ..all_args(&server)
+        };
+        let (report, stop) = publish(&args, root, push(10), &mut Vec::new()).unwrap();
+        assert!(stop.is_none());
+        assert!(
+            report
+                .stood_down
+                .as_deref()
+                .is_some_and(|reason| reason.contains("ghost/repo")),
+            "{report:?}"
+        );
+        repos.assert();
+        // The file waits out the hold, as for an origin Actual AI hasn't
+        // connected.
+        let key = Key {
+            org_id: ORG.to_string(),
+            repo: "ghost/repo".to_string(),
+        };
+        let held = record::load(&tmp.path().join("adr-push"), &key).files;
+        assert_eq!(held["docs/adr/a.md"].outcome, Outcome::StoodDown);
+        // `create --all` says why.
+        let err = publish(&args, root, create_all(false, false), &mut Vec::new()).unwrap_err();
+        assert!(matches!(err, ActualError::RepoNotFound(_)), "{err:?}");
     }
 
     #[test]
