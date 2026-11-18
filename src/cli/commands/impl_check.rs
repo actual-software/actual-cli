@@ -2225,7 +2225,7 @@ mod tests {
     /// A repo whose one rule file has a v2 header and is briefed in
     /// `session`, a fake judge answering `verdict` for both rules that counts
     /// its calls in the returned file, and args pointing at both.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "telemetry"))]
     fn briefed_repo(
         session: &str,
         verdict: &str,
@@ -2277,10 +2277,12 @@ mod tests {
         (repo, bin, calls, args, binary)
     }
 
+    #[cfg(feature = "telemetry")]
     fn judge_calls(calls: &StdPath) -> usize {
         std::fs::read_to_string(calls).map_or(0, |text| text.lines().count())
     }
 
+    #[cfg(feature = "telemetry")]
     fn stop(args: &ImplCheckArgs, session: &str) -> Vec<serde_json::Value> {
         super::super::check_engine::tests::take_emitted();
         exec_hook_with(
@@ -2293,6 +2295,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "telemetry")]
     fn deny_reason(output: &serde_json::Value) -> &str {
         assert_eq!(
             output["hookSpecificOutput"]["permissionDecision"], "deny",
@@ -2303,12 +2306,13 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(feature = "telemetry")]
     const QUESTION: &str = "Which of these ADRs did you use this turn?";
 
     /// A passing turn blocks once with the question. The Stop after the
     /// answer changes no file, so it finds every rule cleared and calls no
     /// judge, and asks nothing. The next turn asks again.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_a_passing_turn_asks_once_and_the_stop_after_the_answer_calls_no_judge() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -2390,7 +2394,7 @@ mod tests {
 
     /// On a block the question follows the judge's reason, and the block
     /// after the fix asks nothing more.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_a_blocked_turn_carries_the_question_after_the_judges_reason() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -2429,7 +2433,7 @@ mod tests {
 
     /// A round that would only have shown a notice blocks with the question
     /// instead, and the notice stays beside it for the user.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "telemetry"))]
     #[test]
     fn test_a_notice_round_asks_and_keeps_the_notice() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());

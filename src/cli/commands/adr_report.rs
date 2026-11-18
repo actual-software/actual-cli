@@ -161,6 +161,7 @@ pub struct CheckedClaim {
 }
 
 impl CheckedClaim {
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
     fn verified(&self) -> bool {
         self.reason.is_none()
     }
@@ -175,6 +176,7 @@ pub enum Anchor {
 }
 
 impl Anchor {
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
     fn as_str(self) -> &'static str {
         match self {
             Self::Diff => "diff",
@@ -196,6 +198,7 @@ pub enum Unverified {
 }
 
 impl Unverified {
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
     fn as_str(self) -> &'static str {
         match self {
             Self::AdrNotInSession => "adr_not_in_session",
@@ -956,6 +959,7 @@ fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) mod tests {
     use super::*;
 
@@ -987,17 +991,27 @@ pub(super) mod tests {
                 "ACTUAL_OTLP_LOGS_ENDPOINT",
                 "ACTUAL_OTLP_FILE",
                 "TRACEPARENT",
-                crate::telemetry::debug::ENV,
-                crate::telemetry::debug::ID_ENV,
             ] {
                 guards.push(EnvGuard::remove(name));
             }
+            #[cfg(feature = "telemetry")]
+            guards.extend(
+                [
+                    crate::telemetry::debug::ENV,
+                    crate::telemetry::debug::ID_ENV,
+                ]
+                .map(EnvGuard::remove),
+            );
             std::fs::write(home.path().join("config.yaml"), config).unwrap();
             let repo = tempdir().unwrap();
             let rules = crate::rules::rules_dir(repo.path());
             std::fs::create_dir_all(&rules).unwrap();
             std::fs::create_dir_all(repo.path().join("src")).unwrap();
+            #[cfg(feature = "telemetry")]
             let header = super::super::check_telemetry::tests::with_header;
+            // Without telemetry no test asks, so plain rule files will do.
+            #[cfg(not(feature = "telemetry"))]
+            let header = |_: &str, _: Option<&str>, body: &str| body.to_string();
             for (slug, contents) in [
                 (
                     "api-errors-001",
@@ -1339,6 +1353,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
 
     /// The question lists every briefed decision once, by its first file's
     /// slug and its title, and names the command with this turn filled in.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_prepare_lists_every_briefed_adr_and_the_command() {
         let _lock = lock();
@@ -1400,6 +1415,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         )));
     }
 
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_prepare_asks_nothing_without_a_session_a_brief_or_a_new_turn() {
         let _lock = lock();
@@ -1478,6 +1494,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     /// A diff matching the one the turn started with asks nothing only when it
     /// was taken from the turn's recorded commit. Taken from `HEAD` after
     /// that commit stopped being an ancestor, the same digest still asks.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_prepare_reads_a_diff_as_unchanged_only_from_the_turns_own_base() {
         let _lock = lock();
@@ -1512,6 +1529,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         assert_eq!(listed[0].0.adr_ref, None);
     }
 
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_mark_records_the_question_once_and_only_for_its_turn() {
         let _lock = lock();
@@ -1540,6 +1558,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
 
     /// Each claim is checked against what the question listed and against the
     /// lines this turn added: in a tracked file and in a new one.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_answer_checks_each_claim_against_the_turn() {
         let _lock = lock();
@@ -1601,6 +1620,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
 
     /// A claim on a path outside the checkout, through `..`, or past the cap
     /// names no file: it is unverified and the session keeps no path for it.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_answer_keeps_no_path_outside_the_checkout() {
         let _lock = lock();
@@ -1625,6 +1645,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
     }
 
     /// A plan claim holds on a non-blank line of the plan judged this turn.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_answer_checks_plan_claims_against_this_turns_plan() {
         let _lock = lock();
@@ -1665,6 +1686,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         );
     }
 
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_answer_reads_json_on_stdin_and_needs_some_answer() {
         let _lock = lock();
@@ -1703,6 +1725,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             .contains("at most 50"));
     }
 
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_answer_refuses_without_an_open_question() {
         let _lock = lock();
