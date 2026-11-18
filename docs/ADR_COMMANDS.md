@@ -1,6 +1,6 @@
 # ADR commands
 
-`actual adr` writes and checks Architecture Decision Records (ADRs) in your repository, and manages your organization's decisions in Actual AI from the terminal. `new`, `check` and `discover` work on local files and need no sign-in. The other ten commands act on the decisions in your Actual AI account and need `actual login`.
+`actual adr` writes and checks Architecture Decision Records (ADRs) in your repository, and manages your organization's decisions in Actual AI from the terminal. `new`, `check` and `discover` work on local files and need no sign-in. The other eleven commands act on the decisions in your Actual AI account and need `actual login`.
 
 ```bash
 actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
@@ -9,6 +9,7 @@ actual adr discover                   # copy the ADRs other tools keep into docs
 actual adr list                       # this repository's decisions in Actual AI
 actual adr create --file docs/adr/<file>.md
 actual adr create --all               # every decision file Actual AI doesn't have yet
+actual adr push                       # the new and changed ones, for the plugin's Stop hook
 actual adr publish <id>
 ```
 
@@ -61,7 +62,7 @@ With no file named, `adr check` also reads the files under `docs/adr/` that carr
 | Reason | What to do |
 |--------|------------|
 | No ADR header, or a save-check reason such as no policy under `## Decision`, a title on more than one line, or a document over the size limit | Rewrite it in Actual's format: the ADR header, a `# ` title and policies such as `1. MUST: …` under `## Decision`, as `adr new` writes them |
-| It looks like a decision in Actual AI, by the rule below | Compare the two; `create --all` skips a look-alike unless you pass `--allow-duplicate` |
+| It looks like a decision in Actual AI, by the rule below | Compare the two; `create --all` and `push` skip a look-alike, and `create --all --allow-duplicate` sends it |
 
 The list leaves out files whose id is already a decision in Actual AI, READMEs, indexes and templates, and everything under `docs/adr/drafts/`, where work in progress stays out of Actual AI. The header-less copies `actual adr-bot` writes of your decisions, each beside a `.claude/rules/` file naming the decision, are counted in one line instead. A file without a header doesn't fail the run: the exit status still comes from the files that carry one.
 
@@ -106,6 +107,8 @@ An index, a README or a template is listed apart, as not an ADR, and isn't copie
 An accepted decision governs at once: `plan-check` and `impl-check` read its rules. A draft is read by no check until it's published.
 
 `adr new` and `adr create` default to `accepted` when standard input is a terminal and to `draft` when it isn't, as in a coding agent's shell, a script or CI. An agent that writes or pushes a decision therefore leaves a draft for a person to publish. `--status` sets either one explicitly.
+
+`create --all` and `push` take each file's own status instead. A file marked accepted that either sends with no person at the terminal stays a draft until the file is on the default branch, as [Accepted files wait for the default branch](#accepted-files-wait-for-the-default-branch) describes.
 
 ## Decisions in Actual AI
 
@@ -153,14 +156,36 @@ actual adr create --title "Use Postgres for storage" --policy "MUST: Services st
 actual adr create --all
 ```
 
-`create --all` sends each decision file under `docs/adr/` that Actual AI doesn't have yet, one at a time, through the steps `create --file` takes. It reads the repository's decisions once, then takes the files in path order:
+`create --all` sends each decision file under `docs/adr/` that carries an ADR header and passes `actual adr check`, one at a time. Nothing under `docs/adr/drafts/` is sent or listed, so a file kept there stays out of Actual AI. The run reads the repository's decisions once, then takes the files in path order:
 
-- A file whose id is already one of those decisions is skipped, so a second run sends nothing twice.
-- Each file keeps the status its header names. An accepted decision is saved, published and written into the repository by Actual AI's sync pull request, and a draft stays a draft, whoever is at the terminal; `--all` takes no `--status`. A status under which a decision doesn't govern, such as `superseded` or `rejected`, keeps the file from being sent.
-- A file that looks like a decision in Actual AI, or like one saved earlier in the run, is skipped by the rule in [Checking decision files](#checking-decision-files). `--allow-duplicate` sends it anyway.
-- A file that doesn't parse, or that Actual AI refuses, isn't saved, and the run goes on to the next.
+- A file whose id, in its header or at the start of its name, is one of those decisions is skipped.
+- Each save names the file's path in the repository. A path saved before, from any checkout, returns the decision its first save made, and a draft there takes the file's new text, so a second run saves nothing twice. A path whose decision is no longer a draft is left to Actual AI, which owns that decision now.
+- A draft or proposed file becomes a draft in Actual AI and keeps its file name, since the sync deletes a merged file named for a draft. A file marked accepted is saved, published and renamed to the names the sync uses for its new id when a person is at the terminal; with no person at one, it's saved as a draft that waits for the default branch. A status under which a decision doesn't govern, such as `superseded` or `rejected`, keeps the file from being sent. `--all` takes no `--status`.
+- A file that looks like a decision in Actual AI, or like one saved earlier in the run, is skipped by the rule in [Checking decision files](#checking-decision-files). The draft a file was saved as is never its look-alike. `--allow-duplicate` sends it anyway.
+- A file that fails the check, or that Actual AI refuses, isn't saved, and the run goes on to the next.
 
-Each saved pair is renamed to the names the sync uses for its new id, as with `--file`, and a step after the save that fails leaves a draft and says how to finish. A line on standard error reports each file as the run reaches it, and the summary lists what was skipped or not saved, with the reason. A file takes up to four requests: the save, a read of the repository's decisions and a write when its header names a scope, and the publish when it's accepted. The run stops at the first save whose outcome is unknown (exit 3), and at the first error that isn't about the file, such as an expired sign-in, and names the files it never sent.
+A step after the save that fails leaves a draft and says how to finish. A line on standard error reports each file as the run reaches it, and the summary lists what was skipped or not saved, with the reason. A file takes up to four requests: the save, a read of the repository's decisions and a write when its header names a scope, and the publish when it's accepted. The run stops at the first save whose outcome is unknown (exit 3), and at the first error that isn't about the file, such as an expired sign-in, and names the files it never sent.
+
+### Accepted files wait for the default branch
+
+A file marked accepted that `create --all` or `push` sends with no person at the terminal stays a draft until the file is on the default branch, so what governs is what a merge reviewed. Each run reads the default branch as the last `git fetch` left it: the branch `origin/HEAD` names, else `origin/main` or `origin/master`. Once that branch holds the file, marked accepted and passing the check, the run sends that copy's text to the draft and publishes it. It leaves the file where it is, and Actual AI's sync pull request replaces it, and its rule file, with the decision's own files.
+
+The CLI remembers what each run last did with each file in a record under its config directory (`~/.actualai/actual/adr-push/`), one per organization and repository, which every checkout of the repository on the machine shares. The record is how a run knows which drafts wait for the default branch and which draft a file was saved as. A teammate's machine has its own record, so there a draft someone else saved from the same file reads as a look-alike and is skipped; `create --all --allow-duplicate` sends it, and the save returns that draft.
+
+### Publishing at the end of each turn
+
+```bash
+actual adr push
+```
+
+`push` is the publishing step for the Actual plugin to run when a coding agent's turn ends. It follows `create --all`'s rules with no person at the terminal, whoever runs it, and differs in four ways:
+
+- It sends only the files that are new or changed since the record's last entry for them. A run where no file under `docs/adr/` changed sends no request.
+- It sends at most `--limit` files per run, 10 by default, counting the drafts it accepts; the rest wait for the next run.
+- With no sign-in, a repository the organization hasn't connected, or a role that can't save decisions, it sends nothing, prints nothing and exits 0. A file the repository or the role kept back is tried again after a day, or once it changes; `create --all` says why it can't publish.
+- A file Actual AI refuses is listed and doesn't fail the run.
+
+It prints a summary only when it sent or listed a file, and `--json` always prints the report. `--root` names the repository root, which defaults to the current directory. It exits 0 when it finished or stood down, and 3 when a request failed or its outcome is unknown, in which case the next run takes up the files this one didn't send.
 
 ### Changing a decision
 
@@ -182,7 +207,7 @@ Every command takes `--json` and prints its result as JSON on standard output. E
 
 | Exit code | Meaning |
 |-----------|---------|
-| 0 | Done |
+| 0 | Done, or `push` standing down with nothing sent |
 | 1 | A decision failed a check: the local save check, a `--policy` or `--level` value that doesn't parse, a blank `update --title` or policy statement, Actual AI's refusal of its content on `create` or `update`, `adr check`, `create`'s duplicate refusal, or a file `create --all` didn't save |
 | 2 | Signed out, a sign-in without access to the decision, no connected repository could be chosen, or a value refused while the command line is read, such as a blank `--reason` |
 | 3 | Actual AI couldn't be reached or answered with another error; no decision has the id given, or `update` names a policy the decision doesn't have; the decision can't take the change (such as publishing a decision that's already active); or a `create` whose outcome is unknown |

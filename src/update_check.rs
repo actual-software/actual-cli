@@ -199,6 +199,8 @@ pub fn applies_to(command: &Command) -> bool {
             AdrAction::List(args) => !args.api.json,
             AdrAction::Show(args) => !args.api.json,
             AdrAction::Create(args) => !args.api.json,
+            // The step for the plugin's hook at the end of each turn.
+            AdrAction::Push(_) => false,
             AdrAction::Update(args) => !args.api.json,
             AdrAction::Publish(args)
             | AdrAction::Unpublish(args)
@@ -776,6 +778,7 @@ mod tests {
             &["adr", "update", "d1", "--title", "T", "--json"],
             &["adr", "publish", "d1", "--json"],
             &["adr", "reject", "d1", "--reason", "r", "--json"],
+            &["adr", "push"],
             &[
                 "mint-token",
                 "--service-account-id",

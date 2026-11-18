@@ -8,6 +8,7 @@ mod batch;
 mod cloud;
 mod discover;
 mod local;
+mod record;
 mod telemetry;
 
 use std::io::IsTerminal;
@@ -37,6 +38,7 @@ pub fn exec(args: &AdrArgs) -> Result<(), ActualError> {
         AdrAction::Show(a) => cloud::exec_show(a),
         AdrAction::Create(a) if a.all => batch::exec_create_all(a),
         AdrAction::Create(a) => cloud::exec_create(a),
+        AdrAction::Push(a) => batch::exec_push(a),
         AdrAction::Update(a) => cloud::exec_update(a),
         AdrAction::Publish(a) => cloud::exec_lifecycle(a, LifecycleAction::Publish),
         AdrAction::Unpublish(a) => cloud::exec_lifecycle(a, LifecycleAction::Unpublish),
@@ -389,13 +391,15 @@ mod tests {
             vec!["check", "--root", root, "--no-cloud"],
             vec!["discover", "--root", root],
             vec!["create", "--all"],
+            vec!["push", "--root", root],
         ] {
             let mut argv = vec!["actual", "adr"];
             argv.extend(args.iter().copied());
             let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
-            // `new` with no context or policy fails the save check; `check`
-            // and `discover` of an empty repository pass, and `create --all`
-            // from the crate root finds no decision file to send.
+            // `new` with no context or policy fails the save check; `check`,
+            // `discover` and `push` of an empty repository pass, and
+            // `create --all` from the crate root finds no decision file to
+            // send.
             let _ = exec(&adr);
         }
     }

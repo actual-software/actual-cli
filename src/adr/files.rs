@@ -140,17 +140,22 @@ fn header_meta(header: &str) -> Option<AdrMeta> {
 
 /// Read a decision doc, refusing one over [`MAX_FILE_SIZE`].
 pub fn read_decision_file(path: &Path) -> Result<DecisionFile, ActualError> {
-    let text = read_text(path)?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    Ok(decision_file_from_text(path, &read_text(path)?))
+}
+
+/// A decision doc whose text is `text`, as [`read_decision_file`] reads one
+/// at `path`.
+pub fn decision_file_from_text(path: &Path, text: &str) -> DecisionFile {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let (meta, body) = match split_header(text) {
         Some((header, body)) => (header_meta(header), body),
         None => (None, text),
     };
-    Ok(DecisionFile {
+    DecisionFile {
         path: path.to_path_buf(),
         meta,
         body: body.to_string(),
-    })
+    }
 }
 
 fn read_text(path: &Path) -> Result<String, ActualError> {

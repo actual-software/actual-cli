@@ -337,7 +337,7 @@ pub(super) async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> 
 
 /// Whether `path`, as the report shows it, is under `docs/adr/drafts/`,
 /// which keeps work in progress out of Actual AI.
-fn in_drafts(path: &str) -> bool {
+pub(super) fn in_drafts(path: &str) -> bool {
     Path::new(path).starts_with(Path::new(DECISION_DIR).join("drafts"))
 }
 

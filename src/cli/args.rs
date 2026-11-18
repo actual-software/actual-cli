@@ -849,6 +849,11 @@ pub enum AdrAction {
     /// Save a decision to Actual AI, from a local file or from flags
     Create(AdrCreateArgs),
 
+    /// Send the new and changed decision files under docs/adr/ to Actual AI
+    /// as drafts, and accept each accepted one once it is on the default
+    /// branch: the step for the plugin to run at the end of each turn.
+    Push(AdrPushArgs),
+
     /// Change a decision's title, context, policies, levels or scope
     Update(AdrUpdateArgs),
 
@@ -1046,9 +1051,31 @@ pub struct AdrCreateArgs {
     pub allow_duplicate: bool,
 
     /// Send every decision file under docs/adr/ that Actual AI doesn't have
-    /// yet, one at a time. Each keeps the status its header names.
+    /// yet, one at a time, keyed on its path. Each keeps the status its
+    /// header names; an accepted one goes up as a draft until it is on the
+    /// default branch when no person is at the terminal.
     #[arg(long, conflicts_with_all = ["title", "context", "policies", "status"])]
     pub all: bool,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr push`
+#[derive(Parser, Debug)]
+pub struct AdrPushArgs {
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    /// Connected repository: its name, owner/name or id. Defaults to the one
+    /// the working tree's origin remote names.
+    #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// The most files one run sends; the rest wait for the next run.
+    #[arg(long, value_name = "N", default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+    pub limit: u64,
 
     #[command(flatten)]
     pub api: AdrApiOptions,

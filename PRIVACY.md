@@ -321,7 +321,7 @@ The `actual adr` commands send one event per run:
 
 Neither event carries a decision's title, context, policies or scope globs, a
 file path, or the text of `reject --reason`. `adr new`, `adr create`,
-`adr list` and `adr show` send neither.
+`adr push`, `adr list` and `adr show` send neither.
 
 Local session state stores only that boolean and a duplicate-suppression flag, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory or free-form end reasons.
 

@@ -372,11 +372,9 @@ async fn create_from_flags(
 }
 
 /// Save a decision file as the web app's Import does, which keeps the whole
-/// document and always saves a draft; then set the scope its header names,
-/// and publish it for an accepted save. A step after the save that fails
-/// leaves a draft and says how to finish. The pair is then renamed to the
-/// names the repository sync gives the saved decision.
-pub(super) async fn create_from_file(
+/// document and always saves a draft; then finish the save as
+/// [`finish_file_save`] does, renaming the pair.
+async fn create_from_file(
     session: &Session,
     repo: &Repo,
     root: &Path,
@@ -384,14 +382,56 @@ pub(super) async fn create_from_file(
     doc: &ContextFile,
     status: SaveStatus,
 ) -> Result<CreateOutcome, ActualError> {
-    let adr_id = session
+    let imported = session
         .client
         .import_decision(&ImportRequest {
             organization_id: session.org_id.clone(),
             repo_unique_id: repo.id.clone(),
             markdown: file.body.clone(),
+            source_path: None,
         })
         .await?;
+    Ok(finish_file_save(
+        session,
+        repo,
+        root,
+        file,
+        doc,
+        status,
+        &imported.adr_id,
+        Rename::Always,
+    )
+    .await)
+}
+
+/// Which saves give a file's pair the names the repository sync gives the
+/// saved decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rename {
+    /// Every save, as `create --file` does.
+    Always,
+    /// A save that ends accepted. A draft keeps its file's name, since the
+    /// sync deletes a merged file named for a draft.
+    IfAccepted,
+    /// None, because the sync replaces the file once the decision governs.
+    Never,
+}
+
+/// After a file's import: set the scope its header names, and publish it
+/// for an accepted save. A step that fails leaves a draft and says how to
+/// finish. The pair is then renamed as `rename` says.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finish_file_save(
+    session: &Session,
+    repo: &Repo,
+    root: &Path,
+    file: &DecisionFile,
+    doc: &ContextFile,
+    status: SaveStatus,
+    adr_id: &str,
+    rename: Rename,
+) -> CreateOutcome {
+    let adr_id = adr_id.to_string();
     let id = sanitize_server_text(&adr_id);
     let publish = status == SaveStatus::Accepted;
     let paths = file
@@ -441,24 +481,34 @@ pub(super) async fn create_from_file(
         SaveStatus::Draft
     };
     let title = stored_title(doc);
-    let files = files::rename_pair(root, file, &adr_id, &title, saved.as_str());
+    let renames = match rename {
+        Rename::Always => true,
+        Rename::IfAccepted => saved == SaveStatus::Accepted,
+        Rename::Never => false,
+    };
+    let files = renames.then(|| files::rename_pair(root, file, &adr_id, &title, saved.as_str()));
     let local_status_was = file
         .meta
         .as_ref()
         .and_then(|meta| meta.status.clone())
-        .filter(|was| was != saved.as_str() && !files.renamed.is_empty());
-    Ok(CreateOutcome {
+        .filter(|was| {
+            was != saved.as_str()
+                && files
+                    .as_ref()
+                    .is_some_and(|files| !files.renamed.is_empty())
+        });
+    CreateOutcome {
         created: Created {
             adr_id,
             status: saved.as_str().to_string(),
             title,
             repo_unique_id: repo.id.clone(),
         },
-        files: Some(files),
+        files,
         scope_problem,
         publish_problem,
         local_status_was,
-    })
+    }
 }
 
 /// Give a just-saved decision the scope `paths`, as the web app's Edit does:
