@@ -57,6 +57,8 @@ pub struct Discovered {
     /// Markdown files without such a header, such as an index or an ADR in
     /// another format.
     pub skipped: Vec<PathBuf>,
+    /// The skipped files, as read.
+    pub unheaded: Vec<DecisionFile>,
     /// Files that couldn't be read, with the reason.
     pub unreadable: Vec<(PathBuf, String)>,
 }
@@ -173,7 +175,10 @@ pub fn discover(root: &Path) -> Discovered {
     for path in paths {
         match read_decision_file(&path) {
             Ok(file) if file.adr_id().is_some() => found.decisions.push(file),
-            Ok(_) => found.skipped.push(path),
+            Ok(file) => {
+                found.skipped.push(path);
+                found.unheaded.push(file);
+            }
             Err(e) => found.unreadable.push((path, e.to_string())),
         }
     }

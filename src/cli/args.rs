@@ -836,7 +836,8 @@ pub enum AdrAction {
     Check(AdrCheckArgs),
 
     /// List the ADR files this repository keeps in the folders ADR tools use,
-    /// with each file's layout, title and status
+    /// copy the ones outside docs/adr/ into docs/adr/imported/, and list the
+    /// files that won't publish
     Discover(AdrDiscoverArgs),
 
     /// List your organization's decisions
@@ -935,7 +936,8 @@ pub struct AdrNewArgs {
 #[derive(Parser, Debug)]
 pub struct AdrCheckArgs {
     /// Decision files to check. Defaults to every file under docs/adr/ that
-    /// carries an ADR header.
+    /// carries an ADR header; the rest are read for the list of files that
+    /// won't publish.
     #[arg(value_name = "FILE")]
     pub files: Vec<std::path::PathBuf>,
 
@@ -964,9 +966,17 @@ pub struct AdrDiscoverArgs {
     #[arg(long, value_name = "PATH")]
     pub root: Option<std::path::PathBuf>,
 
-    /// Print the list as JSON.
+    /// List what would be copied into docs/adr/imported/, and copy nothing.
     #[arg(long)]
-    pub json: bool,
+    pub dry_run: bool,
+
+    /// Compare the files that won't publish only with this repository's
+    /// files, not with your decisions in Actual AI, even when signed in.
+    #[arg(long)]
+    pub no_cloud: bool,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
 }
 
 /// Arguments for `adr list`
