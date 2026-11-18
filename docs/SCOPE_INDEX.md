@@ -290,7 +290,7 @@ actual rules select [<PLAN>...] [--repo PATH] [--file PATH]... [--limit N] [--mi
 actual rules eval --golden FILE [--repo PATH] [--limit N] [--min-score S] [--ablate SIGNAL]... [--rebuild] [--json]
 actual rules brief --claude-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 actual rules brief --claude-session-start [--repo PATH] [--rules-dir PATH]
-actual rules brief --codex-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S] [--max-session-chars N]
+actual rules brief --codex-hook [--repo PATH] [--rules-dir PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S] [--max-session-chars N] [--no-brief-notice]
 actual rules brief --codex-session-start [--repo PATH] [--rules-dir PATH]
 actual rules brief --file PATH [--repo PATH] [--limit N] [--rules-per-decision N] [--max-chars N] [--min-score S]
 actual session summary --claude-hook [--repo PATH] [--rules-dir PATH]
@@ -333,8 +333,16 @@ that exist are briefed. `PreToolUse` on `apply_patch` briefs up to three files a
 patch's `*** Add File:`, `*** Update File:` and `*** Move to:` headers name,
 absolute or relative. The files of one call are briefed in turn against the
 same memory and arrive as one `additionalContext`, in the same reply shape
-Claude Code gets, which carries only keys Codex's strict hook parser accepts.
-Codex envelopes carry no `agent_id`, so a Codex session has one memory.
+Claude Code gets plus a leading top-level `systemMessage`; both are keys
+Codex's strict hook parser accepts. Codex shows `additionalContext` to the
+model only, and Claude Code's per-brief transcript row comes from the plugin's
+mod, which Codex has no equivalent of, so the `systemMessage` is the user's
+sign that a brief arrived: `Actual AI: briefed 2 ADRs · 7 rules · src/a.ts`,
+counted from the brief itself and naming only the files that got one, or a
+line saying briefing stopped when the budget note replaced a brief. Codex shows
+it to the user and keeps it out of the model's context. `--no-brief-notice`
+leaves it out. Codex envelopes carry no `agent_id`, so a Codex session has one
+memory.
 `--codex-session-start` is `--claude-session-start` for a Codex `SessionStart`
 envelope.
 

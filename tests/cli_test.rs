@@ -3418,14 +3418,36 @@ fn test_rules_brief_codex_hook_briefs_a_shell_read() {
         .clone()
     };
 
-    let (keys, value) = codex_reply_keys(&brief(read.clone()));
-    assert_eq!(keys, ["hookSpecificOutput"]);
+    let (mut keys, value) = codex_reply_keys(&brief(read.clone()));
+    keys.sort();
+    assert_eq!(keys, ["hookSpecificOutput", "systemMessage"]);
     assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PostToolUse");
     assert!(value["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap()
         .contains("R-A-001"));
-    assert!(brief(read).is_empty(), "briefed once per session");
+    let notice = value["systemMessage"].as_str().unwrap();
+    assert!(
+        notice.starts_with("Actual AI: briefed 1 ADR \u{b7} ")
+            && notice.ends_with(" \u{b7} services/auth/token.ts"),
+        "{notice}"
+    );
+    assert!(brief(read.clone()).is_empty(), "briefed once per session");
+
+    // A fresh session with --no-brief-notice gets the brief alone.
+    let quiet = read.replace("\"s1\"", "\"s2\"");
+    let out = actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["rules", "brief", "--codex-hook", "--no-brief-notice"],
+    )
+    .write_stdin(quiet)
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    assert_eq!(codex_reply_keys(&out).0, ["hookSpecificOutput"]);
 
     let start = serde_json::json!({"session_id": "s1", "cwd": repo.path(), "hook_event_name": "SessionStart", "source": "compact"}).to_string();
     actual_in(
