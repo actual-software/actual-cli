@@ -145,7 +145,7 @@ use serde::Serialize;
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::{
-    capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
+    self, capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
     CheckJson, HookRun, Outcome,
 };
 use crate::cli::commands::codex_rollout;
@@ -364,7 +364,7 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
         }
     };
 
-    let plan_text = match host {
+    let (plan_text, picker_available) = match host {
         HookHost::Claude => {
             let Some((plan_text, _source)) = plan_check_hook::resolve_plan(&envelope) else {
                 emit(host.notice(
@@ -373,12 +373,12 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
                 ));
                 return;
             };
-            plan_text
+            (plan_text, false)
         }
         // Codex runs this on every `Stop`, so a turn that was not in Plan
         // mode, or proposed no plan, is the common case and says nothing.
         HookHost::Codex => match codex_plan(&envelope) {
-            Some(plan_text) => plan_text,
+            Some(found) => found,
             None => return,
         },
     };
@@ -404,6 +404,19 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
     let plan_digest = governance_session::content_digest(&plan_text);
     if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
         super::adr_report::keep_plan(session_id, &rules_dir, &plan_text);
+    }
+    // A picker question about this same plan went unanswered: end the turn
+    // with the text choices instead of judging it again.
+    if let Some(reply) = check_engine::codex_unanswered_picker(
+        host,
+        ArtifactKind::Plan,
+        session_id,
+        &rules_dir,
+        &session,
+        &plan_digest,
+    ) {
+        emit(reply);
+        return;
     }
 
     // Noted before the judge runs, so a judge that outlasts the hook's
@@ -452,6 +465,7 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
             max_rounds: args.max_rounds,
             ask: None,
             codex_ask: args.codex_ask,
+            picker: args.codex_picker && picker_available,
             #[cfg(feature = "telemetry")]
             started,
         },
@@ -463,12 +477,17 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
 /// The plan a Codex `Stop` envelope's turn proposed, when that turn ran in
 /// Plan mode. `None` for any other turn, and whenever the rollout cannot say:
 /// see `codex_rollout`'s module doc.
-fn codex_plan(envelope: &HookEnvelope) -> Option<String> {
+fn codex_plan(envelope: &HookEnvelope) -> Option<(String, bool)> {
     let facts = codex_rollout::turn_facts(
         Path::new(envelope.transcript_path.as_deref()?),
         envelope.turn_id.as_deref()?,
     );
-    facts.plan_mode.filter(|&plan| plan).and(facts.plan)
+    let picker = facts.picker == Some(true);
+    facts
+        .plan_mode
+        .filter(|&plan| plan)
+        .and(facts.plan)
+        .map(|plan| (plan, picker))
 }
 
 /// Direct mode's `--json`: the check, and beside it the folder pass when the
@@ -744,6 +763,7 @@ mod tests {
             claude_hook: false,
             codex_hook: false,
             codex_ask: false,
+            codex_picker: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -2947,8 +2967,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let read = |raw: String| codex_plan(&serde_json::from_str(&raw).unwrap());
         assert_eq!(
-            read(codex_stop(dir.path(), "plan", Some("# Plan"))).as_deref(),
-            Some("# Plan")
+            read(codex_stop(dir.path(), "plan", Some("# Plan"))),
+            Some(("# Plan".to_string(), false))
         );
         assert_eq!(
             read(codex_stop(dir.path(), "default", Some("# Plan"))),

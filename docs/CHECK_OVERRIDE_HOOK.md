@@ -88,5 +88,14 @@ Codex shows `stopReason` to the user and never to the model, and it outranks a b
 - **Otherwise, with conflicts waiting.** The reply is `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`. It tells the agent that its last turn was stopped on these conflicts and that the user's message answers them, and the conflicts are no longer kept.
 - **Otherwise.** Nothing.
 
+**`--codex-picker`, with `--codex-ask`.** Codex's only picker is the agent's own `request_user_input` tool. Plan mode always has it, and Default mode has it with Codex's `default_mode_request_user_input` feature on, which the gates read from the tool's description in the session rollout. Where the agent can use it, a conflict is a `{"decision":"block","reason":…}` again, but the reason tells the agent to call `request_user_input` with exact arguments: question id `actual_choice_<nonce>`, options "Revise the changes to conform (Recommended)" (or "the plan") and "Override all N rules" (or "Override <rule-id>"). The question is kept in the session with its nonce and the digest of the work it is about. `impl-check --codex-hook` reads the answer from a `PostToolUse` on `request_user_input`, but only for a question id it issued, and never with `CODEX_THREAD_ID` or `CODEX_SESSION_ID` set. It replies with `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":…}}`:
+
+- **Revise:** the conflicts, to fix.
+- **Override:** a second call to make, id `actual_reason_<nonce>`, with "The check misread my change", "This ADR doesn't apply here" and "This ADR is wrong". Under Other, a typed `accepted` or `adr-outdated` is that code, and other words are `other`.
+- **The why answer:** every rule the gate is blocking is overridden, with source `session_dialog`, and the agent is told to end its turn.
+- **Other text in the first question:** no rule was overridden; the agent acts on the words.
+
+A question that goes unanswered (the agent didn't ask, the user dismissed it, or the answer never arrived) ends the turn at the next check of the same work with the plain `--codex-ask` stop, without judging again.
+
 An override never comes from the agent's own shell. Codex sets `CODEX_THREAD_ID` and `CODEX_SESSION_ID` there, and a Codex hook ran without either on Codex CLI 0.167.0. When either is set, nothing is recorded, and the stop reason names the variable.
 

@@ -1603,6 +1603,17 @@ pub struct PlanCheckArgs {
     #[arg(long, requires = "codex_hook")]
     pub codex_ask: bool,
 
+    /// With `--codex-ask`, have the agent show the user a picker
+    /// (`request_user_input`) instead of ending the turn, when the session
+    /// rollout says the tool works in the turn's mode: Plan mode always, and
+    /// Default mode with Codex's `default_mode_request_user_input` feature
+    /// on. The conflict is a `{"decision":"block"}` telling the agent to ask;
+    /// the answer comes back through `impl-check --codex-hook` on
+    /// `PostToolUse`. Without the tool, or when the question goes unanswered,
+    /// the turn ends as plain `--codex-ask` ends it.
+    #[arg(long, requires = "codex_ask")]
+    pub codex_picker: bool,
+
     /// Maximum number of rule documents to judge the plan against.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
@@ -1750,6 +1761,17 @@ pub struct ImplCheckArgs {
     /// revise at once, which suits a run with nobody to ask.
     #[arg(long, requires = "codex_hook")]
     pub codex_ask: bool,
+
+    /// With `--codex-ask`, have the agent show the user a picker
+    /// (`request_user_input`) instead of ending the turn, when the session
+    /// rollout says the tool works in the turn's mode: Plan mode always, and
+    /// Default mode with Codex's `default_mode_request_user_input` feature
+    /// on. The conflict is a `{"decision":"block"}` telling the agent to ask;
+    /// the answer comes back through `impl-check --codex-hook` on
+    /// `PostToolUse`. Without the tool, or when the question goes unanswered,
+    /// the turn ends as plain `--codex-ask` ends it.
+    #[arg(long, requires = "codex_ask")]
+    pub codex_picker: bool,
 
     /// Maximum number of rule documents to judge the diff against.
     #[arg(long, default_value_t = 20)]

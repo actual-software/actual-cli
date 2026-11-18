@@ -3459,6 +3459,105 @@ fn test_impl_check_codex_ask_stops_hands_over_and_takes_an_override() {
     assert_eq!(keys, ["systemMessage"]);
 }
 
+/// `--codex-picker`, end to end: a conflict sends the agent back with the
+/// picker to show, Override asks why, the why answer records the override,
+/// and the next check passes. An unanswered picker over the same diff ends the
+/// turn with the text choices.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_codex_picker_asks_and_records_the_answer() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let stop = |session: &str| {
+        let raw = codex_stop(fixture.repo.path(), session, "default", None);
+        let mut envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // The tool list as Codex writes it with the picker on in Default mode.
+        let rollout = envelope["transcript_path"].as_str().unwrap().to_string();
+        let tools = serde_json::json!({"type":"response_item","payload":{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"request_user_input","description":"Request user input for one to three short questions and wait for the response. This tool is only available in Default or Plan mode."}]}]}});
+        let old = std::fs::read_to_string(&rollout).unwrap();
+        std::fs::write(&rollout, format!("{tools}\n{old}")).unwrap();
+        envelope["session_id"] = session.into();
+        envelope.to_string()
+    };
+    let answer = |session: &str, id: &str, picked: &str| {
+        serde_json::json!({
+            "session_id": session,
+            "turn_id": "t1",
+            "cwd": fixture.repo.path(),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "request_user_input",
+            "tool_input": {"questions": [{"id": id, "header": "h", "question": "q", "options": []}]},
+            "tool_response": serde_json::json!({"answers": {id: {"answers": [picked]}}}).to_string(),
+        })
+        .to_string()
+    };
+    let run = |args: &[&str], input: String| {
+        let out = fixture
+            .cmd()
+            .args(args)
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+    let gate = ["--codex-hook", "--codex-ask", "--codex-picker"];
+    let call = |text: &str| -> serde_json::Value {
+        serde_json::from_str(&text[text.rfind("\n{").unwrap() + 1..]).unwrap()
+    };
+
+    let blocked = run(&gate, stop("sess-picker"));
+    let (keys, value) = codex_reply_keys(blocked.as_bytes());
+    assert_eq!(keys, ["decision", "reason"]);
+    let reason = value["reason"].as_str().unwrap();
+    let choice = call(reason)["questions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(choice.starts_with("actual_choice_"), "{reason}");
+
+    let why = run(
+        &["--codex-hook"],
+        answer("sess-picker", &choice, "Override R-A-001"),
+    );
+    assert!(why.starts_with(
+        r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":""#
+    ));
+    let (_, value) = codex_reply_keys(why.as_bytes());
+    let text = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let reason_id = call(text)["questions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason_id.starts_with("actual_reason_"), "{text}");
+
+    let done = run(
+        &["--codex-hook"],
+        answer("sess-picker", &reason_id, "This ADR is wrong"),
+    );
+    assert!(
+        done.contains("overrode R-A-001 in the picker (reason: adr-wrong)"),
+        "{done}"
+    );
+    let (keys, _) = codex_reply_keys(run(&gate, stop("sess-picker")).as_bytes());
+    assert_eq!(keys, ["systemMessage"], "overridden, so the check passes");
+
+    // Asked and never answered: the same diff ends the turn with the text.
+    run(&gate, stop("sess-unanswered"));
+    let (keys, value) = codex_reply_keys(run(&gate, stop("sess-unanswered")).as_bytes());
+    assert_eq!(keys, ["continue", "stopReason"]);
+    assert!(value["stopReason"]
+        .as_str()
+        .unwrap()
+        .contains("went unanswered"));
+}
+
 /// `--codex-ask` belongs to `--codex-hook`.
 #[test]
 fn test_codex_ask_requires_codex_hook() {
@@ -3468,6 +3567,11 @@ fn test_codex_ask_requires_codex_hook() {
             .assert()
             .failure()
             .stderr(predicate::str::contains("--codex-hook"));
+        cmd()
+            .args([command, "--codex-hook", "--codex-picker"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--codex-ask"));
     }
 }
 

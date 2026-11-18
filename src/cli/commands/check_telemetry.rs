@@ -423,6 +423,7 @@ pub(super) mod tests {
             max_rounds: 3,
             ask: None,
             codex_ask: false,
+            picker: false,
             started: Started::now(),
         };
         let blocking: Vec<&CheckedRule> = verdicts
@@ -1054,6 +1055,7 @@ pub(super) mod tests {
                 max_rounds: 3,
                 ask: None,
                 codex_ask: false,
+                picker: false,
                 started: Started {
                     time: std::time::UNIX_EPOCH + std::time::Duration::from_secs(7),
                     instant: Instant::now(),

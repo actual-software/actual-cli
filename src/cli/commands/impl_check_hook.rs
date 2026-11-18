@@ -42,12 +42,25 @@ pub struct HookEnvelope {
     /// Codex only: the text of a `UserPromptSubmit`, read for an override the
     /// user typed (see `check_engine::codex_prompt_reply`).
     pub prompt: Option<String>,
+    /// Codex only: a `PostToolUse` on `request_user_input` carries the
+    /// questions asked and the user's answers (see
+    /// `check_engine::codex_answer_reply`).
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub tool_response: Option<serde_json::Value>,
 }
 
 impl HookEnvelope {
     /// Whether this envelope came from a `UserPromptSubmit` hook.
     pub fn is_turn_start(&self) -> bool {
         self.hook_event_name.as_deref() == Some("UserPromptSubmit")
+    }
+
+    /// Whether this envelope reports the user's answer to a picker the agent
+    /// showed with `request_user_input`.
+    pub fn is_picker_answer(&self) -> bool {
+        self.hook_event_name.as_deref() == Some("PostToolUse")
+            && self.tool_name.as_deref() == Some("request_user_input")
     }
 }
 

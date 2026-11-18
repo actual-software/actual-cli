@@ -456,6 +456,12 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
             return;
         }
     };
+    if host == HookHost::Codex && envelope.is_picker_answer() {
+        if let Some(reply) = codex_answer(args, &envelope) {
+            emit(reply);
+        }
+        return;
+    }
     if envelope.is_turn_start() {
         record_turn_start(args, &envelope);
         if host == HookHost::Codex {
@@ -468,7 +474,11 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     // A Codex Plan-mode turn makes no edits, and its `Stop` belongs to the
     // plan gate. An unknown mode still runs the check: skipping it would let
     // a rollout format change switch the implementation gate off.
-    if host == HookHost::Codex && codex_plan_turn(&envelope) {
+    let facts = match host {
+        HookHost::Codex => codex_facts(&envelope),
+        HookHost::Claude => codex_rollout::TurnFacts::default(),
+    };
+    if facts.plan_mode == Some(true) {
         return;
     }
 
@@ -529,6 +539,19 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
         base.as_deref(),
         &diff_digest,
     );
+    // A picker question about this same diff went unanswered: end the turn
+    // with the text choices instead of judging it again.
+    if let Some(reply) = check_engine::codex_unanswered_picker(
+        host,
+        ArtifactKind::Diff,
+        session_id,
+        &rules_dir,
+        &session,
+        &diff_digest,
+    ) {
+        emit(reply);
+        return;
+    }
 
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
@@ -571,6 +594,7 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
             max_rounds: args.max_rounds,
             ask: ask.as_ref(),
             codex_ask: args.codex_ask,
+            picker: args.codex_picker && facts.picker == Some(true),
             #[cfg(feature = "telemetry")]
             started,
         },
@@ -579,13 +603,33 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     );
 }
 
-/// Whether a Codex `Stop` envelope ends a turn its rollout says ran in Plan
-/// mode. See `codex_rollout`'s module doc.
-fn codex_plan_turn(envelope: &HookEnvelope) -> bool {
+/// What the rollout says about the turn a Codex `Stop` envelope ends: its
+/// mode (a Plan-mode turn makes no edits) and whether the agent can show a
+/// picker in it. See `codex_rollout`'s module doc.
+fn codex_facts(envelope: &HookEnvelope) -> codex_rollout::TurnFacts {
     let (Some(path), Some(turn_id)) = (&envelope.transcript_path, &envelope.turn_id) else {
-        return false;
+        return codex_rollout::TurnFacts::default();
     };
-    codex_rollout::turn_facts(Path::new(path), turn_id).plan_mode == Some(true)
+    codex_rollout::turn_facts(Path::new(path), turn_id)
+}
+
+/// The user's answer to a picker a gate asked the agent to show, from a
+/// Codex `PostToolUse` on `request_user_input` (see
+/// `check_engine::codex_answer_reply`).
+fn codex_answer(args: &ImplCheckArgs, envelope: &HookEnvelope) -> Option<String> {
+    let session_id = envelope.session_id.as_deref().filter(|id| !id.is_empty())?;
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    check_engine::codex_answer_reply(
+        session_id,
+        envelope.tool_input.as_ref(),
+        envelope.tool_response.as_ref(),
+        &root,
+        &rules_dir,
+    )
 }
 
 /// What a Codex `UserPromptSubmit` answers once the turn start is recorded:
@@ -741,6 +785,7 @@ mod tests {
             claude_hook: false,
             codex_hook: false,
             codex_ask: false,
+            codex_picker: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -2557,7 +2602,8 @@ mod tests {
     #[test]
     fn test_codex_plan_turn_reads_the_rollout() {
         let dir = tempdir().unwrap();
-        let read = |raw: String| codex_plan_turn(&serde_json::from_str(&raw).unwrap());
+        let read =
+            |raw: String| codex_facts(&serde_json::from_str(&raw).unwrap()).plan_mode == Some(true);
         assert!(read(codex_stop(dir.path(), "plan")));
         assert!(!read(codex_stop(dir.path(), "default")));
         // Unknown is not Plan mode: the implementation gate still runs.
