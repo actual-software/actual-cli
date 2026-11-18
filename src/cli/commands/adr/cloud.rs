@@ -724,6 +724,12 @@ fn render_flags_created(outcome: &FlagsOutcome, repo: &Repo) -> String {
     {
         let _ = writeln!(out, "  wrote {}", file.display());
     }
+    if outcome.rule_file.is_some() {
+        out.push_str(
+            "  Commit both files with the change they govern, or delete them before you pull \
+             once that pull request merges.\n",
+        );
+    }
     if let Some(problem) = &outcome.files_problem {
         let _ = writeln!(out, "  {} {problem}", theme::warning("note:"));
     }
@@ -1656,6 +1662,10 @@ mod tests {
         );
         assert!(!src.join("docs").exists(), "{text}");
         assert!(!src.join(".actual").exists(), "{text}");
+        // git won't pull the sync's merge over the same files left untracked.
+        let commit = "  Commit both files with the change they govern, or delete them before \
+                      you pull once that pull request merges.\n";
+        assert!(text.contains(commit), "{text}");
 
         // Inside `.git` there's no working tree to write into.
         let text = block(run_create(&args, &checkout.path().join(".git"), true)).unwrap();
@@ -1667,6 +1677,7 @@ mod tests {
             ),
             "{text}"
         );
+        assert!(!text.contains(commit), "{text}");
     }
 
     #[test]
