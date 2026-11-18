@@ -56,7 +56,7 @@ Keep your team's architecture decisions under `docs/adr/`. From your own termina
 actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
 ```
 
-From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens. Either way, each decision lands in `docs/adr/`, with the rule file the checks read beside it under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
+From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted. To accept a draft, change `status: draft` to `status: accepted` in the header of both files `adr new` wrote, or have the agent pass `--status accepted`. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens. Either way, each decision lands in `docs/adr/`, with the rule file the checks read beside it under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
 
 `actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. Signed in, `actual adr create` saves a decision to your Actual AI account, where `list`, `show`, `update`, `publish` and the other `actual adr` commands manage it. [ADR commands](docs/ADR_COMMANDS.md) covers each one.
 
