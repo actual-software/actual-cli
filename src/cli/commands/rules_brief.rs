@@ -43,7 +43,11 @@
 //! writes (see [`super::codex_paths`]). Each file is briefed in turn against
 //! the same memory, so a second file adds only what the first did not, and the
 //! briefs arrive as one `additionalContext`. The reply shape is the one Claude
-//! Code gets, which is also exactly what Codex's schema allows.
+//! Code gets, plus a top-level `systemMessage`, one line naming what was
+//! briefed. Codex shows hook context to the model only, and has nothing like
+//! the mod's transcript row, so this line is the user's only sign that a brief
+//! arrived; Codex shows it and does not put it in the model's context.
+//! `--no-brief-notice` leaves it out.
 //!
 //! **A session budget.** `--max-session-chars` caps the characters of brief a
 //! session receives, counted in [`super::brief_ledger`] across every agent. A
@@ -149,11 +153,20 @@ struct HookSpecificContext {
 /// The hook's only output shape. It has no `permissionDecision` field, which
 /// is what makes "this hook never grants or denies" a property of the type
 /// rather than a promise in a comment.
+///
+/// `system_message` is Codex only: Claude Code's reply never sets it, so its
+/// output is unchanged.
 #[derive(Debug, Serialize)]
 struct ContextOutput {
+    #[serde(rename = "systemMessage", skip_serializing_if = "Option::is_none")]
+    system_message: Option<String>,
     #[serde(rename = "hookSpecificOutput")]
     hook_specific_output: HookSpecificContext,
 }
+
+/// What the Codex user is told when the budget note replaces a brief.
+const EXHAUSTED_USER_NOTICE: &str =
+    "Actual AI: rule briefing reached this session's budget and has stopped";
 
 pub fn exec(args: &RulesBriefArgs) -> Result<(), ActualError> {
     if args.claude_session_start || args.codex_session_start {
@@ -407,13 +420,62 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
 
 /// The `additionalContext` reply naming `event`.
 fn context_reply(event: String, context: String) -> String {
+    notice_reply(event, context, None)
+}
+
+/// [`context_reply`] with a line for the user beside it.
+fn notice_reply(event: String, context: String, notice: Option<String>) -> String {
     serde_json::to_string(&ContextOutput {
+        system_message: notice,
         hook_specific_output: HookSpecificContext {
             hook_event_name: event,
             additional_context: context,
         },
     })
-    .expect("two strings serialize")
+    .expect("strings serialize")
+}
+
+/// The decisions and rule lines in a rendered brief: `## ` heads a decision
+/// and `- [` a rule, as [`crate::rules::brief`] writes them.
+fn brief_counts(brief: &str) -> (usize, usize) {
+    brief.lines().fold((0, 0), |(decisions, rules), line| {
+        (
+            decisions + usize::from(line.starts_with("## ")),
+            rules + usize::from(line.starts_with("- [")),
+        )
+    })
+}
+
+/// The user's line for a Codex reply: what was briefed and for which files,
+/// then the budget note if it was given. `None` when there is neither.
+fn codex_notice(briefed: &[(String, String)], budget_spent: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if !briefed.is_empty() {
+        let (decisions, rules) = briefed
+            .iter()
+            .map(|(_, brief)| brief_counts(brief))
+            .fold((0, 0), |(d, r), (bd, br)| (d + bd, r + br));
+        let files: Vec<&str> = briefed.iter().map(|(file, _)| file.as_str()).collect();
+        parts.push(format!(
+            "Actual AI: briefed {} \u{b7} {} \u{b7} {}",
+            counted(decisions, "ADR"),
+            counted(rules, "rule"),
+            files.join(", ")
+        ));
+    }
+    if budget_spent {
+        parts.push(EXHAUSTED_USER_NOTICE.to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// `1 rule` / `2 rules`.
+fn counted(n: usize, singular: &str) -> String {
+    if n == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{n} {singular}s")
+    }
 }
 
 /// The Codex hook's reply for one envelope, or `None` for silence. Like
@@ -440,22 +502,38 @@ fn codex_hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     });
 
     let mut briefs = Vec::new();
+    // Each delivered brief beside the file it is for, for the user's line.
+    let mut briefed = Vec::new();
+    let mut budget_spent = false;
     for file in files {
         let file = file.to_string_lossy().into_owned();
+        let shown = relative_to_root(&root, &file).unwrap_or_else(|| file.clone());
         match brief_for(&root, &file, args, session) {
-            Ok(brief) => briefs.push(brief),
+            Ok(brief) => {
+                briefed.push((shown, brief.clone()));
+                briefs.push(brief);
+            }
             Err(reason) => {
-                report(reason, &relative_to_root(&root, &file).unwrap_or(file));
+                report(reason, &shown);
                 if reason == NoBrief::BudgetSpent {
                     if let Some(note) = budget_notice(&root, args, session) {
                         briefs.push(note);
+                        budget_spent = true;
                     }
                     break;
                 }
             }
         }
     }
-    (!briefs.is_empty()).then(|| context_reply(event, briefs.join("\n\n")))
+    if briefs.is_empty() {
+        return None;
+    }
+    let notice = if args.no_brief_notice {
+        None
+    } else {
+        codex_notice(&briefed, budget_spent)
+    };
+    Some(notice_reply(event, briefs.join("\n\n"), notice))
 }
 
 /// [`EXHAUSTED_NOTICE`], the first time this session's budget turns a brief
@@ -930,6 +1008,7 @@ mod tests {
             // Explicit, so these tests never read the machine's own config.
             min_score: Some(0.0),
             max_session_chars: None,
+            no_brief_notice: false,
         }
     }
 
@@ -2960,12 +3039,99 @@ mod tests {
             );
 
             let reply = codex_hook_reply(&read, &a).expect("a brief");
-            let (keys, event, context) = context_of(&reply);
-            assert_eq!(keys, ["hookSpecificOutput"]);
+            let (mut keys, event, context) = context_of(&reply);
+            keys.sort();
+            assert_eq!(keys, ["hookSpecificOutput", "systemMessage"]);
             assert_eq!(event, "PostToolUse");
             assert!(context.contains("R-A-001"), "{context}");
             assert_eq!(codex_hook_reply(&read, &a), None, "briefed already");
         });
+    }
+
+    fn notice_of(reply: &str) -> Option<String> {
+        let value: serde_json::Value = serde_json::from_str(reply).unwrap();
+        value["systemMessage"].as_str().map(str::to_string)
+    }
+
+    /// The user is told what the brief carried and for which file, in a line
+    /// counted from the brief itself.
+    #[test]
+    fn test_codex_a_brief_tells_the_user_what_it_carried() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let a = codex_args(root.path());
+            let reply = codex_hook_reply(
+                &codex_envelope(
+                    root.path(),
+                    "s1",
+                    "PostToolUse",
+                    "Bash",
+                    "cat infra/main.tf services/auth/oauth/token.ts",
+                ),
+                &a,
+            )
+            .expect("a brief");
+            let (decisions, rules) = brief_counts(&context_of(&reply).2);
+            assert_eq!(decisions, 1);
+            assert!(rules >= 1);
+            // Only the governed file is named: the other one added nothing.
+            assert_eq!(
+                notice_of(&reply).as_deref(),
+                Some(
+                    format!(
+                        "Actual AI: briefed 1 ADR \u{b7} {} \u{b7} services/auth/oauth/token.ts",
+                        counted(rules, "rule")
+                    )
+                    .as_str()
+                )
+            );
+        });
+    }
+
+    /// `--no-brief-notice` leaves the line out and the brief alone.
+    #[test]
+    fn test_codex_no_brief_notice_leaves_the_line_out() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let mut a = codex_args(root.path());
+            a.no_brief_notice = true;
+            let read = codex_envelope(
+                root.path(),
+                "s1",
+                "PostToolUse",
+                "Bash",
+                "cat services/auth/oauth/token.ts",
+            );
+            let reply = codex_hook_reply(&read, &a).expect("a brief");
+            let (keys, _, context) = context_of(&reply);
+            assert_eq!(keys, ["hookSpecificOutput"]);
+            assert!(context.contains("R-A-001"), "{context}");
+        });
+    }
+
+    /// Claude Code's reply never carries the line: the mod reports briefs
+    /// there, and its output must not change.
+    #[test]
+    fn test_claude_reply_has_no_notice() {
+        with_scratch_config(|| {
+            let root = codex_repo();
+            let first = session_envelope(root.path(), "s1", None, &governed(root.path()));
+            let reply = hook_reply(&first, &args(root.path())).expect("a brief");
+            assert!(!reply.contains("systemMessage"), "{reply}");
+        });
+    }
+
+    #[test]
+    fn test_brief_counts_reads_decisions_and_rules() {
+        let brief = "This repository's own rules that apply to `a.ts`:\n\n\
+                     ## One\n- [a/R-1] MUST x.\n- [a/R-2] MUST y.\n- (2 of 5 rules shown)\n\n\
+                     ## Two\n- [b/R-1] MUST NOT z.";
+        assert_eq!(brief_counts(brief), (2, 3));
+        assert_eq!(codex_notice(&[], false), None);
+        assert_eq!(
+            codex_notice(&[], true).as_deref(),
+            Some(EXHAUSTED_USER_NOTICE)
+        );
     }
 
     /// A patch is briefed before it is applied, from its headers, whether
@@ -3123,6 +3289,7 @@ mod tests {
 
             let reply = codex_hook_reply(&read, &a).expect("the notice");
             assert_eq!(context_of(&reply).2, EXHAUSTED_NOTICE);
+            assert_eq!(notice_of(&reply).as_deref(), Some(EXHAUSTED_USER_NOTICE));
             assert_eq!(codex_hook_reply(&read, &a), None);
             let recorded = session_ledger(root.path(), "s1");
             assert!(recorded.budget_spent);

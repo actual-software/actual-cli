@@ -1261,6 +1261,12 @@ pub struct RulesBriefArgs {
     /// add a second exhaustion note. The Codex hook forwards it as this flag.
     #[arg(long, value_name = "CHARS")]
     pub max_session_chars: Option<usize>,
+
+    /// Under `--codex-hook`, leave out the one-line `systemMessage` that tells
+    /// the user which files were briefed and how many ADRs and rules the
+    /// brief carried. The brief itself is unchanged.
+    #[arg(long, requires = "codex_hook")]
+    pub no_brief_notice: bool,
 }
 
 /// Arguments for the `session` command

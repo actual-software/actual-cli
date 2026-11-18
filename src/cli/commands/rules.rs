@@ -629,6 +629,7 @@ mod tests {
                     max_chars: crate::rules::brief::DEFAULT_MAX_CHARS,
                     min_score: Some(0.0),
                     max_session_chars: None,
+                    no_brief_notice: false,
                 }),
             };
             assert!(exec(&args).is_ok());
