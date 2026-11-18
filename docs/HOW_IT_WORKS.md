@@ -91,7 +91,7 @@ Signing in is optional, since the checks and `rules` run signed out. Ask your ag
 <details>
 <summary><strong>Direct CLI</strong></summary>
 
-`actual whoami` shows the signed-in account, organization, and scopes, and `actual logout` signs you out. For CI and headless agents, see [Agent authentication](AGENT_AUTH.md): `actual auth create-token` mints a scoped access token from an existing session, and `actual mint-token` signs one from a service-account key when there is no human to sign in.
+`actual whoami` shows the signed-in account, organization, and scopes, and `actual logout` signs you out. `actual whoami --check` asks the server whether that sign-in still works, renewing it first when it is about to expire; it exits 2 when you need to sign in again and 3 when the server can't be reached. For CI and headless agents, see [Agent authentication](AGENT_AUTH.md): `actual auth create-token` mints a scoped access token from an existing session, and `actual mint-token` signs one from a service-account key when there is no human to sign in.
 
 </details>
 
@@ -129,7 +129,7 @@ The skill manages the CLI with its defaults, so most teams never touch configura
 
 ### Documentation
 
-See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill) for skill setup, and the [Actual CLI docs](https://actual.ai/cli/docs) for the full command reference the skill wraps. Point your agent at [docs.md](https://actual.ai/cli/docs.md) for the same docs in Markdown. [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers those two commands, and [ADR commands](ADR_COMMANDS.md) covers writing decisions and managing them in Actual AI with `actual adr`.
+See the [Actual.ai Skill README](https://github.com/actual-software/actual-skill) for skill setup, and [Getting Started](GETTING_STARTED.md#commands) for the commands the skill wraps. [adr-bot and the Advisor](ADR_BOT_AND_ADVISOR.md) covers those two commands, and [ADR commands](ADR_COMMANDS.md) covers writing decisions and managing them in Actual AI with `actual adr`.
 
 ### Requirements
 

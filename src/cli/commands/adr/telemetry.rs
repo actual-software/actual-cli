@@ -21,16 +21,24 @@
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved, a report returns before it builds anything.
+//!
+//! **Nothing without the feature.** A build without the `telemetry` feature
+//! has neither event, and both reports are no-ops that take the same calls.
 
 use std::time::Instant;
 
+#[cfg(feature = "telemetry")]
 use super::super::brief_telemetry;
 use crate::adr::workflow;
 use crate::api::adr_types::{LifecycleAction, WebDecision};
 use crate::error::ActualError;
-use crate::telemetry::otlp::{self, CheckCounts, ReviewedDecision};
+#[cfg(feature = "telemetry")]
+pub(super) use crate::telemetry::otlp::CheckCounts;
+#[cfg(feature = "telemetry")]
+use crate::telemetry::otlp::{self, ReviewedDecision};
 
 /// A command run being timed, and whether a person was at the terminal.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) struct Run {
     started: Instant,
     interactive: bool,
@@ -44,6 +52,7 @@ impl Run {
         }
     }
 
+    #[cfg(feature = "telemetry")]
     fn ended<'a>(&self, outcome: &'a str, exit_code: i32) -> otlp::AdrRun<'a> {
         otlp::AdrRun {
             outcome,
@@ -89,12 +98,25 @@ pub(super) fn command(action: LifecycleAction) -> &'static str {
     }
 }
 
+/// What an `adr check` run found, which nothing reads in a build without the
+/// `telemetry` feature.
+#[cfg(not(feature = "telemetry"))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct CheckCounts {
+    pub files: usize,
+    pub failed: usize,
+    pub duplicates: usize,
+}
+
+#[cfg(feature = "telemetry")]
 fn exit_code<T>(result: &Result<T, ActualError>) -> i32 {
     result.as_ref().err().map_or(0, ActualError::exit_code)
 }
 
 /// Report one `adr check` run that found `counts`: `passed`, `failed` when a
 /// file failed the save rules, or `error` when the check couldn't run.
+#[cfg(feature = "telemetry")]
 pub(super) fn report_check(run: &Run, counts: CheckCounts, result: &Result<(), ActualError>) {
     let outcome = match result {
         Ok(()) => "passed",
@@ -107,6 +129,7 @@ pub(super) fn report_check(run: &Run, counts: CheckCounts, result: &Result<(), A
 /// Report one run of review command `action` that found `reviewed`, if it got
 /// that far: `succeeded`, `refused` when [`workflow`] turns the change down
 /// before anything is sent, `not_signed_in`, or `failed`.
+#[cfg(feature = "telemetry")]
 pub(super) fn report_review<T>(
     run: &Run,
     action: &str,
@@ -127,6 +150,7 @@ pub(super) fn report_review<T>(
     send(|origin| origin.adr_reviewed(action, decision, run.ended(outcome, exit_code(result))));
 }
 
+#[cfg(feature = "telemetry")]
 fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
     let Some(destination) = brief_telemetry::Destination::resolve() else {
         return;
@@ -134,7 +158,14 @@ fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
     destination.deliver(vec![build(&otlp::Origin::resolve())]);
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_check(_: &Run, _: CheckCounts, _: &Result<(), ActualError>) {}
+
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_review<T>(_: &Run, _: &str, _: Option<&Reviewed>, _: &Result<T, ActualError>) {
+}
+
+#[cfg(all(test, feature = "telemetry"))]
 pub(super) mod tests {
     use super::*;
 

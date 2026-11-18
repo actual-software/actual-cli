@@ -433,7 +433,7 @@ pub enum Command {
     /// Sign out of your Actual AI account and clear local credentials
     Logout,
     /// Show the signed-in Actual AI account and organization
-    Whoami,
+    Whoami(WhoamiArgs),
     /// Write and check ADRs in this repository, and manage your decisions in
     /// Actual AI
     Adr(AdrArgs),
@@ -711,6 +711,17 @@ pub struct LoginArgs {
     /// is ignored in this mode (the org is selected on the approval page).
     #[arg(long, hide = true)]
     pub device: bool,
+}
+
+/// Arguments for the `whoami` command
+#[derive(Parser, Debug)]
+pub struct WhoamiArgs {
+    /// Ask the auth server whether the sign-in still works, renewing the
+    /// access token first when it is about to expire. Exits 2 when the server
+    /// no longer accepts the sign-in, and 3 when the server can't be reached
+    /// or fails. Without this flag, `whoami` reads only the local credentials.
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// Arguments for the `auth` command group.
@@ -3669,5 +3680,18 @@ mod parse_tests {
         #[rustfmt::skip]
         let Command::Login(args) = cli.command else { panic!("expected Login command") };
         assert!(args.device);
+    }
+
+    #[test]
+    fn test_whoami_check_flag() {
+        let cli = Cli::try_parse_from(["actual", "whoami"]).unwrap();
+        #[rustfmt::skip]
+        let Command::Whoami(args) = cli.command else { panic!("expected Whoami command") };
+        assert!(!args.check);
+
+        let cli = Cli::try_parse_from(["actual", "whoami", "--check"]).unwrap();
+        #[rustfmt::skip]
+        let Command::Whoami(args) = cli.command else { panic!("expected Whoami command") };
+        assert!(args.check);
     }
 }
