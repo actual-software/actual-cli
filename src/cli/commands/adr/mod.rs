@@ -9,7 +9,7 @@ mod local;
 mod telemetry;
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -159,6 +159,27 @@ async fn pick_repo(
             many.len()
         )),
     })
+}
+
+/// How long `checkout_top` waits for git.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The top of the working tree `dir` sits in, from any of its subdirectories.
+/// `None` outside a working tree (a bare repository, or inside `.git`) and
+/// whenever git gives no answer in time.
+async fn checkout_top(dir: &Path) -> Option<PathBuf> {
+    let git = tokio::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(GIT_TIMEOUT, git).await.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let top = String::from_utf8(output.stdout).ok()?;
+    let top = top.trim_end_matches(['\r', '\n']);
+    (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
 /// A level as rule files spell it: `MUST NOT`, not `MUST_NOT`.
@@ -498,6 +519,21 @@ mod tests {
                 label: "o/solo".to_string()
             })
         );
+    }
+
+    #[tokio::test]
+    async fn checkout_top_finds_the_working_trees_top_from_inside_it() {
+        let dir = tempdir().unwrap();
+        git_repo(dir.path(), None);
+        let deep = dir.path().join("src/cli");
+        std::fs::create_dir_all(&deep).unwrap();
+        // git names the top by its real path.
+        let top = dir.path().canonicalize().unwrap();
+        assert_eq!(checkout_top(&deep).await, Some(top.clone()));
+        assert_eq!(checkout_top(dir.path()).await, Some(top));
+        assert_eq!(checkout_top(&dir.path().join(".git")).await, None);
+        let outside = tempdir().unwrap();
+        assert_eq!(checkout_top(outside.path()).await, None);
     }
 
     #[test]

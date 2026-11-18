@@ -10,8 +10,8 @@ use serde::Serialize;
 
 use super::telemetry::{self, Reviewed};
 use super::{
-    content_from_flags, interactive, json_text, local, missing_level, pick_repo, rule_spelling,
-    runtime, save_status, session, today, Repo, RepoPick, Session,
+    checkout_top, content_from_flags, interactive, json_text, local, missing_level, pick_repo,
+    rule_spelling, runtime, save_status, session, today, Repo, RepoPick, Session,
 };
 use crate::adr::context_file::{self, js_trim, ContextFile};
 use crate::adr::files::{self, DecisionFile, RenameOutcome};
@@ -300,6 +300,17 @@ fn stored_title(doc: &ContextFile) -> String {
     if title.is_empty() { "Untitled" } else { title }.to_string()
 }
 
+/// The doc an accepted save from flags writes into the checkout, as the save
+/// stores it, or every reason the local save check refuses it. It runs
+/// before the save, so no decision is saved accepted without its files.
+fn files_doc(doc: &ContextFile) -> Result<ContextFile, ActualError> {
+    let doc = ContextFile {
+        title: stored_title(doc),
+        ..doc.clone()
+    };
+    check_document(&doc, false, &today()).map_err(|reasons| ActualError::AdrInvalid { reasons })
+}
+
 async fn run_create(
     args: &AdrCreateArgs,
     dir: &Path,
@@ -307,6 +318,9 @@ async fn run_create(
 ) -> Result<String, ActualError> {
     let status = save_status(args.status, interactive);
     let outgoing = outgoing(args, dir)?;
+    let accepted_doc = (outgoing.file.is_none() && status == SaveStatus::Accepted)
+        .then(|| files_doc(&outgoing.doc))
+        .transpose()?;
     // A pushed file names its own repository through the checkout it sits in.
     let root: PathBuf = match &outgoing.file {
         Some(file) => files::root_of(&file.path).unwrap_or_else(|| dir.to_path_buf()),
@@ -327,7 +341,8 @@ async fn run_create(
     let Some(file) = &outgoing.file else {
         let saved = create_from_flags(&session, &repo, &outgoing.doc, status).await?;
         let named = args.repo.is_some();
-        let outcome = write_saved_pair(&session, &repo, named, &root, &outgoing.doc, saved).await;
+        let doc = accepted_doc.as_ref();
+        let outcome = write_saved_pair(&session, &repo, named, &root, doc, saved).await;
         return Ok(if args.api.json {
             format!("{}\n", json_text(&outcome))
         } else {
@@ -394,17 +409,19 @@ struct FlagsOutcome {
     files_problem: Option<String>,
 }
 
-/// Write an accepted decision's doc and rule file under `root`, named for its
-/// id as the repository sync names them, so the sync's pull request rewrites
-/// these files in place. A draft gets none: the sync deletes a file named for
-/// a decision it doesn't render, drafts included. With `named` (a `--repo`
-/// flag), `root`'s origin remote must name the same repository.
+/// Write an accepted decision's doc and rule file at the top of the checkout
+/// `dir` is in, named for its id as the repository sync names them, so the
+/// sync's pull request rewrites these files in place. `doc` is the
+/// [`files_doc`] an accepted save checked before it was sent. A draft has
+/// none and gets no files: the sync deletes a file named for a decision it
+/// doesn't render, drafts included. With `named` (a `--repo` flag), `dir`'s
+/// origin remote must name the same repository.
 async fn write_saved_pair(
     session: &Session,
     repo: &Repo,
     named: bool,
-    root: &Path,
-    doc: &ContextFile,
+    dir: &Path,
+    doc: Option<&ContextFile>,
     saved: CreateOutcome,
 ) -> FlagsOutcome {
     let mut outcome = FlagsOutcome {
@@ -413,11 +430,11 @@ async fn write_saved_pair(
         rule_file: None,
         files_problem: None,
     };
-    if outcome.saved.created.status != SaveStatus::Accepted.as_str() {
+    let Some(doc) = doc else {
         return outcome;
-    }
+    };
     let adr_id = &outcome.saved.created.adr_id;
-    match saved_pair(session, repo, named, root, doc, adr_id).await {
+    match saved_pair(session, repo, named, dir, doc, adr_id).await {
         Ok((decision_file, rule_file)) => {
             outcome.decision_file = Some(decision_file);
             outcome.rule_file = Some(rule_file);
@@ -436,13 +453,13 @@ async fn saved_pair(
     session: &Session,
     repo: &Repo,
     named: bool,
-    root: &Path,
+    dir: &Path,
     doc: &ContextFile,
     adr_id: &str,
 ) -> Result<(PathBuf, PathBuf), String> {
     let label = sanitize_server_text(&repo.label);
     if named {
-        match pick_repo(session, None, root).await {
+        match pick_repo(session, None, dir).await {
             Ok(RepoPick::Chosen(found)) if found.id == repo.id => {}
             Ok(_) => return Err(format!("this directory isn't a checkout of {label}.")),
             Err(e) => {
@@ -452,12 +469,10 @@ async fn saved_pair(
             }
         }
     }
-    let doc = ContextFile {
-        title: stored_title(doc),
-        ..doc.clone()
+    let Some(top) = checkout_top(dir).await else {
+        return Err("couldn't find the top of the checkout this directory is in.".to_string());
     };
-    let doc = check_document(&doc, false, &today()).map_err(|reasons| reasons.join(" "))?;
-    local::write_pair(root, &doc, adr_id, SaveStatus::Accepted, &[]).map_err(|e| format!("{e}."))
+    local::write_pair(&top, doc, adr_id, SaveStatus::Accepted, &[]).map_err(|e| format!("{e}."))
 }
 
 /// Save a decision file as the web app's Import does, which keeps the whole
@@ -1516,12 +1531,12 @@ mod tests {
         let json = block(run_create(&args, repo_dir.path(), true)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let title = "Use Postgres for storage";
-        let doc = repo_dir
-            .path()
+        // git names the checkout's top by its real path.
+        let top = repo_dir.path().canonicalize().unwrap();
+        let doc = top
             .join("docs/adr")
             .join(crate::adr::names::decision_doc_file_name(ADR, title));
-        let rule = repo_dir
-            .path()
+        let rule = top
             .join(".actual/rules")
             .join(crate::adr::names::rule_file_name(ADR, title));
         assert_eq!(value["status"], "accepted");
@@ -1616,7 +1631,46 @@ mod tests {
     }
 
     #[test]
-    fn create_from_flags_writes_no_file_the_save_check_refuses() {
+    fn create_from_flags_writes_the_pair_at_the_top_of_the_checkout() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let checkout = tempdir().unwrap();
+        git_repo(
+            checkout.path(),
+            Some("https://github.com/actual-software/actual-cli"),
+        );
+        let src = checkout.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let (server, create) = flags_server(2);
+        let mut args = create_args(&server);
+        args.repo = None;
+
+        // From a subdirectory, the pair goes where the sync writes it.
+        let text = block(run_create(&args, &src, true)).unwrap();
+        let top = checkout.path().canonicalize().unwrap();
+        let rule = files::find_rule_file(&top, ADR).expect(&text);
+        assert!(
+            text.contains(&format!("  wrote {}", rule.display())),
+            "{text}"
+        );
+        assert!(!src.join("docs").exists(), "{text}");
+        assert!(!src.join(".actual").exists(), "{text}");
+
+        // Inside `.git` there's no working tree to write into.
+        let text = block(run_create(&args, &checkout.path().join(".git"), true)).unwrap();
+        create.assert();
+        assert!(
+            text.contains(
+                "its files weren't written: couldn't find the top of the checkout this \
+                 directory is in."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn create_from_flags_sends_no_accepted_decision_the_save_check_refuses() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
@@ -1625,16 +1679,17 @@ mod tests {
             repo_dir.path(),
             Some("https://github.com/actual-software/actual-cli"),
         );
-        let (server, create) = flags_server(1);
+        let (server, create) = flags_server(0);
         let mut args = create_args(&server);
         args.repo = None;
         args.content.policies = vec!["MUST: Store relational data\nin Postgres.".to_string()];
-        let text = block(run_create(&args, repo_dir.path(), true)).unwrap();
+        // Refused before the save, so no accepted decision is left without its files.
+        let err = block(run_create(&args, repo_dir.path(), true)).unwrap_err();
         create.assert();
-        assert!(text.contains("as accepted"), "{text}");
         assert!(
-            text.contains("its files weren't written: Policy 1 runs over more than one line"),
-            "{text}"
+            matches!(&err, ActualError::AdrInvalid { reasons } if reasons
+                == &["Policy 1 runs over more than one line; give each policy one statement."]),
+            "{err:?}"
         );
         assert!(!repo_dir.path().join("docs").exists());
     }
