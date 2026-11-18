@@ -772,8 +772,7 @@ fn repository_path(file: &str, checkout: &Path) -> Option<String> {
     for component in relative.components() {
         match component {
             Component::Normal(part) => parts.push(part.to_string_lossy()),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+            _ => return None,
         }
     }
     Some(parts.join("/")).filter(|joined| !joined.is_empty() && joined.len() <= MAX_PATH_BYTES)
