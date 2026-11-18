@@ -1,6 +1,6 @@
 //! The ADR files a repository already keeps where ADR tools put them, for
-//! `actual adr discover`. Discovery only reads: it writes nothing and sends
-//! nothing.
+//! `actual adr discover`. [`discover`] only reads them; [`import`] copies the
+//! ones outside docs/adr into `docs/adr/imported/`, and nothing is sent.
 //!
 //! It reads these folders, each with what names it:
 //!
@@ -20,8 +20,16 @@
 //! when a tool's folder holds it, and in a common folder only when its name
 //! is numbered, such as `0007-use-postgres.md`. An index, a README or a
 //! template is never an ADR.
+//!
+//! A copy goes to `docs/adr/imported/<folder>/` under the source's own name,
+//! where the folder is the source's folder with `-` between its parts
+//! (`doc/adr` becomes `doc-adr`), so each copy sits within the three levels
+//! the checks read and two tools' `0001-…` files don't collide. A file is
+//! never overwritten, and `docs/adr/imported/.copied` lists each source
+//! copied, so a source is copied once even after its copy is renamed.
 
 use std::collections::{BTreeMap, HashSet};
+use std::io::Write as _;
 use std::path::{Component, Path};
 
 use serde::de::IgnoredAny;
@@ -50,6 +58,16 @@ const MADR_SECTIONS: &[&str] = &[
     "considered options",
     "decision outcome",
 ];
+/// Where [`import`] copies the ADRs found outside docs/adr.
+pub const IMPORT_DIR: &str = "docs/adr/imported";
+/// The list of copied sources, in [`IMPORT_DIR`].
+pub const COPIED_LIST: &str = ".copied";
+/// What a new copied list opens with.
+const COPIED_LIST_HEADER: &str = "\
+# The ADR files `actual adr discover` copied into this folder, one path per
+# line from the repository root. A listed file is copied only once, even
+# after its copy is renamed or removed. Delete a line to copy it again.
+";
 
 /// What names a folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -149,6 +167,48 @@ pub struct Discovery {
     pub unreadable: Vec<Unreadable>,
     /// Configuration discovery couldn't use, and folders it wouldn't read.
     pub notes: Vec<String>,
+}
+
+/// What became of an ADR file found outside docs/adr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportState {
+    Copied,
+    /// A dry run's: it would be copied.
+    WouldCopy,
+    /// The copied list names it.
+    CopiedBefore,
+    /// A file is already where its copy would go.
+    Exists,
+    Failed,
+}
+
+/// An ADR file found outside docs/adr, and its copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Import {
+    /// Relative to the repository root, `/`-separated.
+    pub source: String,
+    /// Relative to the repository root, `/`-separated.
+    pub copy: String,
+    pub state: ImportState,
+    /// Why the copy failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What [`import`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Imports {
+    pub files: Vec<Import>,
+    /// Why nothing was copied, or why the copied list wasn't updated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Imports {
+    pub fn count(&self, state: ImportState) -> usize {
+        self.files.iter().filter(|file| file.state == state).count()
+    }
 }
 
 /// The folders to read, in order, each with what names it and whether a
@@ -294,6 +354,158 @@ pub fn discover(root: &Path) -> Discovery {
         });
     }
     found
+}
+
+/// Copy each ADR file `found` lists outside docs/adr into [`IMPORT_DIR`], as
+/// the module docs say, and add each new copy's source to the copied list. A
+/// source the list names, or whose copy's path is taken, is left alone. With
+/// `dry_run`, nothing is written.
+pub fn import(root: &Path, found: &Discovery, dry_run: bool) -> Imports {
+    let mut imports = Imports::default();
+    let wanted: Vec<(&AdrFile, String, String)> = found
+        .adrs
+        .iter()
+        .filter_map(|adr| import_paths(&adr.path).map(|(source, copy)| (adr, source, copy)))
+        .collect();
+    if wanted.is_empty() {
+        return imports;
+    }
+    let list = root.join(IMPORT_DIR).join(COPIED_LIST);
+    let listed = match read_copied(&list) {
+        Ok(listed) => listed,
+        Err(reason) => {
+            imports.error = Some(format!(
+                "{IMPORT_DIR}/{COPIED_LIST} couldn't be read, so nothing was copied: {reason}"
+            ));
+            return imports;
+        }
+    };
+    if !writes_inside(root, &list) {
+        imports.error = Some(format!(
+            "{IMPORT_DIR}/{COPIED_LIST} leads outside the repository, so nothing was copied."
+        ));
+        return imports;
+    }
+    let copied: HashSet<&str> = listed
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let mut taken = HashSet::new();
+    let mut added = Vec::new();
+    for (adr, source, copy) in wanted {
+        let mut reason = None;
+        let state = if copied.contains(source.as_str()) {
+            ImportState::CopiedBefore
+        } else if !taken.insert(copy.clone()) || root.join(&copy).symlink_metadata().is_ok() {
+            ImportState::Exists
+        } else if !writes_inside(root, &root.join(&copy)) {
+            reason = Some("Its folder leads outside the repository.".to_string());
+            ImportState::Failed
+        } else if dry_run {
+            ImportState::WouldCopy
+        } else {
+            match copy_new(&root.join(&adr.path), &root.join(&copy)) {
+                Ok(()) => {
+                    added.push(source.clone());
+                    ImportState::Copied
+                }
+                Err(e) => {
+                    reason = Some(e.to_string());
+                    ImportState::Failed
+                }
+            }
+        };
+        imports.files.push(Import {
+            source,
+            copy,
+            state,
+            reason,
+        });
+    }
+    if !added.is_empty() {
+        imports.error = record_copied(&list, listed.as_deref(), &added)
+            .err()
+            .map(|e| format!("{IMPORT_DIR}/{COPIED_LIST} {UNLISTED}: {e}"));
+    }
+    imports
+}
+
+/// Why the copied list misses files just copied, when it couldn't be updated.
+const UNLISTED: &str = "couldn't be updated, so it doesn't list the files just copied";
+
+/// The source's path and its copy's, `/`-separated from the root, for a file
+/// outside docs/adr; `None` for one inside it.
+fn import_paths(path: &str) -> Option<(String, String)> {
+    let parts: Vec<String> = Path::new(path)
+        .components()
+        .filter(|part| matches!(part, Component::Normal(_)))
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let (name, folder) = parts.split_last()?;
+    let under_decisions = folder
+        .iter()
+        .map(String::as_str)
+        .take(2)
+        .eq(DECISION_DIR.split('/'));
+    (!under_decisions && !folder.is_empty()).then(|| {
+        (
+            parts.join("/"),
+            format!("{IMPORT_DIR}/{}/{name}", folder.join("-")),
+        )
+    })
+}
+
+/// The copied list's text, `None` when there is none.
+fn read_copied(path: &Path) -> Result<Option<String>, String> {
+    if path.symlink_metadata().is_err() {
+        return Ok(None);
+    }
+    read_text(path).map(Some)
+}
+
+/// Whether a write to `path` stays in the repository: the path, or else its
+/// nearest folder that exists, is inside the root once links are resolved.
+fn writes_inside(root: &Path, path: &Path) -> bool {
+    let Ok(real_root) = root.canonicalize() else {
+        return false;
+    };
+    path.ancestors()
+        .find_map(|path| path.canonicalize().ok())
+        .is_some_and(|real| real.starts_with(real_root))
+}
+
+/// Copy `from` to a new file `to`, making its folder. An existing `to` is an
+/// `AlreadyExists` error, and it is left as it was.
+fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    let bytes = std::fs::read(from)?;
+    to.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?
+        .write_all(&bytes)
+}
+
+/// Add `sources` to the copied list at `path`, whose text is `listed`, or
+/// write a new list when there is none.
+fn record_copied(path: &Path, listed: Option<&str>, sources: &[String]) -> std::io::Result<()> {
+    let mut text = match listed {
+        None => COPIED_LIST_HEADER.to_string(),
+        Some(listed) if listed.is_empty() || listed.ends_with('\n') => String::new(),
+        Some(_) => "\n".to_string(),
+    };
+    for source in sources {
+        text.push_str(source);
+        text.push('\n');
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(text.as_bytes())
 }
 
 /// `path` relative to `root`.
@@ -516,6 +728,18 @@ fn not_an_adr(name: &str) -> bool {
     name == "readme" || name == "index" || name.ends_with("template")
 }
 
+/// Whether `path` is an index, a README or a template, by its name.
+pub(crate) fn listed_apart(path: &Path) -> bool {
+    not_an_adr(&stem(path))
+}
+
+/// A file's name without its extension, lowercased.
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
 /// A numbered file name: `0007-use-postgres`, `20200101_title`, `adr-12-x`.
 fn numbered(name: &str) -> bool {
     let rest = name
@@ -560,10 +784,7 @@ fn read_adr(path: &Path, tool_folder: bool) -> Result<Option<AdrFile>, String> {
             id.map(str::to_string),
         );
     }
-    let name = path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    let name = stem(path);
     if not_an_adr(&name) {
         return Ok(None);
     }
@@ -893,6 +1114,9 @@ mod tests {
             assert!(not_an_adr(name), "{name}");
         }
         assert!(!not_an_adr("0001-templates-for-services"));
+        assert!(listed_apart(Path::new("docs/adr/README.md")));
+        assert!(listed_apart(Path::new("docs/adr/drafts/adr-template.md")));
+        assert!(!listed_apart(Path::new("docs/adr/0001-use-postgres.md")));
     }
 
     /// `read_adr` with a common folder's rule.
@@ -996,5 +1220,249 @@ mod tests {
             serde_json::to_value(FoundBy::AdrTools).unwrap(),
             serde_json::json!("adr-tools")
         );
+    }
+
+    fn read(root: &Path, path: &str) -> String {
+        std::fs::read_to_string(root.join(path)).unwrap()
+    }
+
+    fn states(imports: &Imports) -> Vec<(&str, ImportState)> {
+        imports
+            .files
+            .iter()
+            .map(|file| (file.source.as_str(), file.state))
+            .collect()
+    }
+
+    const RECORD: &str = "doc/adr/0001-record-architecture-decisions.md";
+    const MADR_RECORD: &str = "docs/decisions/0001-record-architecture-decisions.md";
+    const NESTED: &str = "docs/decisions/backend/0002-use-madr.md";
+
+    /// A repository with an Actual file in docs/adr and three ADRs in other
+    /// folders, two of them under one name.
+    fn tools_repository(root: &Path) {
+        write(root, "docs/adr/7d2cad87-use-postgres.md", ACTUAL);
+        write(root, RECORD, NYGARD);
+        write(root, MADR_RECORD, MADR4);
+        write(root, NESTED, MADR4);
+    }
+
+    #[test]
+    fn import_copies_each_adr_outside_docs_adr_once() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        tools_repository(root);
+        let copies = [
+            "docs/adr/imported/doc-adr/0001-record-architecture-decisions.md",
+            "docs/adr/imported/docs-decisions/0001-record-architecture-decisions.md",
+            "docs/adr/imported/docs-decisions-backend/0002-use-madr.md",
+        ];
+
+        let dry = import(root, &discover(root), true);
+        assert_eq!(
+            states(&dry),
+            [
+                (RECORD, ImportState::WouldCopy),
+                (MADR_RECORD, ImportState::WouldCopy),
+                (NESTED, ImportState::WouldCopy),
+            ]
+        );
+        let planned: Vec<&str> = dry.files.iter().map(|f| f.copy.as_str()).collect();
+        assert_eq!(planned, copies);
+        assert!(!root.join(IMPORT_DIR).exists());
+
+        let first = import(root, &discover(root), false);
+        assert_eq!(first.count(ImportState::Copied), 3, "{first:#?}");
+        assert_eq!(first.error, None);
+        assert_eq!(read(root, copies[0]), NYGARD);
+        assert_eq!(read(root, copies[1]), MADR4);
+        assert_eq!(read(root, RECORD), NYGARD, "the source stays");
+        let list = format!("{IMPORT_DIR}/{COPIED_LIST}");
+        assert_eq!(
+            read(root, &list),
+            format!("{COPIED_LIST_HEADER}{RECORD}\n{MADR_RECORD}\n{NESTED}\n")
+        );
+
+        // The copies are under docs/adr now, so a second run finds them there
+        // and copies nothing.
+        let found = discover(root);
+        assert!(found.adrs.iter().any(|adr| adr.path == copies[2]));
+        let second = import(root, &found, false);
+        assert_eq!(second.count(ImportState::CopiedBefore), 3, "{second:#?}");
+        assert_eq!(second.files.len(), 3);
+
+        // A copy renamed, as `create --file` renames a pair, isn't copied
+        // again, until its line leaves the list.
+        std::fs::rename(root.join(copies[0]), root.join("docs/adr/42-record.md")).unwrap();
+        let third = import(root, &discover(root), false);
+        assert_eq!(third.count(ImportState::CopiedBefore), 3);
+        std::fs::write(root.join(&list), format!("{MADR_RECORD}\n{NESTED}")).unwrap();
+        let fourth = import(root, &discover(root), false);
+        assert_eq!(states(&fourth)[0], (RECORD, ImportState::Copied));
+        assert_eq!(read(root, copies[0]), NYGARD);
+        assert_eq!(
+            read(root, &list),
+            format!("{MADR_RECORD}\n{NESTED}\n{RECORD}\n")
+        );
+    }
+
+    #[test]
+    fn import_never_overwrites_a_file_and_says_why_it_left_one() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        tools_repository(root);
+        // log4brains' `docs-decisions` folder takes the same copy folder as
+        // MADR's `docs/decisions`.
+        write(
+            root,
+            ".log4brains.yml",
+            "project:\n  adrFolder: docs-decisions\n",
+        );
+        write(
+            root,
+            "docs-decisions/0001-record-architecture-decisions.md",
+            LOG4BRAINS,
+        );
+        write(
+            root,
+            "docs/adr/imported/doc-adr/0001-record-architecture-decisions.md",
+            "Mine.\n",
+        );
+        // A file where a copy's folder would go.
+        write(root, "docs/adr/imported/docs-decisions-backend", "");
+        write(root, &format!("{IMPORT_DIR}/{COPIED_LIST}"), "");
+
+        let imports = import(root, &discover(root), false);
+
+        assert_eq!(
+            states(&imports),
+            [
+                (RECORD, ImportState::Exists),
+                (MADR_RECORD, ImportState::Copied),
+                (NESTED, ImportState::Failed),
+                (
+                    "docs-decisions/0001-record-architecture-decisions.md",
+                    ImportState::Exists
+                ),
+            ]
+        );
+        assert!(imports.files[2].reason.is_some());
+        assert_eq!(
+            read(
+                root,
+                "docs/adr/imported/doc-adr/0001-record-architecture-decisions.md"
+            ),
+            "Mine.\n"
+        );
+        assert_eq!(
+            read(
+                root,
+                "docs/adr/imported/docs-decisions/0001-record-architecture-decisions.md"
+            ),
+            MADR4
+        );
+        assert_eq!(
+            read(root, &format!("{IMPORT_DIR}/{COPIED_LIST}")),
+            format!("{MADR_RECORD}\n")
+        );
+    }
+
+    #[test]
+    fn import_reads_no_list_when_nothing_is_outside_docs_adr() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write(root, "docs/adr/7d2cad87-use-postgres.md", ACTUAL);
+        std::fs::create_dir_all(root.join(IMPORT_DIR).join(COPIED_LIST)).unwrap();
+        assert_eq!(import(root, &discover(root), false), Imports::default());
+
+        // With a source to copy, a list that can't be read stops the run.
+        write(root, RECORD, NYGARD);
+        let imports = import(root, &discover(root), false);
+        assert!(imports.files.is_empty());
+        assert!(
+            imports.error.as_deref().is_some_and(|e| e.starts_with(
+                "docs/adr/imported/.copied couldn't be read, so nothing was copied: "
+            )),
+            "{imports:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_writes_nothing_outside_the_repository() {
+        let outside = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write(root, RECORD, NYGARD);
+        std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join(IMPORT_DIR)).unwrap();
+        let imports = import(root, &discover(root), false);
+        assert_eq!(
+            imports.error.as_deref(),
+            Some("docs/adr/imported/.copied leads outside the repository, so nothing was copied.")
+        );
+        assert!(imports.files.is_empty());
+
+        // A copy's own folder that leads outside.
+        std::fs::remove_file(root.join(IMPORT_DIR)).unwrap();
+        std::fs::create_dir_all(root.join(IMPORT_DIR)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join(IMPORT_DIR).join("doc-adr")).unwrap();
+        let imports = import(root, &discover(root), false);
+        assert_eq!(states(&imports), [(RECORD, ImportState::Failed)]);
+        assert_eq!(
+            imports.files[0].reason.as_deref(),
+            Some("Its folder leads outside the repository.")
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn import_paths_give_each_source_folder_one_copy_folder() {
+        assert_eq!(
+            import_paths("doc/adr/0001-x.md"),
+            Some((
+                "doc/adr/0001-x.md".to_string(),
+                "docs/adr/imported/doc-adr/0001-x.md".to_string()
+            ))
+        );
+        assert_eq!(
+            import_paths("docs/adrs/0001-x.md")
+                .map(|(_, copy)| copy)
+                .as_deref(),
+            Some("docs/adr/imported/docs-adrs/0001-x.md")
+        );
+        assert_eq!(
+            import_paths("docs/0001-x.md")
+                .map(|(_, copy)| copy)
+                .as_deref(),
+            Some("docs/adr/imported/docs/0001-x.md")
+        );
+        assert_eq!(
+            import_paths("./doc/adr/0001-x.md").map(|(source, _)| source),
+            Some("doc/adr/0001-x.md".to_string())
+        );
+        for inside in [
+            "docs/adr/0001-x.md",
+            "docs/adr/imported/doc-adr/0001-x.md",
+            "x.md",
+        ] {
+            assert_eq!(import_paths(inside), None, "{inside}");
+        }
+    }
+
+    #[test]
+    fn copied_list_writes_fail_closed() {
+        let tmp = tempdir().unwrap();
+        assert!(!writes_inside(
+            &tmp.path().join("gone"),
+            &tmp.path().join("gone/x")
+        ));
+        assert!(writes_inside(
+            tmp.path(),
+            &tmp.path().join("new/folder/x.md")
+        ));
+        let list = tmp.path().join("missing").join(COPIED_LIST);
+        assert!(record_copied(&list, None, &["a.md".to_string()]).is_err());
+        assert_eq!(read_copied(&list), Ok(None));
     }
 }

@@ -13,7 +13,8 @@ use super::{
     session, today, RepoPick,
 };
 use crate::adr::context_file::{self, ContextFile};
-use crate::adr::files::{self, DecisionFile, DECISION_DIR, RULES_DIR};
+use crate::adr::discover::listed_apart;
+use crate::adr::files::{self, DecisionFile, DECISION_DIR, MAX_FILE_SIZE, RULES_DIR};
 use crate::adr::header::{description_for, render_header, AdrHeader};
 use crate::adr::names::{decision_doc_file_name, rule_file_name};
 use crate::adr::overlap::{find_overlaps, ExistingDecision, Overlap};
@@ -175,7 +176,7 @@ struct Duplicate {
 
 /// Whether the cloud comparison ran, against what, and why not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-struct CloudComparison {
+pub(super) struct CloudComparison {
     compared: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
@@ -184,13 +185,42 @@ struct CloudComparison {
     note: Option<String>,
 }
 
+/// What to do about a file that won't publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Remedy {
+    /// Rewrite it in Actual's format.
+    Normalize,
+    /// Compare it with the decision in Actual AI it looks like.
+    Compare,
+}
+
+/// A file under `docs/adr/` that won't publish, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct WontPublish {
+    pub(super) path: String,
+    pub(super) reasons: Vec<String>,
+    pub(super) recommendation: Remedy,
+}
+
+/// The reason a file with no ADR header won't publish.
+const NO_HEADER: &str = "It has no ADR header.";
+
+/// Marks a rule file `actual adr-bot` wrote for a decision in Actual AI.
+const ADR_BOT_RULE: &str = "<rule_activation adr-id=\"";
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct CheckReport {
+pub(super) struct CheckReport {
     files: Vec<FileResult>,
     duplicates: Vec<Duplicate>,
-    /// Markdown under `docs/adr/` with no ADR header, left unchecked.
+    /// Markdown under `docs/adr/` with no ADR header, so not checked as a
+    /// decision file.
     skipped: Vec<String>,
-    cloud: CloudComparison,
+    pub(super) wont_publish: Vec<WontPublish>,
+    /// Header-less copies `actual adr-bot` wrote of decisions in Actual AI,
+    /// which `wont_publish` leaves out.
+    pub(super) adr_bot_copies: Vec<String>,
+    pub(super) cloud: CloudComparison,
 }
 
 impl CheckReport {
@@ -233,12 +263,22 @@ fn check_and_print(args: &AdrCheckArgs, counts: &mut CheckCounts) -> Result<(), 
 struct Checked {
     result: FileResult,
     doc: Option<ContextFile>,
+    /// Read, and no ADR header names its id.
+    no_header: bool,
 }
 
-async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> CheckReport {
-    let (files, unreadable, skipped) = if args.files.is_empty() {
+/// The check `adr check` runs, and the list of files that won't publish
+/// `adr discover` prints too. With no files named, it checks the files under
+/// `docs/adr/` that carry an ADR header, and reads the rest for the list.
+pub(super) async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> CheckReport {
+    let (files, unreadable, skipped, unheaded) = if args.files.is_empty() {
         let found = files::discover(root);
-        (found.decisions, found.unreadable, found.skipped)
+        (
+            found.decisions,
+            found.unreadable,
+            found.skipped,
+            found.unheaded,
+        )
     } else {
         let mut files = Vec::new();
         let mut unreadable = Vec::new();
@@ -248,7 +288,7 @@ async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> CheckReport
                 Err(e) => unreadable.push((path.clone(), e.to_string())),
             }
         }
-        (files, unreadable, Vec::new())
+        (files, unreadable, Vec::new(), Vec::new())
     };
 
     let mut checked: Vec<Checked> = files
@@ -265,10 +305,20 @@ async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> CheckReport
             warnings: Vec::new(),
         },
         doc: None,
+        no_header: false,
     }));
+    let (copies, unheaded): (Vec<&DecisionFile>, Vec<&DecisionFile>) = unheaded
+        .iter()
+        .filter(|file| !listed_apart(&file.path) && !in_drafts(&display_path(root, &file.path)))
+        .partition(|file| adr_bot_copy(root, &file.path));
+    let unheaded: Vec<Checked> = unheaded
+        .into_iter()
+        .map(|file| check_file(root, file, today))
+        .collect();
 
     let (cloud, cloud_decisions) = cloud_decisions(args, root).await;
     let duplicates = find_duplicates(&checked, &cloud_decisions);
+    let wont_publish = wont_publish(checked.iter().chain(&unheaded), &cloud_decisions);
     CheckReport {
         files: checked.into_iter().map(|c| c.result).collect(),
         duplicates,
@@ -276,8 +326,77 @@ async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> CheckReport
             .iter()
             .map(|path| display_path(root, path))
             .collect(),
+        wont_publish,
+        adr_bot_copies: copies
+            .iter()
+            .map(|file| display_path(root, &file.path))
+            .collect(),
         cloud,
     }
+}
+
+/// Whether `path`, as the report shows it, is under `docs/adr/drafts/`,
+/// which keeps work in progress out of Actual AI.
+fn in_drafts(path: &str) -> bool {
+    Path::new(path).starts_with(Path::new(DECISION_DIR).join("drafts"))
+}
+
+/// Whether `path` is a copy `actual adr-bot` wrote of a decision in Actual
+/// AI: `docs/adr/<slug>.md`, beside a `.claude/rules/<slug>.md` that names
+/// the decision's id.
+fn adr_bot_copy(root: &Path, path: &Path) -> bool {
+    let rule = root
+        .join(".claude/rules")
+        .join(path.file_name().unwrap_or_default());
+    path.parent() == Some(root.join(DECISION_DIR).as_path())
+        && std::fs::metadata(&rule).is_ok_and(|meta| meta.len() <= MAX_FILE_SIZE)
+        && std::fs::read_to_string(&rule).is_ok_and(|text| text.contains(ADR_BOT_RULE))
+}
+
+/// Each file that won't publish, and why: it can't be read, has no ADR
+/// header, breaks a save rule, or looks like a decision in Actual AI. A file
+/// whose id is one of those decisions is published already, and nothing
+/// under `docs/adr/drafts/` is listed.
+fn wont_publish<'a>(
+    checked: impl Iterator<Item = &'a Checked>,
+    cloud: &[ExistingDecision],
+) -> Vec<WontPublish> {
+    checked
+        .filter(|c| !in_drafts(&c.result.path))
+        .filter(|c| {
+            !cloud
+                .iter()
+                .any(|decision| Some(decision.id.as_str()) == c.result.adr_id.as_deref())
+        })
+        .filter_map(|c| {
+            let mut reasons: Vec<String> = c
+                .no_header
+                .then(|| NO_HEADER.to_string())
+                .into_iter()
+                .chain(c.result.problems.iter().cloned())
+                .collect();
+            let recommendation = if reasons.is_empty() {
+                Remedy::Compare
+            } else {
+                Remedy::Normalize
+            };
+            if let Some(doc) = &c.doc {
+                let this = comparable(String::new(), doc);
+                for overlap in find_overlaps(&this.title, &this.policies, cloud) {
+                    reasons.push(format!(
+                        "It looks like decision {} in Actual AI: \"{}\".",
+                        sanitize_server_text(&overlap.adr_id),
+                        sanitize_server_text(&overlap.title)
+                    ));
+                }
+            }
+            (!reasons.is_empty()).then(|| WontPublish {
+                path: c.result.path.clone(),
+                reasons,
+                recommendation,
+            })
+        })
+        .collect()
 }
 
 fn check_file(root: &Path, file: &DecisionFile, today: &str) -> Checked {
@@ -299,6 +418,7 @@ fn check_file(root: &Path, file: &DecisionFile, today: &str) -> Checked {
             warnings: checked.warnings,
         },
         doc,
+        no_header: file.adr_id().is_none(),
     }
 }
 
@@ -424,7 +544,7 @@ fn render_report(report: &CheckReport) -> String {
     let mut out = String::new();
     if report.files.is_empty() {
         out.push_str(&format!(
-            "No decision files to check under {DECISION_DIR}/.\n"
+            "No decision files with an ADR header to check under {DECISION_DIR}/.\n"
         ));
     } else {
         out.push_str(&format!(
@@ -474,14 +594,59 @@ fn render_report(report: &CheckReport) -> String {
             ));
         }
     }
-    if !report.skipped.is_empty() {
+    out.push_str(&render_wont_publish(report));
+    out.push_str(&render_cloud(&report.cloud));
+    out
+}
+
+/// The files that won't publish, each with what to do and why, and how many
+/// of adr-bot's copies the list leaves out.
+pub(super) fn render_wont_publish(report: &CheckReport) -> String {
+    let mut out = String::new();
+    let wont = &report.wont_publish;
+    if !wont.is_empty() {
         out.push_str(&format!(
-            "\nNot checked: {} {} under {DECISION_DIR}/ with no ADR header. Name a file to check it.\n",
-            report.skipped.len(),
-            if report.skipped.len() == 1 { "file" } else { "files" }
+            "\n{} {} {}\n",
+            theme::heading("Won't publish:"),
+            wont.len(),
+            if wont.len() == 1 { "file" } else { "files" }
+        ));
+        for file in wont {
+            let remedy = match file.recommendation {
+                Remedy::Normalize => "rewrite it in Actual's format",
+                Remedy::Compare => "compare it with the decision it looks like",
+            };
+            out.push_str(&format!("  {}: {remedy}\n", file.path));
+            for reason in &file.reasons {
+                out.push_str(&format!("      - {reason}\n"));
+            }
+        }
+        if wont.iter().any(|f| f.recommendation == Remedy::Normalize) {
+            out.push_str(
+                "Actual's format is the ADR header, a `# ` title and policies such as \
+                 `1. MUST: …` under `## Decision`, as `actual adr new` writes them.\n",
+            );
+        }
+        if wont.iter().any(|f| f.recommendation == Remedy::Compare) {
+            out.push_str(
+                "`actual adr create --all` skips a look-alike unless you pass \
+                 `--allow-duplicate`.\n",
+            );
+        }
+    }
+    let copies = report.adr_bot_copies.len();
+    if copies > 0 {
+        out.push_str(&format!(
+            "\nNot listed: {copies} {} that `actual adr-bot` wrote of decisions in Actual AI.\n",
+            if copies == 1 { "copy" } else { "copies" }
         ));
     }
-    let cloud = &report.cloud;
+    out
+}
+
+/// Which decisions in Actual AI the files were compared with, or why not.
+pub(super) fn render_cloud(cloud: &CloudComparison) -> String {
+    let mut out = String::new();
     if cloud.compared {
         out.push_str(&format!(
             "\nCompared with {} {} in {}.\n",
@@ -704,13 +869,239 @@ mod tests {
             Some("Skipped with --no-cloud.")
         );
 
+        let listed: Vec<(&str, Remedy)> = report
+            .wont_publish
+            .iter()
+            .map(|file| (file.path.as_str(), file.recommendation))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("docs/adr/bad.md", Remedy::Normalize),
+                ("docs/adr/binary.md", Remedy::Normalize)
+            ]
+        );
+        assert_eq!(report.wont_publish[0].reasons, bad.problems);
+
         let text = render_report(&report);
         assert!(text.contains("Checked 3 decision files"), "{text}");
+        assert!(!text.contains("Not checked"), "{text}");
+        assert!(text.contains("Won't publish: 2 files"), "{text}");
+        assert!(text.contains("Skipped with --no-cloud."));
+    }
+
+    const RECORD: &str = "# 1. Record architecture decisions\n\n## Status\n\nAccepted\n\n\
+        ## Context\n\nWe need to record decisions.\n\n## Decision\n\nWe will use ADRs.\n";
+
+    /// A decision document with no header.
+    fn plain(title: &str, policy: &str) -> String {
+        format!("# {title}\n\n## Context\n\n- Why.\n\n## Decision\n\n1. {policy}\n")
+    }
+
+    /// A decision file whose header names `id`.
+    fn headed(id: &str, title: &str, policy: &str) -> String {
+        format!(
+            "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: {id}\n    status: accepted\n---\n\n{}",
+            plain(title, policy)
+        )
+    }
+
+    fn write(root: &Path, path: &str, text: &str) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn check_reads_header_less_files_for_the_files_that_wont_publish() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        mixed_repository(root);
+        write(root, "docs/adr/0001-record.md", RECORD);
+        write(root, "docs/adr/drafts/0002-later.md", RECORD);
+        write(
+            root,
+            "docs/adr/drafts/bad-draft.md",
+            &headed("d-1", "Later", "Soon."),
+        );
+        write(root, "docs/adr/drafts/index.md", "# Drafts\n");
+        let kafka = plain("Use Kafka for events", "MUST: Publish events to Kafka.");
+        write(root, "docs/adr/use-kafka-for-events.md", &kafka);
+        write(
+            root,
+            ".claude/rules/use-kafka-for-events.md",
+            "---\nglob: \"**/*\"\n---\n\n<rule_activation adr-id=\"c-1\">\n</rule_activation>\n",
+        );
+        let redis = plain("Use Redis for caching", "MUST: Cache sessions in Redis.");
+        write(root, "docs/adr/use-redis-for-caching.md", &redis);
+        write(
+            root,
+            ".claude/rules/use-redis-for-caching.md",
+            "Written by hand.\n",
+        );
+        write(
+            root,
+            "docs/adr/imported/doc-adr/use-kafka-for-events.md",
+            &kafka,
+        );
+
+        let report = block(run_check(&check_args(&[]), root, TODAY));
+
+        // The exit status still counts only the files with a header.
+        assert_eq!((report.files.len(), report.failed()), (4, 3));
+        let listed: Vec<&str> = report
+            .wont_publish
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                "docs/adr/bad.md",
+                "docs/adr/binary.md",
+                "docs/adr/0001-record.md",
+                "docs/adr/imported/doc-adr/use-kafka-for-events.md",
+                "docs/adr/use-redis-for-caching.md",
+            ]
+        );
+        let record = &report.wont_publish[2];
+        assert_eq!(record.reasons[0], NO_HEADER);
         assert!(
-            text.contains("Not checked: 1 file under docs/adr/"),
+            record.reasons[1].starts_with("No policies found."),
+            "{record:?}"
+        );
+        assert_eq!(report.wont_publish[4].reasons, [NO_HEADER]);
+        assert_eq!(report.adr_bot_copies, ["docs/adr/use-kafka-for-events.md"]);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["wont_publish"][2]["recommendation"],
+            "normalize"
+        );
+
+        let text = render_report(&report);
+        assert!(text.contains("Won't publish: 5 files"), "{text}");
+        assert!(
+            text.contains(
+                "  docs/adr/0001-record.md: rewrite it in Actual's format\n      - It has no ADR header.\n"
+            ),
             "{text}"
         );
-        assert!(text.contains("Skipped with --no-cloud."));
+        assert!(text.contains("Actual's format is the ADR header"), "{text}");
+        assert!(!text.contains("--allow-duplicate"), "{text}");
+        assert!(
+            text.contains(
+                "Not listed: 1 copy that `actual adr-bot` wrote of decisions in Actual AI."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn check_lists_a_named_file_without_a_header_but_not_a_draft() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let text = plain("Use Redis for caching", "MUST: Cache sessions in Redis.");
+        write(root, "docs/adr/redis.md", &text);
+        write(root, "docs/adr/drafts/redis.md", &text);
+        let named = [
+            root.join("docs/adr/redis.md"),
+            root.join("docs/adr/drafts/redis.md"),
+        ];
+        let report = block(run_check(&check_args(&named), root, TODAY));
+        assert_eq!(report.failed(), 0);
+        assert_eq!(report.wont_publish.len(), 1, "{:#?}", report.wont_publish);
+        assert_eq!(report.wont_publish[0].path, "docs/adr/redis.md");
+        assert_eq!(report.wont_publish[0].reasons, [NO_HEADER]);
+    }
+
+    #[test]
+    fn check_lists_a_look_alike_of_a_cloud_decision_but_not_a_published_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let kafka = ("Use Kafka for events", "MUST: Publish events to Kafka.");
+        let postgres = (
+            "Use Postgres for storage",
+            "MUST: Store relational data in Postgres.",
+        );
+        write(
+            root,
+            "docs/adr/published.md",
+            &headed("cloud-1", kafka.0, kafka.1),
+        );
+        write(
+            root,
+            "docs/adr/look-alike.md",
+            &headed("local-1", postgres.0, postgres.1),
+        );
+        write(root, "docs/adr/plain.md", &plain(kafka.0, kafka.1));
+        let decision = |id: &str, title: &str, statement: &str| {
+            format!(
+                r#"{{"id":"{id}","title":"{title}","status":"accepted","policyRules":[{{"id":"r","adrId":"{id}","level":"MUST","statement":"{statement}"}}]}}"#
+            )
+        };
+        let mut server = mockito::Server::new();
+        let list = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded("repository_id".into(), REPO.into()))
+            .with_status(200)
+            .with_body(format!(
+                r#"{{"adrs":[{},{}],"suggestions":[]}}"#,
+                decision("cloud-1", kafka.0, "Publish events to Kafka."),
+                decision(
+                    "cloud-2",
+                    "Postgres for storage",
+                    "Store relational data in Postgres."
+                ),
+            ))
+            .create();
+        let mut args = check_args(&[]);
+        args.no_cloud = false;
+        args.repo = Some(REPO.to_string());
+        args.api = api(&server);
+
+        let report = block(run_check(&args, root, TODAY));
+
+        list.assert();
+        let listed: Vec<(&str, Remedy, &[String])> = report
+            .wont_publish
+            .iter()
+            .map(|f| (f.path.as_str(), f.recommendation, f.reasons.as_slice()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "docs/adr/look-alike.md",
+                    Remedy::Compare,
+                    &[
+                        "It looks like decision cloud-2 in Actual AI: \"Postgres for storage\"."
+                            .to_string()
+                    ][..]
+                ),
+                (
+                    "docs/adr/plain.md",
+                    Remedy::Normalize,
+                    &[
+                        NO_HEADER.to_string(),
+                        "It looks like decision cloud-1 in Actual AI: \"Use Kafka for events\"."
+                            .to_string()
+                    ][..]
+                ),
+            ]
+        );
+        let text = render_report(&report);
+        assert!(
+            text.contains("  docs/adr/look-alike.md: compare it with the decision it looks like\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "`actual adr create --all` skips a look-alike unless you pass `--allow-duplicate`."
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -766,7 +1157,7 @@ mod tests {
         let report = block(run_check(&args, tmp.path(), TODAY));
         assert_eq!(
             render_report(&report).lines().next(),
-            Some("No decision files to check under docs/adr/.")
+            Some("No decision files with an ADR header to check under docs/adr/.")
         );
     }
 
@@ -951,6 +1342,12 @@ mod tests {
             }],
             duplicates: Vec::new(),
             skipped: vec!["a".to_string(), "b".to_string()],
+            wont_publish: vec![WontPublish {
+                path: "docs/adr/b.md".to_string(),
+                reasons: vec!["It looks like decision x in Actual AI: \"X\".".to_string()],
+                recommendation: Remedy::Compare,
+            }],
+            adr_bot_copies: vec!["docs/adr/c.md".to_string(), "docs/adr/d.md".to_string()],
             cloud: CloudComparison {
                 compared: true,
                 scope: Some("o/r".to_string()),
@@ -961,7 +1358,9 @@ mod tests {
         let text = render_report(&report);
         assert!(text.contains("Checked 1 decision file\n"), "{text}");
         assert!(text.contains("warning: No title"), "{text}");
-        assert!(text.contains("2 files under"), "{text}");
+        assert!(text.contains("Won't publish: 1 file\n"), "{text}");
+        assert!(!text.contains("Actual's format is"), "{text}");
+        assert!(text.contains("Not listed: 2 copies that"), "{text}");
         assert!(text.contains("Compared with 1 decision in o/r."), "{text}");
     }
 

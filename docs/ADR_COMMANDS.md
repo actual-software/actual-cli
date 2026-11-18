@@ -5,7 +5,7 @@
 ```bash
 actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
 actual adr check                      # check every decision file under docs/adr/
-actual adr discover                   # every ADR file in the folders ADR tools use
+actual adr discover                   # copy the ADRs other tools keep into docs/adr/imported/
 actual adr list                       # this repository's decisions in Actual AI
 actual adr create --file docs/adr/<file>.md
 actual adr create --all               # every decision file Actual AI doesn't have yet
@@ -56,16 +56,30 @@ actual adr check --no-cloud            # compare only with the files in this rep
 
 `adr check` runs Actual AI's save check on each file and lists likely duplicates: pairs of files in the repository and, when you're signed in, decisions in Actual AI. Those are the connected repository's decisions, or the whole organization's when the checkout names no connected repository, and the report says which. It exits 1 when a file fails the check. A likely duplicate is reported without failing the run. When the comparison with Actual AI can't run (signed out, or the request failed), the report says why and the local check still counts.
 
+With no file named, `adr check` also reads the files under `docs/adr/` that carry no ADR header, and it ends with the files that won't publish. Each comes with its reasons and what to do:
+
+| Reason | What to do |
+|--------|------------|
+| No ADR header, or a save-check reason such as no policy under `## Decision`, a title on more than one line, or a document over the size limit | Rewrite it in Actual's format: the ADR header, a `# ` title and policies such as `1. MUST: …` under `## Decision`, as `adr new` writes them |
+| It looks like a decision in Actual AI, by the rule below | Compare the two; `create --all` skips a look-alike unless you pass `--allow-duplicate` |
+
+The list leaves out files whose id is already a decision in Actual AI, READMEs, indexes and templates, and everything under `docs/adr/drafts/`, where work in progress stays out of Actual AI. The header-less copies `actual adr-bot` writes of your decisions, each beside a `.claude/rules/` file naming the decision, are counted in one line instead. A file without a header doesn't fail the run: the exit status still comes from the files that carry one.
+
 Two decisions look the same when their titles share at least half their content words, or when any policy of one does with any policy of the other. Content words leave out common English words and the policy levels, and the comparison runs locally with no model.
 
 ### Finding the ADRs a repository already has
 
 ```bash
 actual adr discover
+actual adr discover --dry-run          # list what would be copied, and copy nothing
 actual adr discover --root ../web --json
 ```
 
-`adr discover` lists the ADR files in the folders ADR tools use, with each file's layout, title and status, and the id its Actual header names. It only reads: nothing is written or sent, and it needs no sign-in.
+`adr discover` lists the ADR files in the folders ADR tools use, with each file's layout, title and status, and the id its Actual header names. It then copies each one kept outside `docs/adr/` into `docs/adr/imported/<folder>/` under its own name, where `<folder>` is the source's folder with `-` between its parts: `doc/adr/0001-record-architecture-decisions.md` goes to `docs/adr/imported/doc-adr/`. The copies sit where `check` and `create --all` read, and two tools' files of the same name don't collide. The sources stay where they are.
+
+A file is never overwritten: when a copy's path is taken, the run says so and leaves that source alone. `docs/adr/imported/.copied` lists each source copied, and a listed source isn't copied again, even after its copy is renamed or deleted; delete its line to copy it once more. `--dry-run` lists the copies and writes nothing.
+
+The run ends with the files under `docs/adr/` that won't publish, as [`check`](#checking-decision-files) lists them, compared with your decisions in Actual AI when you're signed in unless you pass `--no-cloud`. It sends no file and needs no sign-in.
 
 | Folder | Read for |
 |--------|----------|
@@ -85,7 +99,7 @@ Each folder is read three levels deep. A file's layout is one of four:
 | `nygard` | Status, Context, Decision and Consequences sections, as adr-tools writes them |
 | `other` | None of the layouts above: any such file in a tool's folder, and in a common folder a numbered one such as `0007-use-postgres.md` |
 
-An index, a README or a template is listed apart, as not an ADR. A folder a configuration file names that leads outside the repository isn't read, nor is a URL in `catalog-info.yaml`, and the list says so. `adr new` writes a random local id into the header, so an id in the list doesn't mean Actual AI has the decision: `create --all` finds that out. Only files in Actual's format can be sent with `create`.
+An index, a README or a template is listed apart, as not an ADR, and isn't copied. A folder a configuration file names that leads outside the repository isn't read, nor is a URL in `catalog-info.yaml`, and the list says so; nothing is copied into a folder that leads outside it. `adr new` writes a random local id into the header, so an id in the list doesn't mean Actual AI has the decision: `create --all` finds that out. Only files in Actual's format can be sent with `create`, so a copy publishes once it's rewritten in that format.
 
 ## Accepted or draft
 
