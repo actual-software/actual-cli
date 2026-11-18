@@ -21,16 +21,24 @@
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved, a report returns before it builds anything.
+//!
+//! **Nothing without the feature.** A build without the `telemetry` feature
+//! has neither event, and both reports are no-ops that take the same calls.
 
 use std::time::Instant;
 
+#[cfg(feature = "telemetry")]
 use super::super::brief_telemetry;
 use crate::adr::workflow;
 use crate::api::adr_types::{LifecycleAction, WebDecision};
 use crate::error::ActualError;
-use crate::telemetry::otlp::{self, CheckCounts, ReviewedDecision};
+#[cfg(feature = "telemetry")]
+pub(super) use crate::telemetry::otlp::CheckCounts;
+#[cfg(feature = "telemetry")]
+use crate::telemetry::otlp::{self, ReviewedDecision};
 
 /// A command run being timed, and whether a person was at the terminal.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub(super) struct Run {
     started: Instant,
     interactive: bool,
@@ -44,6 +52,7 @@ impl Run {
         }
     }
 
+    #[cfg(feature = "telemetry")]
     fn ended<'a>(&self, outcome: &'a str, exit_code: i32) -> otlp::AdrRun<'a> {
         otlp::AdrRun {
             outcome,
@@ -89,12 +98,25 @@ pub(super) fn command(action: LifecycleAction) -> &'static str {
     }
 }
 
+/// What an `adr check` run found, which nothing reads in a build without the
+/// `telemetry` feature.
+#[cfg(not(feature = "telemetry"))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct CheckCounts {
+    pub files: usize,
+    pub failed: usize,
+    pub duplicates: usize,
+}
+
+#[cfg(feature = "telemetry")]
 fn exit_code<T>(result: &Result<T, ActualError>) -> i32 {
     result.as_ref().err().map_or(0, ActualError::exit_code)
 }
 
 /// Report one `adr check` run that found `counts`: `passed`, `failed` when a
 /// file failed the save rules, or `error` when the check couldn't run.
+#[cfg(feature = "telemetry")]
 pub(super) fn report_check(run: &Run, counts: CheckCounts, result: &Result<(), ActualError>) {
     let outcome = match result {
         Ok(()) => "passed",
@@ -107,6 +129,7 @@ pub(super) fn report_check(run: &Run, counts: CheckCounts, result: &Result<(), A
 /// Report one run of review command `action` that found `reviewed`, if it got
 /// that far: `succeeded`, `refused` when [`workflow`] turns the change down
 /// before anything is sent, `not_signed_in`, or `failed`.
+#[cfg(feature = "telemetry")]
 pub(super) fn report_review<T>(
     run: &Run,
     action: &str,
@@ -127,18 +150,22 @@ pub(super) fn report_review<T>(
     send(|origin| origin.adr_reviewed(action, decision, run.ended(outcome, exit_code(result))));
 }
 
+#[cfg(feature = "telemetry")]
 fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
-    let Some(config) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
         return;
     };
-    let Some(outputs) = otlp::Outputs::resolve(&config) else {
-        return;
-    };
-    let record = build(&otlp::Origin::resolve());
-    brief_telemetry::dispatch(&outputs, vec![record]);
+    destination.deliver(vec![build(&otlp::Origin::resolve())]);
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_check(_: &Run, _: CheckCounts, _: &Result<(), ActualError>) {}
+
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_review<T>(_: &Run, _: &str, _: Option<&Reviewed>, _: &Result<T, ActualError>) {
+}
+
+#[cfg(all(test, feature = "telemetry"))]
 pub(super) mod tests {
     use super::*;
 
@@ -193,6 +220,8 @@ pub(super) mod tests {
             "ACTUAL_OTLP_LOGS_ENDPOINT",
             "ACTUAL_OTLP_FILE",
             "TRACEPARENT",
+            crate::telemetry::debug::ENV,
+            crate::telemetry::debug::ID_ENV,
         ]
         .into_iter()
         .map(EnvGuard::remove)
@@ -269,7 +298,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 3);
+                assert_eq!(all["actual.event.schema_version"], 4);
             }
         });
     }
@@ -399,6 +428,26 @@ pub(super) mod tests {
         });
         with_config(WITH_FILE, |_| {
             assert_eq!(report_both().len(), 2, "the positive control");
+        });
+    }
+
+    /// Telemetry off in debug mode: both events are built and logged as not
+    /// sent, and nothing is sent.
+    #[test]
+    fn debug_mode_logs_both_events_as_not_sent_with_telemetry_off() {
+        let reviewed = Reviewed::of(&decision("d-1", None, &[]));
+        with_config(&format!("{WITH_FILE}  enabled: false\n"), |home| {
+            let _debug = crate::telemetry::debug::tests::debug_on(home, "adr-off");
+            report_check(&run(true), COUNTS, &Ok(()));
+            report_review(&run(true), "accept", Some(&reviewed), &Ok(()));
+            assert!(take_captured().is_empty());
+            let lines = crate::telemetry::debug::tests::logged("adr-off");
+            let names: Vec<_> = lines.iter().map(|l| &l["event"]["eventName"]).collect();
+            assert_eq!(names, [otlp::ADR_DISCOVERED, otlp::ADR_REVIEWED]);
+            for line in &lines {
+                assert_eq!(line["stage"], "not_sent");
+                assert_eq!(line["reason"], "telemetry_off");
+            }
         });
     }
 }

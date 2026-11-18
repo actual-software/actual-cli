@@ -333,6 +333,10 @@ fn hook_reply(raw: &str, args: &RulesBriefArgs) -> Option<String> {
     let root = repo_root(args, || envelope_root(envelope.cwd));
 
     let session_id = envelope.session_id.filter(|id| !id.is_empty());
+    #[cfg(feature = "telemetry")]
+    if let Some(id) = session_id.as_deref() {
+        crate::telemetry::debug::use_session(id);
+    }
     let session = session_id.as_deref().map(|session_id| SessionIdentity {
         session_id,
         agent_id: envelope.agent_id.as_deref().filter(|id| !id.is_empty()),

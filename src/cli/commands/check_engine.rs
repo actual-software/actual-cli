@@ -852,12 +852,13 @@ fn spool_governance_events(
 /// `violations` — never a rule's span, statement, or reason text; see
 /// `PRIVACY.md`.
 ///
-/// Checks `opt_out::load_if_enabled` first, before any repo-identity hashing or
+/// Checks `plan_governance::gate` first, before any repo-identity hashing or
 /// `distinct_id()` — an opted-out user must not have a persistent telemetry
 /// id written to disk (or git subprocesses spawned) just because a check
 /// ran; the uploader's own opt-out check is too late for that, since by
 /// then the id file already exists. See `PRIVACY.md`'s "How to opt out of
-/// telemetry."
+/// telemetry." Telemetry debug mode with telemetry off builds the events with
+/// no id written and logs them as not sent.
 #[cfg(feature = "telemetry")]
 pub(super) fn send_governance_events(
     command: &str,
@@ -868,16 +869,16 @@ pub(super) fn send_governance_events(
     violations: &[(&str, &str, crate::api::types::PlanGovernanceDecision)],
     rounds: Option<(u32, u32)>,
 ) {
-    use crate::telemetry::plan_governance::EventContext;
+    use crate::telemetry::plan_governance::{self, EventContext};
 
-    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some((cfg, send)) = plan_governance::gate() else {
         return;
     };
 
     let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
     let identity = identity_envelope(&cfg, &repo_url);
-    let mut ctx = EventContext::new(command)
+    let mut ctx = EventContext::with_distinct_id(command, plan_governance::distinct_id_for(send))
         .with_repo_hashes(repo_hash, repo_url_hash)
         .with_identity(identity);
     if let Some((round_index, round_total)) = rounds {
@@ -899,7 +900,11 @@ pub(super) fn send_governance_events(
         events.push(ctx.violation_event(rule_id, rule_source, *v_decision));
     }
 
-    dispatch_governance_events(events);
+    if send {
+        dispatch_governance_events(events);
+    } else {
+        plan_governance::hold_back(&events);
+    }
 }
 
 /// Emit one `plan_governance_rule_override` event per rule an
@@ -912,7 +917,7 @@ pub(super) fn send_governance_events(
 /// `governance_session::key`), validated against the rule corpus by
 /// [`validate_override_rules`] before this is ever called.
 ///
-/// Checks `opt_out::load_if_enabled` first, before any repo-identity hashing or
+/// Checks `plan_governance::gate` first, before any repo-identity hashing or
 /// `distinct_id()` — see `send_governance_events`'s doc comment for why
 /// that ordering matters.
 #[cfg(feature = "telemetry")]
@@ -927,9 +932,9 @@ fn send_override_events(
         PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
         PlanGovernanceEventProperties,
     };
-    use crate::telemetry::plan_governance::{distinct_id, reason_summary};
+    use crate::telemetry::plan_governance::{self, reason_summary};
 
-    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some((cfg, send)) = plan_governance::gate() else {
         return;
     };
 
@@ -937,7 +942,7 @@ fn send_override_events(
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
     // Same hashed identity/timestamp envelope every other governance event carries.
     let identity = identity_envelope(&cfg, &repo_url);
-    let id = distinct_id();
+    let id = plan_governance::distinct_id_for(send);
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
     let timestamp = chrono::Utc::now().to_rfc3339();
     // The reason is customer free text: events carry only its length bucket
@@ -979,11 +984,15 @@ fn send_override_events(
         })
         .collect();
 
-    dispatch_governance_events(events);
+    if send {
+        dispatch_governance_events(events);
+    } else {
+        plan_governance::hold_back(&events);
+    }
 }
 
 /// `--claude-hook`-mode wrapper around [`send_governance_events`]: every
-/// non-conforming verdict this round gets a violation event with the same
+/// non-passing verdict this round gets a violation event with the same
 /// `blocked` outcome, since (per the module doc's "revision loop" section) a
 /// round either denies the tool call over every rule in `blocking` together
 /// or lets all of them through together — there is no per-rule split within
@@ -1007,7 +1016,7 @@ pub(super) fn send_hook_governance_events(
 ) {
     let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
         .iter()
-        .filter(|v| v.verdict != Verdict::Conforming)
+        .filter(|v| !v.verdict.passes())
         .map(|v| {
             (
                 v.rule_id.as_str(),
@@ -1374,6 +1383,8 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
         return None;
     }
     let session_id = env.session_id.filter(|s| !s.is_empty())?;
+    #[cfg(feature = "telemetry")]
+    crate::telemetry::debug::use_session(&session_id);
     let root = repo_root(args.repo.as_ref());
     let rules_dir = args
         .rules_dir
@@ -1786,12 +1797,12 @@ fn finish_verdicts(
         let state = session.loop_state_mut(kind);
         for v in &verdicts {
             let key = governance_session::key(&v.doc_slug, &v.rule_id);
-            if v.verdict == Verdict::Conforming {
+            if v.verdict.passes() {
                 state.cleared.insert(key, run.artifact_digest.to_string());
             } else {
-                // A rule that was cleared against an earlier artifact and is
-                // no longer conforming against this one must not leave a
-                // stale entry behind -- it is no longer a true fact about the
+                // A rule that was cleared against an earlier artifact and no
+                // longer passes against this one must not leave a stale
+                // entry behind -- it is no longer a true fact about the
                 // current artifact, digest mismatch or not.
                 state.cleared.remove(&key);
             }
@@ -1966,8 +1977,8 @@ fn finish_verdicts(
     // An active override on an otherwise-clean round is still worth
     // distinguishing from a truly clean allow -- something was once wrong here
     // and a human waived it, which is exactly the kind of fact this stream
-    // exists to preserve. `verdicts` this round holds no non-`Conforming`
-    // entries by construction (any such rule would already be in `blocking`,
+    // exists to preserve. `verdicts` this round holds only passing entries
+    // ([`Verdict::passes`]) by construction (any such rule would already be in `blocking`,
     // handled above), so no violation events are emitted here regardless.
     #[cfg(feature = "telemetry")]
     let has_override_reminder = reminder.is_some();
@@ -2843,7 +2854,12 @@ pub(crate) mod tests {
         };
         let outcome = Outcome::Verdicts {
             selection,
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
+            verdicts: vec![checked(
+                "R-A-001",
+                Verdict::Followed,
+                "Sign every access token with RS256.",
+                "uses RS256",
+            )],
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: None,
             headers: BTreeMap::new(),
@@ -2874,7 +2890,12 @@ pub(crate) mod tests {
         };
         let outcome = Outcome::Verdicts {
             selection,
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
+            verdicts: vec![checked(
+                "R-A-001",
+                Verdict::Followed,
+                "Sign every access token with RS256.",
+                "uses RS256",
+            )],
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: Some((60, 85)),
             headers: BTreeMap::new(),
@@ -2939,7 +2960,10 @@ pub(crate) mod tests {
         };
         let conforming = Outcome::Verdicts {
             selection: selection.clone(),
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
+            verdicts: vec![
+                checked("R-A-001", Verdict::Followed, "Sign with RS256.", ""),
+                checked("R-A-002", Verdict::NotApplicable, "", ""),
+            ],
             runner_label: None,
             partial: None,
             headers: BTreeMap::new(),
@@ -2948,6 +2972,10 @@ pub(crate) mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conforming");
         assert!(value.get("partial").is_none());
+        assert_eq!(value["verdicts"][0]["verdict"], "followed");
+        assert_eq!(value["verdicts"][0]["span"], "Sign with RS256.");
+        assert_eq!(value["verdicts"][1]["verdict"], "not_applicable");
+        assert_eq!(value["verdicts"][1]["span"], "");
 
         let conflicting = Outcome::Verdicts {
             selection: selection.clone(),
@@ -2973,7 +3001,7 @@ pub(crate) mod tests {
 
         let partial = Outcome::Verdicts {
             selection: selection.clone(),
-            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
+            verdicts: vec![checked("R-A-001", Verdict::NotApplicable, "", "")],
             runner_label: None,
             partial: Some((60, 85)),
             headers: BTreeMap::new(),
@@ -3222,7 +3250,7 @@ pub(crate) mod tests {
             dir,
             &check_output(serde_json::json!([
                 {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "skips signing", "reason": "unsigned"},
-                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "fine"},
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "fine"},
             ])),
         )
     }
@@ -3623,7 +3651,7 @@ pub(crate) mod tests {
                 serde_json::json!({
                     "doc_slug": "cross-cutting-many-abcd",
                     "rule_id": format!("R-X-{i:04}"),
-                    "verdict": "conforming",
+                    "verdict": "not_applicable",
                     "span": "",
                     "reason": "not touched",
                 })
@@ -3701,8 +3729,8 @@ pub(crate) mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -4015,7 +4043,7 @@ pub(crate) mod tests {
             finish_hook(
                 &run,
                 &mut session,
-                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+                verdicts_outcome(vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")]),
             );
 
             let own = session.loop_state(kind);
@@ -4044,7 +4072,7 @@ pub(crate) mod tests {
             finish_hook(
                 &run,
                 &mut session,
-                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+                verdicts_outcome(vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")]),
             );
         });
 
@@ -4295,7 +4323,7 @@ pub(crate) mod tests {
         let rules = tempdir().unwrap();
         let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
         let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
-        let conforming = vec![checked("R-A-001", Verdict::Conforming, "", "ok")];
+        let conforming = vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")];
 
         for (exit, max_rounds, earlier_denials, verdicts, outcome) in [
             ("the round limit's pass", 2, 2, conflict(), "warn"),
@@ -4361,7 +4389,7 @@ pub(crate) mod tests {
         .unwrap();
         let rules = tempdir().unwrap();
         let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
-        let conforming = || vec![checked("R-A-001", Verdict::Conforming, "", "ok")];
+        let conforming = || vec![checked("R-A-001", Verdict::NotApplicable, "", "ok")];
         let over_some_rules = |verdicts| {
             let mut outcome = verdicts_outcome(verdicts);
             if let Outcome::Verdicts { partial, .. } = &mut outcome {
@@ -4668,6 +4696,47 @@ pub(crate) mod tests {
         );
         let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"source\":\"session_dialog\""), "{log}");
+    }
+
+    /// An override typed in a telemetry debug session is logged in that
+    /// session's file, beside the gates' events.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_override_hook_in_debug_mode_logs_under_the_session_id() {
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _fresh = FreshId::new();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::remove(debug::ID_ENV);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let k = governance_session::key("doc", "R-A-001");
+        let mut session = governance_session::load("sess-debug-o1", &rules_dir);
+        session.plan.record_denial(&k);
+        governance_session::store("sess-debug-o1", &rules_dir, &session);
+
+        exec_override_hook_with(
+            &hook_args(repo.path()),
+            &prompt_env(
+                "UserPromptSubmit",
+                "sess-debug-o1",
+                "/actual-cli:override all",
+            ),
+        )
+        .expect("hook output");
+
+        let names: Vec<String> = logged("sess-debug-o1")
+            .iter()
+            .filter(|line| line["stream"] == "governance")
+            .map(|line| line["event"]["event"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["plan_governance_rule_override"]);
     }
 
     /// The dialog's pick rides as the first word after the target: it is
@@ -5926,5 +5995,72 @@ pub(crate) mod tests {
             override_events_under(crate::testutil::LOADABLE_TELEMETRY_ON),
             (1, true)
         );
+    }
+
+    /// Telemetry off in debug mode: the check's and the override's events
+    /// are built and logged as not sent, none is handed to the spool, and no
+    /// telemetry id is written.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_debug_mode_with_telemetry_off_logs_governance_events_and_writes_no_id() {
+        use crate::telemetry::debug::{self, tests::logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::set(debug::ID_ENV, "governance-off");
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let events = with_captured_plan_governance_events(|| {
+            send_governance_events(
+                "plan-check",
+                repo.path(),
+                std::time::Instant::now(),
+                crate::api::types::PlanGovernanceDecision::Allow,
+                0,
+                &[],
+                None,
+            );
+        });
+        let args = PlanCheckOverrideArgs {
+            session: Some("sess-debug-1".to_string()),
+            rules: vec![governance_session::key("doc", "R-A-001")],
+            reason: Some("reviewed and accepted".to_string()),
+            reason_code: None,
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+            claude_hook: false,
+            via: OverrideVia::Prompt,
+            gate: None,
+            list_blocking: false,
+        };
+        let override_events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+
+        assert!(events.is_empty());
+        assert!(override_events.is_empty());
+        assert!(!home.path().join("telemetry-id").exists());
+        let lines: Vec<_> = logged("governance-off")
+            .into_iter()
+            .filter(|line| line["stream"] == "governance")
+            .collect();
+        let names: Vec<&str> = lines
+            .iter()
+            .map(|line| line["event"]["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "plan_governance_check_started",
+                "plan_governance_check_completed",
+                "plan_governance_rule_override"
+            ]
+        );
+        for line in &lines {
+            assert_eq!(line["stage"], "not_sent");
+            assert_eq!(line["reason"], "telemetry_off");
+            assert!(uuid::Uuid::parse_str(line["event"]["distinct_id"].as_str().unwrap()).is_ok());
+        }
     }
 }

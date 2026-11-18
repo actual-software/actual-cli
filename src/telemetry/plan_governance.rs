@@ -16,6 +16,7 @@ use crate::api::types::{
 };
 use crate::config::types::Config;
 use crate::rules::check::Verdict;
+use crate::telemetry::debug;
 use crate::telemetry::identity::IdentityEnvelope;
 use crate::telemetry::opt_out;
 use crate::telemetry::reporter::SERVICE_KEY;
@@ -65,16 +66,57 @@ pub fn distinct_id() -> String {
         return uuid::Uuid::new_v4().to_string();
     };
     let path = dir.join(DISTINCT_ID_FILE);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if uuid::Uuid::parse_str(trimmed).is_ok() {
-            return trimmed.to_string();
-        }
+    if let Some(existing) = stored_distinct_id(&path) {
+        return existing;
     }
     let fresh = uuid::Uuid::new_v4().to_string();
     let _ = std::fs::create_dir_all(&dir);
     let _ = crate::config::paths::write_secure(&path, fresh.as_bytes());
     fresh
+}
+
+/// The id stored at `path`, when it holds a UUID.
+fn stored_distinct_id(path: &std::path::Path) -> Option<String> {
+    let existing = std::fs::read_to_string(path).ok()?;
+    let trimmed = existing.trim();
+    uuid::Uuid::parse_str(trimmed)
+        .is_ok()
+        .then(|| trimmed.to_string())
+}
+
+/// The id a governance event carries: [`distinct_id`] when it will be sent,
+/// else the stored id, or a fresh one written nowhere, since a telemetry debug
+/// run with telemetry off must not leave an id behind.
+pub(crate) fn distinct_id_for(send: bool) -> String {
+    if send {
+        return distinct_id();
+    }
+    crate::config::paths::config_dir()
+        .ok()
+        .and_then(|dir| stored_distinct_id(&dir.join(DISTINCT_ID_FILE)))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+/// The config a governance sender builds its events under, and whether it
+/// sends them (`false` in telemetry debug mode with telemetry off), or `None`
+/// when it should build nothing.
+pub(crate) fn gate() -> Option<(Config, bool)> {
+    match opt_out::gate(debug::Stream::Governance) {
+        opt_out::Gate::Send(config) => Some((config, true)),
+        opt_out::Gate::DebugOnly(config) => Some((config, false)),
+        opt_out::Gate::Off => None,
+    }
+}
+
+/// Log `events` in debug mode as telemetry kept them back.
+pub(crate) fn hold_back(events: &[PlanGovernanceEvent]) {
+    if debug::enabled() {
+        debug::held_back(
+            debug::Stream::Governance,
+            &debug::lines_of(events),
+            debug::Reason::TelemetryOff,
+        );
+    }
 }
 
 /// The `decision` reported for one rule's outcome this round.
@@ -91,7 +133,7 @@ pub fn distinct_id() -> String {
 /// only record governance activity leaves behind.
 pub fn rule_decision(verdict: Verdict, blocked: bool) -> PlanGovernanceDecision {
     match verdict {
-        Verdict::Conforming => PlanGovernanceDecision::Allow,
+        Verdict::Followed | Verdict::NotApplicable => PlanGovernanceDecision::Allow,
         Verdict::Conflicting | Verdict::RequiresDecision => {
             if blocked {
                 PlanGovernanceDecision::Block
@@ -120,8 +162,13 @@ pub struct EventContext {
 
 impl EventContext {
     pub fn new(command: impl Into<String>) -> Self {
+        Self::with_distinct_id(command, distinct_id())
+    }
+
+    /// [`EventContext::new`], carrying `distinct_id`.
+    pub fn with_distinct_id(command: impl Into<String>, distinct_id: String) -> Self {
         Self {
-            distinct_id: distinct_id(),
+            distinct_id,
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             command: command.into(),
             repo_hash: None,
@@ -347,15 +394,11 @@ mod tests {
     // --- rule_decision ---
 
     #[test]
-    fn test_rule_decision_conforming_is_always_allow() {
-        assert_eq!(
-            rule_decision(Verdict::Conforming, false),
-            PlanGovernanceDecision::Allow
-        );
-        assert_eq!(
-            rule_decision(Verdict::Conforming, true),
-            PlanGovernanceDecision::Allow
-        );
+    fn test_rule_decision_a_passing_verdict_is_always_allow() {
+        for verdict in [Verdict::Followed, Verdict::NotApplicable] {
+            assert_eq!(rule_decision(verdict, false), PlanGovernanceDecision::Allow);
+            assert_eq!(rule_decision(verdict, true), PlanGovernanceDecision::Allow);
+        }
     }
 
     #[test]
