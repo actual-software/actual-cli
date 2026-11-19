@@ -69,6 +69,7 @@ use crate::rules::brief::{render_brief_shown, BriefDecision};
 use crate::rules::scope::{
     self,
     index::{AdrGroup, Match, Query, ScopeIndex},
+    FilterTally, KeptFile,
 };
 
 /// The event and tool pairs this command answers, and nothing else: a read is
@@ -624,7 +625,8 @@ fn brief_for(
 
     // Uncapped, so whether a decision governs the file never depends on
     // `--limit`. The cap is applied below.
-    let mut decisions = governing(&resolved.index, &relative, min_score(args, root));
+    let (mut decisions, mut tally) =
+        governing_tallied(&resolved.index, &relative, min_score(args, root));
 
     // Decisions this context was already briefed on are dropped after the
     // search, so `--limit` still means "the top N for this file" rather than
@@ -651,10 +653,13 @@ fn brief_for(
     if let Some(who) = session {
         record_folder(&resolved.index, who, &key_dir, &relative, governed);
     }
+    let matched = files_of(&decisions);
     decisions.truncate(args.limit);
     if let Some((_, _, state)) = &memory {
         decisions.retain(|decision| !state.has_briefed(&decision.key));
     }
+    let offered = files_of(&decisions);
+    tally.brief_cap += matched - offered;
     if decisions.is_empty() {
         return Err(match (governed, args.limit) {
             (false, _) => NoBrief::Ungoverned,
@@ -667,7 +672,7 @@ fn brief_for(
     // text is read here — one file per selected document. Loading the whole
     // rule set instead would read 425 files to render two decisions, and this
     // runs on every file the agent reads.
-    let parsed: Vec<(usize, crate::rules::types::RuleDocument)> = decisions
+    let parsed: Vec<(usize, &Match, crate::rules::types::RuleDocument)> = decisions
         .iter()
         .enumerate()
         .flat_map(|(position, decision)| {
@@ -678,10 +683,11 @@ fn brief_for(
                 // failing the brief: the rest still governs the file.
                 let document = crate::rules::parse_rule_document(&path, &text).ok()?;
                 // As in the index: a retired decision is never briefed.
-                document.is_active().then_some((position, document))
+                document.is_active().then_some((position, hit, document))
             })
         })
         .collect();
+    tally.inactive += offered - parsed.len();
 
     let briefed: Vec<BriefDecision<'_>> = decisions
         .iter()
@@ -690,8 +696,8 @@ fn brief_for(
             heading: brief_heading(decision),
             documents: parsed
                 .iter()
-                .filter(|(at, _)| *at == position)
-                .map(|(_, document)| document)
+                .filter(|(at, _, _)| *at == position)
+                .map(|(_, _, document)| document)
                 .collect(),
         })
         .collect();
@@ -701,6 +707,17 @@ fn brief_for(
     else {
         return Err(NoBrief::NothingToShow);
     };
+    tally.kept = rendered
+        .reached
+        .iter()
+        .filter_map(|&document| {
+            let (_, hit, _) = parsed
+                .iter()
+                .find(|(_, _, parsed)| std::ptr::eq(parsed, document))?;
+            Some(KeptFile::of(hit))
+        })
+        .collect();
+    tally.brief_cap += parsed.len() - tally.kept.len();
     let chars = rendered.brief.chars().count();
 
     // The budget is checked before anything is recorded, so a brief turned
@@ -738,7 +755,13 @@ fn brief_for(
         // Telemetry counts by a different rule: any ADR with a rule the agent
         // was just given, however its decision was trimmed.
         #[cfg(feature = "telemetry")]
-        super::brief_telemetry::report(&dir, &key, who.agent_id, rendered.reached.iter().copied());
+        super::brief_telemetry::report(
+            &dir,
+            &key,
+            who.agent_id,
+            rendered.reached.iter().copied(),
+            &tally,
+        );
     }
 
     // Only decisions that contributed everything they could are remembered:
@@ -752,6 +775,14 @@ fn brief_for(
         brief_memory::store(&dir, &key, &state);
     }
     Ok(rendered.brief)
+}
+
+/// How many rule files `decisions` hold between them.
+fn files_of(decisions: &[AdrGroup]) -> usize {
+    decisions
+        .iter()
+        .map(|decision| decision.documents.len())
+        .sum()
 }
 
 /// Note the folder `relative` sits in, in the session's record: covered when
@@ -809,12 +840,22 @@ fn min_score(args: &RulesBriefArgs, root: &Path) -> f64 {
 /// file's contents are not used: imports and boilerplate swamp the terms that
 /// say what the file is about, and it would cost a read on every brief.
 pub(crate) fn governing(index: &ScopeIndex, relative: &str, floor: f64) -> Vec<AdrGroup> {
+    governing_tallied(index, relative, floor).0
+}
+
+/// [`governing`], with the account of the search whose decisions it returns.
+/// The files of those decisions are left for the caller to count.
+fn governing_tallied(
+    index: &ScopeIndex,
+    relative: &str,
+    floor: f64,
+) -> (Vec<AdrGroup>, FilterTally) {
     let by_path = Query::new("")
         .with_paths([relative.to_string()])
         .with_min_score(floor);
-    let decisions = index.search_adrs(&by_path, index.len());
+    let (decisions, tally) = index.search_adrs_tallied(&by_path, index.len());
     if !decisions.is_empty() {
-        return decisions;
+        return (decisions, tally);
     }
     let by_text = Query::new(relative.replace('/', " "))
         .with_paths([relative.to_string()])
@@ -836,12 +877,16 @@ const MIN_RETRY_TERMS: usize = 2;
 ///
 /// The filter runs before the caller's cap, so a decision dropped here makes
 /// room for the next one that qualifies rather than leaving the brief short.
-fn retry_by_text(index: &ScopeIndex, query: &Query) -> Vec<AdrGroup> {
-    let mut decisions: Vec<AdrGroup> = index
-        .search_adrs(query, index.len())
+///
+/// A file dropped for sharing too few words counts as matching nothing.
+fn retry_by_text(index: &ScopeIndex, query: &Query) -> (Vec<AdrGroup>, FilterTally) {
+    let (found, mut tally) = index.search_adrs_tallied(query, index.len());
+    let mut decisions: Vec<AdrGroup> = found
         .into_iter()
         .filter_map(|mut decision| {
+            let before = decision.documents.len();
             decision.documents.retain(clears_retry_minimum);
+            tally.no_match += before - decision.documents.len();
             let best = decision.documents.first()?.score;
             decision.score = best;
             Some(decision)
@@ -854,7 +899,7 @@ fn retry_by_text(index: &ScopeIndex, query: &Query) -> Vec<AdrGroup> {
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    decisions
+    (decisions, tally)
 }
 
 fn clears_retry_minimum(hit: &Match) -> bool {
@@ -2185,7 +2230,7 @@ mod tests {
             let by_text = Query::new("ops deploy.sh")
                 .with_paths(["ops/deploy.sh".to_string()])
                 .with_min_score(0.0);
-            assert!(retry_by_text(&index, &by_text).is_empty());
+            assert!(retry_by_text(&index, &by_text).0.is_empty());
 
             for (root, file, folder) in [
                 (by_path_only, "ops/deploy.sh", "ops"),
@@ -2782,8 +2827,9 @@ mod tests {
     /// the group id.
     #[cfg(feature = "telemetry")]
     fn reported() -> Vec<(String, serde_json::Value)> {
-        use super::super::brief_telemetry::tests::{attribute, take_captured};
-        let mut reported: Vec<(String, serde_json::Value)> = take_captured()
+        use super::super::brief_telemetry::tests::attribute;
+        let mut reported: Vec<(String, serde_json::Value)> = captured()
+            .1
             .iter()
             .map(|record| {
                 (
@@ -2797,6 +2843,168 @@ mod tests {
             .collect();
         reported.sort_by(|a, b| a.0.cmp(&b.0));
         reported
+    }
+
+    /// The records reported since the last call: the filter records, then
+    /// the rest.
+    #[cfg(feature = "telemetry")]
+    fn captured() -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        super::super::brief_telemetry::tests::take_captured()
+            .into_iter()
+            .partition(|record| record["eventName"] == crate::telemetry::otlp::FILTER_EVALUATED)
+    }
+
+    /// A record's integer or double attribute.
+    #[cfg(feature = "telemetry")]
+    fn number(record: &serde_json::Value, key: &str) -> f64 {
+        let value = &record["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|kv| kv["key"] == key)
+            .unwrap_or_else(|| panic!("no {key} in {record}"))["value"];
+        match value.get("intValue") {
+            Some(int) => int.as_str().unwrap().parse().unwrap(),
+            None => value["doubleValue"].as_f64().unwrap(),
+        }
+    }
+
+    /// Every rule file a filter record accounts for, in one bucket each.
+    #[cfg(feature = "telemetry")]
+    fn assert_conserved(record: &serde_json::Value) {
+        let buckets = [
+            "inactive",
+            "excluded_path",
+            "no_match",
+            "below_floor",
+            "capped",
+            "unrelated",
+            "session",
+            "window",
+            "brief_cap",
+        ];
+        let dropped: f64 = buckets
+            .iter()
+            .map(|bucket| number(record, &format!("actual.filter.dropped.{bucket}")))
+            .sum();
+        assert_eq!(
+            dropped + number(record, "actual.filter.kept_count"),
+            number(record, "actual.filter.index_size"),
+            "{record}"
+        );
+    }
+
+    /// A brief that puts a new ADR in front of the agent sends its selection
+    /// once, before the ADRs, counting every file. A brief that adds none, or
+    /// shows nothing, sends no selection.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_brief_sends_its_selection_only_when_it_adds_an_adr() {
+        use super::super::brief_telemetry::tests::attribute;
+        with_otlp_configured(|| {
+            let root = v2_repo();
+            let a = args(root.path());
+            let file = governed(root.path());
+
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &file), &a).is_some());
+            let (filters, detected) = captured();
+            assert_eq!(filters.len(), 1);
+            assert_eq!(detected.len(), 2);
+            let filter = &filters[0];
+            assert_eq!(attribute(filter, "actual.filter.selector"), "context");
+            assert_eq!(attribute(filter, "actual.session.id"), "s1");
+            assert_eq!(number(filter, "actual.filter.index_size"), 3.0);
+            assert_eq!(number(filter, "actual.filter.kept_count"), 3.0);
+            assert_eq!(
+                attribute(filter, "actual.filter.kept_refs"),
+                serde_json::json!(["grp-rotate", "grp-sign"])
+            );
+            assert_conserved(filter);
+
+            // Already briefed, then briefed again with nothing new to report.
+            assert_eq!(
+                hook_reply(&session_envelope(root.path(), "s1", None, &file), &a),
+                None
+            );
+            assert!(hook_reply(
+                &session_envelope(root.path(), "s1", Some("sub-1"), &file),
+                &a
+            )
+            .is_some());
+            assert_eq!(captured(), (Vec::new(), Vec::new()));
+
+            // An ungoverned file, and a limit that shows nothing.
+            let elsewhere = root.path().join("README.md").to_string_lossy().to_string();
+            assert_eq!(
+                hook_reply(&session_envelope(root.path(), "s2", None, &elsewhere), &a),
+                None
+            );
+            let mut none = args(root.path());
+            none.limit = 0;
+            assert_eq!(
+                hook_reply(&session_envelope(root.path(), "s3", None, &file), &none),
+                None
+            );
+            assert_eq!(captured(), (Vec::new(), Vec::new()));
+        });
+    }
+
+    /// The brief's own cuts are counted: the decision `--limit` leaves out,
+    /// and the file `--rules-per-decision` keeps out of the brief.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_brief_counts_the_files_its_own_limits_cut() {
+        use super::super::brief_telemetry::tests::attribute;
+        with_otlp_configured(|| {
+            let root = v2_repo();
+            let file = governed(root.path());
+            let mut one = args(root.path());
+            one.limit = 1;
+            one.rules_per_decision = 1;
+
+            assert!(hook_reply(&session_envelope(root.path(), "s1", None, &file), &one).is_some());
+            let (filters, _) = captured();
+            let filter = &filters[0];
+            assert_eq!(number(filter, "actual.filter.kept_count"), 1.0);
+            assert_eq!(number(filter, "actual.filter.dropped.brief_cap"), 2.0);
+            assert_eq!(
+                attribute(filter, "actual.filter.kept_scores")
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_conserved(filter);
+        });
+    }
+
+    /// The floor the brief applied is the one reported, and what it dropped
+    /// is counted under it.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_brief_reports_the_floor_it_applied() {
+        with_otlp_configured(|| {
+            let root = v2_repo();
+            let file = governed(root.path());
+            let mut floored = args(root.path());
+            floored.min_score = Some(0.25);
+
+            assert!(
+                hook_reply(&session_envelope(root.path(), "s1", None, &file), &floored).is_some()
+            );
+            let (filters, _) = captured();
+            assert_eq!(number(&filters[0], "actual.filter.min_score"), 0.25);
+            assert_conserved(&filters[0]);
+
+            let index =
+                scope::resolve_in(&crate::rules::rules_dir(root.path()), root.path(), false)
+                    .unwrap()
+                    .index;
+            let relative = relative_to_root(root.path(), &file).unwrap();
+            let (_, tally) = governing_tallied(&index, &relative, f64::MAX);
+            assert_eq!(tally.below_floor + tally.no_match, 3, "{tally:?}");
+            assert_eq!(tally.min_score, f64::MAX);
+        });
     }
 
     /// One brief adding two ADRs reports both, with their group and file ids.

@@ -32,7 +32,7 @@ use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
 use crate::rules::check::{self, CheckedRule, RuleForJudging, Verdict};
-use crate::rules::scope::{self, select, Query, Selection, Stage2};
+use crate::rules::scope::{self, select, FilterTally, KeptFile, Query, Selection, Stage2};
 use crate::rules::types::AdrMeta;
 
 /// Safety cap on how many individual rules are judged in one call. The
@@ -202,6 +202,22 @@ pub(super) fn run_pipeline(
     use_rank: bool,
     session: &GovernanceSession,
 ) -> Result<Outcome, ActualError> {
+    run_pipeline_filtered(plan_text, root, rules_dir, knobs, kind, use_rank, session)
+        .map(|(outcome, _)| outcome)
+}
+
+/// [`run_pipeline`], with the account of what selection kept and dropped on
+/// the way to the judge. The account is `None` only when a rank found no
+/// runner, which stops the round before anything is selected.
+pub(super) fn run_pipeline_filtered(
+    plan_text: &str,
+    root: &Path,
+    rules_dir: &Path,
+    knobs: &CheckKnobs,
+    kind: check::ArtifactKind,
+    use_rank: bool,
+    session: &GovernanceSession,
+) -> Result<(Outcome, Option<FilterTally>), ActualError> {
     let plan_digest = governance_session::content_digest(plan_text);
     let resolved = scope::resolve_in(rules_dir, root, knobs.rebuild)?;
     let query = match kind {
@@ -211,7 +227,9 @@ pub(super) fn run_pipeline(
     let prefiltered = select::prefilter(&resolved.index, &query, knobs.limit, knobs.candidates);
 
     if prefiltered.is_empty() {
-        return Ok(Outcome::NothingApplies);
+        let selection = prefiltered.finish(Stage2::NotRequested);
+        let tally = filter_tally(&prefiltered, &selection, &GatheredRules::default());
+        return Ok((Outcome::NothingApplies, Some(tally)));
     }
 
     let cfg = crate::config::paths::load().unwrap_or_default();
@@ -235,10 +253,13 @@ pub(super) fn run_pipeline(
         ) {
             Ok(runner) => Some(runner),
             Err(reason) => {
-                return Ok(Outcome::NoRunner {
-                    documents_selected: prefiltered.len(),
-                    reason,
-                })
+                return Ok((
+                    Outcome::NoRunner {
+                        documents_selected: prefiltered.len(),
+                        reason,
+                    },
+                    None,
+                ))
             }
         }
     } else {
@@ -259,12 +280,14 @@ pub(super) fn run_pipeline(
     };
 
     if selection.selected.is_empty() {
-        return Ok(Outcome::NothingApplies);
+        let tally = filter_tally(&prefiltered, &selection, &GatheredRules::default());
+        return Ok((Outcome::NothingApplies, Some(tally)));
     }
 
     let gathered = gather_rules(&selection, root, session, kind, &plan_digest);
+    let tally = filter_tally(&prefiltered, &selection, &gathered);
     if gathered.rules.is_empty() {
-        return Ok(if gathered.excluded > 0 {
+        let outcome = if gathered.excluded > 0 {
             // Every applicable rule was already settled this session: there
             // is nothing new to judge, which is the fully-conforming case,
             // not "no rule applies" (this plan does have applicable rules —
@@ -278,7 +301,8 @@ pub(super) fn run_pipeline(
             }
         } else {
             Outcome::NothingApplies
-        });
+        };
+        return Ok((outcome, Some(tally)));
     }
 
     // The judge always resolves its own runner, capped at
@@ -301,15 +325,18 @@ pub(super) fn run_pipeline(
     ) {
         Ok(runner) => runner,
         Err(reason) => {
-            return Ok(Outcome::NoRunner {
-                documents_selected: selection.selected.len(),
-                reason,
-            })
+            return Ok((
+                Outcome::NoRunner {
+                    documents_selected: selection.selected.len(),
+                    reason,
+                },
+                Some(tally),
+            ))
         }
     };
     let label = resolved_runner.label();
 
-    match runtime.block_on(check::check(
+    let outcome = match runtime.block_on(check::check(
         &resolved_runner.runner,
         kind,
         plan_text,
@@ -317,7 +344,7 @@ pub(super) fn run_pipeline(
         resolved_runner.model.as_deref(),
         resolved_runner.max_budget_usd,
     )) {
-        Ok(verdicts) => Ok(Outcome::Verdicts {
+        Ok(verdicts) => Outcome::Verdicts {
             selection,
             verdicts,
             runner_label: Some(label),
@@ -325,16 +352,44 @@ pub(super) fn run_pipeline(
                 .truncated
                 .then_some((gathered.rules.len(), gathered.considered)),
             headers: gathered.headers,
-        }),
-        Err(e) => Ok(Outcome::CheckFailed {
+        },
+        Err(e) => Outcome::CheckFailed {
             documents_selected: selection.selected.len(),
             reason: e.to_string(),
-        }),
-    }
+        },
+    };
+    Ok((outcome, Some(tally)))
+}
+
+/// The account of one round's selection: stage 1's and the limit's drops from
+/// `prefiltered`, then what became of each selected file in `gathered`.
+fn filter_tally(
+    prefiltered: &select::Prefiltered,
+    selection: &Selection,
+    gathered: &GatheredRules,
+) -> FilterTally {
+    let mut tally = prefiltered.tally(selection);
+    tally.inactive += gathered.unusable;
+    tally.session = gathered.settled;
+    tally.window = gathered.windowed;
+    tally.kept = gathered
+        .judged
+        .iter()
+        .map(|&at| {
+            let rule = &selection.selected[at];
+            KeptFile::new(
+                rule.candidate_group_id.as_deref(),
+                rule.adr_id.as_deref(),
+                rule.score,
+            )
+        })
+        .collect();
+    tally
 }
 
 /// The rules gathered from every selected document, capped at
 /// [`MAX_RULES_JUDGED`], and whether the true count exceeded that cap.
+#[derive(Default)]
 struct GatheredRules {
     /// The rules actually handed to the judge: up to [`MAX_RULES_JUDGED`]
     /// non-excluded candidates, in priority order starting from this round's
@@ -359,6 +414,16 @@ struct GatheredRules {
     /// The v2 header of each document read, by slug. A document without one
     /// is absent.
     headers: BTreeMap<String, AdrMeta>,
+    /// Selected documents, by position in the selection, with a rule in
+    /// `rules`.
+    judged: Vec<usize>,
+    /// Selected documents that no longer read, parse or are active.
+    unusable: usize,
+    /// Selected documents whose every rule `session` excludes.
+    settled: usize,
+    /// Selected documents with a rule still to judge, none of them inside the
+    /// window.
+    windowed: usize,
 }
 
 /// Read the individual rules out of every selected document, in selection
@@ -407,21 +472,26 @@ fn gather_rules(
     let mut candidates = Vec::new();
     let mut excluded = 0usize;
     let mut headers = BTreeMap::new();
-    for selected in &selection.selected {
+    let mut unusable = 0usize;
+    let mut settled = 0usize;
+    // Documents with a rule still to judge, by selection position and slug.
+    let mut live: Vec<(usize, &str)> = Vec::new();
+    for (position, selected) in selection.selected.iter().enumerate() {
         let path = root.join(&selected.relative_path);
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Some(doc) = read_active(&path) else {
+            unusable += 1;
             continue;
         };
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        let Ok(doc) = crate::rules::parse_rule_document(&path, &text) else {
-            continue;
-        };
-        // The index already leaves inactive decisions out; this is the same
-        // check for a file edited to a retired status after selection.
-        if !doc.is_active() {
-            continue;
+        if doc.rules.iter().all(|rule| {
+            session.excludes(
+                kind,
+                &governance_session::key(&selected.slug, &rule.id),
+                plan_digest,
+            )
+        }) {
+            settled += 1;
+        } else {
+            live.push((position, &selected.slug));
         }
         for rule in doc.rules {
             if session.excludes(
@@ -448,13 +518,29 @@ fn gather_rules(
     if truncated {
         candidates = select_judged_window(candidates, session, kind);
     }
+    let (judged, windowed): (Vec<_>, Vec<_>) = live
+        .into_iter()
+        .partition(|(_, slug)| candidates.iter().any(|rule| rule.doc_slug == *slug));
     GatheredRules {
         rules: candidates,
         considered,
         truncated,
         excluded,
         headers,
+        judged: judged.into_iter().map(|(position, _)| position).collect(),
+        unusable,
+        settled,
+        windowed: windowed.len(),
     }
+}
+
+/// The rule document at `path`, when it reads, parses and is still active.
+/// The index already leaves inactive decisions out; this is the same check
+/// for a file edited to a retired status after selection.
+fn read_active(path: &Path) -> Option<crate::rules::types::RuleDocument> {
+    let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
+    let doc = crate::rules::parse_rule_document(path, &text).ok()?;
+    doc.is_active().then_some(doc)
 }
 
 /// Chooses which [`MAX_RULES_JUDGED`] candidates get judged this round when
@@ -2465,6 +2551,9 @@ pub(super) struct HookRun<'a> {
     pub picker: bool,
     #[cfg(feature = "telemetry")]
     pub started: super::check_telemetry::Started,
+    /// What this round's selection kept and dropped.
+    #[cfg(feature = "telemetry")]
+    pub filter: Option<&'a FilterTally>,
 }
 
 /// Turn the pipeline's [`Outcome`] into the hook's one line of output and the
@@ -2483,6 +2572,12 @@ pub(super) struct HookRun<'a> {
 /// cannot reach an ordinary nonzero exit through it.
 pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, outcome: Outcome) {
     let copy = artifact_copy(run.kind);
+    // A round that reaches a verdict sends its selection with the round's
+    // other records; one that stops short sends it alone.
+    #[cfg(feature = "telemetry")]
+    if !matches!(outcome, Outcome::Verdicts { .. }) {
+        super::check_telemetry::report_filter(run);
+    }
     match outcome {
         Outcome::NothingApplies => {
             // Nothing applies, so nothing blocks: the previous round's
@@ -2587,7 +2682,12 @@ fn finish_verdicts(
         .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
         .collect();
     #[cfg(feature = "telemetry")]
-    let records = super::check_telemetry::adr_records(run, headers, &verdicts, &blocking);
+    let records = super::check_telemetry::filter_record(run)
+        .into_iter()
+        .chain(super::check_telemetry::adr_records(
+            run, headers, &verdicts, &blocking,
+        ))
+        .collect();
 
     if !blocking.is_empty() {
         // `--codex-ask` needs a session: the conflicts wait in it for the
@@ -4899,6 +4999,8 @@ pub(crate) mod tests {
             picker: false,
             #[cfg(feature = "telemetry")]
             started: super::super::check_telemetry::Started::now(),
+            #[cfg(feature = "telemetry")]
+            filter: None,
         }
     }
 
@@ -6957,6 +7059,216 @@ pub(crate) mod tests {
             assert_eq!(line["reason"], "telemetry_off");
             assert!(uuid::Uuid::parse_str(line["event"]["distinct_id"].as_str().unwrap()).is_ok());
         }
+    }
+
+    // ── the selection's account ─────────────────────────────────────────
+
+    /// [`run_pipeline_filtered`] for a plan, with no runner, so a round gets
+    /// as far as choosing what the judge would see.
+    fn filtered_without_a_runner(
+        root: &Path,
+        plan: &str,
+        args: &PlanCheckArgs,
+        kind: check::ArtifactKind,
+    ) -> (Outcome, FilterTally) {
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let (outcome, tally) = run_pipeline_filtered(
+            plan,
+            root,
+            &crate::rules::rules_dir(root),
+            &args.check_knobs(),
+            kind,
+            false,
+            &GovernanceSession::default(),
+        )
+        .unwrap();
+        let tally = tally.expect("a round without a rank always has an account");
+        assert_eq!(tally.accounted(), tally.index_size, "{tally:?}");
+        (outcome, tally)
+    }
+
+    fn no_runner_args() -> PlanCheckArgs {
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args
+    }
+
+    /// Every rule file lands in one bucket: retired, matching nothing, or
+    /// kept, with the kept file named by its ADR. The
+    /// gates apply no floor yet, and say so.
+    #[test]
+    fn test_the_gate_account_counts_every_file_once() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let retired = v2_oauth("draft")
+            .replace("token-signing-1c57", "token-signing-old")
+            .replace("adr-oauth", "adr-old");
+        let root = seed(&[
+            ("cross-cutting-token-signing-1c57.md", &v2_oauth("accepted")),
+            ("cross-cutting-token-signing-old.md", &retired),
+            ("cross-cutting-terraform-2b2b.md", TERRAFORM_DOC),
+        ]);
+
+        let (outcome, tally) = filtered_without_a_runner(
+            root.path(),
+            "Sign access tokens with RS256",
+            &no_runner_args(),
+            check::ArtifactKind::Plan,
+        );
+
+        assert!(matches!(outcome, Outcome::NoRunner { .. }));
+        assert_eq!(tally.index_size, 3);
+        assert_eq!(tally.inactive, 1);
+        assert_eq!(tally.no_match, 1);
+        assert_eq!(tally.min_score, 0.0);
+        assert_eq!(tally.kept_adrs(), vec![("adr-oauth", tally.kept[0].score)]);
+    }
+
+    /// A round that keeps nothing still has an account: a plan nothing
+    /// matches, and a limit of zero, which caps everything that matched.
+    #[test]
+    fn test_a_round_that_keeps_nothing_is_accounted_for() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[
+            ("cross-cutting-token-signing-1c57.md", OAUTH_DOC),
+            ("cross-cutting-terraform-2b2b.md", TERRAFORM_DOC),
+        ]);
+
+        let (outcome, tally) = filtered_without_a_runner(
+            root.path(),
+            "Paint the garden fence",
+            &no_runner_args(),
+            check::ArtifactKind::Plan,
+        );
+        assert!(matches!(outcome, Outcome::NothingApplies));
+        assert_eq!((tally.no_match, tally.kept.len()), (2, 0));
+
+        let mut none = no_runner_args();
+        none.limit = 0;
+        let (outcome, tally) =
+            filtered_without_a_runner(root.path(), "Sign tokens", &none, check::ArtifactKind::Plan);
+        assert!(matches!(outcome, Outcome::NothingApplies));
+        assert_eq!((tally.capped, tally.kept.len()), (1, 0));
+    }
+
+    /// A diff wholly outside a rule's root drops the rule by path.
+    #[test]
+    fn test_a_diff_outside_a_rules_root_counts_as_an_excluded_path() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rooted = v2_oauth("accepted").replace(
+            "root: .",
+            "root: services/auth\n    paths:\n      - \"oauth/**\"",
+        );
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", &rooted)]);
+        let diff = "diff --git a/web/token.rs b/web/token.rs\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/web/token.rs\n@@ -0,0 +1 @@\n+sign access tokens with RS256\n";
+
+        let (outcome, tally) = filtered_without_a_runner(
+            root.path(),
+            diff,
+            &no_runner_args(),
+            check::ArtifactKind::Diff,
+        );
+
+        assert!(matches!(outcome, Outcome::NothingApplies));
+        assert_eq!(tally.excluded_path, 1);
+    }
+
+    /// The candidate cap and stage 2's rank are counted from the selection:
+    /// a candidate judged unrelated, and one the limit left out.
+    #[test]
+    fn test_a_ranked_selection_counts_the_unrelated_and_the_capped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[
+            ("cross-cutting-token-signing-1c57.md", OAUTH_DOC),
+            (
+                "cross-cutting-key-rotation-3c3c.md",
+                "# Rotate Signing Keys: Rotation\n\nThese rules are ALWAYS ACTIVE for signing key rotation.\n\n### Rules\n\n- **R-C-001** MUST: rotate signing keys.\n",
+            ),
+            (
+                "cross-cutting-key-storage-4d4d.md",
+                "# Store Signing Keys: Storage\n\nThese rules are ALWAYS ACTIVE for signing key storage.\n\n### Rules\n\n- **R-D-001** MUST: store signing keys in the vault.\n",
+            ),
+            ("cross-cutting-terraform-2b2b.md", TERRAFORM_DOC),
+        ]);
+        let index = scope::resolve_in(&crate::rules::rules_dir(root.path()), root.path(), true)
+            .unwrap()
+            .index;
+        let prefiltered =
+            select::prefilter(&index, &Query::new("Rotate and store signing keys"), 1, 30);
+        let candidates = prefiltered.candidates();
+        assert!(candidates.len() >= 3, "{}", candidates.len());
+        let verdict = |at: usize, verdict: &str| scope::RankedVerdict {
+            slug: candidates[at].slug.clone(),
+            verdict: serde_json::from_value(serde_json::json!(verdict)).unwrap(),
+            reason: String::new(),
+        };
+        let selection = prefiltered.apply(&[verdict(0, "unrelated"), verdict(1, "governs")]);
+
+        let mut tally = prefiltered.tally(&selection);
+        assert_eq!(tally.unrelated, 1);
+        assert_eq!(tally.capped, candidates.len() - 2);
+        tally.kept = vec![KeptFile::new(None, None, 1.0)];
+        assert_eq!(tally.accounted(), tally.index_size, "{tally:?}");
+    }
+
+    /// Gathering sorts each selected file: one whose every rule the session
+    /// already settled, one the judge's window has no room for, and the one
+    /// it judges.
+    #[test]
+    fn test_gathering_counts_settled_and_windowed_files() {
+        let mut many = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling.\n\n### Rules\n\n".to_string();
+        for i in 0..MAX_RULES_JUDGED {
+            many.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[
+            ("many.md", &many),
+            ("oauth.md", OAUTH_DOC),
+            ("terraform.md", TERRAFORM_DOC),
+        ]);
+        let selected = |slug: &str| crate::rules::scope::SelectedRule {
+            slug: slug.to_string(),
+            relative_path: format!(".actual/rules/{slug}.md"),
+            title: None,
+            adr_id: None,
+            candidate_group_id: None,
+            root: None,
+            score: 1.0,
+            stage: scope::Stage::Prefilter,
+            verdict: None,
+            reason: String::new(),
+        };
+        let selection = Selection {
+            plan: String::new(),
+            paths: Vec::new(),
+            indexed_documents: 3,
+            limit: 3,
+            selected: vec![selected("terraform"), selected("many"), selected("oauth")],
+            stage2: Stage2::NotRequested,
+        };
+        let mut session = GovernanceSession::default();
+        session.plan.cleared.insert(
+            governance_session::key("terraform", "R-B-001"),
+            "digest-1".to_string(),
+        );
+
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &session,
+            check::ArtifactKind::Plan,
+            "digest-1",
+        );
+
+        assert_eq!(gathered.judged, vec![1]);
+        assert_eq!((gathered.settled, gathered.windowed), (1, 1));
+        assert_eq!(gathered.unusable, 0);
     }
 
     // ── --codex-ask and the Codex prompt ──────────────────────────────────

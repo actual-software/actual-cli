@@ -14,7 +14,7 @@
 //! `### Verify` block, whose grep and test operands name concrete paths. This
 //! module reads both.
 //!
-//! Seven layers, each testable alone:
+//! Eight layers, each testable alone:
 //!
 //! * [`signals`] extracts globs and terms from one document's text. Pure.
 //! * [`index`] builds the searchable index and scores a plan against it. Pure,
@@ -31,6 +31,8 @@
 //! * [`select`] joins the two, and is what a caller wanting an answer should
 //!   use. Every failure in stage 2 degrades to the stage-1 answer rather than
 //!   to an error.
+//! * [`tally`] counts what a selector kept and dropped, and why, for its
+//!   telemetry.
 //!
 //! [`resolve`] is the one entry point most callers want: load, reuse or build
 //! the index, and hand back something searchable.
@@ -42,6 +44,7 @@ pub mod index;
 pub mod rank;
 pub mod select;
 pub mod signals;
+pub mod tally;
 
 use std::path::Path;
 
@@ -56,6 +59,7 @@ pub use rank::{Candidate, RankedVerdict, Verdict};
 pub use select::{
     prefilter, select, Prefiltered, SelectedRule, Selection, Stage, Stage2, DEFAULT_CANDIDATES,
 };
+pub use tally::{FilterTally, KeptFile};
 
 /// Whether a resolved index was reused from cache or built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
