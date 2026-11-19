@@ -365,6 +365,8 @@ None of these events carries a decision's title, context, policy text or
 scope globs, a file path, or the text of `reject --reason`. `adr list` and
 `adr show` send none of them.
 
+The same review actions taken in the Actual web app are recorded as well, by Actual's server rather than by the CLI. Each accept, reject, publish, move to draft, delete, restore or edit there records one `actual.adr.reviewed` event tied to your organization. It holds the decision's id, your Actual user id, the outcome and how long the action took, plus whether an accept saved edits first and whether a grouped delete was permanent. It has no exit code or terminal flag, and no titles, policy text or rejection reasons. A review you run from the CLI is reported by the CLI alone, so it's never counted twice.
+
 Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
