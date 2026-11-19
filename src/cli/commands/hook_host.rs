@@ -154,6 +154,21 @@ mod tests {
         assert_eq!(value["reason"], "Rule DA-1 conflicts.");
     }
 
+    /// Codex's block with a notice: the `Stop` block plus `systemMessage`.
+    #[test]
+    fn test_codex_deny_with_notice_adds_system_message() {
+        let out = HookHost::Codex.deny_with_notice("Revise or override?", "1 rule overridden.");
+        assert_eq!(keys(&out), ["decision", "reason", "systemMessage"]);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["decision"], "block");
+        assert_eq!(value["reason"], "Revise or override?");
+        assert_eq!(value["systemMessage"], "1 rule overridden.");
+        assert_eq!(
+            HookHost::Claude.deny_with_notice("q", "m"),
+            plan_check_hook::render_deny_with_notice("q", "m")
+        );
+    }
+
     /// Codex rejects unknown keys, so its notice is `systemMessage` alone.
     #[test]
     fn test_codex_notice_has_only_system_message() {
