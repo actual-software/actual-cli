@@ -97,22 +97,13 @@ behind `--features integration` to keep the default `cargo test` cycle fast.
 
 ### 4. Coverage (optional but useful before PRs)
 
-CI enforces 100% per-file line coverage. Check coverage locally with the same
-exclusions CI uses:
+CI enforces 100% per-file line coverage. Run the [local coverage command in CONTRIBUTING.md](../CONTRIBUTING.md#coverage) from the repository root to use CI's test selection and exclusions, as defined in the [coverage workflow](../.github/workflows/coverage.yml).
+
+After that run, generate an HTML report from the collected coverage data using the workflow's exclusions:
 
 ```bash
-cargo install cargo-llvm-cov   # one-time install
-
-cargo llvm-cov --workspace \
-  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
-  --lcov --output-path lcov.info
-```
-
-For an HTML report you can open in a browser:
-
-```bash
-cargo llvm-cov --workspace \
-  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+cargo llvm-cov report \
+  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
   --html --open
 ```
 
