@@ -384,7 +384,7 @@ directory, one file per organization and repository named by a hash of the
 two. Nothing sends that record; the next `create --all` and `adr refresh`
 read it.
 
-The same review actions taken in the Actual web app are recorded as well, by Actual's server rather than by the CLI. Each accept, reject, publish, move to draft, delete, restore or edit there records one `actual.adr.reviewed` event tied to your organization. It holds the decision's id, your Actual user id, the outcome and how long the action took, plus whether an accept saved edits first and whether a grouped delete was permanent. It has no exit code or terminal flag, and no titles, policy text or rejection reasons. A review you run from the CLI is reported by the CLI alone, so it's never counted twice.
+The same review actions taken in the Actual web app are recorded as well, by Actual's server rather than by the CLI. Each accept, reject, publish, move to draft, delete, restore or edit there records one `actual.adr.reviewed` event tied to your organization. It holds the action, the decision's id, your Actual user id, the outcome and how long the action took, plus whether the decision is AI-grouped and how many rows its group action covers, whether an accept saved edits first and whether a grouped delete was permanent. It has no exit code or terminal flag, and no titles, policy text or rejection reasons. A review you run from the CLI is reported by the CLI alone, so it's never counted twice.
 
 The CLI's telemetry setting doesn't reach these records: `telemetry.enabled false` and `ACTUAL_NO_TELEMETRY` stop what the CLI sends, and the server records a web review whatever either is set to, with no setting of its own to stop it. Each record also carries a raw account identifier, your Actual user id. These records are first-party, identity-linked data:
 
@@ -915,6 +915,8 @@ request for it. Signed-out ones are covered under "Signed-out events sent to
 Actual's API": they aren't stored with an account or organization, so a deletion
 request can't remove them. Opting out of telemetry stops both before they're
 built.
+
+The review records Actual's server writes when you act in the web app are covered above with the `actual adr` events: they have no end date, are deleted when the organization is deleted or on a verified deletion request for it, and no telemetry setting stops them.
 
 ## Reviewing changes to telemetry identity
 
