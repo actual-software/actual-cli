@@ -367,6 +367,12 @@ scope globs, a file path, or the text of `reject --reason`. `adr list` and
 
 The same review actions taken in the Actual web app are recorded as well, by Actual's server rather than by the CLI. Each accept, reject, publish, move to draft, delete, restore or edit there records one `actual.adr.reviewed` event tied to your organization. It holds the decision's id, your Actual user id, the outcome and how long the action took, plus whether an accept saved edits first and whether a grouped delete was permanent. It has no exit code or terminal flag, and no titles, policy text or rejection reasons. A review you run from the CLI is reported by the CLI alone, so it's never counted twice.
 
+Two things this notice says about telemetry don't hold for these records. The CLI's telemetry setting doesn't reach them: `telemetry.enabled false` and `ACTUAL_NO_TELEMETRY` stop what the CLI sends, and the server records a web review whatever either is set to, with no setting of its own to stop it. And each record carries a raw account identifier, your Actual user id, so the statement below that no event carries raw account identifiers covers the events the CLI sends. These records are first-party, identity-linked data:
+
+- **Who can attribute them:** Actual, as the first party, via its authorized backend systems and personnel. They're stored with the other events Actual's API receives and don't go to PostHog or any other third-party analytics service.
+- **Purpose:** to measure how each organization reviews its decisions in the web app, alongside the reviews the CLI reports.
+- **Retention & deletion:** they have no end date, and are deleted when the organization is deleted or on a verified deletion request for it. Deleting your Actual account alone doesn't remove them.
+
 Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
