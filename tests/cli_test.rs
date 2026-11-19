@@ -3701,3 +3701,143 @@ fn test_codex_hook_capability_marker_is_in_each_commands_help() {
         .success()
         .stdout(predicate::str::contains("--codex-hook"));
 }
+
+/// Each envelope Codex was captured sending (`tests/fixtures/codex/`) goes
+/// through the `--codex-hook` command that handles it, so a change to the
+/// shape the CLI parses, or to the keys it replies with, fails here and not
+/// in a user's Codex session. Codex rejects a reply with a key it doesn't
+/// know, so each reply is held to the keys its schema allows.
+#[cfg(unix)]
+#[test]
+fn test_captured_codex_envelopes_drive_the_codex_hooks() {
+    const CODEX_REPLY_KEYS: [&str; 5] = [
+        "decision",
+        "reason",
+        "systemMessage",
+        "hookSpecificOutput",
+        "continue",
+    ];
+
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    // The rule governs `src/`, so the captured plan, reads and edits land in it.
+    std::fs::write(
+        fixture
+            .repo
+            .path()
+            .join(".actual/rules/cross-cutting-token-signing-1c57.md"),
+        "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for token signing in `src/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: log the raw signing key.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(fixture.repo.path().join("src")).unwrap();
+    std::fs::write(
+        fixture.repo.path().join("src/app.ts"),
+        "export function main(): number {\n  return 42;\n}\n",
+    )
+    .unwrap();
+
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
+    let envelope = |name: &str| {
+        std::fs::read_to_string(fixtures.join(name))
+            .unwrap()
+            .replace("__FIXTURE_DIR__", fixtures.to_str().unwrap())
+            .replace("__REPO_ROOT__", fixture.repo.path().to_str().unwrap())
+    };
+    let judge = [
+        "--no-rank",
+        "--runner",
+        "claude-cli",
+        "--codex-hook",
+        "--repo",
+        fixture.repo.path().to_str().unwrap(),
+    ];
+
+    // (envelope, command, whether it must answer)
+    let cases: [(&str, Vec<&str>, bool); 12] = [
+        (
+            "pretooluse-bash-cat.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "pretooluse-apply-patch.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "posttooluse-bash-cat.json",
+            vec!["rules", "brief", "--codex-hook"],
+            true,
+        ),
+        (
+            "posttooluse-bash-compound-read.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "posttooluse-apply-patch.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "sessionstart-startup.json",
+            vec!["rules", "brief", "--codex-session-start"],
+            false,
+        ),
+        (
+            "userpromptsubmit-turn.json",
+            vec!["impl-check"].into_iter().chain(judge).collect(),
+            false,
+        ),
+        (
+            "stop-plan.json",
+            vec!["plan-check"].into_iter().chain(judge).collect(),
+            true,
+        ),
+        (
+            "stop-plan-revised.json",
+            vec!["plan-check"].into_iter().chain(judge).collect(),
+            false,
+        ),
+        (
+            "stop-default.json",
+            vec!["impl-check"].into_iter().chain(judge).collect(),
+            false,
+        ),
+        (
+            "stop-default.json",
+            vec!["session", "summary", "--codex-hook"],
+            false,
+        ),
+        (
+            "stop-plan.json",
+            vec!["session", "summary", "--codex-hook"],
+            false,
+        ),
+    ];
+    for (name, args, must_answer) in cases {
+        // A fresh config directory each time: the captured envelopes share a
+        // session id, and an earlier case's brief would silence a later one.
+        let config_dir = tempfile::tempdir().unwrap();
+        let output = actual_in(fixture.repo.path(), config_dir.path(), &args)
+            .env("CLAUDE_BINARY", &fixture.fake_claude)
+            .timeout(std::time::Duration::from_secs(60))
+            .write_stdin(envelope(name))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        if output.is_empty() {
+            assert!(!must_answer, "{name} through {args:?} printed nothing");
+            continue;
+        }
+        let (keys, _) = codex_reply_keys(&output);
+        for key in &keys {
+            assert!(
+                CODEX_REPLY_KEYS.contains(&key.as_str()),
+                "{name} through {args:?} replied with {key}: {keys:?}"
+            );
+        }
+    }
+}

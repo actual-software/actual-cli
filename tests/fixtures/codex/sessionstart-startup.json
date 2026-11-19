@@ -1,6 +1,6 @@
 {
   "session_id": "01a1c301-6da3-7821-b56b-e8de710c84c7",
-  "transcript_path": "__FIXTURE_DIR__/codex-transcript-plan.jsonl",
+  "transcript_path": "__FIXTURE_DIR__/transcript-plan.jsonl",
   "cwd": "__REPO_ROOT__",
   "hook_event_name": "SessionStart",
   "model": "gpt-6-luna",
