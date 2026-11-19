@@ -427,8 +427,6 @@ mod tests {
         })
     }
 
-    /// The gaps stand alone only when they are every area the session worked
-    /// in: nothing added and no folder covered.
     #[test]
     fn test_the_codex_reply_is_only_a_system_message() {
         let reply: serde_json::Value =
@@ -439,6 +437,8 @@ mod tests {
         );
     }
 
+    /// The gaps stand alone only when they are every area the session worked
+    /// in: nothing added and no folder covered.
     #[test]
     fn test_the_line_takes_every_form() {
         for (added, gaps, covered, expected) in [
