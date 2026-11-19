@@ -35,7 +35,7 @@ in and on who processes it. This notice is explicit about both:
 **One setting turns telemetry off.** `actual config set telemetry.enabled false`
 stops every telemetry event in this notice: the counters, the plan-governance
 events that reach PostHog through Actual's proxy, and the ADR, check and session-end events.
-You don't need a second switch for any of them. It covers telemetry, not every
+You don't need a second switch for any of them. The one exception is the review records Actual's server writes when you act in the Actual web app, which no setting stops (see the `actual adr` events below). The setting covers telemetry, not every
 network request: "How to opt out of telemetry" below says what it leaves running,
 and to change it when no `actual adr-bot` run is in progress.
 
@@ -367,7 +367,7 @@ scope globs, a file path, or the text of `reject --reason`. `adr list` and
 
 The same review actions taken in the Actual web app are recorded as well, by Actual's server rather than by the CLI. Each accept, reject, publish, move to draft, delete, restore or edit there records one `actual.adr.reviewed` event tied to your organization. It holds the decision's id, your Actual user id, the outcome and how long the action took, plus whether an accept saved edits first and whether a grouped delete was permanent. It has no exit code or terminal flag, and no titles, policy text or rejection reasons. A review you run from the CLI is reported by the CLI alone, so it's never counted twice.
 
-Two things this notice says about telemetry don't hold for these records. The CLI's telemetry setting doesn't reach them: `telemetry.enabled false` and `ACTUAL_NO_TELEMETRY` stop what the CLI sends, and the server records a web review whatever either is set to, with no setting of its own to stop it. And each record carries a raw account identifier, your Actual user id, so the statement below that no event carries raw account identifiers covers the events the CLI sends. These records are first-party, identity-linked data:
+The CLI's telemetry setting doesn't reach these records: `telemetry.enabled false` and `ACTUAL_NO_TELEMETRY` stop what the CLI sends, and the server records a web review whatever either is set to, with no setting of its own to stop it. Each record also carries a raw account identifier, your Actual user id. These records are first-party, identity-linked data:
 
 - **Who can attribute them:** Actual, as the first party, via its authorized backend systems and personnel. They're stored with the other events Actual's API receives and don't go to PostHog or any other third-party analytics service.
 - **Purpose:** to measure how each organization reviews its decisions in the web app, alongside the reviews the CLI reports.
@@ -535,8 +535,8 @@ release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
 override was recorded, when a check started or completed, when a selection was made, when a block ended, when the session ended, or when an `actual adr` run finished), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
-**Apart from the `actual.override.reason_text` of an `other` override and the
-`actual.report.file_path` of a verified, signed-in report, no event carries rule text,
+**Apart from the `actual.override.reason_text` of an `other` override, the
+`actual.report.file_path` of a verified, signed-in report and the Actual user id in the web app's review records, no event carries rule text,
 plan or diff text, override reasons, decision titles, context, policies or
 scope globs, rejection reasons, file paths, raw account identifiers, identity
 hashes or installation id.**
@@ -793,7 +793,7 @@ The setting lasts across shells and applies to every run that reads that file,
 including the `--claude-hook` paths Claude Code runs for you.
 
 **This one setting stops every telemetry event**: the counters, the
-plan-governance events that reach PostHog through Actual's proxy, and the ADR, check and session-end events, whether they go to Actual's API or to an endpoint or file you set. You don't need a second switch for any of them.
+plan-governance events that reach PostHog through Actual's proxy, and the ADR, check and session-end events, whether they go to Actual's API or to an endpoint or file you set. You don't need a second switch for any of them. The one exception is the review records Actual's server writes when you act in the Actual web app, which no setting stops (see the `actual adr` events above).
 
 Events an earlier run left queued in the local spools stay on your machine,
 unsent, while telemetry is off, and the uploader sends them if you turn it back
