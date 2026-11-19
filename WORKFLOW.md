@@ -139,10 +139,7 @@ If any gate fails, fix it. Do NOT commit or push broken code.
 This project enforces **100% per-file line coverage** via CI. Every source file (except `main.rs` and a few excluded files) must have 100% test coverage. When adding new code:
 
 1. Write tests for every code path, including error branches
-2. Check coverage locally if `cargo-llvm-cov` is installed:
-   ```bash
-   cargo llvm-cov --workspace --lcov --output-path lcov.info
-   ```
+2. Check coverage locally with the [coverage command in CONTRIBUTING.md](CONTRIBUTING.md#coverage). It uses the test selection and exclusions defined in the [coverage workflow](.github/workflows/coverage.yml).
 3. If a line is uncovered, add a test that exercises it
 
 ## Git Workflow
