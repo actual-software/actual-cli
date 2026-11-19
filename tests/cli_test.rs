@@ -2751,6 +2751,43 @@ fn otlp_brief_hook_at(
     if let Some(agent) = agent {
         envelope["agent_id"] = agent.into();
     }
+    otlp_hook_at(config_dir, repo, "--claude-hook", envelope, api)
+}
+
+/// [`otlp_brief_hook_at`] for Codex: a `PostToolUse` shell read of the same
+/// governed file, through `--codex-hook`.
+#[cfg(feature = "telemetry")]
+fn otlp_codex_brief_hook_at(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    config_yaml: &str,
+    api: Option<&str>,
+) -> (String, std::time::Duration) {
+    std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
+    std::fs::create_dir_all(repo.join("services/auth/oauth")).unwrap();
+    std::fs::write(repo.join("services/auth/oauth/token.ts"), "jwt.sign()\n").unwrap();
+    let envelope = serde_json::json!({
+        "session_id": "s1",
+        "turn_id": "t1",
+        "cwd": repo,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cat services/auth/oauth/token.ts"},
+        "tool_response": "jwt.sign()\n",
+    });
+    otlp_hook_at(config_dir, repo, "--codex-hook", envelope, api)
+}
+
+/// Run `rules brief` in hook mode `mode` on `envelope`, with Actual's API at
+/// `api`, or at its built-in address when that is `None`.
+#[cfg(feature = "telemetry")]
+fn otlp_hook_at(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    mode: &str,
+    envelope: serde_json::Value,
+    api: Option<&str>,
+) -> (String, std::time::Duration) {
     let mut command = cmd();
     match api {
         Some(api) => command.env("ACTUAL_API_URL", api),
@@ -2761,7 +2798,7 @@ fn otlp_brief_hook_at(
         .args([
             "rules",
             "brief",
-            "--claude-hook",
+            mode,
             "--repo",
             repo.to_str().unwrap(),
             "--min-score",
@@ -2809,9 +2846,14 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
                 })
                 .and_then(|sent| serde_json::to_string(&sent).ok())
                 .is_some_and(|sent| {
-                    ["actual.adr.detected", "grp-sign", "grp-rotate"]
-                        .iter()
-                        .all(|text| sent.contains(text))
+                    [
+                        "actual.filter.evaluated",
+                        "actual.adr.detected",
+                        "grp-sign",
+                        "grp-rotate",
+                    ]
+                    .iter()
+                    .all(|text| sent.contains(text))
                 })
         })
         .with_status(200)
@@ -2851,8 +2893,9 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
     let records = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
         .as_array()
         .unwrap();
-    assert_eq!(records.len(), 2);
-    assert!(records
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["eventName"], "actual.filter.evaluated");
+    assert!(records[1..]
         .iter()
         .all(|r| r["eventName"] == "actual.adr.detected"));
 
@@ -2925,6 +2968,115 @@ fn test_brief_hook_events_reach_actual_api_signed_in() {
     assert!(!written.contains("cli-sign-in-token"), "{written}");
     assert!(!written.contains("actualSignIn"), "{written}");
     mock.assert();
+}
+
+/// Poll until `mock` has matched and `sink` holds a line, then return the
+/// records of the one request the sink holds.
+#[cfg(feature = "telemetry")]
+fn delivered_records(mock: &mockito::Mock, sink: &std::path::Path) -> Vec<serde_json::Value> {
+    let mut written = String::new();
+    for _ in 0..100 {
+        written = std::fs::read_to_string(sink).unwrap_or_default();
+        if mock.matched() && !written.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    mock.assert();
+    assert_eq!(written.lines().count(), 1, "{written}");
+    let body: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+    body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The string value of `record`'s attribute `key`.
+#[cfg(feature = "telemetry")]
+fn string_attribute<'a>(record: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    record["attributes"]
+        .as_array()?
+        .iter()
+        .find(|attribute| attribute["key"] == key)?["value"]["stringValue"]
+        .as_str()
+}
+
+/// A Codex shell read sends the brief's selection ahead of its ADRs, as a
+/// Claude Code read does, and signed out the request carries no token.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_codex_brief_hook_sends_its_selection_signed_out() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(200)
+        .expect(1)
+        .create();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_codex_brief_hook_at(config_dir.path(), repo.path(), &config_yaml, None);
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    let records = delivered_records(&mock, &sink);
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0]["eventName"], "actual.filter.evaluated");
+    assert_eq!(
+        string_attribute(&records[0], "actual.filter.selector"),
+        Some("context")
+    );
+    assert!(records[1..]
+        .iter()
+        .all(|r| r["eventName"] == "actual.adr.detected"));
+}
+
+/// Signed in, a Codex shell read's selection reaches Actual's API with the
+/// sign-in's token, and the file sink never holds it.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_codex_brief_hook_events_reach_actual_api_signed_in() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", "Bearer cli-sign-in-token")
+        .with_status(200)
+        .expect(1)
+        .create();
+    std::fs::write(
+        config_dir.path().join("credentials.yaml"),
+        "access_token: cli-sign-in-token\nrefresh_token: cli-refresh-token\n\
+         organization_id: org-1\nmember_id: member-1\n",
+    )
+    .unwrap();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_codex_brief_hook_at(
+        config_dir.path(),
+        repo.path(),
+        &config_yaml,
+        Some(&server.url()),
+    );
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    let records = delivered_records(&mock, &sink);
+    assert_eq!(records[0]["eventName"], "actual.filter.evaluated");
+    let written = std::fs::read_to_string(&sink).unwrap();
+    assert!(!written.contains("cli-sign-in-token"), "{written}");
+    assert!(!written.contains("actualSignIn"), "{written}");
 }
 
 /// An endpoint that never answers costs the hook nothing: it spools, hands
@@ -3315,6 +3467,73 @@ fn test_plan_check_codex_hook_blocks_a_conflicting_plan() {
     assert!(reason.contains("R-A-001"), "{reason}");
     assert!(reason.contains("outside Codex"), "{reason}");
     assert!(!reason.contains("/actual-cli:override"), "{reason}");
+}
+
+/// A Codex plan gate round sends its selection, with the planning gate as the
+/// selector, over the same signed-out request a Claude Code round uses.
+#[cfg(all(unix, feature = "telemetry"))]
+#[test]
+fn test_plan_check_codex_hook_sends_its_selection() {
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(200)
+        .expect_at_least(1)
+        .create();
+    let sink = fixture.config_dir.path().join("otlp.jsonl");
+    std::fs::write(
+        fixture.config_dir.path().join("config.yaml"),
+        format!(
+            "api_url: \"http://127.0.0.1:1\"\ntelemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+            server.url(),
+            sink.display()
+        ),
+    )
+    .unwrap();
+    let stop = codex_stop(
+        fixture.repo.path(),
+        "sess-codex-filter",
+        "plan",
+        Some("Sign access tokens with HS256"),
+    );
+
+    fixture
+        .cmd()
+        .arg("--codex-hook")
+        .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
+        .env_remove("ACTUAL_OTLP_FILE")
+        .env_remove("TRACEPARENT")
+        .write_stdin(stop)
+        .assert()
+        .success();
+
+    let mut filter = None;
+    for _ in 0..100 {
+        let written = std::fs::read_to_string(&sink).unwrap_or_default();
+        filter = written
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .flat_map(|body| {
+                body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .find(|record| record["eventName"] == "actual.filter.evaluated");
+        if mock.matched() && filter.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    mock.assert();
+    let filter = filter.expect("the round's selection never reached the sink");
+    assert_eq!(
+        string_attribute(&filter, "actual.filter.selector"),
+        Some("planning")
+    );
 }
 
 /// Codex runs the plan gate on every `Stop`; a turn in any other mode prints

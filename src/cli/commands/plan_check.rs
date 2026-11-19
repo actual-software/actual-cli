@@ -146,7 +146,7 @@ use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::{
     self, capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
-    CheckJson, HookRun, Outcome,
+    run_pipeline_filtered, CheckJson, HookRun, Outcome,
 };
 use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession};
@@ -430,7 +430,9 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
 
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
     // hook's one model call stays reserved for the judge. See the module doc.
-    let outcome = match run_pipeline(
+    // `filter` only feeds telemetry.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let (outcome, filter) = match run_pipeline_filtered(
         &plan_text,
         &root,
         &rules_dir,
@@ -439,7 +441,7 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
         false,
         &session,
     ) {
-        Ok(outcome) => outcome,
+        Ok(run) => run,
         Err(e) => {
             emit(host.notice(&format!(
                 "plan-check could not read {}: {e}",
@@ -468,6 +470,8 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
             picker: args.codex_picker && picker_available,
             #[cfg(feature = "telemetry")]
             started,
+            #[cfg(feature = "telemetry")]
+            filter: filter.as_ref(),
         },
         &mut session,
         outcome,
@@ -1549,12 +1553,22 @@ mod tests {
             events,
             [
                 otlp::ACTION_STARTED,
+                otlp::FILTER_EVALUATED,
                 otlp::ADR_DETECTED,
                 otlp::GATE_EVALUATED,
                 otlp::ACTION_COMPLETED
             ]
         );
-        assert_completed_before_governance(&records[3], &governance);
+        assert_completed_before_governance(&records[4], &governance);
+        assert_eq!(attribute(&records[1], "actual.filter.selector"), "planning");
+        assert_eq!(
+            attribute(&records[1], "actual.filter.kept_refs"),
+            serde_json::json!(["grp-sign"])
+        );
+        let records: Vec<serde_json::Value> = [&records[0], &records[2], &records[3], &records[4]]
+            .into_iter()
+            .cloned()
+            .collect();
         for record in &records {
             assert_eq!(attribute(record, "actual.session.id"), "sess-plan-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "agent-plan-1");

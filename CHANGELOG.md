@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The rules brief and both gates send an OpenTelemetry event, `actual.filter.evaluated`, describing how their selection narrowed the repository's rule files: which selection it was (`context`, `planning` or `implementation`), the score floor it applied, how many rule files the index holds, how many each step dropped and why (retired, excluded by path, no match, under the floor, capped, judged unrelated, already settled this session, outside the judge's window, or cut by the brief's own limits), and how many were kept, with the kept files' ADR references and best scores. The counts add up to the index size. `plan-check` and `impl-check` send one every round of `--claude-hook` or `--codex-hook`, and its `actual.action.id` joins it to that round's verdicts. `rules brief` sends one from either hook mode only when its brief adds an ADR new to the session. Dropped rule files are never named, and no rule text, plan or diff text, path or glob is sent. `actual.event.schema_version` is now `6`. See `PRIVACY.md`
+
 ## [0.15.0] - 2026-11-19
 
 ### Added

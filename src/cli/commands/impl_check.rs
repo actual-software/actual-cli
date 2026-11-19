@@ -75,7 +75,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
     self, capped_read, deny_summary, emit, emit_status, finish_hook, render_json, render_panel,
-    run_pipeline, HookRun, Outcome,
+    run_pipeline, run_pipeline_filtered, HookRun, Outcome,
 };
 use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession, TurnStart};
@@ -575,7 +575,9 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     // `use_rank: false`, unconditionally, for the same reason
     // `plan_check::exec_hook_with` always passes it: the hook's one model
     // call stays reserved for the judge.
-    let outcome = match run_pipeline(
+    // `filter` only feeds telemetry.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let (outcome, filter) = match run_pipeline_filtered(
         &diff_text,
         &root,
         &rules_dir,
@@ -584,7 +586,7 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
         false,
         &session,
     ) {
-        Ok(outcome) => outcome,
+        Ok(run) => run,
         Err(e) => {
             emit(host.notice(&format!(
                 "impl-check could not read {}: {e}",
@@ -613,6 +615,8 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
             picker: args.codex_picker && facts.picker == Some(true),
             #[cfg(feature = "telemetry")]
             started,
+            #[cfg(feature = "telemetry")]
+            filter: filter.as_ref(),
         },
         &mut session,
         outcome,
@@ -1852,13 +1856,27 @@ mod tests {
             events(&records),
             [
                 otlp::ACTION_STARTED,
+                otlp::FILTER_EVALUATED,
                 otlp::ADR_DETECTED,
                 otlp::GATE_EVALUATED,
                 otlp::ACTION_COMPLETED
             ]
         );
-        action(&records[0], &records[3]);
-        assert_completed_before_governance(&records[3], &governance);
+        action(&records[0], &records[4]);
+        assert_completed_before_governance(&records[4], &governance);
+        assert_eq!(
+            attribute(&records[1], "actual.filter.selector"),
+            "implementation"
+        );
+        assert_eq!(
+            attribute(&records[1], "actual.action.id"),
+            attribute(&records[2], "actual.action.id"),
+            "the selection joins the verdicts it led to"
+        );
+        let records: Vec<serde_json::Value> = [&records[0], &records[2], &records[3], &records[4]]
+            .into_iter()
+            .cloned()
+            .collect();
         for record in &records[1..3] {
             assert_eq!(attribute(record, "actual.session.id"), "sess-impl-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "");
@@ -1883,11 +1901,15 @@ mod tests {
         let records = take_captured();
         assert_eq!(
             events(&records),
-            [otlp::ACTION_STARTED, otlp::ACTION_COMPLETED],
-            "and sent no ADR event again"
+            [
+                otlp::ACTION_STARTED,
+                otlp::FILTER_EVALUATED,
+                otlp::ACTION_COMPLETED
+            ],
+            "and sent no ADR event again, though the round's selection goes"
         );
-        action(&records[0], &records[1]);
-        assert_completed_before_governance(&records[1], &governance);
+        action(&records[0], &records[2]);
+        assert_completed_before_governance(&records[2], &governance);
     }
 
     /// The gap this guards: plan-stage denials used to live in the same
