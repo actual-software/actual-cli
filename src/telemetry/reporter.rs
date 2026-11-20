@@ -1,6 +1,7 @@
 use crate::api::client::ActualApiClient;
 use crate::config::types::Config;
 use crate::error::ActualError;
+use crate::telemetry::debug::{self, Entry, Stage, Stream};
 use crate::telemetry::metrics::SyncMetrics;
 
 /// Public write-only telemetry key — safe to embed in client binaries.
@@ -40,13 +41,40 @@ async fn try_report_metrics(
     config: &Config,
     api_url: &str,
 ) -> Result<(), ActualError> {
+    let request = metrics.to_counter_request();
     if crate::telemetry::opt_out::is_disabled(config) {
+        log(&request, Stage::NotSent, api_url);
         return Ok(());
     }
 
-    let request = metrics.to_counter_request();
     let client = ActualApiClient::new(api_url)?;
-    client.post_telemetry(&request, SERVICE_KEY).await
+    let result = client.post_telemetry(&request, SERVICE_KEY).await;
+    let stage = match &result {
+        Ok(()) => Stage::Sent,
+        Err(
+            ActualError::ApiResponseError { .. }
+            | ActualError::ServiceUnavailable
+            | ActualError::OrgMismatch { .. },
+        ) => Stage::Refused,
+        Err(ActualError::ApiError(message)) if message.starts_with("HTTP ") => Stage::Refused,
+        Err(_) => Stage::Dropped,
+    };
+    log(&request, stage, api_url);
+    result
+}
+
+/// Log the counters in debug mode. They carry no sign-in, so every line is
+/// signed out.
+fn log(request: &crate::api::types::TelemetryRequest, stage: Stage, api_url: &str) {
+    if !debug::enabled() {
+        return;
+    }
+    let mut entry = Entry::new(Stream::Metrics, stage).event(serde_json::json!(request));
+    entry = match stage {
+        Stage::NotSent => entry.reason(debug::Reason::TelemetryOff),
+        _ => entry.to(format!("{api_url}/counter/record")),
+    };
+    debug::record(entry);
 }
 
 #[cfg(test)]
@@ -268,5 +296,85 @@ mod tests {
         } // guard drops here, restores to absent
 
         assert!(std::env::var("ACTUAL_NO_TELEMETRY").is_err());
+    }
+
+    // ── telemetry debug mode ────────────────────────────────────────────
+
+    /// The counters are logged as sent exactly as posted, signed out since
+    /// they carry no sign-in, and as not sent with telemetry off.
+    #[tokio::test]
+    async fn test_debug_mode_logs_the_counters_sent_and_held_back() {
+        use crate::telemetry::debug::tests::{debug_on, logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _debug = debug_on(home.path(), "metrics");
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let metrics = sample_metrics();
+        let request = serde_json::to_value(metrics.to_counter_request()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .match_body(mockito::Matcher::Json(request.clone()))
+            .with_status(200)
+            .create_async()
+            .await;
+        report_metrics(&metrics, &Config::default(), &server.url()).await;
+        mock.assert_async().await;
+
+        let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        report_metrics(&metrics, &Config::default(), &server.url()).await;
+
+        let lines = logged("metrics");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["stream"], "metrics");
+        assert_eq!(lines[0]["stage"], "sent");
+        assert_eq!(lines[0]["auth"], "signed_out");
+        assert_eq!(lines[0]["event"], request);
+        assert_eq!(lines[1]["stage"], "not_sent");
+        assert_eq!(lines[1]["reason"], "telemetry_off");
+        assert_eq!(lines[1]["event"], request);
+    }
+
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_refused_post_as_refused() {
+        use crate::telemetry::debug::tests::{debug_on, logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _debug = debug_on(home.path(), "metrics-refused");
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let mut server = mockito::Server::new_async().await;
+        let bare = server
+            .mock("POST", "/counter/record")
+            .with_status(400)
+            .create_async()
+            .await;
+        report_metrics(&sample_metrics(), &Config::default(), &server.url()).await;
+        bare.remove_async().await;
+        let _json = server
+            .mock("POST", "/counter/record")
+            .with_status(422)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"bad","message":"no"}}"#)
+            .create_async()
+            .await;
+        report_metrics(&sample_metrics(), &Config::default(), &server.url()).await;
+        let stages: Vec<_> = logged("metrics-refused")
+            .iter()
+            .map(|line| line["stage"].clone())
+            .collect();
+        assert_eq!(stages, ["refused", "refused"]);
+    }
+
+    /// No answer at all: the counters reached nobody.
+    #[tokio::test]
+    async fn test_debug_mode_logs_an_unreachable_endpoint_as_dropped() {
+        use crate::telemetry::debug::tests::{debug_on, logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _debug = debug_on(home.path(), "metrics-dropped");
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        report_metrics(&sample_metrics(), &Config::default(), "http://127.0.0.1:1").await;
+        assert_eq!(logged("metrics-dropped")[0]["stage"], "dropped");
     }
 }

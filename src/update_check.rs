@@ -173,24 +173,30 @@ pub fn applies_to(command: &Command) -> bool {
         | Command::Auth(_)
         | Command::Login(_)
         | Command::Logout
-        | Command::Whoami
+        | Command::Whoami(_)
         | Command::Advisor(_)
         | Command::Config(_)
         | Command::Runners
         | Command::Models(_)
         | Command::Cache(_)
         | Command::PlanCheckOverride(_) => true,
-        Command::PlanCheck(args) => !(args.claude_hook || args.json),
-        Command::ImplCheck(args) => !(args.claude_hook || args.json),
+        Command::PlanCheck(args) => !(args.claude_hook || args.codex_hook || args.json),
+        Command::ImplCheck(args) => !(args.claude_hook || args.codex_hook || args.json),
         Command::Rules(rules) => match &rules.action {
             RulesAction::Ls(args) => !args.json,
             RulesAction::Index(args) => !args.json,
             RulesAction::Select(args) => !args.json,
             RulesAction::Eval(args) => !args.json,
-            RulesAction::Brief(args) => !(args.claude_hook || args.claude_session_start),
+            RulesAction::Brief(args) => {
+                !(args.claude_hook
+                    || args.claude_session_start
+                    || args.codex_hook
+                    || args.codex_session_start)
+            }
+            RulesAction::ReportUse(_) => false,
         },
         Command::Session(session) => match &session.action {
-            SessionAction::Summary(args) => !(args.claude_hook || args.json),
+            SessionAction::Summary(args) => !(args.claude_hook || args.codex_hook || args.json),
         },
         Command::Adr(adr) => match &adr.action {
             AdrAction::New(args) => !args.json,
@@ -763,6 +769,15 @@ mod tests {
             &["rules", "eval", "--golden", "golden.json", "--json"],
             &["rules", "brief", "--claude-hook"],
             &["rules", "brief", "--claude-session-start"],
+            &[
+                "rules",
+                "report-use",
+                "--claude-session",
+                "s1",
+                "--turn",
+                "1-abc",
+                "--none",
+            ],
             &["session", "summary", "--claude-hook"],
             &["session", "summary", "--session", "s1", "--json"],
             &["adr", "new", "T", "--json"],

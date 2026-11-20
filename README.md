@@ -18,7 +18,7 @@
   <a href="https://github.com/actual-software/actual-cli/stargazers"><img src="https://img.shields.io/github/stars/actual-software/actual-cli?style=flat" alt="Stars"></a>
 </p>
 
-The Actual.ai CLI checks your coding agent's plans and changes against your team's architecture decisions, written as rule files in `.actual/rules/`. In Claude Code, the [Actual.ai Skill](https://github.com/actual-software/actual-skill) runs the checks for you: a plan that conflicts with a rule goes back to the agent before you approve it, and so does a change at the end of a turn. The same checks run from your terminal and in CI.
+The Actual.ai CLI checks your coding agent's plans and changes against your team's architecture decisions. In Claude Code, the [Actual.ai Skill](https://github.com/actual-software/actual-skill) runs the checks for you: a plan that conflicts with a decision goes back to the agent before you approve it, and so does a change at the end of a turn. The same checks run from your terminal and in CI.
 
 ## Installation
 
@@ -44,28 +44,25 @@ npm install -g @actualai/actual
 
 It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installation) covers Homebrew, prebuilt binaries and building from source. [`actual self-update`](docs/SELF_UPDATE.md) upgrades a prebuilt binary you downloaded by hand.
 
-## Adding rules
+## Signing in (optional)
 
-The checks read the rule files committed under `.actual/rules/`. Each one is a Markdown file with a title, a sentence on where its rules apply, and a `### Rules` list of one-line rules, each with an ID and a level (`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT` or `MAY`):
+The checks and `actual rules` run signed out, so you can skip this step. To connect the CLI to your Actual AI account, `actual login` signs you in through your browser and stores your credentials locally. `actual whoami` shows the signed-in account and organization, and `actual logout` signs you out.
 
-```markdown
-# API error handling
+## Adding decisions
 
-These rules apply to every HTTP handler under `src/api/`.
+Keep your team's architecture decisions under `docs/adr/`. From your own terminal, `actual adr new` (CLI 0.14.0 or later) writes one there:
 
-### Rules
-
-- **API-1** MUST: Handlers return errors as a JSON body with a `code` and a `message`.
-- **API-2** MUST NOT: Handlers put a stack trace in an error response.
+```bash
+actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
 ```
 
-Write them by hand, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
+From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted. To accept a draft, change `status: draft` to `status: accepted` in the header of both files `adr new` wrote, and the decision file's `Status: proposed` line to `Status: accepted`. An agent that passes `--status accepted` writes an accepted decision to begin with. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens. Either way, each decision lands in `docs/adr/`, with the rule file the checks read beside it under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
 
 `actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. Signed in, `actual adr create` saves a decision to your Actual AI account, where `list`, `show`, `update`, `publish` and the other `actual adr` commands manage it. [ADR commands](docs/ADR_COMMANDS.md) covers each one.
 
 ## Checking plans and changes
 
-In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [code] [reason]` in the session (CLI 0.13.0 or later); [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
+In Claude Code, the skill runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [code] [reason]` in the session (CLI 0.13.0 or later, and 0.14.0 or later to record the code); [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
 
 From a terminal or in CI:
 
@@ -89,17 +86,12 @@ actual rules brief --file src/api/users.ts
 
 `rules select` names the rule documents that govern a plan, and `rules brief` the rules that govern one file. `rules ls`, `rules index` and `rules brief` use no model and no network, and `rules select` asks a runner only to rank more matches than it can keep (`--no-rank` skips that). In Claude Code, the skill runs `rules brief` as your agent reads a file, so the rules for that file reach it before its first edit.
 
-## Signing in
-
-Signing in is optional, since the checks and `rules` run signed out. `actual login` signs you in to your Actual AI account through your browser and stores your credentials locally. `actual whoami` shows the signed-in account and organization, and `actual logout` signs you out.
-
 ## Documentation
 
 - [Actual.ai Skill and CLI in depth](docs/HOW_IT_WORKS.md): governance, rules in context, sign-in and troubleshooting.
 - [Getting Started](docs/GETTING_STARTED.md): installation, runners, commands and configuration.
 - [ADR commands](docs/ADR_COMMANDS.md): writing and checking ADRs in your repository, and managing your organization's decisions from the terminal.
 - [adr-bot and the Advisor](docs/ADR_BOT_AND_ADVISOR.md): ADR guidance written into your agent's context file, and architecture questions answered from your ADRs.
-- [Command reference](https://actual.ai/cli/docs) on actual.ai, also as [Markdown](https://actual.ai/cli/docs.md) for your agent.
 
 ## Privacy & Telemetry
 

@@ -84,7 +84,7 @@ jobs:
       - name: Generate text report
         if: always()
         run: |
-          cargo llvm-cov report --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' 2>&1 | tee coverage-summary.txt || true
+          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' 2>&1 | tee coverage-summary.txt || true
 
       - name: Enforce 100% coverage
         if: always()
@@ -177,7 +177,7 @@ jobs:
       - name: Generate HTML report
         if: always()
         run: |
-          cargo llvm-cov report --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' --html --output-dir coverage-html 2>/dev/null || true
+          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' --html --output-dir coverage-html 2>/dev/null || true
 
       - name: Upload coverage artifacts
         if: always()

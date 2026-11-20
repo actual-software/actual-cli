@@ -1,6 +1,6 @@
 # actual — Getting Started
 
-`actual` checks your coding agent's plans and changes against your team's architecture decisions, committed as rule files in `.actual/rules/`. This guide takes you from installing the Actual.ai Skill and the CLI to your first check (signing in comes last, and it's optional), then lists every command and configuration setting.
+`actual` checks your coding agent's plans and changes against your team's architecture decisions. This guide takes you from installing the Actual.ai Skill and the CLI, through an optional sign-in and adding your decisions, to your first check, then lists every command and configuration setting.
 
 ## Installation
 
@@ -84,6 +84,15 @@ sudo apt-get install build-essential
 cargo install --git https://github.com/actual-software/actual-cli.git actual-cli
 ```
 
+## Signing in (optional)
+
+The checks and `rules` run signed out. To sign in to your Actual AI account through your browser:
+
+```bash
+actual login
+actual whoami   # show the signed-in account and organization
+```
+
 ## Prerequisites
 
 The checks judge your rules with an AI runner. Pick one:
@@ -117,9 +126,15 @@ actual config set runner codex-cli
 actual config set runner cursor-cli
 ```
 
-## Adding rules
+## Adding decisions
 
-The checks read the rule files committed under `.actual/rules/`. Write them by hand in the format the [README](../README.md#adding-rules) shows, or manage your ADRs at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes your accepted decisions as rule files there. `actual adr new` writes a decision and its rule file for you; see [ADR commands](ADR_COMMANDS.md). Then see what the CLI read:
+Keep your team's architecture decisions under `docs/adr/`. From your own terminal, `actual adr new` (CLI 0.14.0 or later) writes one there, with the rule file the checks read beside it under `.actual/rules/`:
+
+```bash
+actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
+```
+
+From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted. To accept a draft, change `status: draft` to `status: accepted` in the header of both files, and the decision file's `Status: proposed` line to `Status: accepted`. An agent that passes `--status accepted` writes an accepted decision to begin with; [ADR commands](ADR_COMMANDS.md) covers the other flags. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens, which writes the same two files for each accepted decision. Then see what the CLI read:
 
 ```bash
 actual rules ls
@@ -135,15 +150,6 @@ actual impl-check
 ```
 
 Only a `conflicting` verdict exits non-zero, so a CI job that has to tell "checked and clean" from "could not check" should read the `status` field from `--json`. [Governance](HOW_IT_WORKS.md#governance) covers the other outcomes and how to override a rule.
-
-## Signing in (optional)
-
-The checks and `rules` run signed out. To sign in to your Actual AI account through your browser:
-
-```bash
-actual login
-actual whoami   # show the signed-in account and organization
-```
 
 ## Commands
 
@@ -226,3 +232,4 @@ telemetry:
 | `ACTUAL_NO_TELEMETRY` | Set to any non-empty value for the same effect as `telemetry.enabled: false`, for CI and one-off runs |
 | `ACTUAL_OTLP_LOGS_ENDPOINT` | OTLP logs URL for ADR context, use, breach and override events, check events and session-end events (overrides config file) |
 | `ACTUAL_OTLP_FILE` | Local file for ADR context, use, breach and override events, check events and session-end events (overrides config file) |
+| `ACTUAL_TELEMETRY_DEBUG` | Set to `1` to log every telemetry event a run queues, sends or holds back, telemetry off included, under `~/.actualai/actual/telemetry-debug/` (see [PRIVACY.md](../PRIVACY.md#seeing-what-telemetry-sends)) |

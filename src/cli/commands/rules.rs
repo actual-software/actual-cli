@@ -31,6 +31,7 @@ pub fn exec(args: &RulesArgs) -> Result<(), ActualError> {
         RulesAction::Select(select) => rules_scope::exec_select(select),
         RulesAction::Eval(eval) => rules_scope::exec_eval(eval),
         RulesAction::Brief(brief) => rules_brief::exec(brief),
+        RulesAction::ReportUse(report) => super::adr_report::exec(report),
     }
 }
 
@@ -618,6 +619,8 @@ mod tests {
                 action: RulesAction::Brief(RulesBriefArgs {
                     claude_hook: false,
                     claude_session_start: false,
+                    codex_hook: false,
+                    codex_session_start: false,
                     file: Some("src/main.rs".to_string()),
                     repo: Some(root.path().to_path_buf()),
                     rules_dir: None,
@@ -625,6 +628,8 @@ mod tests {
                     rules_per_decision: 8,
                     max_chars: crate::rules::brief::DEFAULT_MAX_CHARS,
                     min_score: Some(0.0),
+                    max_session_chars: None,
+                    no_brief_notice: false,
                 }),
             };
             assert!(exec(&args).is_ok());

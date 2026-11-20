@@ -1,6 +1,7 @@
 //! ADR telemetry as OpenTelemetry log events in Actual's `actual.*` event
 //! catalog, over OTLP/HTTP with protobuf encoding: ADRs entering an agent's
-//! context and meeting the gates, the gate checks themselves, and session ends.
+//! context and meeting the gates, the selections that chose them, the gate
+//! checks themselves, and session ends.
 //!
 //! # Design
 //!
@@ -46,9 +47,10 @@
 //! gain no identity field. [`crate::telemetry::sign_in`] decides which records
 //! the token covers, and a 401 sends the batch again once, signed out.
 //!
-//! **Typed reason text goes only with the token.** A request without it, and
-//! the file sink's copy of that request, leaves out [`REASON_TEXT`], since
-//! Actual can restrict and delete only events it can tie to an organization.
+//! **Typed reason text, decision ids and reported file paths go only with
+//! the token.** A request without it, and the file sink's copy of that
+//! request, leaves out the attributes in [`SIGNED_IN_ONLY`], since Actual
+//! can restrict and delete only events it can tie to an organization.
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -64,6 +66,8 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::config::types::{validate_otlp_file, validate_otlp_logs_endpoint, Config};
+use crate::rules::scope::FilterTally;
+use crate::telemetry::debug::{self, Entry, Stage, Stream};
 use crate::telemetry::opt_out;
 use crate::telemetry::sign_in::{self, SignIn};
 use crate::telemetry::spool::OTLP_LOGS;
@@ -84,13 +88,44 @@ pub(crate) const ACTION_COMPLETED: &str = "actual.action.completed";
 
 pub(crate) const SESSION_ENDED: &str = "actual.session.ended";
 
-/// The typed reason of an `other` override, the one attribute only a request
-/// carrying the sign-in's token holds.
+/// The event an `actual adr check` run sends once it has checked the files.
+pub(crate) const ADR_DISCOVERED: &str = "actual.adr.discovered";
+
+/// The event a run of an `actual adr` review command sends: `accept`,
+/// `reject`, `publish`, `unpublish`, `delete`, `restore` or `update`.
+pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
+
+/// The event `rules report-use` sends for each ADR the agent says it used in
+/// a turn, in answer to the Stop hook's question.
+pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
+
+/// The event the rules brief and the gates send for each selection that
+/// reaches the agent or the judge: what they kept, and what they dropped at
+/// each step and why.
+pub(crate) const FILTER_EVALUATED: &str = "actual.filter.evaluated";
+
+/// The typed reason of an `other` override, which only a request carrying the
+/// sign-in's token holds.
 const REASON_TEXT: &str = "actual.override.reason_text";
 
+/// The decision a review command acted on, which only a request carrying the
+/// sign-in's token holds.
+const DECISION_ID: &str = "actual.adr.decision_id";
+
+/// The repository path an agent's report anchors a claim to, which only a
+/// request carrying the sign-in's token holds.
+const REPORT_FILE_PATH: &str = "actual.report.file_path";
+
+/// The attributes [`LogRecord::signed_out`] leaves out.
+const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
+
 /// The version of the attributes below, sent as `actual.event.schema_version`.
-/// 2 adds `actual.override.reason` and `actual.override.reason_text`.
-const SCHEMA_VERSION: i64 = 2;
+/// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
+/// the [`ADR_DISCOVERED`] and [`ADR_REVIEWED`] events; 4 adds
+/// `actual.adr.verdict`; 5 adds [`ADR_REPORTED`] and its `actual.turn.index`
+/// and `actual.report.*` attributes; 6 adds [`FILTER_EVALUATED`] and its
+/// `actual.filter.*` attributes.
+const SCHEMA_VERSION: i64 = 6;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -157,6 +192,16 @@ impl Outputs {
         if opt_out::is_disabled(config) {
             return None;
         }
+        Self::settings(config, by_default)
+    }
+
+    /// The outputs this run would have with telemetry on, for debug mode to
+    /// build what it would send.
+    pub(crate) fn resolve_ignoring_opt_out(config: &Config) -> Option<Self> {
+        Self::settings(config, SENDS_BY_DEFAULT)
+    }
+
+    fn settings(config: &Config, by_default: bool) -> Option<Self> {
         let telemetry = config.telemetry.as_ref();
         let endpoint = setting(
             ENDPOINT_ENV,
@@ -228,9 +273,10 @@ impl LogRecord {
     }
 
     /// This record as a request without the sign-in's token carries it:
-    /// without [`REASON_TEXT`].
+    /// without the attributes in [`SIGNED_IN_ONLY`].
     fn signed_out(mut self) -> Self {
-        self.attributes.retain(|kv| kv.key != REASON_TEXT);
+        self.attributes
+            .retain(|kv| !SIGNED_IN_ONLY.contains(&kv.key.as_str()));
         self
     }
 }
@@ -251,7 +297,8 @@ impl KeyValue {
     }
 }
 
-// The variants spell OTLP/JSON's keys: stringValue, intValue, arrayValue.
+// The variants spell OTLP/JSON's keys: stringValue, intValue, doubleValue,
+// arrayValue.
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +306,7 @@ enum AnyValue {
     StringValue(String),
     BoolValue(bool),
     IntValue(#[serde(with = "decimal")] i64),
+    DoubleValue(f64),
     ArrayValue { values: Vec<AnyValue> },
 }
 
@@ -268,6 +316,7 @@ impl AnyValue {
             Self::StringValue(value) => common::any_value::Value::StringValue(value.clone()),
             Self::BoolValue(value) => common::any_value::Value::BoolValue(*value),
             Self::IntValue(value) => common::any_value::Value::IntValue(*value),
+            Self::DoubleValue(value) => common::any_value::Value::DoubleValue(*value),
             Self::ArrayValue { values } => {
                 common::any_value::Value::ArrayValue(common::ArrayValue {
                     values: values.iter().map(Self::to_proto).collect(),
@@ -319,6 +368,39 @@ fn int(key: &'static str, value: i64) -> KeyValue {
     }
 }
 
+/// A double. NaN and the infinities, which JSON cannot hold and no score is,
+/// go as 0.
+fn double(key: &'static str, value: f64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: finite(value),
+    }
+}
+
+fn doubles(key: &'static str, values: &[f64]) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::ArrayValue {
+            values: values.iter().copied().map(finite).collect(),
+        },
+    }
+}
+
+fn finite(value: f64) -> AnyValue {
+    AnyValue::DoubleValue(if value.is_finite() { value } else { 0.0 })
+}
+
+fn count(key: &'static str, value: usize) -> KeyValue {
+    int(key, i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn boolean(key: &'static str, value: bool) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::BoolValue(value),
+    }
+}
+
 /// The bytes `hex` spells, or `None` when it isn't whole hex digit pairs.
 fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
     let digit = |byte: u8| char::from(byte).to_digit(16);
@@ -354,6 +436,44 @@ pub(crate) struct OverrideReason<'a> {
     pub text: Option<&'a str>,
 }
 
+/// How one run of an `actual adr` command ended, which both of its events
+/// record.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdrRun<'a> {
+    /// `actual.adr.command.outcome`.
+    pub outcome: &'a str,
+    /// The exit code the run ends with: `actual.adr.command.exit_code`.
+    pub exit_code: i32,
+    /// Whether standard input was a terminal:
+    /// `actual.adr.command.stdin_is_terminal`.
+    pub interactive: bool,
+    pub duration: Duration,
+}
+
+/// What an `adr check` run found, as its [`ADR_DISCOVERED`] record counts it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CheckCounts {
+    /// Decision files checked, unreadable ones included.
+    pub files: usize,
+    /// Those that failed the save rules.
+    pub failed: usize,
+    /// Likely duplicates listed.
+    pub duplicates: usize,
+}
+
+/// The decision a review command acted on, as its [`ADR_REVIEWED`] record
+/// names it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ReviewedDecision<'a> {
+    /// The decision's id, once the run found it: [`DECISION_ID`], sent empty
+    /// before then.
+    pub id: Option<&'a str>,
+    /// Whether it is an AI-grouped decision, which takes the group routes.
+    pub grouped: bool,
+    /// For a grouped decision, the rows its group action covers, else 0.
+    pub group_rows: usize,
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -384,10 +504,7 @@ impl Origin {
         let mut record = self.record(SESSION_ENDED, session_id, None);
         record.attributes.extend([
             text("actual.session.end_reason", Some(reason)),
-            KeyValue {
-                key: "actual.session.last_check_blocked".to_string(),
-                value: AnyValue::BoolValue(last_check_blocked),
-            },
+            boolean("actual.session.last_check_blocked", last_check_blocked),
         ]);
         record
     }
@@ -439,7 +556,8 @@ impl Origin {
     }
 
     /// The [`ADR_DETECTED`] record for one logical ADR a gate judged rules of,
-    /// with that gate, `planning` or `implementation`, as how it was detected.
+    /// with that gate, `planning` or `implementation`, as how it was detected,
+    /// and the strongest verdict the round gave any of its rules.
     pub(crate) fn used(
         &self,
         session_id: &str,
@@ -447,11 +565,13 @@ impl Origin {
         adr_ref: &str,
         adr_ids: &[String],
         gate: &str,
+        verdict: &str,
     ) -> LogRecord {
         let mut record = self.adr_record(ADR_DETECTED, session_id, agent_id, adr_ref, adr_ids);
-        record
-            .attributes
-            .push(text("actual.detection.method", Some(gate)));
+        record.attributes.extend([
+            text("actual.detection.method", Some(gate)),
+            text("actual.adr.verdict", Some(verdict)),
+        ]);
         record
     }
 
@@ -522,6 +642,97 @@ impl Origin {
         record
     }
 
+    /// The [`ADR_DISCOVERED`] record for one `adr check` run: what it found,
+    /// then how the run ended.
+    pub(crate) fn adr_discovered(&self, counts: CheckCounts, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_DISCOVERED, "", None);
+        record.attributes.extend([
+            count("actual.adr.check.files", counts.files),
+            count("actual.adr.check.failed_files", counts.failed),
+            count("actual.adr.check.duplicates", counts.duplicates),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
+    /// The [`ADR_REVIEWED`] record for one run of review command `action`:
+    /// the command, the decision it acted on, then how the run ended.
+    pub(crate) fn adr_reviewed(
+        &self,
+        action: &str,
+        decision: ReviewedDecision<'_>,
+        run: AdrRun<'_>,
+    ) -> LogRecord {
+        let mut record = self.record(ADR_REVIEWED, "", None);
+        record.attributes.extend([
+            text("actual.adr.review.action", Some(action)),
+            text(DECISION_ID, decision.id),
+            boolean("actual.adr.review.grouped", decision.grouped),
+            count("actual.adr.review.group_rows", decision.group_rows),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
+    /// The [`ADR_REPORTED`] record for one ADR an agent named in its answer
+    /// to the Stop hook's question. `report.adr` is `None` for a name that
+    /// matched no ADR in the session, sent with an empty ref and no ids.
+    pub(crate) fn reported(&self, session_id: &str, report: &AdrReport<'_>) -> LogRecord {
+        let (adr_ref, adr_ids) = report.adr.unwrap_or_default();
+        let mut record = self.adr_record(ADR_REPORTED, session_id, None, adr_ref, adr_ids);
+        record.attributes.extend([
+            int(
+                "actual.turn.index",
+                i64::try_from(report.turn).unwrap_or(i64::MAX),
+            ),
+            text(
+                "actual.report.check_action_id",
+                Some(report.check_action_id),
+            ),
+            text("actual.report.evidence", Some(report.evidence)),
+            text("actual.report.evidence_reason", report.reason),
+            text("actual.report.anchor", Some(report.anchor)),
+        ]);
+        if let Some(path) = report.file_path {
+            record.attributes.push(text(REPORT_FILE_PATH, Some(path)));
+        }
+        record
+    }
+
+    /// The [`FILTER_EVALUATED`] record for one selection by `selector`,
+    /// `context` for the brief or the gate's `planning` or `implementation`:
+    /// the floor it applied, the index it searched, its drops by reason, and
+    /// the logical ADRs it kept with their scores, in rank order. Counts are
+    /// in rule files, so `kept_count` can exceed the ADRs named.
+    pub(crate) fn filter_evaluated(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        selector: &str,
+        tally: &FilterTally,
+    ) -> LogRecord {
+        let (refs, scores): (Vec<&str>, Vec<f64>) = tally.kept_adrs().into_iter().unzip();
+        let mut record = self.record(FILTER_EVALUATED, session_id, agent_id);
+        record.attributes.extend([
+            text("actual.filter.selector", Some(selector)),
+            double("actual.filter.min_score", tally.min_score),
+            count("actual.filter.index_size", tally.index_size),
+            count("actual.filter.dropped.inactive", tally.inactive),
+            count("actual.filter.dropped.excluded_path", tally.excluded_path),
+            count("actual.filter.dropped.no_match", tally.no_match),
+            count("actual.filter.dropped.below_floor", tally.below_floor),
+            count("actual.filter.dropped.capped", tally.capped),
+            count("actual.filter.dropped.unrelated", tally.unrelated),
+            count("actual.filter.dropped.session", tally.session),
+            count("actual.filter.dropped.window", tally.window),
+            count("actual.filter.dropped.brief_cap", tally.brief_cap),
+            count("actual.filter.kept_count", tally.kept.len()),
+            strings("actual.filter.kept_refs", &refs),
+            doubles("actual.filter.kept_scores", &scores),
+        ]);
+        record
+    }
+
     /// A record carrying the attributes every event shares, each present on
     /// every record and an empty string when unknown: its own event id, which
     /// `log.record.uid` repeats, the schema version, and the action, session
@@ -564,6 +775,44 @@ impl Origin {
         ]);
         record
     }
+}
+
+/// The attributes both `actual adr` events end with.
+fn adr_run(run: AdrRun<'_>) -> [KeyValue; 4] {
+    [
+        text("actual.adr.command.outcome", Some(run.outcome)),
+        int("actual.adr.command.exit_code", i64::from(run.exit_code)),
+        boolean("actual.adr.command.stdin_is_terminal", run.interactive),
+        int(
+            "actual.adr.command.duration_ms",
+            i64::try_from(run.duration.as_millis()).unwrap_or(i64::MAX),
+        ),
+    ]
+}
+
+/// One ADR an agent reported using, as an [`ADR_REPORTED`] record names it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AdrReport<'a> {
+    /// The logical ADR's ref and the `adr_id` of each of its files.
+    pub adr: Option<(&'a str, &'a [String])>,
+    /// The session's turn the question was asked in: `actual.turn.index`.
+    pub turn: u64,
+    /// The `actual.action.id` of the `impl-check` run that asked.
+    pub check_action_id: &'a str,
+    /// `verified` or `unverified`. Verified means the ADR was listed and the
+    /// line is one the turn changed or planned, not that the ADR shaped it.
+    pub evidence: &'a str,
+    /// Why a claim is unverified, sent empty when it is verified.
+    pub reason: Option<&'a str>,
+    /// `diff` or `plan`.
+    pub anchor: &'a str,
+    /// The file a verified diff claim names, sent only signed in.
+    pub file_path: Option<&'a str>,
+}
+
+/// This execution's `actual.action.id`, the one its records carry.
+pub(crate) fn current_action_id() -> &'static str {
+    action_id()
 }
 
 /// This execution's `actual.action.id`: a UUIDv7 made the first time a record
@@ -646,8 +895,28 @@ struct Spooled<R> {
 /// Without a stamp no request will carry the token, so [`REASON_TEXT`] isn't
 /// spooled either.
 pub(crate) fn spool(outputs: &Outputs, records: &[LogRecord]) {
+    let lines = spool_lines(outputs, records);
+    if let Err(e) = OTLP_LOGS.append_lines(&lines) {
+        tracing::debug!("otlp logs: {} records not spooled: {e}", lines.len());
+    }
+}
+
+/// Log `records` in debug mode as telemetry kept them back, each in the form
+/// [`spool`] would have queued it for `outputs`.
+pub(crate) fn hold_back(outputs: &Outputs, records: &[LogRecord]) {
+    if debug::enabled() {
+        debug::held_back(
+            Stream::Otlp,
+            &spool_lines(outputs, records),
+            debug::Reason::TelemetryOff,
+        );
+    }
+}
+
+/// The spool lines for `records` bound for `outputs`.
+fn spool_lines(outputs: &Outputs, records: &[LogRecord]) -> Vec<String> {
     let sign_in = sign_in::recording_stamp(outputs.endpoint.as_deref());
-    let lines: Vec<String> = records
+    records
         .iter()
         .filter_map(|record| {
             let record = match sign_in {
@@ -660,20 +929,29 @@ pub(crate) fn spool(outputs: &Outputs, records: &[LogRecord]) {
             })
             .ok()
         })
-        .collect();
-    if let Err(e) = OTLP_LOGS.append_lines(&lines) {
-        tracing::debug!("otlp logs: {} records not spooled: {e}", lines.len());
-    }
+        .collect()
 }
 
 /// The records spooled `lines` hold, with their stamps. A line is dropped when
 /// it isn't a record, or when its time or ids won't encode.
 fn records(lines: &[String]) -> Vec<Spooled<LogRecord>> {
+    lines.iter().filter_map(|line| decode(line)).collect()
+}
+
+/// The spooled `lines` [`records`] drops.
+fn unreadable(lines: &[String]) -> Vec<String> {
     lines
         .iter()
-        .filter_map(|line| serde_json::from_str::<Spooled<LogRecord>>(line).ok())
-        .filter(|spooled| spooled.record.to_proto().is_some())
+        .filter(|line| decode(line).is_none())
+        .cloned()
         .collect()
+}
+
+/// The record a spool line holds, when it is one that will encode.
+fn decode(line: &str) -> Option<Spooled<LogRecord>> {
+    serde_json::from_str::<Spooled<LogRecord>>(line)
+        .ok()
+        .filter(|spooled| spooled.record.to_proto().is_some())
 }
 
 /// The requests `spooled` goes out in: the records `sign_in` covers, flagged
@@ -711,6 +989,11 @@ fn resource_attributes() -> Vec<KeyValue> {
 /// `records` as one `ExportLogsServiceRequest` in OTLP/JSON, the line the
 /// file sink appends.
 fn json_request(records: &[LogRecord]) -> String {
+    json_request_value(records).to_string()
+}
+
+/// [`json_request`], before it is written out.
+fn json_request_value(records: &[LogRecord]) -> serde_json::Value {
     serde_json::json!({
         "resourceLogs": [{
             "resource": {"attributes": resource_attributes()},
@@ -720,7 +1003,6 @@ fn json_request(records: &[LogRecord]) -> String {
             }],
         }],
     })
-    .to_string()
 }
 
 /// `records` as one `ExportLogsServiceRequest` built from the official
@@ -756,8 +1038,9 @@ fn protobuf_request(records: &[LogRecord]) -> Vec<u8> {
 /// Each request's records are taken out of the spool before it is sent, so
 /// they are gone whatever the outcome. A request gets what is left of the
 /// budget. The upload ends when the budget runs out or a request is dropped,
-/// since a dropped request means the time left can't hold another try, and
-/// the records it didn't reach stay in the spool for the next one. The
+/// since a dropped request means the time left can't hold another try. The
+/// records it hadn't taken stay in the spool for the next one, and the rest of
+/// the batch it had taken is dropped with it. The
 /// request is appended to the file sink as OTLP/JSON when one is set and
 /// POSTed as protobuf when an endpoint is. A batch with no record left in it
 /// sends nothing, since a sender should not send an empty envelope. An
@@ -791,18 +1074,24 @@ async fn flush_within(config: &Config, budget: Duration) {
         if lines.is_empty() {
             return;
         }
-        for (records, signed) in requests(records(&lines), sign_in.as_ref()) {
-            if let Some(file) = &outputs.file {
+        if debug::enabled() {
+            debug::spooled(Stream::Otlp, &unreadable(&lines), false);
+        }
+        let mut pending = requests(records(&lines), sign_in.as_ref()).into_iter();
+        while let Some((records, signed)) = pending.next() {
+            let filed = outputs.file.as_ref().is_some_and(|file| {
                 let line = format!("{}\n", json_request(&records));
-                let _ = crate::config::paths::append_secure(file, line.as_bytes());
-            }
+                crate::config::paths::append_secure(file, line.as_bytes()).is_ok()
+            });
             let (Some(client), Some(endpoint)) = (&client, &outputs.endpoint) else {
+                log_request(&records, false, None, filed, &outputs);
                 continue;
             };
             let body = protobuf_request(&records);
             let token = sign_in.as_ref().filter(|_| signed).map(SignIn::token);
             let left = deadline.saturating_duration_since(Instant::now());
             let mut sent = post(client, endpoint, body, token, left, tokio::time::sleep).await;
+            log_request(&records, token.is_some(), Some(sent), filed, &outputs);
             if token.is_some() && sent == Sent::Rejected(401) {
                 sign_in = None;
                 let unsigned: Vec<LogRecord> =
@@ -810,13 +1099,52 @@ async fn flush_within(config: &Config, budget: Duration) {
                 let body = protobuf_request(&unsigned);
                 let left = deadline.saturating_duration_since(Instant::now());
                 sent = post(client, endpoint, body, None, left, tokio::time::sleep).await;
+                log_request(&unsigned, false, Some(sent), filed, &outputs);
             }
             tracing::debug!("otlp logs: {} records: {sent:?}", records.len());
             if sent == Sent::Dropped {
+                for (records, signed) in pending {
+                    log_request(&records, signed, Some(Sent::Dropped), false, &outputs);
+                }
                 return;
             }
         }
     }
+}
+
+/// Log one request in debug mode, in its OTLP/JSON form: `sent` when the
+/// endpoint accepted it, `refused` with the status it gave, `dropped` when it
+/// got no answer in time or was never tried. With no `sent`, the request went
+/// nowhere over the network: `sent` to the file sink when `filed` says it was
+/// written there, else `dropped`, since nobody got it.
+fn log_request(
+    records: &[LogRecord],
+    signed: bool,
+    sent: Option<Sent>,
+    filed: bool,
+    outputs: &Outputs,
+) {
+    if !debug::enabled() {
+        return;
+    }
+    let event = json_request_value(records);
+    let endpoint = outputs.endpoint.clone();
+    let file = outputs
+        .file
+        .as_ref()
+        .map(|file| format!("file:{}", file.display()));
+    let (entry, to) = match sent {
+        Some(Sent::Accepted) => (Entry::new(Stream::Otlp, Stage::Sent), endpoint),
+        Some(Sent::Rejected(status)) => (
+            Entry::new(Stream::Otlp, Stage::Refused).status(status),
+            endpoint,
+        ),
+        Some(Sent::Dropped) => (Entry::new(Stream::Otlp, Stage::Dropped), endpoint),
+        None if filed => (Entry::new(Stream::Otlp, Stage::Sent), file),
+        None => (Entry::new(Stream::Otlp, Stage::Dropped), endpoint.or(file)),
+    };
+    let entry = to.into_iter().fold(entry, |entry, to| entry.to(to));
+    debug::record(entry.signed_in(signed).bearer(signed).event(event));
 }
 
 /// A client with the API client's User-Agent that refuses plain HTTP unless
@@ -953,6 +1281,8 @@ mod tests {
             "TRACEPARENT",
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            debug::ENV,
+            debug::ID_ENV,
         ]
         .into_iter()
         .map(EnvGuard::remove)
@@ -1256,7 +1586,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "2"})
+            serde_json::json!({"intValue": "6"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -1433,10 +1763,18 @@ mod tests {
             "grp-1",
             &ids(&["adr-1", "adr-2"]),
             "planning",
+            "not_applicable",
         ));
         assert_eq!(used["eventName"], ADR_DETECTED);
         assert_eq!(used["severityNumber"], 9);
         let mut used = shared(&used);
+        assert_eq!(
+            used.pop().unwrap(),
+            (
+                "actual.adr.verdict".to_string(),
+                serde_json::json!({"stringValue": "not_applicable"})
+            )
+        );
         assert_eq!(
             used.pop().unwrap(),
             (
@@ -1734,7 +2072,14 @@ mod tests {
         vec![
             origin.context_added("session-1", None, "grp-1", &ids(&["adr-1", "adr-2"])),
             origin.context_added("session-1", Some("agent-2"), "adr-3", &ids(&["adr-3"])),
-            origin.used("session-1", None, "grp-1", &ids(&["adr-1"]), "planning"),
+            origin.used(
+                "session-1",
+                None,
+                "grp-1",
+                &ids(&["adr-1"]),
+                "planning",
+                "followed",
+            ),
             origin.breached(
                 "session-1",
                 Some("agent-2"),
@@ -1826,7 +2171,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(2))
+            Some(&common::any_value::Value::IntValue(6))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -1839,6 +2184,11 @@ mod tests {
         let Some(common::any_value::Value::ArrayValue(ids)) = ids else { panic!("actual.adr.ids is not a list: {ids:?}") };
         let ids: Vec<&str> = ids.values.iter().map(|id| string(Some(id))).collect();
         assert_eq!(ids, ["adr-1", "adr-2"]);
+
+        let used = &request.resource_logs[0].scope_logs[0].log_records[2];
+        let verdict = used.attributes.last().unwrap();
+        assert_eq!(verdict.key, "actual.adr.verdict");
+        assert_eq!(string(verdict.value.as_ref()), "followed");
     }
 
     /// A record with no trace context goes out with no ids and no flags.
@@ -1850,6 +2200,118 @@ mod tests {
         assert!(record.trace_id.is_empty());
         assert!(record.span_id.is_empty());
         assert_eq!(record.flags, 0);
+    }
+
+    fn filter_tally() -> FilterTally {
+        use crate::rules::scope::KeptFile;
+        FilterTally {
+            index_size: 9,
+            min_score: 0.25,
+            inactive: 1,
+            excluded_path: 1,
+            no_match: 1,
+            below_floor: 1,
+            capped: 1,
+            session: 1,
+            window: 1,
+            kept: vec![
+                KeptFile::new(Some("grp-1"), Some("adr-1"), 2.5),
+                KeptFile::new(None, None, 1.5),
+            ],
+            ..FilterTally::default()
+        }
+    }
+
+    /// The selection event carries the selector, the floor, every count, and
+    /// the kept ADRs with their scores, and nothing naming a file, a path or
+    /// a rule's text. It encodes as the official message, doubles included.
+    #[test]
+    fn test_a_filter_record_counts_the_selection_and_encodes() {
+        let record = origin(None).filter_evaluated("s1", Some("a1"), "planning", &filter_tally());
+        assert_eq!(record.event_name, FILTER_EVALUATED);
+        let json = serde_json::to_value(&record).unwrap();
+        let value = |key: &str| -> Value {
+            json["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .unwrap_or_else(|| panic!("no {key}"))["value"]
+                .clone()
+        };
+        assert_eq!(
+            value("actual.filter.selector"),
+            serde_json::json!({"stringValue": "planning"})
+        );
+        assert_eq!(
+            value("actual.filter.min_score"),
+            serde_json::json!({"doubleValue": 0.25})
+        );
+        assert_eq!(
+            value("actual.filter.index_size"),
+            serde_json::json!({"intValue": "9"})
+        );
+        assert_eq!(
+            value("actual.filter.dropped.window"),
+            serde_json::json!({"intValue": "1"})
+        );
+        assert_eq!(
+            value("actual.filter.dropped.brief_cap"),
+            serde_json::json!({"intValue": "0"})
+        );
+        assert_eq!(
+            value("actual.filter.kept_count"),
+            serde_json::json!({"intValue": "2"})
+        );
+        assert_eq!(
+            value("actual.filter.kept_refs"),
+            serde_json::json!({"arrayValue": {"values": [{"stringValue": "grp-1"}]}})
+        );
+        assert_eq!(
+            value("actual.filter.kept_scores"),
+            serde_json::json!({"arrayValue": {"values": [{"doubleValue": 2.5}]}})
+        );
+        let keys: Vec<&str> = record.attributes.iter().map(|kv| kv.key.as_str()).collect();
+        assert!(
+            keys.iter()
+                .skip(6)
+                .all(|key| key.starts_with("actual.filter.")),
+            "{keys:?}"
+        );
+
+        let request = decoded(&[record]);
+        let decoded = &request.resource_logs[0].scope_logs[0].log_records[0];
+        let min_score = decoded
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "actual.filter.min_score")
+            .and_then(|kv| kv.value.as_ref())
+            .and_then(|value| value.value.as_ref());
+        assert_eq!(
+            min_score,
+            Some(&common::any_value::Value::DoubleValue(0.25))
+        );
+    }
+
+    /// A score JSON can't hold goes as 0 rather than breaking the spool line.
+    #[test]
+    fn test_a_non_finite_score_goes_as_zero() {
+        let tally = FilterTally {
+            min_score: f64::INFINITY,
+            kept: vec![crate::rules::scope::KeptFile::new(
+                None,
+                Some("adr-1"),
+                f64::NAN,
+            )],
+            ..FilterTally::default()
+        };
+        let record = origin(None).filter_evaluated("s1", None, "context", &tally);
+        let line = serde_json::to_string(&record).unwrap();
+        assert!(
+            line.contains(r#""key":"actual.filter.min_score","value":{"doubleValue":0.0}"#),
+            "{line}"
+        );
+        assert!(line.contains(r#"{"doubleValue":0.0}]"#), "{line}");
     }
 
     /// A damaged spool line is dropped: one that isn't a record, and one whose
@@ -1867,7 +2329,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"2"}"#, r#"{"intValue":"two"}"#),
+            whole.replace(r#"{"intValue":"6"}"#, r#"{"intValue":"six"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -3309,6 +3771,94 @@ mod tests {
         assert_eq!(both.matches(REASON_TEXT).count(), 1, "{both}");
     }
 
+    fn reported_record(file_path: Option<&str>) -> LogRecord {
+        let ids = ids(&["adr-1"]);
+        origin(None).reported(
+            "session-1",
+            &AdrReport {
+                adr: Some(("grp-1", &ids)),
+                turn: 3,
+                check_action_id: "check-1",
+                evidence: "verified",
+                reason: None,
+                anchor: "diff",
+                file_path,
+            },
+        )
+    }
+
+    /// A report's attributes, and the file path only a request carrying the
+    /// token keeps: a signed-out copy drops it and nothing else.
+    #[test]
+    fn test_a_reported_record_keeps_its_file_path_only_signed_in() {
+        let built = reported_record(Some("src/orders.rs"));
+        let record = serde_json::to_value(&built).unwrap();
+        assert_eq!(record["eventName"], ADR_REPORTED);
+        let keys: Vec<&str> = record["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kv| kv["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys[6..],
+            [
+                "actual.adr.ref",
+                "actual.adr.ids",
+                "actual.turn.index",
+                "actual.report.check_action_id",
+                "actual.report.evidence",
+                "actual.report.evidence_reason",
+                "actual.report.anchor",
+                REPORT_FILE_PATH,
+            ]
+        );
+        let signed_out = serde_json::to_value(built.signed_out()).unwrap();
+        let mut expected = record.clone();
+        expected["attributes"].as_array_mut().unwrap().pop();
+        assert_eq!(signed_out, expected);
+        let plan = serde_json::to_string(&reported_record(None)).unwrap();
+        assert!(!plan.contains(REPORT_FILE_PATH), "{plan}");
+        let unknown =
+            serde_json::to_string(&origin(None).reported("s", &AdrReport::default())).unwrap();
+        assert!(
+            unknown.contains(r#"{"key":"actual.adr.ref","value":{"stringValue":""}}"#),
+            "{unknown}"
+        );
+    }
+
+    /// Recorded signed out, a report's file path never reaches the spool.
+    #[test]
+    fn test_a_reported_file_path_is_spooled_only_under_a_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let spool_file = home.path().join("otlp-logs-spool.jsonl");
+        spool(&outputs, &[reported_record(Some("src/out.rs"))]);
+        let signed_out = std::fs::read_to_string(&spool_file).unwrap();
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &[reported_record(Some("src/in.rs"))]);
+        let both = std::fs::read_to_string(&spool_file).unwrap();
+        assert!(!signed_out.contains(REPORT_FILE_PATH), "{signed_out}");
+        assert!(
+            signed_out.contains("actual.report.evidence"),
+            "{signed_out}"
+        );
+        assert!(
+            both.contains("src/in.rs") && !both.contains("src/out.rs"),
+            "{both}"
+        );
+    }
+
     /// Signed in, a custom endpoint still never gets the text: it never gets
     /// the token.
     #[tokio::test]
@@ -3502,5 +4052,500 @@ mod tests {
             stamp.as_ref().and_then(Value::as_str)
         );
         assert_eq!(parsed[1].sign_in, None);
+    }
+
+    // ── the `actual adr` events ─────────────────────────────────────────
+
+    /// One `adr check` event and one review event naming decision `id`.
+    fn adr_events(id: &str) -> Vec<LogRecord> {
+        let origin = origin(None);
+        let run = AdrRun {
+            outcome: "succeeded",
+            exit_code: 0,
+            interactive: false,
+            duration: Duration::from_millis(5),
+        };
+        let decision = ReviewedDecision {
+            id: Some(id),
+            grouped: true,
+            group_rows: 2,
+        };
+        vec![
+            origin.adr_discovered(CheckCounts::default(), run),
+            origin.adr_reviewed("accept", decision, run),
+        ]
+    }
+
+    /// Each record in each request `received` holds, as its event name and
+    /// its decision id, if it carries one.
+    fn adr_events_received(received: &Received) -> Vec<Vec<(String, Option<String>)>> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| {
+                collector::ExportLogsServiceRequest::decode(body.as_slice())
+                    .unwrap()
+                    .resource_logs[0]
+                    .scope_logs[0]
+                    .log_records
+                    .iter()
+                    .map(|record| {
+                        let id = record
+                            .attributes
+                            .iter()
+                            .find(|kv| kv.key == DECISION_ID)
+                            .map(|kv| string(kv.value.as_ref()).to_string());
+                        (record.event_name.clone(), id)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Both events carry the same attributes signed in or out, except the
+    /// decision id, which a signed-out copy leaves out.
+    #[test]
+    fn test_adr_events_name_a_decision_only_signed_in() {
+        let events = adr_events("d-1");
+        let keys = |record: &LogRecord| -> Vec<String> {
+            record.attributes.iter().map(|kv| kv.key.clone()).collect()
+        };
+        assert_eq!(events[0].event_name, ADR_DISCOVERED);
+        assert_eq!(events[1].event_name, ADR_REVIEWED);
+        assert_ne!(ADR_DISCOVERED, ADR_DETECTED);
+        assert_ne!(ADR_REVIEWED, ADR_DETECTED);
+        assert_eq!(keys(&events[0]), keys(&events[0].clone().signed_out()));
+        let review = keys(&events[1]);
+        let signed_out = keys(&events[1].clone().signed_out());
+        assert!(review.iter().any(|key| key == DECISION_ID));
+        assert_eq!(
+            review
+                .into_iter()
+                .filter(|key| key != DECISION_ID)
+                .collect::<Vec<_>>(),
+            signed_out
+        );
+    }
+
+    /// Recorded signed out, neither event gets a stamp and the review event
+    /// is spooled without its decision id. Recorded signed in, both are
+    /// stamped and the id waits in the spool.
+    #[test]
+    fn test_adr_events_are_spooled_with_the_sign_in_they_were_recorded_under() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (_home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let creds = signed_in("org-a", "token-a", ChronoDuration::hours(1), None);
+
+        spool(&outputs, &adr_events("out-1"));
+        save(&creds);
+        spool(&outputs, &adr_events("in-1"));
+
+        let spooled = records(&OTLP_LOGS.take(usize::MAX));
+        let stamp = crate::telemetry::sign_in::stamp(&creds);
+        let seen: Vec<(Option<&str>, &str, bool)> = spooled
+            .iter()
+            .map(|line| {
+                (
+                    line.sign_in.as_deref(),
+                    line.record.event_name.as_str(),
+                    line.record
+                        .attributes
+                        .iter()
+                        .any(|kv| kv.key == DECISION_ID),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (None, ADR_DISCOVERED, false),
+                (None, ADR_REVIEWED, false),
+                (Some(stamp.as_str()), ADR_DISCOVERED, false),
+                (Some(stamp.as_str()), ADR_REVIEWED, true),
+            ]
+        );
+    }
+
+    /// The events recorded under the current sign-in go with its token and
+    /// name the decision. Those recorded signed out go without it, and the
+    /// review event among them names none.
+    #[tokio::test]
+    async fn test_adr_events_go_with_the_token_only_when_recorded_signed_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (_home, _api) = isolated(&server.url());
+        let (signed, signed_bodies) = logs(&mut server, Some("Bearer token-a"), 200, 1).await;
+        let (unsigned, unsigned_bodies) = logs(&mut server, None, 200, 1).await;
+        let (outputs, config) = at(&server);
+
+        spool(&outputs, &adr_events("out-1"));
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &adr_events("in-1"));
+
+        flush(&config).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        assert_eq!(
+            adr_events_received(&signed_bodies),
+            [vec![
+                (ADR_DISCOVERED.to_string(), None),
+                (ADR_REVIEWED.to_string(), Some("in-1".to_string())),
+            ]]
+        );
+        assert_eq!(
+            adr_events_received(&unsigned_bodies),
+            [vec![
+                (ADR_DISCOVERED.to_string(), None),
+                (ADR_REVIEWED.to_string(), None),
+            ]]
+        );
+    }
+
+    // ── telemetry debug mode ────────────────────────────────────────────
+
+    use crate::telemetry::debug::tests::{debug_on, logged};
+
+    /// The lines logged at `stage`.
+    fn at_stage(lines: &[Value], stage: &str) -> Vec<Value> {
+        lines
+            .iter()
+            .filter(|line| line["stage"] == stage)
+            .cloned()
+            .collect()
+    }
+
+    /// The spool's lines as the endpoint gets their records: without the
+    /// sign-in stamp.
+    fn spooled_records(home: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(home.join("otlp-logs-spool.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: Value = serde_json::from_str(line).unwrap();
+                record.as_object_mut().unwrap().remove("actualSignIn");
+                record
+            })
+            .collect()
+    }
+
+    /// Signed in and opted in: each record is logged as queued exactly as the
+    /// spool holds it, and the request as sent exactly as the endpoint got it,
+    /// both in the signed-in form with the account they're tied to. The token
+    /// goes in the request's header and nowhere in the log.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_signed_in_upload_as_sent_without_the_token() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let _debug = debug_on(home.path(), "signed-in");
+        let (signed, received) = logs(&mut server, Some("Bearer tok-SECRET-123"), 200, 1).await;
+        let (outputs, config) = at(&server);
+        save(&signed_in(
+            "org-a",
+            "tok-SECRET-123",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &overrides("a", 2));
+        let spooled = spooled_records(home.path());
+
+        flush(&config).await;
+
+        signed.assert_async().await;
+        let lines = logged("signed-in");
+        let queued = at_stage(&lines, "queued");
+        assert_eq!(queued.len(), 2);
+        for (line, record) in queued.iter().zip(&spooled) {
+            assert_eq!(&line["event"], record);
+            assert_eq!(line["auth"], "signed_in");
+            assert_eq!(line["stream"], "otlp");
+            assert_eq!(
+                line["local_only"],
+                serde_json::json!({"account": "dev@example.com", "org": "org-a"})
+            );
+        }
+        let sent = at_stage(&lines, "sent");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["auth"], "signed_in");
+        assert_eq!(sent[0]["authorization"], debug::BEARER);
+        assert_eq!(sent[0]["to"], outputs.endpoint.clone().unwrap());
+        let body = received.lock().unwrap()[0].clone();
+        let request = collector::ExportLogsServiceRequest::decode(body.as_slice()).unwrap();
+        assert_eq!(official_json(&request, &sent[0]["event"]), sent[0]["event"]);
+        // The signed-in form keeps the typed reason text the request carried.
+        assert!(sent[0]["event"].to_string().contains(REASON_TEXT));
+        let raw = std::fs::read_to_string(debug::path_for("signed-in").unwrap()).unwrap();
+        assert!(!raw.contains("tok-SECRET-123"));
+        assert!(!raw.contains("actualSignIn"));
+    }
+
+    /// Signed out: the pseudonymized form, as on the wire, with no account and
+    /// no bearer, and one sent line for each request the endpoint received.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_signed_out_upload_as_on_the_wire() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let _debug = debug_on(home.path(), "signed-out");
+        let (unsigned, received) = logs(&mut server, None, 200, 2).await;
+        let (outputs, config) = at(&server);
+        spool(&outputs, &overrides("a", 150));
+        let spooled = spooled_records(home.path());
+
+        flush(&config).await;
+
+        unsigned.assert_async().await;
+        let lines = logged("signed-out");
+        let queued = at_stage(&lines, "queued");
+        assert_eq!(queued.len(), 150);
+        for (line, record) in queued.iter().zip(&spooled) {
+            assert_eq!(&line["event"], record);
+            assert_eq!(line["auth"], "signed_out");
+            assert!(line.get("local_only").is_none());
+            assert!(!line["event"].to_string().contains(REASON_TEXT));
+        }
+        let sent = at_stage(&lines, "sent");
+        let bodies = received.lock().unwrap().clone();
+        assert_eq!(sent.len(), bodies.len());
+        for (line, body) in sent.iter().zip(&bodies) {
+            let request = collector::ExportLogsServiceRequest::decode(body.as_slice()).unwrap();
+            assert_eq!(official_json(&request, &line["event"]), line["event"]);
+            assert_eq!(line["auth"], "signed_out");
+            assert!(line.get("authorization").is_none());
+        }
+    }
+
+    /// A refusal is logged with its status, and a 401 to a signed request
+    /// logs the refusal and then the signed-out resend.
+    #[tokio::test]
+    async fn test_debug_mode_logs_refusals_and_the_signed_out_resend() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let _debug = debug_on(home.path(), "refused");
+        let (signed, _) = logs(&mut server, Some("Bearer token-a"), 401, 1).await;
+        let (unsigned, _) = logs(&mut server, None, 400, 1).await;
+        let (outputs, config) = at(&server);
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &adrs("a", 1));
+
+        flush(&config).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        let refused = at_stage(&logged("refused"), "refused");
+        assert_eq!(refused.len(), 2);
+        assert_eq!(refused[0]["status"], 401);
+        assert_eq!(refused[0]["auth"], "signed_in");
+        assert_eq!(refused[0]["authorization"], debug::BEARER);
+        assert_eq!(refused[1]["status"], 400);
+        assert_eq!(refused[1]["auth"], "signed_out");
+        assert!(refused[1].get("authorization").is_none());
+    }
+
+    /// Records the uploader took out and then couldn't deliver in its budget
+    /// are dropped: they left the spool and reached nobody.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_request_with_no_answer_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "dropped");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1/logs", listener.local_addr().unwrap());
+        spool(&no_outputs(), &adrs("a", 1));
+
+        flush_within(&config(Some(&endpoint), None), Duration::from_millis(300)).await;
+
+        let lines = logged("dropped");
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 1, "{lines:?}");
+        assert_eq!(dropped[0]["to"], endpoint);
+        drop(listener);
+    }
+
+    /// With only a file sink, the request is sent to the file.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_file_only_upload_as_sent_to_the_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "file-only");
+        let file = home.path().join("otlp.jsonl");
+        spool(&no_outputs(), &adrs("a", 1));
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        let sent = at_stage(&logged("file-only"), "sent");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["to"], format!("file:{}", file.display()));
+        let written: Value =
+            serde_json::from_str(std::fs::read_to_string(&file).unwrap().trim()).unwrap();
+        assert_eq!(sent[0]["event"], written);
+    }
+
+    /// A file sink that can't be written is not sent to: with only that sink,
+    /// the request is dropped and names the file it missed.
+    #[tokio::test]
+    async fn test_debug_mode_logs_a_failed_file_write_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "file-failed");
+        let file = home.path().join("missing").join("otlp.jsonl");
+        spool(&no_outputs(), &adrs("a", 1));
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        assert!(!file.exists());
+        let lines = logged("file-failed");
+        assert!(at_stage(&lines, "sent").is_empty(), "{lines:?}");
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 1, "{lines:?}");
+        assert_eq!(dropped[0]["to"], format!("file:{}", file.display()));
+    }
+
+    /// When the signed request is dropped, the signed-out request the upload
+    /// had already taken from the spool is dropped with it, and says so.
+    #[tokio::test]
+    async fn test_debug_mode_logs_the_request_after_a_dropped_one_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let _debug = debug_on(home.path(), "abandoned");
+        let (signed, _) = logs(&mut server, Some("Bearer token-a"), 503, 1).await;
+        let (unsigned, _) = logs(&mut server, None, 200, 0).await;
+        let (outputs, config) = at(&server);
+        spool(&outputs, &adrs("before", 2));
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &adrs("org-a", 1));
+
+        flush_within(&config, Duration::from_millis(200)).await;
+
+        signed.assert_async().await;
+        unsigned.assert_async().await;
+        assert!(OTLP_LOGS.is_empty());
+        let lines = logged("abandoned");
+        assert!(at_stage(&lines, "sent").is_empty(), "{lines:?}");
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 2, "{lines:?}");
+        assert_eq!(dropped[0]["auth"], "signed_in");
+        assert_eq!(dropped[1]["auth"], "signed_out");
+        assert!(dropped[1].get("authorization").is_none());
+        assert_eq!(dropped[1]["to"], outputs.endpoint.clone().unwrap());
+        let event = dropped[1]["event"].to_string();
+        assert!(adr_refs("before", 2).iter().all(|adr| event.contains(adr)));
+    }
+
+    /// A spool line the uploader can't read leaves the spool unsent, and is
+    /// logged as dropped.
+    #[tokio::test]
+    async fn test_debug_mode_logs_an_unreadable_spool_line_as_dropped() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "unreadable");
+        OTLP_LOGS
+            .append_lines(&["not json".to_string(), "[1, 2]".to_string()])
+            .unwrap();
+        spool(&no_outputs(), &adrs("a", 1));
+        let file = home.path().join("otlp.jsonl");
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        let lines = logged("unreadable");
+        assert_eq!(at_stage(&lines, "queued").len(), 3);
+        assert_eq!(at_stage(&lines, "sent").len(), 1);
+        let dropped = at_stage(&lines, "dropped");
+        assert_eq!(dropped.len(), 2, "{lines:?}");
+        assert!(dropped[0].get("event").is_none());
+        assert_eq!(dropped[1]["event"], serde_json::json!([1, 2]));
+    }
+
+    /// Telemetry off: the records are built in the form the current sign-in
+    /// would send, logged as not sent, and never spooled or sent.
+    #[tokio::test]
+    async fn test_debug_mode_holds_back_records_in_the_form_they_would_go_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let mut server = mockito::Server::new_async().await;
+        let (home, _api) = isolated(&server.url());
+        let _debug = debug_on(home.path(), "held");
+        let (nothing, _) = logs(&mut server, None, 200, 0).await;
+        let (outputs, _) = at(&server);
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        let records = overrides("a", 2);
+        let would_spool: Vec<Value> = spool_lines(&outputs, &records)
+            .iter()
+            .map(|line| {
+                let mut record: Value = serde_json::from_str(line).unwrap();
+                record.as_object_mut().unwrap().remove("actualSignIn");
+                record
+            })
+            .collect();
+
+        hold_back(&outputs, &records);
+
+        nothing.assert_async().await;
+        assert!(OTLP_LOGS.is_empty());
+        let lines = logged("held");
+        assert_eq!(lines.len(), 2);
+        for (line, record) in lines.iter().zip(&would_spool) {
+            assert_eq!(line["stage"], "not_sent");
+            assert_eq!(line["sent"], false);
+            assert_eq!(line["reason"], "telemetry_off");
+            assert_eq!(line["auth"], "signed_in");
+            assert_eq!(&line["event"], record);
+            assert!(line["event"].to_string().contains(REASON_TEXT));
+        }
+    }
+
+    /// Outside debug mode the uploader writes no log at all.
+    #[tokio::test]
+    async fn test_without_debug_mode_the_uploader_logs_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let home = tempdir().unwrap();
+        let _debug = debug_on(home.path(), "quiet");
+        let _off = EnvGuard::remove(debug::ENV);
+        let file = home.path().join("otlp.jsonl");
+        spool(&no_outputs(), &adrs("a", 1));
+
+        flush(&config(None, Some(file.to_str().unwrap()))).await;
+
+        assert!(file.exists());
+        assert!(!home.path().join("telemetry-debug").exists());
     }
 }

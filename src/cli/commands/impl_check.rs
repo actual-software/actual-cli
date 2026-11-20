@@ -74,17 +74,16 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
-    self, capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline,
-    HookRun, Outcome,
+    self, capped_read, deny_summary, emit, emit_status, finish_hook, render_json, render_panel,
+    run_pipeline, run_pipeline_filtered, HookRun, Outcome,
 };
+use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession, TurnStart};
+use crate::cli::commands::hook_host::HookHost;
 use crate::cli::commands::impl_check_hook::HookEnvelope;
 use crate::cli::commands::plan_check::repo_root;
-use crate::cli::commands::plan_check_hook;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-#[cfg(feature = "telemetry")]
-use crate::rules::check::Verdict;
 use crate::rules::check::{ArtifactKind, CheckedRule};
 
 #[cfg(feature = "telemetry")]
@@ -102,13 +101,14 @@ impl ImplCheckArgs {
             candidates: self.candidates,
             runner: self.runner.as_ref(),
             model: self.model.as_deref(),
+            default_runners: crate::cli::commands::rules_rank::DEFAULT_RUNNERS,
         }
     }
 }
 
 pub fn exec(args: &ImplCheckArgs) -> Result<(), ActualError> {
-    if args.claude_hook {
-        exec_hook(args);
+    if let Some(host) = HookHost::select(args.claude_hook, args.codex_hook) {
+        exec_hook(args, host);
         return Ok(());
     }
     exec_direct(args)
@@ -183,7 +183,7 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
         let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
         let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
             .iter()
-            .filter(|v| v.verdict != Verdict::Conforming)
+            .filter(|v| !v.verdict.passes())
             .map(|v| {
                 (
                     v.rule_id.as_str(),
@@ -335,7 +335,7 @@ fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
 /// [`working_tree_diff`] against `base` instead of `HEAD`. The throwaway
 /// index still starts from `HEAD`, so a file committed since `base` is
 /// tracked there and shows up as added, and one deleted since as deleted.
-fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError> {
+pub(super) fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError> {
     let tmp = tempfile::tempdir().map_err(ActualError::IoError)?;
     let index = tmp.path().join("index");
     for (args, what) in [
@@ -352,6 +352,10 @@ fn working_tree_diff_from(root: &Path, base: &str) -> Result<String, ActualError
         .args([
             "diff",
             "--no-ext-diff",
+            // Pinned so a user's diff.context can't move the hunk bounds a
+            // report-use claim's line tolerance stays within.
+            "--unified=3",
+            "--inter-hunk-context=0",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             base,
@@ -422,17 +426,15 @@ fn git_ok(root: &Path, index: Option<&Path>, args: &[&str], what: &str) -> Resul
 ///
 /// See `plan_check::exec_hook`'s own doc comment for why this is kept to one
 /// fallible line: the same real-stdin-in-a-test-harness hazard applies here.
-fn exec_hook(args: &ImplCheckArgs) {
+fn exec_hook(args: &ImplCheckArgs, host: HookHost) {
     let raw = match capped_read(std::io::stdin(), "the hook payload") {
         Ok(text) => text,
         Err(_) => {
-            emit(plan_check_hook::render_notice(
-                "impl-check could not read the hook payload on stdin",
-            ));
+            emit(host.notice("impl-check could not read the hook payload on stdin"));
             return;
         }
     };
-    exec_hook_with(args, &raw);
+    exec_hook_with(args, host, &raw);
 }
 
 /// Run the `--claude-hook` path against an already-read payload.
@@ -446,18 +448,53 @@ fn exec_hook(args: &ImplCheckArgs) {
 /// below is matched explicitly and turned into a fail-open notice (or, for a
 /// real violation, a deny) rather than propagating an error, so this
 /// function never reaches an ordinary nonzero exit on its own.
-fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
+fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     let envelope: HookEnvelope = match serde_json::from_str(raw) {
         Ok(envelope) => envelope,
         Err(_) => {
-            emit(plan_check_hook::render_notice(
-                "impl-check could not parse the hook payload as JSON",
-            ));
+            emit(host.notice("impl-check could not parse the hook payload as JSON"));
             return;
         }
     };
+    // Codex runs `UserPromptSubmit` and tool hooks inside spawned subagents
+    // too, under the root session's id and the subagent's own `agent_id`. A
+    // subagent's prompt is not a turn start (it would move the base past the
+    // turn's earlier commits, and the `Stop` that judges the turn belongs to
+    // the root), nor the user's answer: its prompt was written by the agent
+    // that spawned it, so it must neither take the pending conflicts nor
+    // record an override typed into it. Claude Code sends no `agent_id` here.
+    let from_subagent = envelope
+        .agent_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty());
+    if host == HookHost::Codex && envelope.is_picker_answer() {
+        if !from_subagent {
+            if let Some(reply) = codex_answer(args, &envelope) {
+                emit(reply);
+            }
+        }
+        return;
+    }
     if envelope.is_turn_start() {
+        if from_subagent {
+            return;
+        }
         record_turn_start(args, &envelope);
+        if host == HookHost::Codex {
+            if let Some(reply) = codex_turn_start_reply(args, &envelope) {
+                emit(reply);
+            }
+        }
+        return;
+    }
+    // A Codex Plan-mode turn makes no edits, and its `Stop` belongs to the
+    // plan gate. An unknown mode still runs the check: skipping it would let
+    // a rollout format change switch the implementation gate off.
+    let facts = match host {
+        HookHost::Codex => codex_facts(&envelope),
+        HookHost::Claude => codex_rollout::TurnFacts::default(),
+    };
+    if facts.plan_mode == Some(true) {
         return;
     }
 
@@ -473,6 +510,10 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     // fresh, even if `plan-check` already wrote overrides into the same file.
     // See the module doc.
     let session_id = envelope.session_id.as_deref();
+    #[cfg(feature = "telemetry")]
+    if let Some(id) = session_id {
+        crate::telemetry::debug::use_session(id);
+    }
     let mut session = session_id
         .map(|id| governance_session::load(id, &rules_dir))
         .unwrap_or_default();
@@ -484,7 +525,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     let diff_text = match working_tree_diff_from(&root, base.as_deref().unwrap_or("HEAD")) {
         Ok(text) => text,
         Err(e) => {
-            emit(plan_check_hook::render_notice(&format!(
+            emit(host.notice(&format!(
                 "impl-check could not read the working-tree diff in {}: {e}",
                 root.display()
             )));
@@ -492,14 +533,41 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         }
     };
     if diff_text.trim().is_empty() {
-        emit(plan_check_hook::render_notice(if base.is_some() {
-            "impl-check found no diff to check (nothing has changed since this turn started and there are no untracked files)."
-        } else {
-            "impl-check found no diff to check (working tree matches HEAD and there are no untracked files)."
-        }));
+        emit_status(
+            host,
+            if base.is_some() {
+                "impl-check found no diff to check (nothing has changed since this turn started and there are no untracked files)."
+            } else {
+                "impl-check found no diff to check (working tree matches HEAD and there are no untracked files)."
+            },
+        );
         return;
     }
     let diff_digest = governance_session::content_digest(&diff_text);
+    if super::adr_report::settled(&session, &diff_digest) {
+        return;
+    }
+    let ask = super::adr_report::prepare(
+        session_id,
+        &session,
+        &root,
+        &rules_dir,
+        base.as_deref(),
+        &diff_digest,
+    );
+    // A picker question about this same diff went unanswered: end the turn
+    // with the text choices instead of judging it again.
+    if let Some(reply) = check_engine::codex_unanswered_picker(
+        host,
+        ArtifactKind::Diff,
+        session_id,
+        &rules_dir,
+        &session,
+        &diff_digest,
+    ) {
+        emit(reply);
+        return;
+    }
 
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
@@ -507,18 +575,20 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     // `use_rank: false`, unconditionally, for the same reason
     // `plan_check::exec_hook_with` always passes it: the hook's one model
     // call stays reserved for the judge.
-    let outcome = match run_pipeline(
+    // `filter` only feeds telemetry.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let (outcome, filter) = match run_pipeline_filtered(
         &diff_text,
         &root,
         &rules_dir,
-        &args.check_knobs(),
+        &args.check_knobs().for_host(host),
         ArtifactKind::Diff,
         false,
         &session,
     ) {
-        Ok(outcome) => outcome,
+        Ok(run) => run,
         Err(e) => {
-            emit(plan_check_hook::render_notice(&format!(
+            emit(host.notice(&format!(
                 "impl-check could not read {}: {e}",
                 rules_dir.display()
             )));
@@ -528,25 +598,79 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
 
     finish_hook(
         &HookRun {
+            host,
             kind: ArtifactKind::Diff,
-            command: "impl-check --claude-hook",
+            command: match host {
+                HookHost::Claude => "impl-check --claude-hook",
+                HookHost::Codex => "impl-check --codex-hook",
+            },
             session_id,
             agent_id: envelope.agent_id.as_deref(),
             artifact_digest: &diff_digest,
             root: &root,
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
+            ask: ask.as_ref(),
+            codex_ask: args.codex_ask,
+            picker: args.codex_picker && facts.picker == Some(true),
             #[cfg(feature = "telemetry")]
             started,
+            #[cfg(feature = "telemetry")]
+            filter: filter.as_ref(),
         },
         &mut session,
         outcome,
     );
 }
 
+/// What the rollout says about the turn a Codex `Stop` envelope ends: its
+/// mode (a Plan-mode turn makes no edits) and whether the agent can show a
+/// picker in it. See `codex_rollout`'s module doc.
+fn codex_facts(envelope: &HookEnvelope) -> codex_rollout::TurnFacts {
+    let (Some(path), Some(turn_id)) = (&envelope.transcript_path, &envelope.turn_id) else {
+        return codex_rollout::TurnFacts::default();
+    };
+    codex_rollout::turn_facts(Path::new(path), turn_id)
+}
+
+/// The user's answer to a picker a gate asked the agent to show, from a
+/// Codex `PostToolUse` on `request_user_input` (see
+/// `check_engine::codex_answer_reply`).
+fn codex_answer(args: &ImplCheckArgs, envelope: &HookEnvelope) -> Option<String> {
+    let session_id = envelope.session_id.as_deref().filter(|id| !id.is_empty())?;
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    check_engine::codex_answer_reply(
+        session_id,
+        envelope.tool_input.as_ref(),
+        envelope.tool_response.as_ref(),
+        &root,
+        &rules_dir,
+    )
+}
+
+/// What a Codex `UserPromptSubmit` answers once the turn start is recorded:
+/// a typed override, or the conflicts a `--codex-ask` check stopped the last
+/// turn on (see `check_engine::codex_prompt_reply`). Claude Code's turn start
+/// answers nothing: its plugin's mod handles overrides and asks the user
+/// itself.
+fn codex_turn_start_reply(args: &ImplCheckArgs, envelope: &HookEnvelope) -> Option<String> {
+    let session_id = envelope.session_id.as_deref().filter(|id| !id.is_empty())?;
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    check_engine::codex_prompt_reply(session_id, envelope.prompt.as_deref(), &root, &rules_dir)
+}
+
 /// A `UserPromptSubmit` envelope: record `HEAD` as the commit this turn
-/// starts from. Emits nothing on any path, because a `UserPromptSubmit`
-/// hook's stdout is added to the prompt. When no commit can be named (an
+/// starts from, and drop the last turn's plan. Emits nothing itself: on Claude Code a `UserPromptSubmit`
+/// hook's stdout is added to the prompt, and on Codex the one reply comes from
+/// [`codex_turn_start_reply`]. When no commit can be named (an
 /// unborn branch, or not a repository), the record is cleared and the next
 /// check diffs against `HEAD`. An envelope without a session id leaves the
 /// previous turn's record in place, so the next check re-reads that turn's
@@ -562,13 +686,37 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     let turn_start = head_commit(&root).map(|head| TurnStart {
         root: checkout_root(&root),
+        diff_digest: turn_start_digest(&root, &head),
         head,
     });
     // Under the session lock, on a fresh copy: `/override` runs on the same
     // event, and storing a copy loaded before it would drop the override.
     governance_session::update(session_id, &rules_dir, |session| {
         session.turn_start = turn_start;
+        session.turn = session.turn.saturating_add(1);
+        session.turn_plan = None;
     });
+}
+
+/// The digest of the working-tree diff against `head`, which is `HEAD`. A
+/// tree `git status` reports clean has an empty diff, so the digest skips the
+/// throwaway-index diff, which rehashes every tracked file.
+fn turn_start_digest(root: &Path, head: &str) -> Option<String> {
+    let clean = git_command(root, None)
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.is_empty());
+    let diff = if clean {
+        String::new()
+    } else {
+        working_tree_diff_from(root, head).ok()?
+    };
+    Some(governance_session::content_digest(&diff))
 }
 
 /// The commit this turn started from, when the session recorded one in this
@@ -578,7 +726,7 @@ fn record_turn_start(args: &ImplCheckArgs, envelope: &HookEnvelope) {
 /// commit is no longer behind `HEAD`, and diffing from it would hand the
 /// judge commits this turn may not have written, such as everything a
 /// `git pull --rebase` brought in.
-fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
+pub(super) fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
     let start = session.turn_start.as_ref()?;
     let usable = start.root == checkout_root(root)
         && is_object_id(&start.head)
@@ -594,7 +742,7 @@ fn turn_base(session: &GovernanceSession, root: &Path) -> Option<String> {
 /// runs from whatever directory the session is in, so the recorded turn and
 /// the check that ends it can see different paths for one checkout: a
 /// subdirectory, a symlink, a relative `--repo`. Both sides compare this.
-fn checkout_root(root: &Path) -> PathBuf {
+pub(super) fn checkout_root(root: &Path) -> PathBuf {
     git_command(root, None)
         .args(["rev-parse", "--show-toplevel"])
         .output()
@@ -655,6 +803,9 @@ mod tests {
             repo: None,
             rules_dir: None,
             claude_hook: false,
+            codex_hook: false,
+            codex_ask: false,
+            codex_picker: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -789,7 +940,7 @@ mod tests {
     fn test_resolve_direct_diff_errors_when_the_diff_file_exceeds_the_size_limit() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("huge.diff");
-        let oversized = vec![b'x'; (plan_check_hook::MAX_READ_BYTES + 1) as usize];
+        let oversized = vec![b'x'; (super::super::plan_check_hook::MAX_READ_BYTES + 1) as usize];
         std::fs::write(&file, &oversized).unwrap();
         let mut args = base_args();
         args.diff_file = Some(file);
@@ -915,7 +1066,7 @@ mod tests {
     #[test]
     fn test_working_tree_diff_errors_when_the_diff_exceeds_the_size_limit() {
         let repo = git_repo_with_baseline();
-        let oversized = "x".repeat(plan_check_hook::MAX_READ_BYTES as usize + 1);
+        let oversized = "x".repeat(super::super::plan_check_hook::MAX_READ_BYTES as usize + 1);
         std::fs::write(repo.path().join("huge.txt"), oversized).unwrap();
 
         let err = working_tree_diff(repo.path()).unwrap_err();
@@ -1051,8 +1202,8 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1130,7 +1281,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1184,7 +1335,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1243,7 +1394,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "requires_decision", "span": "logs the key", "reason": "deliberately supersedes the rule"},
         ]));
         let _binary = EnvGuard::set(
@@ -1365,7 +1516,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
-        exec_hook_with(&base_args(), "not json");
+        exec_hook_with(&base_args(), HookHost::Claude, "not json");
     }
 
     #[test]
@@ -1376,7 +1527,7 @@ mod tests {
         let not_a_repo = tempdir().unwrap();
         let mut args = base_args();
         args.repo = Some(not_a_repo.path().to_path_buf());
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1387,7 +1538,7 @@ mod tests {
         let repo = git_repo_with_baseline();
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1403,7 +1554,7 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         args.rules_dir = Some(not_a_dir);
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1415,7 +1566,7 @@ mod tests {
         std::fs::write(repo.path().join("service.rs"), "fn handler() { 4 }\n").unwrap();
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, "{}");
+        exec_hook_with(&args, HookHost::Claude, "{}");
     }
 
     #[cfg(unix)]
@@ -1436,7 +1587,7 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1448,7 +1599,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-1", &rules);
         assert_eq!(
@@ -1482,8 +1633,8 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1503,7 +1654,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": novel_session_id}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         // A verdict was reached and persisted -- proof the pipeline actually
         // ran to completion rather than failing to bootstrap.
@@ -1539,8 +1690,8 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -1551,7 +1702,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-untracked-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-untracked-1", &rules);
         assert_eq!(
@@ -1578,7 +1729,7 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1591,7 +1742,8 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-telemetry-1"}).to_string();
 
-        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let events =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let completed = events
             .iter()
@@ -1657,7 +1809,7 @@ mod tests {
         .unwrap();
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1696,20 +1848,35 @@ mod tests {
         };
         take_captured();
 
-        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let governance =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let records = take_captured();
         assert_eq!(
             events(&records),
             [
                 otlp::ACTION_STARTED,
+                otlp::FILTER_EVALUATED,
                 otlp::ADR_DETECTED,
                 otlp::GATE_EVALUATED,
                 otlp::ACTION_COMPLETED
             ]
         );
-        action(&records[0], &records[3]);
-        assert_completed_before_governance(&records[3], &governance);
+        action(&records[0], &records[4]);
+        assert_completed_before_governance(&records[4], &governance);
+        assert_eq!(
+            attribute(&records[1], "actual.filter.selector"),
+            "implementation"
+        );
+        assert_eq!(
+            attribute(&records[1], "actual.action.id"),
+            attribute(&records[2], "actual.action.id"),
+            "the selection joins the verdicts it led to"
+        );
+        let records: Vec<serde_json::Value> = [&records[0], &records[2], &records[3], &records[4]]
+            .into_iter()
+            .cloned()
+            .collect();
         for record in &records[1..3] {
             assert_eq!(attribute(record, "actual.session.id"), "sess-impl-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "");
@@ -1722,21 +1889,27 @@ mod tests {
             attribute(&records[1], "actual.detection.method"),
             "implementation"
         );
+        assert_eq!(attribute(&records[1], "actual.adr.verdict"), "conflicting");
         assert_eq!(attribute(&records[2], "actual.gate.outcome"), "breached");
         assert_eq!(attribute(&records[2], "actual.gate.type"), "implementation");
 
-        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let governance =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
         let session =
             governance_session::load("sess-impl-otlp-1", &crate::rules::rules_dir(repo.path()));
         assert_eq!(session.diff.rounds, 2, "the next Stop was judged too");
         let records = take_captured();
         assert_eq!(
             events(&records),
-            [otlp::ACTION_STARTED, otlp::ACTION_COMPLETED],
-            "and sent no ADR event again"
+            [
+                otlp::ACTION_STARTED,
+                otlp::FILTER_EVALUATED,
+                otlp::ACTION_COMPLETED
+            ],
+            "and sent no ADR event again, though the round's selection goes"
         );
-        action(&records[0], &records[1]);
-        assert_completed_before_governance(&records[1], &governance);
+        action(&records[0], &records[2]);
+        assert_completed_before_governance(&records[2], &governance);
     }
 
     /// The gap this guards: plan-stage denials used to live in the same
@@ -1770,7 +1943,7 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
         ]));
         let _binary = EnvGuard::set(
@@ -1782,7 +1955,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-budget-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-budget-1", &rules);
         assert_eq!(session.plan.deny_counts.get(&key), Some(&4));
@@ -1844,7 +2017,7 @@ mod tests {
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"session_id": "sess-impl-override-1"}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-impl-override-1", &rules);
         assert_eq!(session.overrides.len(), 2);
@@ -1939,33 +2112,52 @@ mod tests {
             Some(TurnStart {
                 root: checkout_root(repo.path()),
                 head,
+                diff_digest: Some(governance_session::content_digest("")),
             })
         };
 
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
         let first = head_of(repo.path());
         assert_eq!(
             governance_session::load("sess-turn-1", &rules).turn_start,
             recorded(first.clone())
         );
 
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
-        assert_eq!(
-            governance_session::load("sess-turn-1", &rules).turn_start,
-            recorded(first.clone())
-        );
+        // The next prompt also drops the plan the last turn kept.
+        governance_session::update("sess-turn-1", &rules, |session| {
+            session.turn_plan = Some(super::super::adr_report::TurnPlan {
+                turn: session.turn,
+                text: Some("# Plan\n".to_string()),
+                lines: 1,
+            });
+        });
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
+        let state = governance_session::load("sess-turn-1", &rules);
+        assert_eq!(state.turn_start, recorded(first.clone()));
+        assert_eq!(state.turn_plan, None);
 
         std::fs::write(repo.path().join("service.rs"), "fn handler() { 7 }\n").unwrap();
         run_git(
             repo.path(),
             &["commit", "-q", "-am", "the previous turn's work"],
         );
-        exec_hook_with(&turn_start_args(repo.path()), &raw);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
         let second = head_of(repo.path());
         assert_ne!(first, second);
         assert_eq!(
             governance_session::load("sess-turn-1", &rules).turn_start,
-            recorded(second)
+            recorded(second.clone())
+        );
+
+        // Work an earlier turn left uncommitted is in the recorded digest.
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 8 }\n").unwrap();
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &raw);
+        let dirty = working_tree_diff_from(repo.path(), &second).unwrap();
+        assert_eq!(
+            governance_session::load("sess-turn-1", &rules)
+                .turn_start
+                .and_then(|start| start.diff_digest),
+            Some(governance_session::content_digest(&dirty))
         );
     }
 
@@ -1983,11 +2175,12 @@ mod tests {
         stale.turn_start = Some(TurnStart {
             root: checkout_root(unborn.path()),
             head: "a".repeat(40),
+            diff_digest: None,
         });
         governance_session::store("sess-turn-unborn", &rules, &stale);
 
         let raw = serde_json::json!({"session_id": "sess-turn-unborn", "hook_event_name": "UserPromptSubmit"}).to_string();
-        exec_hook_with(&turn_start_args(unborn.path()), &raw);
+        exec_hook_with(&turn_start_args(unborn.path()), HookHost::Claude, &raw);
 
         assert_eq!(
             governance_session::load("sess-turn-unborn", &rules).turn_start,
@@ -2005,7 +2198,7 @@ mod tests {
         let repo = git_repo_with_baseline();
 
         let no_id = r#"{"hook_event_name":"UserPromptSubmit"}"#;
-        exec_hook_with(&turn_start_args(repo.path()), no_id);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, no_id);
 
         assert!(!home.path().join("plan-check-sessions").exists());
     }
@@ -2022,6 +2215,7 @@ mod tests {
         session.turn_start = Some(TurnStart {
             root: canonical.clone(),
             head: start.clone(),
+            diff_digest: None,
         });
         assert_eq!(
             turn_base(&session, &root),
@@ -2058,6 +2252,7 @@ mod tests {
         session.turn_start = Some(TurnStart {
             root: canonical.clone(),
             head: head_of(repo.path()),
+            diff_digest: None,
         });
         run_git(repo.path(), &["commit", "-q", "--amend", "-m", "rewritten"]);
         assert_eq!(
@@ -2069,6 +2264,7 @@ mod tests {
         session.turn_start = Some(TurnStart {
             root: canonical,
             head: "--output=/tmp/injected".to_string(),
+            diff_digest: None,
         });
         assert_eq!(turn_base(&session, repo.path()), None, "not an object id");
     }
@@ -2096,6 +2292,7 @@ mod tests {
             |id: &str| serde_json::json!({"session_id": id, "hook_event_name": "Stop"}).to_string();
         exec_hook_with(
             &turn_start_args(repo.path()),
+            HookHost::Claude,
             &prompt("sess-turn-committed"),
         );
 
@@ -2108,8 +2305,8 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "Sign every access token with RS256.", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "not_applicable", "span": "", "reason": "no logging"},
         ]));
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
@@ -2119,8 +2316,8 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
-        exec_hook_with(&args, &stop("sess-turn-committed"));
-        exec_hook_with(&args, &stop("sess-turn-unmarked"));
+        exec_hook_with(&args, HookHost::Claude, &stop("sess-turn-committed"));
+        exec_hook_with(&args, HookHost::Claude, &stop("sess-turn-unmarked"));
 
         assert_eq!(
             governance_session::load("sess-turn-committed", &rules)
@@ -2150,15 +2347,274 @@ mod tests {
         let prompt = serde_json::json!({"session_id": "sess-turn-clean", "hook_event_name": "UserPromptSubmit"}).to_string();
         let stop = serde_json::json!({"session_id": "sess-turn-clean", "hook_event_name": "Stop"})
             .to_string();
-        exec_hook_with(&turn_start_args(repo.path()), &prompt);
+        exec_hook_with(&turn_start_args(repo.path()), HookHost::Claude, &prompt);
 
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
-        exec_hook_with(&args, &stop);
+        exec_hook_with(&args, HookHost::Claude, &stop);
 
         let session = governance_session::load("sess-turn-clean", &rules);
         assert!(session.turn_start.is_some());
         assert_eq!(session.diff.rounds, 0);
+    }
+
+    // ── the ADR question (agent-reported ADR use) ──────────────────────
+
+    /// A repo whose one rule file has a v2 header and is briefed in
+    /// `session`, a fake judge answering `verdict` for both rules that counts
+    /// its calls in the returned file, and args pointing at both.
+    #[cfg(all(unix, feature = "telemetry"))]
+    fn briefed_repo(
+        session: &str,
+        verdict: &str,
+    ) -> (TempDir, TempDir, PathBuf, ImplCheckArgs, EnvGuard) {
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("cross-cutting-token-signing-1c57.md"),
+            super::super::check_telemetry::tests::with_header("adr-sign", None, OAUTH_DOC),
+        )
+        .unwrap();
+        let index = crate::rules::scope::resolve_in(&rules, repo.path(), false)
+            .unwrap()
+            .index;
+        let ledger_rules = super::super::rules_brief::resolve(&rules);
+        crate::cli::commands::brief_ledger::record(
+            &crate::cli::commands::brief_ledger::ledger_dir().unwrap(),
+            &crate::cli::commands::brief_ledger::LedgerKey {
+                session_id: session,
+                rules_dir: &ledger_rules,
+            },
+            index
+                .documents
+                .iter()
+                .map(|document| document.decision_key())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str),
+        );
+        let bin = tempdir().unwrap();
+        let calls = bin.path().join("calls");
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": verdict, "span": "", "reason": "judged"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "judged"},
+        ]));
+        let script = fake_claude(bin.path(), &response);
+        let body = std::fs::read_to_string(&script).unwrap();
+        let counted = body.replacen(
+            "fi\n",
+            &format!("fi\necho call >> '{}'\n", calls.display()),
+            1,
+        );
+        std::fs::write(&script, counted).unwrap();
+        let binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        (repo, bin, calls, args, binary)
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn judge_calls(calls: &StdPath) -> usize {
+        std::fs::read_to_string(calls).map_or(0, |text| text.lines().count())
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn stop(args: &ImplCheckArgs, session: &str) -> Vec<serde_json::Value> {
+        super::super::check_engine::tests::take_emitted();
+        exec_hook_with(
+            args,
+            HookHost::Claude,
+            &serde_json::json!({"session_id": session, "hook_event_name": "Stop"}).to_string(),
+        );
+        super::super::check_engine::tests::take_emitted()
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn deny_reason(output: &serde_json::Value) -> &str {
+        assert_eq!(
+            output["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{output}"
+        );
+        output["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+    }
+
+    #[cfg(feature = "telemetry")]
+    const QUESTION: &str = "Which of these ADRs did you use this turn?";
+
+    /// A passing turn blocks once with the question. The Stop after the
+    /// answer changes no file, so it finds every rule cleared and calls no
+    /// judge, and asks nothing. The next turn asks again.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_a_passing_turn_asks_once_and_the_stop_after_the_answer_calls_no_judge() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let (repo, _bin, calls, mut args, _binary) = briefed_repo("sess-ask", "conforming");
+        let start = |args: &ImplCheckArgs| {
+            let mut start_args = turn_start_args(repo.path());
+            start_args.runner = args.runner.clone();
+            exec_hook_with(&start_args, HookHost::Claude, &serde_json::json!({"session_id": "sess-ask", "hook_event_name": "UserPromptSubmit"}).to_string());
+        };
+        start(&args);
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); }\n",
+        )
+        .unwrap();
+
+        let first = stop(&args, "sess-ask");
+        assert_eq!(first.len(), 1);
+        let reason = deny_reason(&first[0]);
+        assert!(reason.starts_with(QUESTION), "{reason}");
+        assert!(
+            reason.contains("- `cross-cutting-token-signing-1c57`: Sign With Asymmetric Keys"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("--claude-session sess-ask --turn 1-"),
+            "{reason}"
+        );
+        assert_eq!(judge_calls(&calls), 1);
+
+        assert!(
+            stop(&args, "sess-ask").is_empty(),
+            "the second Stop is a silent pass"
+        );
+        assert_eq!(judge_calls(&calls), 1, "and calls no judge");
+
+        start(&args);
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); sign_again(); }\n",
+        )
+        .unwrap();
+        let next = stop(&args, "sess-ask");
+        assert!(deny_reason(&next[0]).contains("--turn 2-"), "{next:?}");
+        assert_eq!(judge_calls(&calls), 2);
+
+        // A turn that only reads, with the earlier turns' edits still
+        // uncommitted, has a diff but changed nothing, so it is not asked.
+        start(&args);
+        assert!(
+            stop(&args, "sess-ask").is_empty(),
+            "a read-only turn is not asked"
+        );
+        assert_eq!(judge_calls(&calls), 2);
+
+        // Reworded, the turn's commit is no longer behind HEAD, so the diff
+        // is taken from HEAD. Its digest matches the turn start's, but from
+        // another base, so the turn is asked.
+        start(&args);
+        run_git(repo.path(), &["commit", "-q", "--amend", "-m", "reworded"]);
+        let reworded = stop(&args, "sess-ask");
+        assert!(
+            deny_reason(&reworded[0]).contains("--turn 4-"),
+            "{reworded:?}"
+        );
+
+        // A session nothing was briefed in is never asked.
+        args.rules_dir = None;
+        let quiet = stop(&args, "sess-never-briefed");
+        assert!(
+            quiet
+                .iter()
+                .all(|out| out["hookSpecificOutput"]["permissionDecision"] != "deny"),
+            "{quiet:?}"
+        );
+    }
+
+    /// On a block the question follows the judge's reason, asks for the
+    /// answer once that is fixed, and the block after the fix asks nothing
+    /// more.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_a_blocked_turn_carries_the_question_after_the_judges_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let (repo, _bin, calls, args, _binary) = briefed_repo("sess-block", "conflicting");
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_hs256(); }\n",
+        )
+        .unwrap();
+
+        let first = stop(&args, "sess-block");
+        let reason = deny_reason(&first[0]);
+        let (judge, question) = reason.split_once("\n\nWhich of these ADRs").unwrap();
+        assert!(judge.contains("R-A-001"), "{judge}");
+        assert!(
+            question.starts_with(" did you use this turn?"),
+            "{question}"
+        );
+        assert!(
+            question.contains(
+                "\n\nAfter fixing the above, answer with one command, then end your turn:\n"
+            ),
+            "{question}"
+        );
+
+        // Answering the question settles nothing: the same diff is judged,
+        // and blocked, again.
+        let same = stop(&args, "sess-block");
+        assert!(!deny_reason(&same[0]).contains(QUESTION), "{same:?}");
+        assert_eq!(judge_calls(&calls), 2);
+
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_hs512(); }\n",
+        )
+        .unwrap();
+        let again = stop(&args, "sess-block");
+        assert!(!deny_reason(&again[0]).contains(QUESTION), "{again:?}");
+    }
+
+    /// A round that would only have shown a notice blocks with the question
+    /// instead, and the notice stays beside it for the user.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_a_notice_round_asks_and_keeps_the_notice() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let (repo, _bin, _calls, args, _binary) = briefed_repo("sess-notice", "conforming");
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); }\n",
+        )
+        .unwrap();
+
+        let out = stop(&args, "sess-notice");
+        assert!(deny_reason(&out[0]).starts_with(QUESTION), "{out:?}");
+        assert!(!deny_reason(&out[0]).contains("After fixing"), "{out:?}");
+        let notice = out[0]["systemMessage"].as_str().unwrap();
+        assert!(notice.contains("did not run"), "{notice}");
+
+        // The answer changed no file, so the next Stop ends the turn without
+        // running the check again, and without repeating the notice.
+        assert!(stop(&args, "sess-notice").is_empty());
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs512(); }\n",
+        )
+        .unwrap();
+        let changed = stop(&args, "sess-notice");
+        assert!(
+            changed[0]["systemMessage"]
+                .as_str()
+                .unwrap()
+                .contains("did not run"),
+            "{changed:?}"
+        );
     }
 
     #[test]
@@ -2168,5 +2624,196 @@ mod tests {
         assert!(!is_object_id(&"f".repeat(39)));
         assert!(!is_object_id(&"g".repeat(40)));
         assert!(!is_object_id("HEAD"));
+    }
+
+    // ── --codex-hook ───────────────────────────────────────────────────────
+
+    fn codex_stop(dir: &StdPath, mode: &str) -> String {
+        let path = dir.join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1","collaboration_mode_kind":mode}}).to_string(),
+        )
+        .unwrap();
+        serde_json::json!({
+            "session_id": "sess-codex-impl",
+            "turn_id": "t1",
+            "transcript_path": path.to_string_lossy(),
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_plan_turn_reads_the_rollout() {
+        let dir = tempdir().unwrap();
+        let read =
+            |raw: String| codex_facts(&serde_json::from_str(&raw).unwrap()).plan_mode == Some(true);
+        assert!(read(codex_stop(dir.path(), "plan")));
+        assert!(!read(codex_stop(dir.path(), "default")));
+        // Unknown is not Plan mode: the implementation gate still runs.
+        assert!(!read(
+            r#"{"turn_id":"t1","transcript_path":"/nonexistent"}"#.to_string()
+        ));
+        assert!(!read(r#"{"turn_id":"t1"}"#.to_string()));
+    }
+
+    /// A Plan-mode turn's `Stop` belongs to the plan gate: no diff is read
+    /// and nothing is recorded, even with a conflicting change on disk.
+    #[test]
+    fn test_exec_hook_with_codex_skips_a_plan_mode_turn() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); log_signing_key(); }\n",
+        )
+        .unwrap();
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+
+        exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "plan"));
+        assert_eq!(
+            governance_session::load("sess-codex-impl", &rules),
+            GovernanceSession::default()
+        );
+        exec_hook_with(&args, HookHost::Codex, "not json");
+    }
+
+    /// Any other turn is checked, and a conflict is counted.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_codex_checks_a_default_turn() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { sign_with_rs256(); log_signing_key(); }\n",
+        )
+        .unwrap();
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+
+        exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "default"));
+        let session = governance_session::load("sess-codex-impl", &rules);
+        assert_eq!(
+            session.diff.deny_counts.get(&governance_session::key(
+                "cross-cutting-token-signing-1c57",
+                "R-A-002"
+            )),
+            Some(&1)
+        );
+    }
+
+    /// With nothing changed, Codex hears nothing: the status line is
+    /// Claude-only.
+    #[test]
+    fn test_exec_hook_with_codex_and_no_diff() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        exec_hook_with(&args, HookHost::Codex, &codex_stop(repo.path(), "default"));
+    }
+
+    /// A Codex subagent's prompt arrives under the root session's id with its
+    /// own `agent_id`. It is not a turn start, it doesn't take the conflicts
+    /// waiting for the user, and an override typed into it records nothing:
+    /// the agent that spawned it wrote that prompt.
+    #[test]
+    fn test_codex_a_subagent_prompt_is_not_a_turn_start_or_an_answer() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _codex: Vec<EnvGuard> = ["CODEX_THREAD_ID", "CODEX_SESSION_ID"]
+            .into_iter()
+            .map(EnvGuard::remove)
+            .collect();
+        let repo = git_repo_with_baseline();
+        let rules = crate::rules::rules_dir(repo.path());
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("doc.md"),
+            "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n",
+        )
+        .unwrap();
+        let mut args = turn_start_args(repo.path());
+        args.claude_hook = false;
+        args.codex_hook = true;
+        let prompt = |agent: Option<&str>, text: &str| {
+            let mut raw = serde_json::json!({
+                "session_id": "sess-sub",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": text,
+            });
+            if let Some(agent) = agent {
+                raw["agent_id"] = agent.into();
+            }
+            raw.to_string()
+        };
+
+        exec_hook_with(&args, HookHost::Codex, &prompt(None, "build it"));
+        let base = governance_session::load("sess-sub", &rules).turn_start;
+        assert!(base.is_some());
+        governance_session::update("sess-sub", &rules, |s| {
+            s.diff
+                .record_denial(&governance_session::key("doc", "R-A-001"));
+            s.diff.pending = Some(governance_session::Pending::new(
+                "CONFLICT R-A-001".to_string(),
+            ));
+        });
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 8 }\n").unwrap();
+        run_git(
+            repo.path(),
+            &["commit", "-q", "-am", "work earlier in the turn"],
+        );
+
+        exec_hook_with(
+            &args,
+            HookHost::Codex,
+            &prompt(Some("agent-7"), "actual override all accepted"),
+        );
+        let picker_answer = serde_json::json!({
+            "session_id": "sess-sub",
+            "agent_id": "agent-7",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "request_user_input",
+        })
+        .to_string();
+        exec_hook_with(&args, HookHost::Codex, &picker_answer);
+
+        let session = governance_session::load("sess-sub", &rules);
+        assert_eq!(session.turn_start, base, "the root turn's base stays");
+        assert!(
+            session.overrides.is_empty(),
+            "no override from a subagent's prompt"
+        );
+        assert!(
+            session.diff.pending.is_some(),
+            "the conflicts still wait for the user"
+        );
     }
 }

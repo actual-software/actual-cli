@@ -39,7 +39,8 @@
 //! **Reported ADRs.** The OpenTelemetry events sent once per session keep
 //! their keys here too, since every agent shares this record and compaction
 //! never resets it: the brief's in `reported_adrs`, and the gates' used and
-//! breached events per stage.
+//! breached events per stage. A used ADR keeps the strongest verdict it was
+//! reported with, so a later round reports it again only with a stronger one.
 //!
 //! **Pruning.** As with the memory, records untouched for
 //! [`LEDGER_MAX_AGE`] are removed whenever one is written.
@@ -51,6 +52,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::rules::check::Verdict;
 
 /// Bumped whenever [`BriefLedger`]'s on-disk shape changes incompatibly. A
 /// mismatch reads as an empty session.
@@ -102,10 +105,18 @@ pub struct BriefLedger {
     /// group else `adr_id`, so each is reported once per session.
     pub reported_adrs: BTreeSet<String>,
     /// Logical ADRs already reported as checked against, keyed the same way,
-    /// by stage, so each is reported once per session and stage.
-    pub reported_used: BTreeMap<String, BTreeSet<String>>,
+    /// by stage, each with the strongest verdict it was reported with. A
+    /// record from before verdicts holds `reported_used` instead, which loads
+    /// as nothing, so each of its ADRs is reported once more, with a verdict.
+    pub reported_verdicts: BTreeMap<String, BTreeMap<String, Verdict>>,
     /// Logical ADRs already reported as breached, by stage, likewise.
     pub reported_breached: BTreeMap<String, BTreeSet<String>>,
+    /// Characters of brief delivered this session, to any agent, for
+    /// `rules brief --max-session-chars`. Defaulted, like every field here, so
+    /// a record written before the cap existed still loads.
+    pub briefed_chars: usize,
+    /// Whether the session was told briefing hit its cap, so it is told once.
+    pub budget_spent: bool,
 }
 
 impl BriefLedger {
@@ -185,7 +196,26 @@ pub fn load(dir: &Path, key: &LedgerKey<'_>) -> BriefLedger {
         .unwrap_or_default()
 }
 
-/// Add `decision_keys` to the record for `key`, best effort.
+/// Add `decision_keys` to the record for `key`, with the `chars` of brief
+/// they arrived in, best effort.
+pub fn record_brief<'k>(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    decision_keys: impl IntoIterator<Item = &'k str>,
+    chars: usize,
+) {
+    update(dir, key, |ledger| {
+        ledger
+            .briefed
+            .extend(decision_keys.into_iter().map(str::to_string));
+        ledger.briefed_chars = ledger.briefed_chars.saturating_add(chars);
+    });
+}
+
+/// Add `decision_keys` to the record for `key`, best effort. Tests only:
+/// `rules brief` records through [`record_brief`], which also counts the
+/// characters the decisions arrived in.
+#[cfg(test)]
 pub fn record<'k>(
     dir: &Path,
     key: &LedgerKey<'_>,
@@ -223,23 +253,24 @@ pub fn report_adrs<'k>(
     }
 }
 
-/// Add a gate round's logical ADRs to the record's sets for `stage`, `used`
-/// to those it checked against and `breached` to those it blocked on, best
-/// effort, and return the keys this write added to each. As with
-/// [`report_adrs`], a caller reporting each returned key can undercount but
-/// never report one twice. The lock is taken only when the lock-free read
-/// finds a key the record lacks, so a round with nothing new reads the record
-/// and stops.
+/// Record a gate round's logical ADRs for `stage`, `used` those it checked
+/// against with each one's verdict and `breached` those it blocked on, best
+/// effort, and return the keys this write added to each. A used key counts as
+/// added when it is new or its verdict is stronger than the one recorded. As
+/// with [`report_adrs`], a caller reporting each returned key can undercount
+/// but never report one twice at the same verdict. The lock is taken only
+/// when the lock-free read finds something to add, so a round with nothing
+/// new reads the record and stops.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub fn report_checks(
     dir: &Path,
     key: &LedgerKey<'_>,
     stage: &str,
-    used: &[&str],
+    used: &[(&str, Verdict)],
     breached: &[&str],
 ) -> (Vec<String>, Vec<String>) {
     let recorded = load(dir, key);
-    if !has_new(&recorded.reported_used, stage, used)
+    if !has_stronger(&recorded.reported_verdicts, stage, used)
         && !has_new(&recorded.reported_breached, stage, breached)
     {
         return (Vec::new(), Vec::new());
@@ -247,7 +278,7 @@ pub fn report_checks(
     let mut added = (Vec::new(), Vec::new());
     let written = update_within(dir, key, LOCK_WAIT, |ledger| {
         added = (
-            add_new(&mut ledger.reported_used, stage, used),
+            raise(&mut ledger.reported_verdicts, stage, used),
             add_new(&mut ledger.reported_breached, stage, breached),
         );
     });
@@ -256,6 +287,39 @@ pub fn report_checks(
     } else {
         (Vec::new(), Vec::new())
     }
+}
+
+type StageVerdicts = BTreeMap<String, BTreeMap<String, Verdict>>;
+
+/// Whether any of `used` is missing from `stage`'s verdicts in `reported`, or
+/// stronger than the verdict there.
+fn has_stronger(reported: &StageVerdicts, stage: &str, used: &[(&str, Verdict)]) -> bool {
+    let recorded = reported.get(stage);
+    used.iter().any(|(key, verdict)| {
+        recorded
+            .and_then(|verdicts| verdicts.get(*key))
+            .is_none_or(|old| verdict.strength() > old.strength())
+    })
+}
+
+/// Record each of `used` in `stage`'s verdicts in `reported` that is new or
+/// stronger than the verdict there, and return those keys.
+fn raise(reported: &mut StageVerdicts, stage: &str, used: &[(&str, Verdict)]) -> Vec<String> {
+    if !has_stronger(reported, stage, used) {
+        return Vec::new();
+    }
+    let verdicts = reported.entry(stage.to_string()).or_default();
+    let mut raised = Vec::new();
+    for &(key, verdict) in used {
+        if verdicts
+            .get(key)
+            .is_none_or(|old| verdict.strength() > old.strength())
+        {
+            verdicts.insert(key.to_string(), verdict);
+            raised.push(key.to_string());
+        }
+    }
+    raised
 }
 
 /// Whether `stage`'s set in `reported` lacks any of `keys`.
@@ -464,6 +528,39 @@ pub(super) fn prune_stale(dir: &Path) {
             let _ = std::fs::remove_file(&path);
         }
     }
+}
+
+/// The keys [`report_adrs`] would add, read without the lock and written
+/// nowhere, for a telemetry debug run that keeps no state of its own.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn unreported_adrs<'k>(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    adr_keys: impl IntoIterator<Item = &'k str>,
+) -> Vec<String> {
+    let mut reported = load(dir, key).reported_adrs;
+    adr_keys
+        .into_iter()
+        .filter(|adr| reported.insert(adr.to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The keys [`report_checks`] would add, read without the lock and written
+/// nowhere, likewise.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn unreported_checks(
+    dir: &Path,
+    key: &LedgerKey<'_>,
+    stage: &str,
+    used: &[(&str, Verdict)],
+    breached: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let mut recorded = load(dir, key);
+    (
+        raise(&mut recorded.reported_verdicts, stage, used),
+        add_new(&mut recorded.reported_breached, stage, breached),
+    )
 }
 
 #[cfg(test)]
@@ -1111,6 +1208,15 @@ pub(super) mod tests {
         keys.iter().map(|key| key.to_string()).collect()
     }
 
+    /// `keys` each judged with `verdict`, as a round passes them.
+    fn judged<'a>(keys: &[&'a str], verdict: Verdict) -> Vec<(&'a str, Verdict)> {
+        keys.iter().map(|&key| (key, verdict)).collect()
+    }
+
+    fn na<'a>(keys: &[&'a str]) -> Vec<(&'a str, Verdict)> {
+        judged(keys, Verdict::NotApplicable)
+    }
+
     /// A key is returned by the write that added it to its stage's set and
     /// never again. Stages, the two events, sessions and the context event's
     /// set each count apart.
@@ -1121,41 +1227,112 @@ pub(super) mod tests {
         assert_eq!(report_adrs(dir.path(), &s1, ["grp-1"]), ["grp-1"]);
 
         assert_eq!(
-            report_checks(dir.path(), &s1, "plan", &["grp-1", "adr-9"], &["grp-1"]),
+            report_checks(
+                dir.path(),
+                &s1,
+                "plan",
+                &na(&["grp-1", "adr-9"]),
+                &["grp-1"]
+            ),
             (keys(&["grp-1", "adr-9"]), keys(&["grp-1"]))
         );
         assert_eq!(
-            report_checks(dir.path(), &s1, "plan", &["grp-1", "adr-9"], &["grp-1"]),
+            report_checks(
+                dir.path(),
+                &s1,
+                "plan",
+                &na(&["grp-1", "adr-9"]),
+                &["grp-1"]
+            ),
             (vec![], vec![])
         );
         assert_eq!(
-            report_checks(dir.path(), &s1, "plan", &["adr-9"], &["adr-9"]),
+            report_checks(dir.path(), &s1, "plan", &na(&["adr-9"]), &["adr-9"]),
             (vec![], keys(&["adr-9"])),
             "a breach of an ADR already reported as used"
         );
         assert_eq!(
-            report_checks(dir.path(), &s1, "implementation", &["grp-1"], &["grp-1"]),
+            report_checks(
+                dir.path(),
+                &s1,
+                "implementation",
+                &na(&["grp-1"]),
+                &["grp-1"]
+            ),
             (keys(&["grp-1"]), keys(&["grp-1"]))
         );
         assert_eq!(
-            report_checks(dir.path(), &key("s2"), "plan", &["grp-1"], &[]),
+            report_checks(dir.path(), &key("s2"), "plan", &na(&["grp-1"]), &[]),
             (keys(&["grp-1"]), vec![])
         );
 
         assert_eq!(report_adrs(dir.path(), &s1, ["grp-1", "adr-9"]), ["adr-9"]);
         let ledger = load(dir.path(), &s1);
+        let recorded = |keys: &[&str]| -> BTreeMap<String, Verdict> {
+            keys.iter()
+                .map(|key| (key.to_string(), Verdict::NotApplicable))
+                .collect()
+        };
         assert_eq!(
-            ledger.reported_used,
+            ledger.reported_verdicts,
             BTreeMap::from([
-                (
-                    "implementation".to_string(),
-                    BTreeSet::from(["grp-1".to_string()])
-                ),
-                (
-                    "plan".to_string(),
-                    keys(&["adr-9", "grp-1"]).into_iter().collect()
-                ),
+                ("implementation".to_string(), recorded(&["grp-1"])),
+                ("plan".to_string(), recorded(&["adr-9", "grp-1"])),
             ])
+        );
+    }
+
+    /// A used ADR is returned again only when a later round's verdict for it
+    /// is stronger than the strongest already returned at that stage: not
+    /// applicable, then followed, then requires a decision, then conflicting.
+    /// A weaker or equal verdict returns nothing and leaves the record alone.
+    #[test]
+    fn test_a_used_adr_is_returned_again_only_with_a_stronger_verdict() {
+        use Verdict::{Conflicting, Followed, NotApplicable, RequiresDecision};
+        let dir = tempdir().unwrap();
+        let s1 = key("s1");
+        let round = |verdict| report_checks(dir.path(), &s1, "plan", &[("grp-1", verdict)], &[]).0;
+
+        assert_eq!(round(NotApplicable), ["grp-1"]);
+        assert_eq!(round(NotApplicable), Vec::<String>::new());
+        assert_eq!(round(Followed), ["grp-1"]);
+        assert_eq!(round(NotApplicable), Vec::<String>::new());
+        assert_eq!(round(Followed), Vec::<String>::new());
+        assert_eq!(round(RequiresDecision), ["grp-1"]);
+        assert_eq!(
+            load(dir.path(), &s1).reported_verdicts["plan"]["grp-1"],
+            RequiresDecision
+        );
+        assert_eq!(round(Followed), Vec::<String>::new());
+        assert_eq!(round(RequiresDecision), Vec::<String>::new());
+        assert_eq!(round(Conflicting), ["grp-1"]);
+        assert_eq!(round(RequiresDecision), Vec::<String>::new());
+        assert_eq!(
+            load(dir.path(), &s1).reported_verdicts["plan"]["grp-1"],
+            Conflicting
+        );
+
+        assert_eq!(
+            report_checks(
+                dir.path(),
+                &s1,
+                "plan",
+                &[("grp-1", Followed), ("adr-9", Followed)],
+                &[]
+            ),
+            (keys(&["adr-9"]), vec![]),
+            "only the ADR whose verdict rose"
+        );
+        assert_eq!(
+            report_checks(
+                dir.path(),
+                &s1,
+                "implementation",
+                &[("grp-1", Followed)],
+                &[]
+            ),
+            (keys(&["grp-1"]), vec![]),
+            "another stage starts from nothing"
         );
     }
 
@@ -1165,7 +1342,7 @@ pub(super) mod tests {
     #[test]
     fn test_a_check_with_nothing_new_skips_the_lock() {
         let dir = tempdir().unwrap();
-        report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], &["grp-1"]);
+        report_checks(dir.path(), &key("s1"), "plan", &na(&["grp-1"]), &["grp-1"]);
         let path = ledger_path(dir.path(), &key("s1"));
         let before = std::fs::read_to_string(&path).unwrap();
         let _held = lock(dir.path(), Duration::ZERO).expect("the lock");
@@ -1173,14 +1350,20 @@ pub(super) mod tests {
         let started = Instant::now();
         for breached in [&["grp-1"][..], &[]] {
             assert_eq!(
-                report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], breached),
+                report_checks(dir.path(), &key("s1"), "plan", &na(&["grp-1"]), breached),
                 (vec![], vec![])
             );
         }
         assert!(started.elapsed() < LOCK_WAIT, "a no-op waited on the lock");
 
         assert_eq!(
-            report_checks(dir.path(), &key("s1"), "implementation", &["grp-1"], &[]),
+            report_checks(
+                dir.path(),
+                &key("s1"),
+                "implementation",
+                &na(&["grp-1"]),
+                &[]
+            ),
             (vec![], vec![])
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -1194,7 +1377,32 @@ pub(super) mod tests {
         std::fs::create_dir(ledger_path(dir.path(), &key("s1"))).unwrap();
 
         assert_eq!(
-            report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], &["grp-1"]),
+            report_checks(dir.path(), &key("s1"), "plan", &na(&["grp-1"]), &["grp-1"]),
+            (vec![], vec![])
+        );
+    }
+
+    /// A record from a CLI that sent no verdict holds its used ADRs in
+    /// `reported_used`. It still loads with everything else it held, and each
+    /// of those ADRs is returned once more, so its next event carries one.
+    #[test]
+    fn test_a_record_from_before_verdicts_reports_each_used_adr_once_more() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            ledger_path(dir.path(), &key("s1")),
+            format!(
+                r#"{{"format_version":{FORMAT_VERSION},"reported_adrs":["grp-1"],"reported_used":{{"plan":["grp-1"]}},"reported_breached":{{"plan":["grp-1"]}}}}"#
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(load(dir.path(), &key("s1")).reported_adrs.len(), 1);
+        assert_eq!(
+            report_checks(dir.path(), &key("s1"), "plan", &na(&["grp-1"]), &["grp-1"]),
+            (keys(&["grp-1"]), vec![])
+        );
+        assert_eq!(
+            report_checks(dir.path(), &key("s1"), "plan", &na(&["grp-1"]), &[]),
             (vec![], vec![])
         );
     }
@@ -1214,12 +1422,51 @@ pub(super) mod tests {
 
         let ledger = load(dir.path(), &key("s1"));
         assert_eq!(ledger.reported_adrs.len(), 1);
-        assert!(ledger.reported_used.is_empty());
+        assert!(ledger.reported_verdicts.is_empty());
         assert!(ledger.reported_breached.is_empty());
         assert_eq!(
-            report_checks(dir.path(), &key("s1"), "plan", &["grp-1"], &[]),
+            report_checks(dir.path(), &key("s1"), "plan", &na(&["grp-1"]), &[]),
             (keys(&["grp-1"]), vec![])
         );
         assert_eq!(briefed(dir.path(), &key("s1")), ["Adopt RS256"]);
+    }
+
+    /// The read-only twins answer what the writes would add, and write
+    /// nothing.
+    #[test]
+    fn test_unreported_twins_answer_like_the_writes_and_write_nothing() {
+        let dir = tempdir().unwrap();
+        let key = LedgerKey {
+            session_id: "s",
+            rules_dir: Path::new("/repo/.actual/rules"),
+        };
+        assert_eq!(report_adrs(dir.path(), &key, ["a"]), ["a"]);
+        assert_eq!(
+            report_checks(dir.path(), &key, "plan", &na(&["u1"]), &["b1"]),
+            (vec!["u1".to_string()], vec!["b1".to_string()])
+        );
+        let before = load(dir.path(), &key);
+
+        assert_eq!(unreported_adrs(dir.path(), &key, ["a", "b", "b"]), ["b"]);
+        assert_eq!(
+            unreported_checks(dir.path(), &key, "plan", &na(&["u1", "u2"]), &["b1"]),
+            (vec!["u2".to_string()], Vec::new())
+        );
+        assert_eq!(
+            unreported_checks(
+                dir.path(),
+                &key,
+                "plan",
+                &judged(&["u1"], Verdict::Followed),
+                &[]
+            ),
+            (vec!["u1".to_string()], Vec::new()),
+            "a stronger verdict than the one recorded"
+        );
+        assert_eq!(
+            unreported_checks(dir.path(), &key, "impl", &na(&["u1"]), &[]),
+            (vec!["u1".to_string()], Vec::new())
+        );
+        assert_eq!(load(dir.path(), &key), before);
     }
 }

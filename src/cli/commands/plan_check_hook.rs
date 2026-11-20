@@ -58,6 +58,9 @@ pub struct HookEnvelope {
     pub prompt_id: Option<String>,
     pub transcript_path: Option<String>,
     pub tool_input: Option<ToolInput>,
+    /// Codex only: the turn a `Stop` envelope ends, which is how
+    /// `codex_rollout` finds that turn's mode and plan in the rollout.
+    pub turn_id: Option<String>,
 }
 
 /// `tool_input` uses `planFilePath` because that key comes from the
@@ -265,6 +268,15 @@ pub fn render_deny(reason: &str) -> String {
         },
     };
     serde_json::to_string(&payload).expect("deny payload is serializable")
+}
+
+/// [`render_deny`] with `message` beside it as a top-level `systemMessage`,
+/// for a block that carries a notice the user should still see.
+pub fn render_deny_with_notice(reason: &str, message: &str) -> String {
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&render_deny(reason)).expect("deny payload is JSON");
+    payload["systemMessage"] = serde_json::Value::String(message.to_string());
+    payload.to_string()
 }
 
 /// Render a non-blocking advisory: a `systemMessage` with no
@@ -724,6 +736,19 @@ mod tests {
         assert!(value["hookSpecificOutput"]
             .get("permissionDecision")
             .is_none());
+    }
+
+    #[test]
+    fn test_render_deny_with_notice_carries_both() {
+        let json = render_deny_with_notice("the question", "a notice");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecisionReason"],
+            "the question"
+        );
+        assert_eq!(value["systemMessage"], "a notice");
+        assert_eq!(json.matches('\n').count(), 0);
     }
 
     #[test]

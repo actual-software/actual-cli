@@ -49,7 +49,7 @@
 //! not — deliberately different.** A cleared rule guards against exactly one
 //! thing: a non-deterministic judge asked the *same* question twice giving a
 //! different answer. It is not a standing pass. So each loop's `cleared` map
-//! keys a rule to the digest of the plan or diff that was judged conforming
+//! keys a rule to the digest of the plan or diff that was judged passing
 //! for it ([`content_digest`]), and [`GovernanceSession::excludes`] only
 //! honors that entry for *that* [`crate::rules::check::ArtifactKind`] while
 //! the *current* artifact's digest still matches — edit the plan or the
@@ -131,7 +131,7 @@ pub struct LoopState {
     /// increment this — nothing was actually checked.
     pub rounds: u32,
     /// `"{doc_slug}::{rule_id}"` -> the digest of the artifact text that was
-    /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
+    /// last judged passing ([`crate::rules::check::Verdict::passes`]) for it (see
     /// [`content_digest`]). A later clearance for the same rule simply
     /// overwrites the entry — only the most recent judgment matters, so this
     /// holds one entry per rule ever cleared, not one per round.
@@ -154,6 +154,84 @@ pub struct LoopState {
     /// conflicting. A fail-open outcome (no runner, a failed judge call)
     /// leaves it alone: nothing was decided.
     pub blocking: BTreeSet<String>,
+    /// The conflicts a `--codex-ask` check stopped the last turn on, worded
+    /// for the agent, waiting to be handed to it with the user's next
+    /// message. Codex shows a stopped turn's reason to the user only, so
+    /// without this the agent would answer "revise" with no idea what to
+    /// revise. Taken when the next prompt arrives; dropped by the next judged
+    /// round (see [`begin_round`](Self::begin_round)), by a round that finds
+    /// nothing blocking, and once overrides leave nothing blocking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Pending>,
+}
+
+/// The conflicts a `--codex-ask` check stopped or paused a turn on (see
+/// [`LoopState::pending`]), and the picker question the agent was told to
+/// show the user, when there is one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "PendingOnDisk")]
+pub struct Pending {
+    /// The conflict lines, worded for the agent.
+    pub text: String,
+    /// The `request_user_input` question outstanding for these conflicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<PickerAsk>,
+}
+
+impl Pending {
+    /// Conflicts with no picker question.
+    pub fn new(text: String) -> Self {
+        Self { text, ask: None }
+    }
+}
+
+/// [`Pending`] as read: a file written before picker questions existed holds
+/// the conflict text alone.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PendingOnDisk {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        ask: Option<PickerAsk>,
+    },
+}
+
+impl From<PendingOnDisk> for Pending {
+    fn from(on_disk: PendingOnDisk) -> Self {
+        match on_disk {
+            PendingOnDisk::Text(text) => Self::new(text),
+            PendingOnDisk::Full { text, ask } => Self { text, ask },
+        }
+    }
+}
+
+/// A picker question the agent was told to show with `request_user_input`.
+/// Its answer is accepted only under these ids and labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerAsk {
+    /// Part of every question id, `actual_choice_<nonce>` and
+    /// `actual_reason_<nonce>`, so an answer to some other question, or to an
+    /// earlier denial, is never read as this one's.
+    pub nonce: String,
+    pub stage: PickerStage,
+    /// [`content_digest`] of the plan or diff the conflicts were found in.
+    /// An unanswered question over unchanged work ends the turn with the
+    /// text choices instead of judging the same work again.
+    pub digest: String,
+    /// The override option's exact label, such as `Override all 2 rules`.
+    pub override_label: String,
+}
+
+/// Which picker question is outstanding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickerStage {
+    /// Revise, or override.
+    Choice,
+    /// Why override, after the user chose to.
+    Reason,
 }
 
 impl LoopState {
@@ -164,6 +242,7 @@ impl LoopState {
     pub fn begin_round(&mut self) {
         self.rounds += 1;
         self.blocking.clear();
+        self.pending = None;
     }
 
     /// Record one more denial of `key` in this loop and return its new total.
@@ -211,6 +290,22 @@ pub struct GovernanceSession {
     /// this format version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_start: Option<TurnStart>,
+    /// How many turns have started in this session, counted on the same
+    /// `UserPromptSubmit` event that records [`Self::turn_start`]. The ADR
+    /// question is asked at most once per value.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub turn: u64,
+    /// The latest turn's ADR question and, once given, the agent's answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adr_ask: Option<super::adr_report::AdrAsk>,
+    /// The plan `plan-check` last judged, kept so an answer can anchor a
+    /// claim to one of its lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_plan: Option<super::adr_report::TurnPlan>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Where and from which commit a Claude Code turn started.
@@ -222,6 +317,11 @@ pub struct TurnStart {
     pub root: PathBuf,
     /// `HEAD`'s full commit id when the turn started.
     pub head: String,
+    /// The digest of the working-tree diff against `head` when the turn
+    /// started. A check whose diff still matches it is looking at nothing this
+    /// turn changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_digest: Option<String>,
 }
 
 /// One explicit override: a human, outside the agent's control, telling this
@@ -421,7 +521,7 @@ impl GovernanceSession {
     /// True when `key` must never be sent to the judge again for an artifact
     /// of `kind` whose digest is `artifact_digest`: either explicitly
     /// overridden (session-scoped, regardless of kind or wording), or judged
-    /// conforming against this *exact* artifact text already in *this* loop
+    /// passing against this *exact* artifact text already in *this* loop
     /// (content-scoped — see the module doc). A rule cleared against a plan
     /// that has since been edited, or cleared in the other loop, is not
     /// excluded: `artifact_digest` / `kind` will not match, so it is judged
@@ -624,9 +724,10 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             cleared: v2.cleared,
             deny_counts: v2.deny_counts,
             blocking: BTreeSet::new(),
+            pending: None,
         },
         diff: LoopState::default(),
-        turn_start: None,
+        ..GovernanceSession::default()
     }
 }
 
@@ -1250,6 +1351,7 @@ mod tests {
         let turn = TurnStart {
             root: PathBuf::from("/repo"),
             head: "a".repeat(40),
+            diff_digest: None,
         };
         update("session-race", &rd(), |s| s.turn_start = Some(turn.clone()));
         update("session-race", &rd(), |s| {
@@ -1279,6 +1381,7 @@ mod tests {
             s.turn_start = Some(TurnStart {
                 root: PathBuf::from("/repo"),
                 head: "b".repeat(40),
+                diff_digest: None,
             });
         });
         let loaded = load("session-turn-race", &rd());
@@ -1583,6 +1686,7 @@ mod tests {
         let turn = TurnStart {
             root: PathBuf::from("/repo"),
             head: "a".repeat(40),
+            diff_digest: None,
         };
         let session = GovernanceSession {
             turn_start: Some(turn.clone()),

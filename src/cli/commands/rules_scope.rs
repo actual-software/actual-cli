@@ -500,9 +500,10 @@ fn emit_scope_telemetry(
     run: &SelectionRun,
     duration_ms: f64,
 ) {
+    use crate::telemetry::plan_governance;
     use crate::telemetry::scope::{new_scope_run_id, ScopeMetrics};
 
-    let Some(cfg) = crate::telemetry::opt_out::load_if_enabled() else {
+    let Some((cfg, send)) = plan_governance::gate() else {
         return;
     };
 
@@ -535,7 +536,12 @@ fn emit_scope_telemetry(
     // `cfg` is no longer needed past this point; dispatch persists the event and
     // hands delivery to a process that outlives this command.
     drop(cfg);
-    dispatch_scope_event(metrics.to_event());
+    let event = metrics.to_event_with_id(plan_governance::distinct_id_for(send));
+    if send {
+        dispatch_scope_event(event);
+    } else {
+        plan_governance::hold_back(&[event]);
+    }
 }
 
 /// Spawn the detached uploader child process that drains the telemetry spool
@@ -570,9 +576,10 @@ fn spawn_uploader_from(exe: std::io::Result<std::path::PathBuf>) {
 }
 
 /// The uploader's command: the subcommand and nothing else. It inherits this
-/// process's environment unchanged and reads any sign-in it sends from the
-/// credentials file when it sends, so no credential is ever on its command
-/// line or in its environment.
+/// process's environment, plus this run's telemetry debug id in debug mode so
+/// its outcomes land in this run's log, and reads any sign-in it sends from
+/// the credentials file when it sends, so no credential is ever on its
+/// command line or in its environment.
 #[cfg(feature = "telemetry")]
 fn uploader_command(exe: std::path::PathBuf) -> std::process::Command {
     let mut child = std::process::Command::new(exe);
@@ -581,6 +588,9 @@ fn uploader_command(exe: std::path::PathBuf) -> std::process::Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if let Some((key, id)) = crate::telemetry::debug::child_env() {
+        child.env(key, id);
+    }
     // Its own process group, as the update check's child has. Codex kills a
     // command's process group once the command returns, and a command that leads
     // its terminal's session hangs that group up when it exits. Either way the
@@ -1294,11 +1304,29 @@ mod tests {
     #[cfg(feature = "telemetry")]
     #[test]
     fn test_the_uploader_command_carries_no_credential() {
+        use crate::telemetry::debug::{ENV, ID_ENV};
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _debug = crate::testutil::EnvGuard::remove(ENV);
         let command = uploader_command(std::path::PathBuf::from("actual"));
 
         let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
         assert_eq!(args, ["__telemetry-flush"]);
         assert_eq!(command.get_envs().count(), 0);
+
+        // In debug mode it sets one more: the id its outcomes are logged under.
+        let _on = crate::testutil::EnvGuard::set(ENV, "1");
+        let _id = crate::testutil::EnvGuard::set(ID_ENV, "parent-id");
+        let command = uploader_command(std::path::PathBuf::from("actual"));
+        let envs: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            envs,
+            [(
+                std::ffi::OsStr::new(ID_ENV),
+                Some(std::ffi::OsStr::new("parent-id"))
+            )]
+        );
     }
 
     /// Both outcomes of a best-effort spool append are observed without panicking
@@ -3281,5 +3309,40 @@ mod tests {
         for key in ["slug", "relative_path", "title", "score", "stage", "reason"] {
             assert!(rule.get(key).is_some(), "{key}");
         }
+    }
+
+    /// Telemetry off in debug mode: the scope event is built and logged as
+    /// not sent, nothing is handed to the spool, and no telemetry id is
+    /// written.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_emit_scope_telemetry_in_debug_mode_with_telemetry_off_logs_the_event() {
+        use crate::telemetry::debug::{self, tests::logged};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_tel = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::set(debug::ID_ENV, "scope-off");
+
+        let root = seed(&[("cross-cutting-token-signing-e410.md", OAUTH)]);
+        let resolved_index = resolved(root.path());
+        let run = run_selection(
+            &resolved_index.index,
+            &Query::new("rotate the signing key"),
+            &select_args(root.path(), 1),
+        )
+        .expect("selection succeeds");
+
+        let events = with_captured_scope_events(|| {
+            emit_scope_telemetry(root.path(), &resolved_index, &run, 1.0)
+        });
+
+        assert!(events.is_empty());
+        assert!(!home.path().join("telemetry-id").exists());
+        let lines = logged("scope-off");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["stage"], "not_sent");
+        assert_eq!(lines[0]["event"]["event"], "plan_governance_scope_select");
     }
 }

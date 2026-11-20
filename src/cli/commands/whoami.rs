@@ -2,21 +2,55 @@
 //!
 //! Reads the locally cached credentials (resolved at `login` time); makes no
 //! network call. Errors with [`ActualError::NotLoggedIn`] when signed out.
+//!
+//! `whoami --check` also asks the auth server whether the sign-in still
+//! works, renewing the access token first when it is about to expire, and
+//! errors with `NotLoggedIn` when the server no longer accepts it.
 
 use chrono::{DateTime, Utc};
 
 use crate::auth::store::{self, StoredCredentials};
+use crate::auth::{oauth, refresh};
+use crate::cli::args::WhoamiArgs;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
 
-pub fn exec() -> Result<(), ActualError> {
-    match store::load()? {
-        Some(creds) => {
-            print_identity(&creds);
-            Ok(())
-        }
-        None => Err(ActualError::NotLoggedIn),
+pub fn exec(args: &WhoamiArgs) -> Result<(), ActualError> {
+    let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
+    if args.check {
+        let creds = build_runtime()?.block_on(check(creds))?;
+        print!("{}", format_checked(&creds, Utc::now()));
+    } else {
+        print_identity(&creds);
     }
+    Ok(())
+}
+
+/// Single-threaded tokio runtime so the sync CLI dispatch path can drive the
+/// async check (mirrors `commands::create_token`).
+fn build_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))
+}
+
+/// `creds` once the auth server that issued it has accepted it, renewed and
+/// saved first when its access token expires within a minute.
+async fn check(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
+    let creds = refresh::ensure_fresh(creds).await?;
+    oauth::verify(&creds).await?;
+    Ok(creds)
+}
+
+/// The identity as `whoami --check` prints it at `now`: `whoami`'s rows, then
+/// the auth server that accepted the sign-in.
+fn format_checked(creds: &StoredCredentials, now: DateTime<Utc>) -> String {
+    let mut text = format_identity(creds, now);
+    if let Some(auth_url) = &creds.auth_url {
+        text.push_str(&server_row("Checked with:", auth_url));
+    }
+    text
 }
 
 /// Print the cached identity. **Never prints token material.**
@@ -96,7 +130,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
 
-        let err = exec().unwrap_err();
+        let err = exec(&WhoamiArgs { check: false }).unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
     }
 
@@ -108,7 +142,7 @@ mod tests {
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
 
         store::save(&creds()).unwrap();
-        assert!(exec().is_ok());
+        assert!(exec(&WhoamiArgs { check: false }).is_ok());
     }
 
     #[test]
@@ -190,5 +224,209 @@ mod tests {
 
         c.expires_at = None;
         assert_eq!(expired_note(&c, now), None);
+    }
+
+    // ---- whoami --check ----
+
+    const CHECK: WhoamiArgs = WhoamiArgs { check: true };
+
+    const IDENTITY: &str = r#"{"sub":"mock-user-0001","organization_id":"mock-org-0001","member_id":"mock-member-0001","scope":"openid adr:query"}"#;
+
+    /// A config dir of the test's own, so nothing here reads, renews or locks
+    /// the machine's real sign-in.
+    fn isolated() -> (tempfile::TempDir, Vec<EnvGuard>) {
+        let home = tempdir().unwrap();
+        let guards = vec![
+            EnvGuard::remove("ACTUAL_CONFIG"),
+            EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+        ];
+        (home, guards)
+    }
+
+    /// A sign-in issued by `auth_url`, whose access token expires in `expires_in`.
+    fn issued_by(
+        auth_url: String,
+        access_token: &str,
+        expires_in: chrono::Duration,
+    ) -> StoredCredentials {
+        StoredCredentials {
+            access_token: access_token.to_string(),
+            refresh_token: "old-rt".to_string(),
+            expires_at: Some(Utc::now() + expires_in),
+            auth_url: Some(auth_url),
+            ..creds()
+        }
+    }
+
+    #[test]
+    fn test_whoami_check_logged_out_errors() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _env) = isolated();
+
+        let err = exec(&CHECK).unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+    }
+
+    /// A token that isn't due for renewal goes to the server that issued it,
+    /// and nothing is renewed or rewritten.
+    #[test]
+    fn test_whoami_check_asks_the_server_that_issued_the_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _env) = isolated();
+        let mut server = mockito::Server::new();
+        let token = server.mock("POST", "/api/oauth/token").expect(0).create();
+        let whoami = server
+            .mock("GET", "/whoami")
+            .match_header("authorization", "Bearer current-at")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(IDENTITY)
+            .expect(1)
+            .create();
+        let signed_in = issued_by(server.url(), "current-at", chrono::Duration::hours(1));
+        store::save(&signed_in).unwrap();
+
+        exec(&CHECK).unwrap();
+
+        whoami.assert();
+        token.assert();
+        assert_eq!(store::load().unwrap(), Some(signed_in));
+    }
+
+    /// A token about to expire is renewed and saved first, and the server is
+    /// asked with the new one.
+    #[test]
+    fn test_whoami_check_renews_an_expiring_token_first() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _env) = isolated();
+        let mut server = mockito::Server::new();
+        let token = server
+            .mock("POST", "/api/oauth/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "old-rt".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"new-at","token_type":"Bearer","expires_in":3600,"refresh_token":"new-rt"}"#,
+            )
+            .expect(1)
+            .create();
+        let whoami = server
+            .mock("GET", "/whoami")
+            .match_header("authorization", "Bearer new-at")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(IDENTITY)
+            .expect(1)
+            .create();
+        store::save(&issued_by(
+            server.url(),
+            "old-at",
+            chrono::Duration::seconds(30),
+        ))
+        .unwrap();
+
+        exec(&CHECK).unwrap();
+
+        token.assert();
+        whoami.assert();
+        let saved = store::load().unwrap().unwrap();
+        assert_eq!(saved.access_token, "new-at");
+        assert_eq!(saved.refresh_token, "new-rt");
+    }
+
+    /// Signed out elsewhere, or revoked: the server refuses the token, so the
+    /// check fails as signed out (exit 2, pointing at `actual login`) and the
+    /// stored sign-in stays as it was.
+    #[test]
+    fn test_whoami_check_with_a_token_the_server_refuses_is_not_logged_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _env) = isolated();
+        let mut server = mockito::Server::new();
+        let _whoami = server
+            .mock("GET", "/whoami")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_token"}"#)
+            .create();
+        let signed_in = issued_by(server.url(), "revoked-at", chrono::Duration::hours(1));
+        store::save(&signed_in).unwrap();
+
+        let err = exec(&CHECK).unwrap_err();
+
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.hint().as_deref(), Some("actual login"));
+        assert_eq!(store::load().unwrap(), Some(signed_in));
+    }
+
+    /// Lapsed: the server refuses the refresh token, so the check fails as
+    /// signed out without asking `/whoami`.
+    #[test]
+    fn test_whoami_check_with_a_refused_refresh_token_is_not_logged_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _env) = isolated();
+        let mut server = mockito::Server::new();
+        let _token = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_grant"}"#)
+            .create();
+        let whoami = server.mock("GET", "/whoami").expect(0).create();
+        store::save(&issued_by(
+            server.url(),
+            "old-at",
+            chrono::Duration::hours(-1),
+        ))
+        .unwrap();
+
+        let err = exec(&CHECK).unwrap_err();
+
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+        whoami.assert();
+    }
+
+    /// An outage is reported as itself (exit 3), not as a sign-out.
+    #[test]
+    fn test_whoami_check_in_an_auth_server_outage_is_not_signed_out() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _env) = isolated();
+        let mut server = mockito::Server::new();
+        let _whoami = server
+            .mock("GET", "/whoami")
+            .with_status(503)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"temporarily_unavailable"}"#)
+            .create();
+        store::save(&issued_by(
+            server.url(),
+            "current-at",
+            chrono::Duration::hours(1),
+        ))
+        .unwrap();
+
+        let err = exec(&CHECK).unwrap_err();
+
+        assert!(matches!(err, ActualError::ApiError(_)), "got: {err:?}");
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn test_format_checked_names_the_server_that_accepted_the_sign_in() {
+        let now = Utc::now();
+        let mut c = creds();
+        assert_eq!(
+            format_checked(&c, now),
+            format!(
+                "{}  Checked with:  http://localhost:4000\n",
+                format_identity(&c, now)
+            )
+        );
+
+        c.auth_url = None;
+        assert_eq!(format_checked(&c, now), format_identity(&c, now));
     }
 }

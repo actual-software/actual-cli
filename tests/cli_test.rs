@@ -288,6 +288,20 @@ fn test_status_shows_config() {
         .stdout(predicate::str::contains("CLAUDE.md Files"));
 }
 
+/// The exit code a script reads to tell a lapsed sign-in (2) from an outage (3).
+#[test]
+fn test_whoami_check_signed_out_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["whoami", "--check"])
+        .env("ACTUAL_CONFIG_DIR", dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Not signed in to Actual AI"))
+        .stderr(predicate::str::contains("actual login"));
+}
+
 #[test]
 fn test_auth_binary_not_found() {
     cmd()
@@ -812,7 +826,7 @@ impl GovernedPlanCheck {
         )
         .unwrap();
 
-        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}}"#;
         let fake_claude = config_dir.path().join("fake-claude.sh");
         std::fs::write(
             &fake_claude,
@@ -855,7 +869,7 @@ impl GovernedPlanCheck {
     /// Swap in a judge that finds R-A-001 violated, so the run denies the plan
     /// and `--claude-hook` prints that verdict rather than an empty allow.
     fn judge_finds_r_a_001_violated(&self) {
-        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}}"#;
         std::fs::write(
             &self.fake_claude,
             format!(
@@ -1142,7 +1156,7 @@ fn test_plan_check_codex_runner_is_read_only_and_keeps_stdin_out_of_codex() {
         scratch.path().join("argv.txt"),
         scratch.path().join("stdin.txt"),
     );
-    let verdicts = r#"{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}"#;
+    let verdicts = r#"{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}"#;
     let fake_codex = scratch.path().join("fake-codex.sh");
     std::fs::write(
         &fake_codex,
@@ -1193,6 +1207,22 @@ done
 
     let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(report["status"], "conforming", "{report}");
+    let verdict_of = |rule_id: &str| {
+        report["verdicts"]
+            .as_array()
+            .and_then(|vs| vs.iter().find(|v| v["rule_id"] == rule_id))
+            .unwrap_or_else(|| panic!("no verdict for {rule_id}: {report}"))
+            .clone()
+    };
+    let followed = verdict_of("R-A-001");
+    assert_eq!(followed["verdict"], "followed", "{report}");
+    assert_eq!(
+        followed["span"], "Sign every access token with RS256.",
+        "{report}"
+    );
+    let not_applicable = verdict_of("R-A-002");
+    assert_eq!(not_applicable["verdict"], "not_applicable", "{report}");
+    assert_eq!(not_applicable["span"], "", "{report}");
     let args = std::fs::read_to_string(&argv).unwrap();
     assert!(args.starts_with("exec\n--sandbox\nread-only\n"), "{args}");
     assert_eq!(std::fs::read_to_string(&stdin).unwrap(), "");
@@ -1201,14 +1231,14 @@ done
 // ── plan-check-override: the interactive-terminal gate ──────────────────
 //
 // `exec_override` refuses unless stdin is a real terminal *and*
-// `running_under_claude_code()` is false (see that function's own doc for
+// `running_under_agent_host()` is false (see that function's own doc for
 // why those two markers are trustworthy). Only the terminal half needs a
 // subprocess test: whether a test *process's* own stdin happens to be a
 // terminal depends on how the test binary itself was launched, which a
 // `--lib` unit test cannot control. `assert_cmd::Command` gives every
 // subprocess here piped (non-terminal) stdin by default, which is exactly
 // the condition this gate exists to catch — an agent's own shell tool calls
-// never get a pty either. `running_under_claude_code()` carries no such
+// never get a pty either. `running_under_agent_host()` carries no such
 // restriction and is covered directly by `--lib` unit tests instead.
 
 #[test]
@@ -1507,7 +1537,7 @@ impl GovernedImplCheck {
         )
         .unwrap();
 
-        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+        let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"not_applicable","span":"","reason":"no logging"}]}}"#;
         let fake_claude = config_dir.path().join("fake-claude.sh");
         std::fs::write(
             &fake_claude,
@@ -1861,7 +1891,7 @@ fn test_check_override_is_gated_the_same_way_for_a_session_impl_check_denied() {
     let rules = fixture.repo.path().join(".actual/rules");
     // A conflicting verdict this time, so the hook run actually denies
     // rather than passing silently.
-    let deny_envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conforming","span":"","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conflicting","span":"logs the key","reason":"forbidden"}]}}"#;
+    let deny_envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"followed","span":"Sign every access token with RS256.","reason":"uses RS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conflicting","span":"logs the key","reason":"forbidden"}]}}"#;
     std::fs::write(
         &fixture.fake_claude,
         format!(
@@ -2721,6 +2751,43 @@ fn otlp_brief_hook_at(
     if let Some(agent) = agent {
         envelope["agent_id"] = agent.into();
     }
+    otlp_hook_at(config_dir, repo, "--claude-hook", envelope, api)
+}
+
+/// [`otlp_brief_hook_at`] for Codex: a `PostToolUse` shell read of the same
+/// governed file, through `--codex-hook`.
+#[cfg(feature = "telemetry")]
+fn otlp_codex_brief_hook_at(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    config_yaml: &str,
+    api: Option<&str>,
+) -> (String, std::time::Duration) {
+    std::fs::write(config_dir.join("config.yaml"), config_yaml).unwrap();
+    std::fs::create_dir_all(repo.join("services/auth/oauth")).unwrap();
+    std::fs::write(repo.join("services/auth/oauth/token.ts"), "jwt.sign()\n").unwrap();
+    let envelope = serde_json::json!({
+        "session_id": "s1",
+        "turn_id": "t1",
+        "cwd": repo,
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cat services/auth/oauth/token.ts"},
+        "tool_response": "jwt.sign()\n",
+    });
+    otlp_hook_at(config_dir, repo, "--codex-hook", envelope, api)
+}
+
+/// Run `rules brief` in hook mode `mode` on `envelope`, with Actual's API at
+/// `api`, or at its built-in address when that is `None`.
+#[cfg(feature = "telemetry")]
+fn otlp_hook_at(
+    config_dir: &std::path::Path,
+    repo: &std::path::Path,
+    mode: &str,
+    envelope: serde_json::Value,
+    api: Option<&str>,
+) -> (String, std::time::Duration) {
     let mut command = cmd();
     match api {
         Some(api) => command.env("ACTUAL_API_URL", api),
@@ -2731,7 +2798,7 @@ fn otlp_brief_hook_at(
         .args([
             "rules",
             "brief",
-            "--claude-hook",
+            mode,
             "--repo",
             repo.to_str().unwrap(),
             "--min-score",
@@ -2779,9 +2846,14 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
                 })
                 .and_then(|sent| serde_json::to_string(&sent).ok())
                 .is_some_and(|sent| {
-                    ["actual.adr.detected", "grp-sign", "grp-rotate"]
-                        .iter()
-                        .all(|text| sent.contains(text))
+                    [
+                        "actual.filter.evaluated",
+                        "actual.adr.detected",
+                        "grp-sign",
+                        "grp-rotate",
+                    ]
+                    .iter()
+                    .all(|text| sent.contains(text))
                 })
         })
         .with_status(200)
@@ -2821,8 +2893,9 @@ fn test_brief_hook_sends_each_new_adr_to_the_otlp_endpoint_once() {
     let records = body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
         .as_array()
         .unwrap();
-    assert_eq!(records.len(), 2);
-    assert!(records
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["eventName"], "actual.filter.evaluated");
+    assert!(records[1..]
         .iter()
         .all(|r| r["eventName"] == "actual.adr.detected"));
 
@@ -2895,6 +2968,115 @@ fn test_brief_hook_events_reach_actual_api_signed_in() {
     assert!(!written.contains("cli-sign-in-token"), "{written}");
     assert!(!written.contains("actualSignIn"), "{written}");
     mock.assert();
+}
+
+/// Poll until `mock` has matched and `sink` holds a line, then return the
+/// records of the one request the sink holds.
+#[cfg(feature = "telemetry")]
+fn delivered_records(mock: &mockito::Mock, sink: &std::path::Path) -> Vec<serde_json::Value> {
+    let mut written = String::new();
+    for _ in 0..100 {
+        written = std::fs::read_to_string(sink).unwrap_or_default();
+        if mock.matched() && !written.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    mock.assert();
+    assert_eq!(written.lines().count(), 1, "{written}");
+    let body: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+    body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The string value of `record`'s attribute `key`.
+#[cfg(feature = "telemetry")]
+fn string_attribute<'a>(record: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    record["attributes"]
+        .as_array()?
+        .iter()
+        .find(|attribute| attribute["key"] == key)?["value"]["stringValue"]
+        .as_str()
+}
+
+/// A Codex shell read sends the brief's selection ahead of its ADRs, as a
+/// Claude Code read does, and signed out the request carries no token.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_codex_brief_hook_sends_its_selection_signed_out() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(200)
+        .expect(1)
+        .create();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_codex_brief_hook_at(config_dir.path(), repo.path(), &config_yaml, None);
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    let records = delivered_records(&mock, &sink);
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0]["eventName"], "actual.filter.evaluated");
+    assert_eq!(
+        string_attribute(&records[0], "actual.filter.selector"),
+        Some("context")
+    );
+    assert!(records[1..]
+        .iter()
+        .all(|r| r["eventName"] == "actual.adr.detected"));
+}
+
+/// Signed in, a Codex shell read's selection reaches Actual's API with the
+/// sign-in's token, and the file sink never holds it.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_codex_brief_hook_events_reach_actual_api_signed_in() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", "Bearer cli-sign-in-token")
+        .with_status(200)
+        .expect(1)
+        .create();
+    std::fs::write(
+        config_dir.path().join("credentials.yaml"),
+        "access_token: cli-sign-in-token\nrefresh_token: cli-refresh-token\n\
+         organization_id: org-1\nmember_id: member-1\n",
+    )
+    .unwrap();
+    let sink = config_dir.path().join("otlp.jsonl");
+    let config_yaml = format!(
+        "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+        server.url(),
+        sink.display()
+    );
+
+    let (reply, _) = otlp_codex_brief_hook_at(
+        config_dir.path(),
+        repo.path(),
+        &config_yaml,
+        Some(&server.url()),
+    );
+    assert!(reply.contains("R-adr-sign-1-001"), "{reply}");
+
+    let records = delivered_records(&mock, &sink);
+    assert_eq!(records[0]["eventName"], "actual.filter.evaluated");
+    let written = std::fs::read_to_string(&sink).unwrap();
+    assert!(!written.contains("cli-sign-in-token"), "{written}");
+    assert!(!written.contains("actualSignIn"), "{written}");
 }
 
 /// An endpoint that never answers costs the hook nothing: it spools, hands
@@ -3173,4 +3355,708 @@ fn test_adr_new_then_check_work_signed_out() {
         .arg(dir.path())
         .assert()
         .success();
+}
+
+/// `rules report-use` with no question open refuses and records nothing,
+/// whether the answer comes as a flag or as JSON on stdin.
+#[test]
+fn test_rules_report_use_refuses_without_an_open_question() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    for (flag, stdin) in [(Some("--none"), ""), (None, "[]")] {
+        let mut command = cmd();
+        command
+            .env("ACTUAL_CONFIG_DIR", home.path())
+            .env("ACTUAL_NO_TELEMETRY", "1")
+            .args([
+                "rules",
+                "report-use",
+                "--claude-session",
+                "s1",
+                "--turn",
+                "0-x",
+                "--repo",
+            ])
+            .arg(repo.path());
+        command.args(flag);
+        command
+            .write_stdin(stdin)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "no ADR question is open for session s1",
+            ));
+    }
+}
+
+// ── --codex-hook: the Codex modes end to end ────────────────────────────────
+//
+// Codex parses hook output strictly, so these assert the exact key set of each
+// reply as well as its content: a key Codex does not know fails the hook run.
+
+/// Every top-level key of the one JSON line `stdout` holds, sorted.
+fn codex_reply_keys(stdout: &[u8]) -> (Vec<String>, serde_json::Value) {
+    let text = String::from_utf8(stdout.to_vec()).unwrap();
+    assert_eq!(text.lines().count(), 1, "exactly one line: {text:?}");
+    let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    (keys, value)
+}
+
+/// A rollout under `dir` holding one turn `t1` in `mode`, proposing `plan`
+/// when given, and the Codex `Stop` envelope that ends it.
+fn codex_stop(dir: &std::path::Path, session: &str, mode: &str, plan: Option<&str>) -> String {
+    let rollout = dir.join("rollout-codex.jsonl");
+    let mut lines = vec![serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1","collaboration_mode_kind":mode}}).to_string()];
+    if let Some(plan) = plan {
+        lines.push(serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"Plan","id":"p","text":plan}}}).to_string());
+    }
+    std::fs::write(&rollout, lines.join("\n")).unwrap();
+    serde_json::json!({
+        "session_id": session,
+        "turn_id": "t1",
+        "transcript_path": rollout,
+        "cwd": dir,
+        "hook_event_name": "Stop",
+        "model": "gpt-6-luna",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": null,
+    })
+    .to_string()
+}
+
+/// Make the fake judge at `path` find R-A-001 violated.
+#[cfg(unix)]
+fn judge_finds_r_a_001_violated(path: &std::path::Path) {
+    let envelope = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"verdicts":[{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-001","verdict":"conflicting","span":"HS256","reason":"signs with HS256"},{"doc_slug":"cross-cutting-token-signing-1c57","rule_id":"R-A-002","verdict":"conforming","span":"","reason":"no logging"}]}}"#;
+    std::fs::write(
+        path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A Plan-mode turn whose plan conflicts is sent back with a `Stop` block:
+/// `decision` and `reason`, and nothing Codex would reject.
+#[cfg(unix)]
+#[test]
+fn test_plan_check_codex_hook_blocks_a_conflicting_plan() {
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let stop = codex_stop(
+        fixture.repo.path(),
+        "sess-codex-1",
+        "plan",
+        Some("Sign access tokens with HS256"),
+    );
+
+    let output = fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(stop)
+        .assert()
+        .success();
+    let (keys, value) = codex_reply_keys(&output.get_output().stdout);
+    assert_eq!(keys, ["decision", "reason"]);
+    assert_eq!(value["decision"], "block");
+    let reason = value["reason"].as_str().unwrap();
+    assert!(reason.contains("R-A-001"), "{reason}");
+    assert!(reason.contains("outside Codex"), "{reason}");
+    assert!(!reason.contains("/actual-cli:override"), "{reason}");
+}
+
+/// A Codex plan gate round sends its selection, with the planning gate as the
+/// selector, over the same signed-out request a Claude Code round uses.
+#[cfg(all(unix, feature = "telemetry"))]
+#[test]
+fn test_plan_check_codex_hook_sends_its_selection() {
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", mockito::Matcher::Missing)
+        .with_status(200)
+        .expect_at_least(1)
+        .create();
+    let sink = fixture.config_dir.path().join("otlp.jsonl");
+    std::fs::write(
+        fixture.config_dir.path().join("config.yaml"),
+        format!(
+            "api_url: \"http://127.0.0.1:1\"\ntelemetry:\n  otlp_logs_endpoint: {}/v1/logs\n  otlp_file: {}\n",
+            server.url(),
+            sink.display()
+        ),
+    )
+    .unwrap();
+    let stop = codex_stop(
+        fixture.repo.path(),
+        "sess-codex-filter",
+        "plan",
+        Some("Sign access tokens with HS256"),
+    );
+
+    fixture
+        .cmd()
+        .arg("--codex-hook")
+        .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
+        .env_remove("ACTUAL_OTLP_FILE")
+        .env_remove("TRACEPARENT")
+        .write_stdin(stop)
+        .assert()
+        .success();
+
+    let mut filter = None;
+    for _ in 0..100 {
+        let written = std::fs::read_to_string(&sink).unwrap_or_default();
+        filter = written
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .flat_map(|body| {
+                body["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .find(|record| record["eventName"] == "actual.filter.evaluated");
+        if mock.matched() && filter.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    mock.assert();
+    let filter = filter.expect("the round's selection never reached the sink");
+    assert_eq!(
+        string_attribute(&filter, "actual.filter.selector"),
+        Some("planning")
+    );
+}
+
+/// Codex runs the plan gate on every `Stop`; a turn in any other mode prints
+/// nothing at all.
+#[cfg(unix)]
+#[test]
+fn test_plan_check_codex_hook_is_silent_outside_plan_mode() {
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let stop = codex_stop(
+        fixture.repo.path(),
+        "sess-codex-2",
+        "default",
+        Some("ignored"),
+    );
+    fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(stop)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+/// `--codex-hook` and `--claude-hook` are one mode or the other.
+#[test]
+fn test_codex_hook_conflicts_with_claude_hook() {
+    cmd()
+        .args(["plan-check", "--claude-hook", "--codex-hook"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+/// The implementation gate checks a default-mode turn's diff and blocks a
+/// conflict the same way; a Plan-mode turn is the plan gate's.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_codex_hook_checks_only_default_turns() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+
+    let output = fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(codex_stop(
+            fixture.repo.path(),
+            "sess-codex-3",
+            "default",
+            None,
+        ))
+        .assert()
+        .success();
+    let (keys, value) = codex_reply_keys(&output.get_output().stdout);
+    assert_eq!(keys, ["decision", "reason"]);
+    assert!(value["reason"].as_str().unwrap().contains("R-A-001"));
+
+    fixture
+        .cmd()
+        .arg("--codex-hook")
+        .write_stdin(codex_stop(
+            fixture.repo.path(),
+            "sess-codex-4",
+            "plan",
+            Some("a plan"),
+        ))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+/// `--codex-ask`, end to end: a conflict ends the turn for the user, the
+/// next prompt hands the agent the conflicts, and a typed override settles
+/// the rule so the next check lets the turn end.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_codex_ask_stops_hands_over_and_takes_an_override() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let session = "sess-codex-ask";
+    let stop = || codex_stop(fixture.repo.path(), session, "default", None);
+    let prompt = |text: &str| {
+        serde_json::json!({
+            "session_id": session,
+            "turn_id": "t2",
+            "cwd": fixture.repo.path(),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": text,
+        })
+        .to_string()
+    };
+    let run = |args: &[&str], input: String| {
+        fixture
+            .cmd()
+            .args(args)
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+
+    let stopped = run(&["--codex-hook", "--codex-ask"], stop());
+    assert!(String::from_utf8_lossy(&stopped).starts_with(r#"{"continue":false,"stopReason":""#));
+    let (keys, value) = codex_reply_keys(&stopped);
+    assert_eq!(keys, ["continue", "stopReason"]);
+    assert_eq!(value["continue"], false);
+    let reason = value["stopReason"].as_str().unwrap();
+    assert!(reason.contains("R-A-001"), "{reason}");
+    assert!(reason.contains("actual override all <code>"), "{reason}");
+
+    let handed = run(&["--codex-hook"], prompt("revise it"));
+    // The plugin forwards these only byte for byte, key order included.
+    assert!(String::from_utf8_lossy(&handed).starts_with(
+        r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":""#
+    ));
+    let (keys, value) = codex_reply_keys(&handed);
+    assert_eq!(keys, ["hookSpecificOutput"]);
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("R-A-001"), "{context}");
+
+    run(&["--codex-hook", "--codex-ask"], stop());
+    let (keys, value) = codex_reply_keys(&run(
+        &["--codex-hook"],
+        prompt("actual override all accepted"),
+    ));
+    assert_eq!(keys, ["continue", "stopReason"]);
+    let said = value["stopReason"].as_str().unwrap();
+    assert!(
+        said.contains("overrode R-A-001 (reason: accepted)"),
+        "{said}"
+    );
+
+    // Overridden, so the next check lets the turn end, saying an override
+    // is in force rather than blocking.
+    let (keys, _) = codex_reply_keys(&run(&["--codex-hook", "--codex-ask"], stop()));
+    assert_eq!(keys, ["systemMessage"]);
+}
+
+/// `--codex-picker`, end to end: a conflict sends the agent back with the
+/// picker to show, Override asks why, the why answer records the override,
+/// and the next check passes. An unanswered picker over the same diff ends the
+/// turn with the text choices.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_codex_picker_asks_and_records_the_answer() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    let stop = |session: &str| {
+        let raw = codex_stop(fixture.repo.path(), session, "default", None);
+        let mut envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // The tool list as Codex writes it with the picker on in Default mode.
+        let rollout = envelope["transcript_path"].as_str().unwrap().to_string();
+        let tools = serde_json::json!({"type":"response_item","payload":{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"request_user_input","description":"Request user input for one to three short questions and wait for the response. This tool is only available in Default or Plan mode."}]}]}});
+        let old = std::fs::read_to_string(&rollout).unwrap();
+        std::fs::write(&rollout, format!("{tools}\n{old}")).unwrap();
+        envelope["session_id"] = session.into();
+        envelope.to_string()
+    };
+    let answer = |session: &str, id: &str, picked: &str| {
+        serde_json::json!({
+            "session_id": session,
+            "turn_id": "t1",
+            "cwd": fixture.repo.path(),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "request_user_input",
+            "tool_input": {"questions": [{"id": id, "header": "h", "question": "q", "options": []}]},
+            "tool_response": serde_json::json!({"answers": {id: {"answers": [picked]}}}).to_string(),
+        })
+        .to_string()
+    };
+    let run = |args: &[&str], input: String| {
+        let out = fixture
+            .cmd()
+            .args(args)
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .write_stdin(input)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+    let gate = ["--codex-hook", "--codex-ask", "--codex-picker"];
+    let call = |text: &str| -> serde_json::Value {
+        serde_json::from_str(&text[text.rfind("\n{").unwrap() + 1..]).unwrap()
+    };
+
+    let blocked = run(&gate, stop("sess-picker"));
+    let (keys, value) = codex_reply_keys(blocked.as_bytes());
+    assert_eq!(keys, ["decision", "reason"]);
+    let reason = value["reason"].as_str().unwrap();
+    let choice = call(reason)["questions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(choice.starts_with("actual_choice_"), "{reason}");
+
+    let why = run(
+        &["--codex-hook"],
+        answer("sess-picker", &choice, "Override R-A-001"),
+    );
+    assert!(why.starts_with(
+        r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":""#
+    ));
+    let (_, value) = codex_reply_keys(why.as_bytes());
+    let text = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let reason_id = call(text)["questions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason_id.starts_with("actual_reason_"), "{text}");
+
+    let done = run(
+        &["--codex-hook"],
+        answer("sess-picker", &reason_id, "This ADR is wrong"),
+    );
+    assert!(
+        done.contains("overrode R-A-001 in the picker (reason: adr-wrong)"),
+        "{done}"
+    );
+    let (keys, _) = codex_reply_keys(run(&gate, stop("sess-picker")).as_bytes());
+    assert_eq!(keys, ["systemMessage"], "overridden, so the check passes");
+
+    // Asked and never answered: the same diff ends the turn with the text.
+    run(&gate, stop("sess-unanswered"));
+    let (keys, value) = codex_reply_keys(run(&gate, stop("sess-unanswered")).as_bytes());
+    assert_eq!(keys, ["continue", "stopReason"]);
+    assert!(value["stopReason"]
+        .as_str()
+        .unwrap()
+        .contains("went unanswered"));
+}
+
+/// `--codex-ask` belongs to `--codex-hook`.
+#[test]
+fn test_codex_ask_requires_codex_hook() {
+    for command in ["plan-check", "impl-check"] {
+        cmd()
+            .args([command, "--codex-ask"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--codex-hook"));
+        cmd()
+            .args([command, "--codex-hook", "--codex-picker"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--codex-ask"));
+    }
+}
+
+/// A shell read of a governed file is briefed through `additionalContext`,
+/// and the `SessionStart` mode answers silently.
+#[test]
+fn test_rules_brief_codex_hook_briefs_a_shell_read() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo.path().join("services/auth")).unwrap();
+    std::fs::write(repo.path().join("services/auth/token.ts"), "jwt.sign()\n").unwrap();
+    let read = serde_json::json!({
+        "session_id": "s1",
+        "turn_id": "t1",
+        "cwd": repo.path(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cat services/auth/token.ts"},
+        "tool_response": "jwt.sign()\n",
+    })
+    .to_string();
+    let brief = |input: String| {
+        actual_in(
+            repo.path(),
+            config_dir.path(),
+            &["rules", "brief", "--codex-hook"],
+        )
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone()
+    };
+
+    let (mut keys, value) = codex_reply_keys(&brief(read.clone()));
+    keys.sort();
+    assert_eq!(keys, ["hookSpecificOutput", "systemMessage"]);
+    assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("R-A-001"));
+    let notice = value["systemMessage"].as_str().unwrap();
+    assert!(
+        notice.starts_with("Actual AI: briefed 1 ADR \u{b7} ")
+            && notice.ends_with(" \u{b7} services/auth/token.ts"),
+        "{notice}"
+    );
+    assert!(brief(read.clone()).is_empty(), "briefed once per session");
+
+    // A fresh session with --no-brief-notice gets the brief alone.
+    let quiet = read.replace("\"s1\"", "\"s2\"");
+    let out = actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["rules", "brief", "--codex-hook", "--no-brief-notice"],
+    )
+    .write_stdin(quiet)
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    assert_eq!(codex_reply_keys(&out).0, ["hookSpecificOutput"]);
+
+    let start = serde_json::json!({"session_id": "s1", "cwd": repo.path(), "hook_event_name": "SessionStart", "source": "compact"}).to_string();
+    actual_in(
+        repo.path(),
+        config_dir.path(),
+        &["rules", "brief", "--codex-session-start"],
+    )
+    .write_stdin(start)
+    .assert()
+    .success()
+    .stdout(predicate::str::is_empty());
+}
+
+/// The session summary reaches Codex as a `systemMessage`, once per change.
+#[test]
+fn test_session_summary_codex_hook_reports_as_a_system_message() {
+    let repo = governed_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    brief_a_read(repo.path(), config_dir.path());
+    let stop = stop_envelope(repo.path());
+    let summary = || {
+        actual_in(
+            repo.path(),
+            config_dir.path(),
+            &["session", "summary", "--codex-hook"],
+        )
+        .write_stdin(stop.clone())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone()
+    };
+
+    let (keys, value) = codex_reply_keys(&summary());
+    assert_eq!(keys, ["systemMessage"]);
+    assert!(value["systemMessage"].as_str().unwrap().contains("ADR"));
+    assert!(summary().is_empty(), "unchanged, so not shown again");
+}
+
+/// The actual-cli plugin's Codex hooks probe for this mode by grepping
+/// `--help` for the literal below, as they probe `adr-header-v2`. It is a
+/// contract with that repository, so it is pinned for each command the Codex
+/// hooks call.
+#[test]
+fn test_codex_hook_capability_marker_is_in_each_commands_help() {
+    let commands: [&[&str]; 3] = [
+        &["plan-check", "--help"],
+        &["impl-check", "--help"],
+        &["rules", "brief", "--help"],
+    ];
+    for args in commands {
+        cmd()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Capability marker: codex-hook"));
+    }
+    cmd()
+        .args(["session", "summary", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--codex-hook"));
+}
+
+/// Each envelope Codex was captured sending (`tests/fixtures/codex/`) goes
+/// through the `--codex-hook` command that handles it, so a change to the
+/// shape the CLI parses, or to the keys it replies with, fails here and not
+/// in a user's Codex session. Codex rejects a reply with a key it doesn't
+/// know, so each reply is held to the keys its schema allows.
+#[cfg(unix)]
+#[test]
+fn test_captured_codex_envelopes_drive_the_codex_hooks() {
+    const CODEX_REPLY_KEYS: [&str; 5] = [
+        "decision",
+        "reason",
+        "systemMessage",
+        "hookSpecificOutput",
+        "continue",
+    ];
+
+    let fixture = GovernedPlanCheck::new("http://127.0.0.1:1");
+    judge_finds_r_a_001_violated(&fixture.fake_claude);
+    // The rule governs `src/`, so the captured plan, reads and edits land in it.
+    std::fs::write(
+        fixture
+            .repo
+            .path()
+            .join(".actual/rules/cross-cutting-token-signing-1c57.md"),
+        "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for token signing in `src/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: log the raw signing key.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(fixture.repo.path().join("src")).unwrap();
+    std::fs::write(
+        fixture.repo.path().join("src/app.ts"),
+        "export function main(): number {\n  return 42;\n}\n",
+    )
+    .unwrap();
+
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
+    let envelope = |name: &str| {
+        std::fs::read_to_string(fixtures.join(name))
+            .unwrap()
+            .replace("__FIXTURE_DIR__", fixtures.to_str().unwrap())
+            .replace("__REPO_ROOT__", fixture.repo.path().to_str().unwrap())
+    };
+    let judge = [
+        "--no-rank",
+        "--runner",
+        "claude-cli",
+        "--codex-hook",
+        "--repo",
+        fixture.repo.path().to_str().unwrap(),
+    ];
+
+    // (envelope, command, whether it must answer)
+    let cases: [(&str, Vec<&str>, bool); 12] = [
+        (
+            "pretooluse-bash-cat.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "pretooluse-apply-patch.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "posttooluse-bash-cat.json",
+            vec!["rules", "brief", "--codex-hook"],
+            true,
+        ),
+        (
+            "posttooluse-bash-compound-read.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "posttooluse-apply-patch.json",
+            vec!["rules", "brief", "--codex-hook"],
+            false,
+        ),
+        (
+            "sessionstart-startup.json",
+            vec!["rules", "brief", "--codex-session-start"],
+            false,
+        ),
+        (
+            "userpromptsubmit-turn.json",
+            vec!["impl-check"].into_iter().chain(judge).collect(),
+            false,
+        ),
+        (
+            "stop-plan.json",
+            vec!["plan-check"].into_iter().chain(judge).collect(),
+            true,
+        ),
+        (
+            "stop-plan-revised.json",
+            vec!["plan-check"].into_iter().chain(judge).collect(),
+            false,
+        ),
+        (
+            "stop-default.json",
+            vec!["impl-check"].into_iter().chain(judge).collect(),
+            false,
+        ),
+        (
+            "stop-default.json",
+            vec!["session", "summary", "--codex-hook"],
+            false,
+        ),
+        (
+            "stop-plan.json",
+            vec!["session", "summary", "--codex-hook"],
+            false,
+        ),
+    ];
+    for (name, args, must_answer) in cases {
+        // A fresh config directory each time: the captured envelopes share a
+        // session id, and an earlier case's brief would silence a later one.
+        let config_dir = tempfile::tempdir().unwrap();
+        let output = actual_in(fixture.repo.path(), config_dir.path(), &args)
+            .env("CLAUDE_BINARY", &fixture.fake_claude)
+            .timeout(std::time::Duration::from_secs(60))
+            .write_stdin(envelope(name))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        if output.is_empty() {
+            assert!(!must_answer, "{name} through {args:?} printed nothing");
+            continue;
+        }
+        let (keys, _) = codex_reply_keys(&output);
+        for key in &keys {
+            assert!(
+                CODEX_REPLY_KEYS.contains(&key.as_str()),
+                "{name} through {args:?} replied with {key}: {keys:?}"
+            );
+        }
+    }
 }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::telemetry::{self, Reviewed};
 use super::{
     content_from_flags, interactive, json_text, missing_level, pick_repo, rule_spelling, runtime,
     save_status, session, Repo, RepoPick, Session,
@@ -625,9 +626,24 @@ struct UpdateOutcome {
 }
 
 pub(super) fn exec_update(args: &AdrUpdateArgs) -> Result<(), ActualError> {
-    let text = runtime()?.block_on(run_update(args))?;
-    print!("{text}");
-    Ok(())
+    let run = telemetry::Run::start();
+    let mut found = None;
+    let result = runtime().and_then(|rt| rt.block_on(run_update(args, &mut found)));
+    print_and_report(&run, "update", found.as_ref(), result)
+}
+
+/// Print what a review command returned, then report the run.
+fn print_and_report(
+    run: &telemetry::Run,
+    action: &str,
+    found: Option<&Reviewed>,
+    result: Result<String, ActualError>,
+) -> Result<(), ActualError> {
+    if let Ok(text) = &result {
+        print!("{text}");
+    }
+    telemetry::report_review(run, action, found, &result);
+    result.map(drop)
 }
 
 /// One `--policy` value for `update`: `LEVEL: statement`, with an optional
@@ -725,10 +741,15 @@ fn update_edit(args: &AdrUpdateArgs) -> Result<DecisionEdit, ActualError> {
     })
 }
 
-async fn run_update(args: &AdrUpdateArgs) -> Result<String, ActualError> {
+/// Run `update`, setting `found` once the decision is found.
+async fn run_update(
+    args: &AdrUpdateArgs,
+    found: &mut Option<Reviewed>,
+) -> Result<String, ActualError> {
     let edit = update_edit(args)?;
     let session = session(&args.api).await?;
     let listed = find(&session, &args.id).await?;
+    *found = Some(Reviewed::of(&listed.decision));
     let write = workflow::edit_write(&listed, &edit, &session.org_id)
         .map_err(ActualError::AdrNotAllowed)?;
     session.client.write_decision(&write).await?;
@@ -771,9 +792,10 @@ async fn run_update(args: &AdrUpdateArgs) -> Result<String, ActualError> {
 // ── lifecycle and reject ───────────────────────────────────────────────────
 
 pub(super) fn exec_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<(), ActualError> {
-    let text = runtime()?.block_on(run_lifecycle(args, action))?;
-    print!("{text}");
-    Ok(())
+    let run = telemetry::Run::start();
+    let mut found = None;
+    let result = runtime().and_then(|rt| rt.block_on(run_lifecycle(args, action, &mut found)));
+    print_and_report(&run, telemetry::command(action), found.as_ref(), result)
 }
 
 /// Send `action`'s change for the decision, once its state allows it.
@@ -792,9 +814,15 @@ async fn change(
     })
 }
 
-async fn run_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<String, ActualError> {
+/// Run lifecycle `action`, setting `found` once the decision is found.
+async fn run_lifecycle(
+    args: &AdrIdArgs,
+    action: LifecycleAction,
+    found: &mut Option<Reviewed>,
+) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
     let listed = find(&session, &args.id).await?;
+    *found = Some(Reviewed::of(&listed.decision));
     let result = change(&session, &listed, action).await?;
     if args.api.json {
         return Ok(format!("{}\n", json_text(&result)));
@@ -817,15 +845,21 @@ async fn run_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Result<Stri
 }
 
 pub(super) fn exec_reject(args: &AdrRejectArgs) -> Result<(), ActualError> {
-    let text = runtime()?.block_on(run_reject(args))?;
-    print!("{text}");
-    Ok(())
+    let run = telemetry::Run::start();
+    let mut found = None;
+    let result = runtime().and_then(|rt| rt.block_on(run_reject(args, &mut found)));
+    print_and_report(&run, "reject", found.as_ref(), result)
 }
 
-/// Reject a suggestion, then save the reason with it, as the web app does.
-async fn run_reject(args: &AdrRejectArgs) -> Result<String, ActualError> {
+/// Reject a suggestion, then save the reason with it, as the web app does,
+/// setting `found` once the decision is found.
+async fn run_reject(
+    args: &AdrRejectArgs,
+    found: &mut Option<Reviewed>,
+) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
     let listed = find(&session, &args.id).await?;
+    *found = Some(Reviewed::of(&listed.decision));
     let mut result = change(&session, &listed, LifecycleAction::Reject).await?;
     let feedback = workflow::rejection_feedback(&listed.decision, &session.org_id, &args.reason);
     result.reason_saved = Some(session.client.write_decision(&feedback).await.is_ok());
@@ -1880,11 +1914,11 @@ mod tests {
             .create();
         let mut args = update_args(&server);
         args.title = Some("New title".to_string());
-        let text = block(run_update(&args)).unwrap();
+        let text = block(run_update(&args, &mut None)).unwrap();
         assert!(text.contains(&format!("Updated {ADR}.")), "{text}");
         assert!(text.contains("New title"));
         args.api.json = true;
-        let json = block(run_update(&args)).unwrap();
+        let json = block(run_update(&args, &mut None)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["decision"]["title"], "New title");
         assert_eq!(value["update"], json!({"success": true, "adr_id": ADR}));
@@ -1919,7 +1953,7 @@ mod tests {
             .create();
         let mut args = update_args(&server);
         args.levels = vec![format!("{ADR}:rule-1=SHOULD")];
-        let text = block(run_update(&args)).unwrap();
+        let text = block(run_update(&args, &mut None)).unwrap();
         read.assert();
         assert!(text.contains(&format!("actual adr show {ADR}")), "{text}");
     }
@@ -1929,7 +1963,7 @@ mod tests {
         let mut args = update_args(&mockito::Server::new());
         args.policies = vec!["nope".to_string()];
         assert!(matches!(
-            block(run_update(&args)),
+            block(run_update(&args, &mut None)),
             Err(ActualError::AdrInvalid { .. })
         ));
 
@@ -1954,7 +1988,7 @@ mod tests {
             .create();
         let mut args = update_args(&server);
         args.title = Some("U".to_string());
-        let err = block(run_update(&args)).unwrap_err();
+        let err = block(run_update(&args, &mut None)).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.starts_with("An archived decision")),
             "{err:?}"
@@ -2020,10 +2054,10 @@ mod tests {
                 id: ADR.to_string(),
                 api: api(&server),
             };
-            let text = block(run_lifecycle(&args, action)).unwrap();
+            let text = block(run_lifecycle(&args, action, &mut None)).unwrap();
             assert!(text.contains(expected), "{text}");
             args.api.json = true;
-            let json = block(run_lifecycle(&args, action)).unwrap();
+            let json = block(run_lifecycle(&args, action, &mut None)).unwrap();
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&json).unwrap(),
                 json!({"success": true, "adr_id": ADR})
@@ -2061,7 +2095,7 @@ mod tests {
             id: "m2".to_string(),
             api: api(&server),
         };
-        let text = block(run_lifecycle(&args, LifecycleAction::Archive)).unwrap();
+        let text = block(run_lifecycle(&args, LifecycleAction::Archive, &mut None)).unwrap();
         assert_eq!(
             text,
             format!(
@@ -2092,7 +2126,7 @@ mod tests {
             id: ADR.to_string(),
             api: api(&server),
         };
-        let err = block(run_lifecycle(&args, LifecycleAction::Publish)).unwrap_err();
+        let err = block(run_lifecycle(&args, LifecycleAction::Publish, &mut None)).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.ends_with("this decision is active.")),
             "{err:?}"
@@ -2102,7 +2136,7 @@ mod tests {
             reason: "r".to_string(),
             api: api(&server),
         };
-        let err = block(run_reject(&reject)).unwrap_err();
+        let err = block(run_reject(&reject, &mut None)).unwrap_err();
         assert!(matches!(err, ActualError::AdrNotAllowed(_)), "{err:?}");
         write.assert();
     }
@@ -2147,7 +2181,7 @@ mod tests {
             reason: "We use MySQL.".to_string(),
             api: api(&server),
         };
-        let text = block(run_reject(&args)).unwrap();
+        let text = block(run_reject(&args, &mut None)).unwrap();
         assert_eq!(
             text,
             format!("{} Rejected {ADR}.\n", theme::success(&theme::SUCCESS))
@@ -2159,10 +2193,10 @@ mod tests {
             .with_status(404)
             .with_body(r#"{"error":"not_found","message":"ADR not found or not accessible"}"#)
             .create();
-        let text = block(run_reject(&args)).unwrap();
+        let text = block(run_reject(&args, &mut None)).unwrap();
         assert!(text.contains("reason wasn't saved"), "{text}");
         args.api.json = true;
-        let json = block(run_reject(&args)).unwrap();
+        let json = block(run_reject(&args, &mut None)).unwrap();
         assert!(json.contains("\"reason_saved\": false"), "{json}");
         reject.assert();
     }
@@ -2216,6 +2250,112 @@ mod tests {
             argv.extend(["--api-url", url.as_str()]);
             let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
             super::super::exec(&adr).unwrap_or_else(|e| panic!("{argv:?}: {e:?}"));
+        }
+    }
+
+    /// Each review command, end to end through `adr::exec`, sends one event
+    /// naming the command, the decision it found and how the run ended, and
+    /// nothing of the decision's content, the flags' text or the typed reason.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn review_commands_send_one_event_and_none_of_the_content() {
+        use super::super::telemetry::tests::{own, sending_to_a_file};
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        use clap::Parser;
+        use serde_json::Value;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let _telemetry = sending_to_a_file(tmp.path());
+        let decision = |id: &str, status: &str, group: &str, members: &[&str]| {
+            json!({
+                "id": id, "date": "", "status": status,
+                "title": "Zeta-title", "context": "Zeta-context",
+                "scope": {"root": "zeta-root", "paths": ["zeta/glob/**"]},
+                "policyRules": [{"id": "rule-1", "adrId": members[0], "level": "MUST",
+                                 "statement": "Zeta-policy"}],
+                "candidateGroupId": group, "memberAdrIds": members,
+                "primaryAdrId": members[0],
+            })
+        };
+        let body = json!({
+            "adrs": [
+                decision("a1", "accepted", "a1", &["a1"]),
+                decision("s1", "suggested", "s1", &["s1"]),
+                decision("g1", "suggested", "g1", &["m1", "m2"]),
+            ],
+            "suggestions": [],
+        });
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", READ)
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(body.to_string())
+            .create();
+        server
+            .mock("POST", Matcher::Regex("^/v1/gcp/product/adr-".to_string()))
+            .with_status(200)
+            .with_body(r#"{"success":true}"#)
+            .create();
+        let url = server.url();
+        let runs: [(Vec<&str>, Value); 5] = [
+            (
+                vec!["reject", "s1", "--reason", "Zeta-reason"],
+                json!(["reject", "s1", false, 0, "succeeded", 0]),
+            ),
+            (
+                vec!["publish", "a1"],
+                json!(["publish", "a1", false, 0, "refused", 3]),
+            ),
+            (
+                vec!["accept", "m2"],
+                json!(["accept", "g1", true, 2, "succeeded", 0]),
+            ),
+            (
+                vec![
+                    "update",
+                    "a1",
+                    "--title",
+                    "Zeta-flag-title",
+                    "--context",
+                    "Zeta-flag-context",
+                    "--policy",
+                    "MUST: Zeta-flag-policy",
+                    "--scope",
+                    "zeta/flag/**",
+                ],
+                json!(["update", "a1", false, 0, "succeeded", 0]),
+            ),
+            (
+                vec!["delete", "nope"],
+                json!(["delete", "", false, 0, "failed", 3]),
+            ),
+        ];
+        for (args, expected) in runs {
+            let mut argv = vec!["actual", "adr"];
+            argv.extend(args.iter().copied());
+            argv.extend(["--api-url", url.as_str()]);
+            let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
+            let _ = super::super::exec(&adr);
+            let records = take_captured();
+            assert_eq!(records.len(), 1, "{argv:?}");
+            assert_eq!(
+                records[0]["eventName"],
+                crate::telemetry::otlp::ADR_REVIEWED
+            );
+            let own = own(&records[0]);
+            let got = json!([
+                own["actual.adr.review.action"],
+                own["actual.adr.decision_id"],
+                own["actual.adr.review.grouped"],
+                own["actual.adr.review.group_rows"],
+                own["actual.adr.command.outcome"],
+                own["actual.adr.command.exit_code"],
+            ]);
+            assert_eq!(got, expected, "{argv:?}");
+            let sent = records[0].to_string().to_lowercase();
+            assert!(!sent.contains("zeta"), "{argv:?} sent content: {sent}");
         }
     }
 }
