@@ -20,7 +20,8 @@
 //! user's config directory, one file per checkout, written under the
 //! directory's lock as [`brief_ledger`] writes, so two hooks at once keep
 //! each other's entries. A record that can't be read starts empty, which
-//! only means existing rule files are met again.
+//! only means existing rule files are met again. One that can't be saved is
+//! reported, since rule files then stop following their decisions.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -37,7 +38,7 @@ use crate::adr::refresh::{
 };
 use crate::api::adr_types::Decision;
 use crate::api::{resolve_api_url, ActualApiClient};
-use crate::auth::refresh::needs_refresh;
+use crate::auth::refresh::{needs_refresh, turned_down};
 use crate::auth::store::{self, StoredCredentials};
 use crate::cli::args::{AdrApiOptions, AdrRefreshArgs};
 use crate::cli::commands::advisor::origin_remote_url;
@@ -91,7 +92,8 @@ pub(super) fn exec_refresh(args: &AdrRefreshArgs) -> Result<(), ActualError> {
 }
 
 /// Refresh `root`'s rule files and check its unnormalized list, keeping the
-/// record under `dir` when there is one.
+/// record under `dir`. With no `dir`, or a record that can't be saved there,
+/// the report says so among its problems.
 pub(super) fn refresh(
     root: &Path,
     args: &AdrRefreshArgs,
@@ -109,12 +111,15 @@ pub(super) fn refresh(
             Some(core::plan_from_docs(root, &scan, &on_disk, &record)),
         ),
         Ok(Some(creds)) if needs_refresh(&creds) => {
-            spawn_renewal();
-            problems.push(
+            let problem = if turned_down(&creds) {
+                "Actual AI turned down your sign-in's renewal, so the rule files were left as \
+                 they are. Sign in again with `actual login`."
+            } else {
+                spawn_renewal();
                 "Your sign-in is being renewed in the background, so the rule files were left \
                  as they are until the next refresh."
-                    .to_string(),
-            );
+            };
+            problems.push(problem.to_string());
             (Mode::SignedIn, None)
         }
         Ok(Some(creds)) => {
@@ -148,14 +153,13 @@ pub(super) fn refresh(
         Some(last) => *last != list,
         None => !scan.unnormalized.is_empty(),
     };
-    if let Some(dir) = dir {
-        save(dir, root, |record| {
-            record.apply_edits(&set, &drop);
-            record.unnormalized = Some(list);
-            record.connected_repo = repo;
-        });
-    }
+    let unrecorded = keep(dir, root, |record| {
+        record.apply_edits(&set, &drop);
+        record.unnormalized = Some(list);
+        record.connected_repo = repo;
+    });
     problems.extend(applied.problems.iter().cloned());
+    problems.extend(unrecorded);
     let message = message(
         mode,
         &applied,
@@ -211,10 +215,8 @@ pub(super) fn refresh_decision(
         .find(|doc| doc.source.adr_id == adr_id);
     let source = doc.filter(|doc| doc.governs).map(|doc| &doc.source);
     planner.decision(adr_id, source, Origin::DocsAdr, changed);
-    let (applied, set, drop) = core::apply(root, planner.plan);
-    if let Some(dir) = dir {
-        save(dir, root, |record| record.apply_edits(&set, &drop));
-    }
+    let (mut applied, set, drop) = core::apply(root, planner.plan);
+    applied.record_problem = keep(dir, root, |record| record.apply_edits(&set, &drop));
     applied
 }
 
@@ -231,20 +233,27 @@ fn read_cloud(
 ) -> Result<(Vec<Decision>, ConnectedRepo), String> {
     let kept = "so the rule files were left as they are";
     let rt = runtime().map_err(|e| format!("Couldn't read Actual AI ({e}), {kept}."))?;
-    rt.block_on(async {
-        match tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            read_decisions(root, creds, api, cached),
-        )
-        .await
-        {
-            Ok(Ok(read)) => Ok(read),
-            Ok(Err(reason)) => Err(format!("{reason}, {kept}.")),
-            Err(_) => Err(format!(
-                "Actual AI didn't answer within {timeout_ms} ms, {kept}."
-            )),
-        }
-    })
+    match within(rt, timeout_ms, read_decisions(root, creds, api, cached)) {
+        Some(Ok(read)) => Ok(read),
+        Some(Err(reason)) => Err(format!("{reason}, {kept}.")),
+        None => Err(format!(
+            "Actual AI didn't answer within {timeout_ms} ms, {kept}."
+        )),
+    }
+}
+
+/// `work`'s output when it finishes within `timeout_ms`. The runtime is let
+/// go without waiting for blocking work it started: a host name lookup can't
+/// be cancelled, and dropping the runtime would wait for it.
+fn within<T>(
+    rt: tokio::runtime::Runtime,
+    timeout_ms: u64,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    let timed = async { tokio::time::timeout(Duration::from_millis(timeout_ms), work).await };
+    let done = rt.block_on(timed);
+    rt.shutdown_background();
+    done.ok()
 }
 
 async fn read_decisions(
@@ -374,26 +383,39 @@ pub(super) fn load(dir: &Path, root: &Path) -> Record {
         .unwrap_or_default()
 }
 
-/// Apply `change` to the record for `root` under the directory's lock, best
-/// effort, writing only a record that changed. Whether the record now holds
-/// the change.
-fn save(dir: &Path, root: &Path, change: impl FnOnce(&mut Record)) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let Some(_lock) = brief_ledger::lock(dir, LOCK_WAIT) else {
-        return false;
+/// Save `change` to the record for `root` under `dir`, or say why it
+/// couldn't be saved and what that means.
+fn keep(dir: Option<&Path>, root: &Path, change: impl FnOnce(&mut Record)) -> Option<String> {
+    let reason = match dir {
+        Some(dir) => save(dir, root, change).err()?,
+        None => "there's no config directory to keep it in".to_string(),
     };
+    Some(format!(
+        "Couldn't save the refresh record ({reason}), so rule files won't follow later edits \
+         or deletions of decisions until it can be saved."
+    ))
+}
+
+/// Apply `change` to the record for `root` under the directory's lock,
+/// writing only a record that changed; or why the record doesn't hold it.
+fn save(dir: &Path, root: &Path, change: impl FnOnce(&mut Record)) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let _lock = brief_ledger::lock(dir, LOCK_WAIT)
+        .ok_or_else(|| format!("its lock in {} couldn't be taken", dir.display()))?;
     let before = load(dir, root);
     let mut record = before.clone();
     change(&mut record);
     record.format_version = RECORD_FORMAT;
     if record == before {
-        return true;
+        return Ok(());
     }
-    serde_json::to_string(&record).is_ok_and(|json| {
-        crate::config::paths::write_secure(&record_path(dir, root), json.as_bytes()).is_ok()
-    })
+    let path = record_path(dir, root);
+    serde_json::to_string(&record)
+        .map_err(|e| e.to_string())
+        .and_then(|json| {
+            crate::config::paths::write_secure(&path, json.as_bytes())
+                .map_err(|e| format!("{}: {e}", path.display()))
+        })
 }
 
 // ── output ─────────────────────────────────────────────────────────────────
@@ -460,7 +482,8 @@ fn message(mode: Mode, applied: &Applied, unnormalized: Option<&[Unnormalized]>)
 fn render(report: &Report) -> String {
     let mut out = match &report.message {
         Some(message) => format!("{message}\n"),
-        None if report.kept => String::new(),
+        // Nothing changed, but a problem says the files may not match.
+        None if report.kept || !report.problems.is_empty() => String::new(),
         None => format!(
             "{RULES_DIR}/ already matches {}.\n",
             match report.mode {
@@ -601,6 +624,65 @@ mod tests {
         let report = refresh(tmp.path(), &args(None), TODAY, None);
         assert_eq!(report.written.len(), 1);
         assert!(!report.kept);
+        assert_eq!(
+            report.problems,
+            [
+                "Couldn't save the refresh record (there's no config directory to keep it in), so \
+              rule files won't follow later edits or deletions of decisions until it can be \
+              saved."
+            ]
+        );
+        // Nothing to update this time, but the files may not match: no
+        // "already matches" line.
+        let again = refresh(tmp.path(), &args(None), TODAY, None);
+        assert!(again.message.is_none() && !again.kept, "{again:?}");
+        let text = render(&again);
+        assert!(
+            text.starts_with("warning: Couldn't save the refresh record"),
+            "{text}"
+        );
+        assert!(!text.contains("already matches"), "{text}");
+    }
+
+    #[test]
+    fn a_record_that_cant_be_saved_is_reported_each_way_it_fails() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = signed_out(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "docs/adr/a.md",
+            &decision_file(ID, "accepted", "Use Postgres", "MUST: Use Postgres."),
+        );
+        let unrecorded = |dir: &Path| {
+            let report = refresh(root, &args(None), TODAY, Some(dir));
+            let problem = report.problems.last().cloned().unwrap_or_default();
+            assert!(
+                problem.starts_with("Couldn't save the refresh record ("),
+                "{report:?}"
+            );
+            problem
+        };
+        // A file where the record directory should be.
+        let blocked = config.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        assert!(unrecorded(&blocked).contains("blocked: "));
+        // Another refresh holds the record's lock.
+        let records = config.path().join(DIR_NAME);
+        std::fs::create_dir_all(&records).unwrap();
+        let held = brief_ledger::lock(&records, LOCK_WAIT).unwrap();
+        assert!(unrecorded(&records).contains("couldn't be taken"));
+        drop(held);
+        // A directory where the record file should be.
+        let path = record_path(&records, root);
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(unrecorded(&records).contains(&path.display().to_string()));
+        std::fs::remove_dir(&path).unwrap();
+        // Saved: no problem, and the next refresh follows the file.
+        let saved = refresh(root, &args(None), TODAY, Some(&records));
+        assert!(saved.problems.is_empty(), "{saved:?}");
     }
 
     #[test]
@@ -610,9 +692,10 @@ mod tests {
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(record_path(dir.path(), root.path()), "not json").unwrap();
         assert_eq!(load(dir.path(), root.path()), Record::default());
-        assert!(save(dir.path(), root.path(), |record| {
+        save(dir.path(), root.path(), |record| {
             record.unnormalized = Some("x".to_string());
-        }));
+        })
+        .unwrap();
         let record = load(dir.path(), root.path());
         assert_eq!(record.format_version, RECORD_FORMAT);
         assert_eq!(record.unnormalized.as_deref(), Some("x"));
@@ -622,7 +705,7 @@ mod tests {
         // A file where the directory should be: nothing is written.
         let blocked = dir.path().join("blocked");
         std::fs::write(&blocked, "").unwrap();
-        assert!(!save(&blocked, root.path(), |_| {}));
+        assert!(save(&blocked, root.path(), |_| {}).is_err());
     }
 
     /// One active decision, one archived, for the connected repository.
@@ -713,10 +796,12 @@ mod tests {
             .match_query(Matcher::Any)
             .with_status(500)
             .create();
+        let records = config.path().join(DIR_NAME);
+        let dir = Some(records.as_path());
         let mut failing = args(Some(&server));
         failing.api.json = false;
         // `--repo` isn't a refresh flag, so the remote decides: there is none.
-        let report = refresh(root, &failing, TODAY, None);
+        let report = refresh(root, &failing, TODAY, dir);
         assert!(report.kept);
         assert!(
             report.problems[0].contains("No connected repository"),
@@ -733,7 +818,7 @@ mod tests {
             .with_status(200)
             .with_body(CONNECTED)
             .create();
-        let report = refresh(root, &args(Some(&server)), TODAY, None);
+        let report = refresh(root, &args(Some(&server)), TODAY, dir);
         assert!(
             report.kept && report.problems[0].contains("HTTP 500"),
             "{report:?}"
@@ -752,7 +837,7 @@ mod tests {
             .create();
         let mut hurried = args(Some(&slow));
         hurried.timeout_ms = 50;
-        let report = refresh(root, &hurried, TODAY, None);
+        let report = refresh(root, &hurried, TODAY, dir);
         assert!(report.kept);
         assert_eq!(
             report.problems,
@@ -766,7 +851,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let config = tempdir().unwrap();
         let _guards = signed_out(config.path());
-        store::save(&StoredCredentials {
+        let creds = StoredCredentials {
             access_token: "tok".to_string(),
             refresh_token: "refresh".to_string(),
             token_type: "Bearer".to_string(),
@@ -777,8 +862,8 @@ mod tests {
             email: None,
             subject: None,
             auth_url: None,
-        })
-        .unwrap();
+        };
+        store::save(&creds).unwrap();
         let tmp = tempdir().unwrap();
         let before = RENEWALS.with(std::cell::Cell::get);
         // No server: a read would fail with another problem.
@@ -790,6 +875,31 @@ mod tests {
             report.problems[0].starts_with("Your sign-in is being renewed in the background"),
             "{report:?}"
         );
+
+        // The auth server turned the renewal down: no refresh asks again.
+        crate::auth::refresh::note_turned_down(&creds);
+        for _ in 0..2 {
+            let report = refresh(tmp.path(), &args(None), TODAY, None);
+            assert!(report.kept);
+            assert_eq!(
+                report.problems[0],
+                "Actual AI turned down your sign-in's renewal, so the rule files were left as \
+                 they are. Sign in again with `actual login`."
+            );
+        }
+        assert_eq!(RENEWALS.with(std::cell::Cell::get), before + 1);
+    }
+
+    #[test]
+    fn the_time_box_lets_go_of_blocking_work_still_running() {
+        // A lookup that outlasts the box: blocking work the runtime can't cancel.
+        let stall = || tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(3)));
+        let started = std::time::Instant::now();
+        let done = within(runtime().unwrap(), 50, async { stall().await });
+        assert!(done.is_none());
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert_eq!(within(runtime().unwrap(), 50, async { 7 }), Some(7));
     }
 
     #[test]
@@ -861,6 +971,16 @@ mod tests {
         );
         assert!(load(records.path(), root).rules.is_empty());
         assert_eq!(rule_files_by_id(root).len(), 0);
+
+        // With nowhere to keep the record, the rule file is written all the
+        // same and the record's problem comes back apart from the files'.
+        let applied = refresh_decision(root, "id-b", TODAY, None, true);
+        assert_eq!(applied.written.len(), 1, "{applied:?}");
+        assert!(applied.problems.is_empty(), "{applied:?}");
+        assert!(applied
+            .record_problem
+            .unwrap()
+            .starts_with("Couldn't save the refresh record"));
     }
 
     #[test]
@@ -905,7 +1025,9 @@ mod tests {
         let held = brief_ledger::lock(records.path(), LOCK_WAIT).unwrap();
         // Never called: `save` gives up before it reads the record.
         let change = |record: &mut Record| record.unnormalized = Some("x".to_string());
-        assert!(!save(records.path(), root.path(), change));
+        assert!(save(records.path(), root.path(), change)
+            .unwrap_err()
+            .contains("couldn't be taken"));
         drop(held);
         assert_eq!(load(records.path(), root.path()), Record::default());
     }
