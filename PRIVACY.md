@@ -347,23 +347,26 @@ The `actual adr` commands send one event per run:
   how many decision files it checked, how many failed the save rules, how many
   likely duplicates it listed, its outcome and exit code, whether standard
   input was a terminal, and how long it took.
-- `actual.adr.reviewed` from each run of `accept`, `reject`, `publish`,
-  `unpublish`, `delete`, `restore` and `update`: the command, the decision it
-  acted on, whether that decision is AI-grouped and how many rows its group
-  action covers, then the same outcome, exit code, terminal flag and duration.
-  These commands need a sign-in, so a run while signed out stops before it
-  reads a decision and sends the outcome `not_signed_in` with no decision.
-- `actual.adr.created` from each run of `adr new` and `adr create`: where the
-  decision went (`local` files for `new`, Actual AI for `create`), whether it
-  came from flags or from `create --file`, the status it was written or saved
-  with, how many policies it has, whether a `create --file` save left its
-  scope or publish step unfinished, and the id `create` saved it under, then
-  the same outcome, exit code, terminal flag and duration. `adr new` has no id
-  to send.
+- `actual.adr.reviewed` from each signed-in run of `accept`, `reject`,
+  `publish`, `unpublish`, `delete`, `restore` and `update`: the command, the
+  decision it acted on, whether that decision is AI-grouped and how many rows
+  its group action covers, then the same outcome, exit code, terminal flag and
+  duration. Signed out, `accept`, `reject` and `restore` stop before they read
+  a decision and send the outcome `not_signed_in` with no decision, while
+  `publish`, `unpublish`, `delete` and `update` work on the files under
+  `docs/adr/` and send no event.
+- `actual.adr.created` from each run of `adr create` (and its alias
+  `adr new`): where the decision went (`local` files under `docs/adr/` signed
+  out, Actual AI signed in), whether it came from flags or from
+  `create --file`, the status it was written or saved with, how many policies
+  it has, whether a signed-in save left its scope or publish step unfinished,
+  and the id a signed-in run saved it under, then the same outcome, exit code,
+  terminal flag and duration. A signed-out run has no id to send. A flag the
+  pathway can't take is refused before the run starts, and sends no event.
 
 None of these events carries a decision's title, context, policy text or
-scope globs, a file path, or the text of `reject --reason`. `adr list` and
-`adr show` send none of them.
+scope globs, a file path, or the text of `reject --reason`. `adr list`,
+`adr show` and `adr refresh` send none of them.
 
 Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
@@ -481,15 +484,15 @@ has only the classes its fields carry below:
 | `actual.adr.check.failed_files` | How many of them failed the save rules | anonymous |
 | `actual.adr.check.duplicates` | How many likely duplicates it listed, between two files or between a file and a decision in Actual AI | anonymous |
 | `actual.adr.review.action` | The review command that ran: `accept`, `reject`, `publish`, `unpublish`, `delete`, `restore` or `update` | anonymous |
-| `actual.adr.decision_id` | The id of the decision the command acted on or `adr create` saved, the one `actual adr list` prints, empty when the run stopped before it found or saved one, and always empty from `adr new`. Sent only in a request that carries your sign-in's token, and left out of every request without it | first-party identity-linked |
+| `actual.adr.decision_id` | The id of the decision the command acted on or a signed-in `adr create` saved, the one `actual adr list` prints, empty when the run stopped before it found or saved one, and always empty from a signed-out `adr create`. Sent only in a request that carries your sign-in's token, and left out of every request without it | first-party identity-linked |
 | `actual.adr.review.grouped` | Whether the decision is AI-grouped, so the change went through its group's route | anonymous |
 | `actual.adr.review.group_rows` | For an AI-grouped decision, how many rows its group action covers, and `0` otherwise | anonymous |
-| `actual.adr.create.target` | Where the decision went: `local` for `adr new`, which writes files in the repository, or `cloud` for `adr create`, which saves it to Actual AI | anonymous |
+| `actual.adr.create.target` | Where the decision went: `local` for `adr create` (or `adr new`) signed out, which writes its file under `docs/adr/`, or `cloud` signed in, which saves it to Actual AI | anonymous |
 | `actual.adr.create.source` | `file` for `adr create --file`, `flags` otherwise | anonymous |
-| `actual.adr.create.status` | `accepted` or `draft`: the status the decision was written or saved with, or the one the run asked for when it stopped first. A `create --file` that can't set the scope or publish is saved as a draft | anonymous |
+| `actual.adr.create.status` | `accepted` or `draft`: the status the decision was written or saved with, or the one the run asked for when it stopped first. A signed-in `create` that can't set the scope or publish is saved as a draft | anonymous |
 | `actual.adr.create.policies` | How many policies the decision has, `0` when the run stopped before it read them | anonymous |
-| `actual.adr.create.partial` | Whether `create --file` saved the decision but couldn't set its scope or publish it. Always `false` for `adr new` and `create` from flags | anonymous |
-| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error. For `adr new` and `adr create`: `succeeded`, `invalid` when the decision fails the save rules, `duplicate` when `create` finds it likely already exists, `not_signed_in`, or `failed` for any other error | anonymous |
+| `actual.adr.create.partial` | Whether a signed-in `create` saved the decision but couldn't set its scope or publish it. Always `false` signed out | anonymous |
+| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error. For `adr create` (and `adr new`): `succeeded`, `invalid` when the decision fails the save rules, `duplicate` when a signed-in `create` finds it likely already exists, `not_signed_in`, or `failed` for any other error | anonymous |
 | `actual.adr.command.exit_code` | The exit code the run ended with, `0` on success | anonymous |
 | `actual.adr.command.stdin_is_terminal` | Whether standard input was a terminal, which tells a person at the keyboard from a coding agent, script or CI job | anonymous |
 | `actual.adr.command.duration_ms` | How long the run took, in milliseconds | anonymous |
@@ -752,7 +755,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, and ADR, check and session-end events from release builds unless you set another OTLP endpoint | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, ADR, check and session-end events from release builds unless you set another OTLP endpoint, and the decision requests the signed-in `actual adr` commands send, including the read of the connected repository's decisions that `actual adr refresh` makes each time the plugin's hooks run it | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |

@@ -199,7 +199,6 @@ pub fn applies_to(command: &Command) -> bool {
             SessionAction::Summary(args) => !(args.claude_hook || args.codex_hook || args.json),
         },
         Command::Adr(adr) => match &adr.action {
-            AdrAction::New(args) => !args.json,
             AdrAction::Check(args) => !args.api.json,
             AdrAction::List(args) => !args.api.json,
             AdrAction::Show(args) => !args.api.json,
@@ -211,6 +210,8 @@ pub fn applies_to(command: &Command) -> bool {
             | AdrAction::Restore(args)
             | AdrAction::Accept(args) => !args.api.json,
             AdrAction::Reject(args) => !args.api.json,
+            // The plugin's hooks run it, so it never adds a notice.
+            AdrAction::Refresh(_) => false,
         },
         Command::MintToken(_)
         | Command::Version(_)

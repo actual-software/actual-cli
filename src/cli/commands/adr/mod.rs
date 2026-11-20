@@ -1,11 +1,17 @@
 //! `actual adr`: write and check ADRs in this repository, and manage the
 //! organization's decisions in Actual AI.
 //!
-//! `new` and `check` work on local files and need no sign-in; the rest call
-//! the decision routes with the signed-in session's token.
+//! Each command that creates, reads, updates or deletes a decision has two
+//! pathways. Signed out it works on the files under `docs/adr/`
+//! ([`signed_out`], with `create` in [`local`]), and each change brings the
+//! decision's rule file in step at once ([`refresh`]). Signed in it calls the
+//! decision routes with the session's token ([`cloud`]). `check` and
+//! `refresh` read the files either way.
 
 mod cloud;
 mod local;
+mod refresh;
+mod signed_out;
 mod telemetry;
 
 use std::io::IsTerminal;
@@ -14,6 +20,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::adr::context_file::{ContextFile, Policy};
+use crate::adr::rule_body::rule_spelling;
 use crate::api::adr_types::{LifecycleAction, SaveStatus};
 use crate::api::{resolve_api_url, ActualApiClient};
 use crate::auth::refresh::ensure_fresh;
@@ -28,11 +35,25 @@ use crate::rules::types::RuleLevel;
 
 pub fn exec(args: &AdrArgs) -> Result<(), ActualError> {
     match &args.action {
-        AdrAction::New(a) => local::exec_new(a),
         AdrAction::Check(a) => local::exec_check(a),
+        AdrAction::Refresh(a) => refresh::exec_refresh(a),
+        action if signed_in() => exec_signed_in(action),
+        action => signed_out::exec(action),
+    }
+}
+
+/// Whether a sign-in is stored. A credentials file that can't be read
+/// counts, so the command takes Actual AI's pathway and says what's wrong
+/// with it.
+fn signed_in() -> bool {
+    !matches!(store::load(), Ok(None))
+}
+
+fn exec_signed_in(action: &AdrAction) -> Result<(), ActualError> {
+    match action {
+        AdrAction::Create(a) => cloud::exec_create(a),
         AdrAction::List(a) => cloud::exec_list(a),
         AdrAction::Show(a) => cloud::exec_show(a),
-        AdrAction::Create(a) => cloud::exec_create(a),
         AdrAction::Update(a) => cloud::exec_update(a),
         AdrAction::Publish(a) => cloud::exec_lifecycle(a, LifecycleAction::Publish),
         AdrAction::Unpublish(a) => cloud::exec_lifecycle(a, LifecycleAction::Unpublish),
@@ -40,6 +61,8 @@ pub fn exec(args: &AdrArgs) -> Result<(), ActualError> {
         AdrAction::Restore(a) => cloud::exec_lifecycle(a, LifecycleAction::Restore),
         AdrAction::Accept(a) => cloud::exec_lifecycle(a, LifecycleAction::Accept),
         AdrAction::Reject(a) => cloud::exec_reject(a),
+        AdrAction::Check(a) => local::exec_check(a),
+        AdrAction::Refresh(a) => refresh::exec_refresh(a),
     }
 }
 
@@ -49,9 +72,10 @@ fn interactive() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// The status a save uses: the flag, else accepted at a terminal and draft
-/// with no person at one, so an agent run never publishes a governing
-/// decision on its own.
+/// The status a signed-in save uses: the flag, else accepted at a terminal
+/// and draft with no person at one, so an agent run never publishes a
+/// governing decision in Actual AI on its own. A signed-out create writes an
+/// accepted file unless told otherwise.
 fn save_status(flag: Option<SaveStatus>, interactive: bool) -> SaveStatus {
     flag.unwrap_or(if interactive {
         SaveStatus::Accepted
@@ -159,17 +183,6 @@ async fn pick_repo(
             many.len()
         )),
     })
-}
-
-/// A level as rule files spell it: `MUST NOT`, not `MUST_NOT`.
-fn rule_spelling(level: RuleLevel) -> &'static str {
-    match level {
-        RuleLevel::Must => "MUST",
-        RuleLevel::MustNot => "MUST NOT",
-        RuleLevel::Should => "SHOULD",
-        RuleLevel::ShouldNot => "SHOULD NOT",
-        RuleLevel::May => "MAY",
-    }
 }
 
 /// The reason a `--policy` value has no level.
@@ -301,21 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn rule_spelling_uses_spaces() {
-        let spelled: Vec<_> = [
-            RuleLevel::Must,
-            RuleLevel::MustNot,
-            RuleLevel::Should,
-            RuleLevel::ShouldNot,
-            RuleLevel::May,
-        ]
-        .into_iter()
-        .map(rule_spelling)
-        .collect();
-        assert_eq!(spelled, ["MUST", "MUST NOT", "SHOULD", "SHOULD NOT", "MAY"]);
-    }
-
-    #[test]
     fn content_from_flags_reads_levels_and_reports_every_bad_policy() {
         let content = AdrContentArgs {
             context: vec!["Why.".to_string()],
@@ -348,18 +346,59 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exec_dispatches_every_action() {
+    fn parse(args: &[&str]) -> AdrArgs {
         use clap::Parser;
+        let mut argv = vec!["adr"];
+        argv.extend(args.iter().copied());
+        AdrArgs::parse_from(argv)
+    }
+
+    #[test]
+    fn exec_takes_the_signed_out_pathway_without_a_sign_in() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        // Signed out, so every cloud action stops before any request.
-        let cloud = [
-            vec!["list"],
+        assert!(!signed_in());
+        // Each stops, with the reason, before it reads or writes a file.
+        for args in [
+            vec!["restore", "x"],
+            vec!["accept", "x"],
+            vec!["reject", "x", "--reason", "r"],
+            vec!["list", "--repo", "web"],
+            vec!["list", "--state", "archived"],
+            vec!["create", "--file", "docs/adr/a.md"],
+        ] {
+            let err = exec(&parse(&args)).unwrap_err();
+            assert!(
+                matches!(err, ActualError::AdrPathway(_)),
+                "{args:?}: {err:?}"
+            );
+        }
+        // `new` is `create`, which writes under `--root`; with no policy the
+        // save check refuses it.
+        let root = tmp.path().to_str().unwrap();
+        assert!(matches!(
+            exec(&parse(&["new", "T", "--root", root])),
+            Err(ActualError::AdrInvalid { .. })
+        ));
+        exec(&parse(&["check", "--root", root, "--no-cloud"])).unwrap();
+        exec(&parse(&["refresh", "--root", root, "--json"])).unwrap();
+    }
+
+    #[test]
+    fn exec_takes_actual_ais_pathway_with_a_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        assert!(signed_in());
+        // A server with no routes, so every request fails after the dispatch.
+        let server = mockito::Server::new();
+        let _api = EnvGuard::set("ACTUAL_API_URL", &server.url());
+        for args in [
+            vec!["list", "--repo", REPO],
             vec!["show", "x"],
-            vec!["create", "--title", "T"],
+            vec!["create", "T", "--policy", "MUST: x", "--repo", REPO],
             vec!["update", "x", "--title", "T"],
             vec!["publish", "x"],
             vec!["unpublish", "x"],
@@ -367,30 +406,23 @@ mod tests {
             vec!["restore", "x"],
             vec!["accept", "x"],
             vec!["reject", "x", "--reason", "r"],
-        ];
-        for args in cloud {
-            let mut argv = vec!["actual", "adr"];
-            argv.extend(args.iter().copied());
-            let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
-            let err = exec(&adr).unwrap_err();
-            let expected = matches!(
-                &err,
-                ActualError::NotLoggedIn | ActualError::AdrInvalid { .. }
-            );
-            assert!(expected, "{argv:?}: {err:?}");
-        }
-        let root = tmp.path().to_str().unwrap();
-        for args in [
-            vec!["new", "T", "--root", root],
-            vec!["check", "--root", root, "--no-cloud"],
         ] {
-            let mut argv = vec!["actual", "adr"];
-            argv.extend(args.iter().copied());
-            let adr = crate::cli::args::AdrArgs::parse_from(&argv[1..]);
-            // `new` with no context or policy fails the save check; `check`
-            // of an empty repository passes.
-            let _ = exec(&adr);
+            let err = exec(&parse(&args)).unwrap_err();
+            assert!(
+                !matches!(err, ActualError::AdrPathway(_) | ActualError::NotLoggedIn),
+                "{args:?}: {err:?}"
+            );
         }
+        // `--deciders` has nowhere to go in Actual AI.
+        let err = exec(&parse(&[
+            "create",
+            "T",
+            "--policy",
+            "MUST: x",
+            "--deciders",
+            "Ana",
+        ]));
+        assert!(matches!(err, Err(ActualError::AdrPathway(_))), "{err:?}");
     }
 
     #[test]
