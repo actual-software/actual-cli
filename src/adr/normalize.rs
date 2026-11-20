@@ -210,6 +210,12 @@ static MARKER: LazyLock<Regex> = LazyLock::new(|| {
 static TITLE_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:adr[-\s]?)?\d+\s*[.:)\-]?\s+").expect("valid regex"));
 
+/// A title without the ADR number before it, as `normalize` writes it:
+/// `ADR-0003: Cache sessions` is `Cache sessions`.
+pub fn title_without_number(title: &str) -> String {
+    TITLE_NUMBER.replace(title, "").trim().to_string()
+}
+
 /// `line` without its list marker, and whether it had one.
 fn unmarked(line: &str) -> (&str, bool) {
     let line = js_trim(line);
@@ -399,7 +405,7 @@ pub fn read(text: &str) -> Read {
     // The preamble: the title, its fields, and any prose, which is context.
     let preamble_text = preamble.join("\n");
     if let Some(title) = h1_title(&preamble_text) {
-        found.title = Some(TITLE_NUMBER.replace(title, "").trim().to_string());
+        found.title = Some(title_without_number(title));
     }
     let mut context: Vec<String> = Vec::new();
     for line in &preamble {
