@@ -2954,11 +2954,17 @@ fn finish_verdicts(
 
 /// Bring the block episodes of `run`'s loop up to date with a judged round, and
 /// return the resolution records for those that ended. A rule still blocking
-/// in an episode ends `fixed` when `verdicts` passes it, `round_limit` when it
-/// is among `round_limited`, and `not_rechecked` when `verdicts` leaves it out.
+/// in an episode ends `fixed` when `verdicts` judges it followed, `round_limit`
+/// when it is among `round_limited`, and `not_rechecked` when `verdicts`
+/// leaves it out or judges it not applicable, which for a diff includes a rule
+/// whose answer turns on code the diff does not show.
 /// Each rule in `denied` then joins its ADR's episode, or opens one at this
 /// round. A rule from a file without a v2 header has no ADR, so opens nothing.
-/// With nowhere to send or log the records, no episode is kept.
+/// Every round that leaves an episode open notes the rules directory for the
+/// session's end, since that note is best-effort and one write can be lost.
+/// With nowhere to send or log the records, no episode is kept, and any an
+/// earlier round kept are dropped, so a block can't carry its rounds and
+/// denials across a stretch with telemetry off.
 ///
 /// The episodes are settled under the sessions lock on a fresh copy, not on
 /// `session`, which was loaded before the judge call: two overlapping rounds of
@@ -2979,16 +2985,15 @@ fn settle_episodes(
         return Vec::new();
     };
     if super::brief_telemetry::Destination::resolve_quietly().is_none() {
+        governance_session::update(session_id, run.rules_dir, |s| {
+            s.loop_state_mut(run.kind).episodes.clear();
+        });
+        session.loop_state_mut(run.kind).episodes.clear();
         return Vec::new();
     }
-    let passes: BTreeMap<String, bool> = verdicts
+    let judged: BTreeMap<String, Verdict> = verdicts
         .iter()
-        .map(|v| {
-            (
-                governance_session::key(&v.doc_slug, &v.rule_id),
-                v.verdict.passes(),
-            )
-        })
+        .map(|v| (governance_session::key(&v.doc_slug, &v.rule_id), v.verdict))
         .collect();
     let denied: Vec<(String, Vec<super::brief_telemetry::BriefedAdr>)> = denied
         .iter()
@@ -3001,19 +3006,18 @@ fn settle_episodes(
         .collect();
     let round = session.loop_state(run.kind).rounds;
     let action_id = crate::telemetry::otlp::current_action_id();
-    let mut opened = false;
     let mut ended = Vec::new();
     let stored = governance_session::update(session_id, run.rules_dir, |s| {
         let state = s.loop_state_mut(run.kind);
-        state.end_blocks(|key| match passes.get(key) {
-            Some(true) => Some(Resolution::Fixed),
-            Some(false) if round_limited.iter().any(|k| k == key) => Some(Resolution::RoundLimit),
-            Some(false) => None,
-            None => Some(Resolution::NotRechecked),
+        state.end_blocks(|key| match judged.get(key) {
+            Some(Verdict::Followed) => Some(Resolution::Fixed),
+            Some(Verdict::NotApplicable) | None => Some(Resolution::NotRechecked),
+            Some(_) if round_limited.iter().any(|k| k == key) => Some(Resolution::RoundLimit),
+            Some(_) => None,
         });
         for (key, adrs) in &denied {
             for adr in adrs {
-                opened |= state.open_block(round, &adr.key, &adr.adr_ids, key, action_id);
+                state.open_block(round, &adr.key, &adr.adr_ids, key, action_id);
             }
         }
         ended = state
@@ -3023,7 +3027,7 @@ fn settle_episodes(
             .collect();
     });
     session.loop_state_mut(run.kind).episodes = stored.loop_state(run.kind).episodes.clone();
-    if opened {
+    if !stored.loop_state(run.kind).episodes.is_empty() {
         super::session_end::record_rules_dir(session_id, run.rules_dir);
     }
     super::check_telemetry::resolved_records(run.session_id, run.agent_id, &ended)
@@ -5342,7 +5346,7 @@ pub(crate) mod tests {
         let other = governance_session::key("doc", "R-Z-001");
         let mut session = governance_session::load("s-race", rules.path());
 
-        governance_session::record_override_with(
+        governance_session::record_override_ending(
             "s-race",
             rules.path(),
             std::slice::from_ref(&other),
@@ -7451,28 +7455,13 @@ pub(crate) mod tests {
         gate: &str,
         mechanism: &str,
     ) -> Vec<Resolved> {
-        let value = |record: &serde_json::Value, key: &str| -> serde_json::Value {
-            record["attributes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|kv| kv["key"] == key)
-                .unwrap_or_else(|| panic!("no {key} in {record}"))["value"]
-                .clone()
-        };
         let text = |record: &serde_json::Value, key: &str| {
-            value(record, key)["stringValue"]
+            super::super::brief_telemetry::tests::attribute(record, key)
                 .as_str()
                 .unwrap()
                 .to_string()
         };
-        let int = |record: &serde_json::Value, key: &str| {
-            value(record, key)["intValue"]
-                .as_str()
-                .unwrap()
-                .parse::<i64>()
-                .unwrap()
-        };
+        let int = |record: &serde_json::Value, key: &str| text(record, key).parse::<i64>().unwrap();
         records
             .iter()
             .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
@@ -7586,9 +7575,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// A block the next decision doesn't judge ends `not_rechecked`, never
-    /// `fixed`: a judged round that leaves its rule out, a round where every
-    /// applicable rule was already settled, and a round where nothing applies.
+    /// A block the next decision doesn't judge followed ends `not_rechecked`,
+    /// never `fixed`: a judged round that leaves its rule out, one that judges
+    /// it not applicable, a round where every applicable rule was already
+    /// settled, and a round where nothing applies.
     /// The Stop gate names itself and its mechanism.
     #[cfg(feature = "telemetry")]
     #[test]
@@ -7604,8 +7594,15 @@ pub(crate) mod tests {
                 outcome
             };
             let left_out = || round_of(vec![rule_of("signing-1", "R-1", Verdict::Followed)]);
+            let not_applicable =
+                || round_of(vec![rule_of("rotation", "R-1", Verdict::NotApplicable)]);
 
-            for next in [left_out(), all_settled(), Outcome::NothingApplies] {
+            for next in [
+                left_out(),
+                not_applicable(),
+                all_settled(),
+                Outcome::NothingApplies,
+            ] {
                 let mut session = GovernanceSession::default();
                 finish_hook(
                     &run,
@@ -7759,6 +7756,44 @@ pub(crate) mod tests {
         });
     }
 
+    /// A round with telemetry off drops the open block it finds and sends
+    /// nothing, so once telemetry is back the block that opens again counts
+    /// its rounds and denials from there, not across the gap.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_round_with_telemetry_off_drops_the_open_blocks() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-off"), &rules_dir, 9);
+            let mut session = GovernanceSession::default();
+            let conflict = || round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]);
+            let pass = || round_of(vec![rule_of("rotation", "R-1", Verdict::Followed)]);
+
+            finish_hook(&run, &mut session, conflict());
+            assert!(!governance_session::load("s-off", &rules_dir)
+                .plan
+                .episodes
+                .is_empty());
+            {
+                let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+                finish_hook(&run, &mut session, conflict());
+                assert!(session.plan.episodes.is_empty());
+                assert!(governance_session::load("s-off", &rules_dir)
+                    .plan
+                    .episodes
+                    .is_empty());
+            }
+            assert_eq!(resolved("s-off", "planning", "plan_deny"), vec![]);
+
+            finish_hook(&run, &mut session, conflict());
+            finish_hook(&run, &mut session, pass());
+            assert_eq!(
+                resolved("s-off", "planning", "plan_deny"),
+                vec![ended("fixed", "adr-rotate", 2, 1)]
+            );
+        });
+    }
+
     /// Two overlapping rounds of one gate that both loaded the session while
     /// its block was open, and both judge it fixed, send its resolution once.
     /// A round that loaded the session before another round opened a block
@@ -7803,6 +7838,33 @@ pub(crate) mod tests {
                 .plan
                 .episodes
                 .is_empty());
+        });
+    }
+
+    /// A block a later round leaves open is still found at the session's end
+    /// when the note the opening round made of its rules directory was lost.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_round_that_leaves_a_block_open_notes_its_rules_dir() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-note"), &rules_dir, 9);
+            let mut session = GovernanceSession::default();
+            let conflict = || round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]);
+            finish_hook(&run, &mut session, conflict());
+            std::fs::remove_dir_all(home.join("session-telemetry")).unwrap();
+            finish_hook(&run, &mut session, conflict());
+            super::super::brief_telemetry::tests::take_captured();
+
+            super::super::session_end::report(
+                &serde_json::json!({"session_id": "s-note", "hook_event_name": "SessionEnd", "reason": "clear"})
+                    .to_string(),
+            );
+
+            assert_eq!(
+                resolved("s-note", "planning", "plan_deny"),
+                vec![ended("still_open", "adr-rotate", 2, 2)]
+            );
         });
     }
 
