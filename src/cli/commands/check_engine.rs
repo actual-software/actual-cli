@@ -2960,6 +2960,8 @@ fn finish_verdicts(
 /// whose answer turns on code the diff does not show.
 /// Each rule in `denied` then joins its ADR's episode, or opens one at this
 /// round. A rule from a file without a v2 header has no ADR, so opens nothing.
+/// Every round that leaves an episode open notes the rules directory for the
+/// session's end, since that note is best-effort and one write can be lost.
 /// With nowhere to send or log the records, no episode is kept, and any an
 /// earlier round kept are dropped, so a block can't carry its rounds and
 /// denials across a stretch with telemetry off.
@@ -3004,7 +3006,6 @@ fn settle_episodes(
         .collect();
     let round = session.loop_state(run.kind).rounds;
     let action_id = crate::telemetry::otlp::current_action_id();
-    let mut opened = false;
     let mut ended = Vec::new();
     let stored = governance_session::update(session_id, run.rules_dir, |s| {
         let state = s.loop_state_mut(run.kind);
@@ -3016,7 +3017,7 @@ fn settle_episodes(
         });
         for (key, adrs) in &denied {
             for adr in adrs {
-                opened |= state.open_block(round, &adr.key, &adr.adr_ids, key, action_id);
+                state.open_block(round, &adr.key, &adr.adr_ids, key, action_id);
             }
         }
         ended = state
@@ -3026,7 +3027,7 @@ fn settle_episodes(
             .collect();
     });
     session.loop_state_mut(run.kind).episodes = stored.loop_state(run.kind).episodes.clone();
-    if opened {
+    if !stored.loop_state(run.kind).episodes.is_empty() {
         super::session_end::record_rules_dir(session_id, run.rules_dir);
     }
     super::check_telemetry::resolved_records(run.session_id, run.agent_id, &ended)
@@ -7837,6 +7838,33 @@ pub(crate) mod tests {
                 .plan
                 .episodes
                 .is_empty());
+        });
+    }
+
+    /// A block a later round leaves open is still found at the session's end
+    /// when the note the opening round made of its rules directory was lost.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_round_that_leaves_a_block_open_notes_its_rules_dir() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-note"), &rules_dir, 9);
+            let mut session = GovernanceSession::default();
+            let conflict = || round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]);
+            finish_hook(&run, &mut session, conflict());
+            std::fs::remove_dir_all(home.join("session-telemetry")).unwrap();
+            finish_hook(&run, &mut session, conflict());
+            super::super::brief_telemetry::tests::take_captured();
+
+            super::super::session_end::report(
+                &serde_json::json!({"session_id": "s-note", "hook_event_name": "SessionEnd", "reason": "clear"})
+                    .to_string(),
+            );
+
+            assert_eq!(
+                resolved("s-note", "planning", "plan_deny"),
+                vec![ended("still_open", "adr-rotate", 2, 2)]
+            );
         });
     }
 
