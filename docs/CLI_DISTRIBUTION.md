@@ -151,7 +151,7 @@ npm install -g @actualai/actual
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| 1 | One release workflow and one build per tag (through v0.9.0, `npm-publish.yml` built its own binaries) | Every channel ships the same binaries. The npm and GitHub Release jobs don't depend on each other, so a failed npm publish still doesn't block a GitHub Release |
+| 1 | One release workflow and one build per tag (through v0.11.0, `npm-publish.yml` built its own binaries) | Every channel ships the same binaries. The npm and GitHub Release jobs don't depend on each other, so a failed npm publish still doesn't block a GitHub Release |
 | 2 | Pre-release tag detection via suffix pattern | Allows staging releases (`-beta`, `-rc`) without publishing to users |
 | 3 | Tarballs contain a single `actual` binary at root (no subdirectory) | Simplifies Homebrew formula and manual install — `tar xzf` drops the binary directly into the current directory |
 | 4 | Release assets mirrored to `actual-software/actual-releases` | Gave Homebrew, manual installs, and the npm scaffolding a public home while this repo was private. This repo is public now and its releases carry the same assets, but the formula and the README still download from `actual-releases` |
