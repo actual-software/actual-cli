@@ -357,17 +357,15 @@ fn classify_headed(
     entry.rule_file = rule.map(|rule| rule.path.clone());
     entry.group_id = rule.and_then(|rule| rule.meta.as_ref()?.candidate_group_id.clone());
 
+    // Actual AI's sync writes a doc only with its rule file, drafts included
+    // (it writes neither), so a doc without one is never the sync's.
     let Some(rule) = rule else {
-        if meta.is_active() {
-            entry.set_state(
-                State::MissingRule,
-                format!(
-                    "No rule file under {RULES_DIR}/ names this decision, so no check reads it."
-                ),
-            );
+        let reason = if meta.is_active() {
+            format!("No rule file under {RULES_DIR}/ names this decision, so no check reads it.")
         } else {
-            entry.set_state(State::Synced, "Not governing, and no rule file names it.");
-        }
+            format!("No rule file under {RULES_DIR}/ names this decision.")
+        };
+        entry.set_state(State::MissingRule, reason);
         entry.doc = parsed.ok();
         return entry;
     };
@@ -692,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn a_headed_doc_without_a_rule_file_misses_one_unless_inactive() {
+    fn a_headed_doc_without_a_rule_file_misses_one_whatever_its_status() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let body = context_file::render(&doc("Use Postgres", "Store data in Postgres."));
@@ -708,7 +706,16 @@ mod tests {
         let active = find(&entries, "active.md");
         assert_eq!(active.state, State::MissingRule);
         assert_eq!(active.action, Action::Reindex);
-        assert_eq!(find(&entries, "draft.md").state, State::Synced);
+        assert!(active.reason.ends_with("so no check reads it."));
+        // `adr new` and `adr normalize` write a draft's rule file too, and the
+        // sync writes neither file for a draft, so a draft without one lost it.
+        let draft = find(&entries, "draft.md");
+        assert_eq!(draft.state, State::MissingRule);
+        assert_eq!(draft.action, Action::Reindex);
+        assert_eq!(
+            draft.reason,
+            format!("No rule file under {RULES_DIR}/ names this decision.")
+        );
     }
 
     #[test]
