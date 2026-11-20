@@ -789,6 +789,7 @@ mod tests {
             &["adr", "update", "d1", "--title", "T", "--json"],
             &["adr", "publish", "d1", "--json"],
             &["adr", "reject", "d1", "--reason", "r", "--json"],
+            &["adr", "refresh"],
             &[
                 "mint-token",
                 "--service-account-id",

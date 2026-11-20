@@ -421,14 +421,12 @@ fn run_update(
             }
         }
     }
-    write_atomic(
-        &path,
-        &format!(
-            "{}\n{}",
-            render_header(&header),
-            context_file::render(&changed)
-        ),
-    )?;
+    let rewritten = format!(
+        "{}\n{}",
+        render_header(&header),
+        context_file::render(&changed)
+    );
+    write_atomic(&path, &rewritten)?;
     if path != file.path {
         std::fs::remove_file(&file.path)?;
     }
@@ -1023,5 +1021,114 @@ mod tests {
         );
         assert_eq!(status_line("# T\n\nStatus:  draft \n"), Some("draft"));
         assert_eq!(status_line("# T\n\n## Context\n\nStatus: x\n"), None);
+    }
+
+    #[test]
+    fn update_refuses_a_header_field_of_its_own_and_a_body_that_does_not_read() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let id = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let path = find(root, &id).unwrap().path;
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut title = update_args(&id);
+        title.title = Some("Use Postgres 16".to_string());
+
+        let owned = text.replacen("version: 2\n", "version: 2\nowner: platform\n", 1);
+        std::fs::write(&path, &owned).unwrap();
+        let err = run_update(&title, root, TODAY, None).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("has header fields outside")),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), owned);
+
+        // No Decision section: no policy reads.
+        let cut = text.split("## Decision").next().unwrap();
+        std::fs::write(&path, cut).unwrap();
+        let err = run_update(&title, root, TODAY, None).unwrap_err();
+        assert!(matches!(err, ActualError::AdrInvalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn update_keeps_a_file_name_of_its_own_and_one_another_file_holds() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let retitle = |id: &str, title: &str| {
+            let mut args = update_args(id);
+            args.title = Some(title.to_string());
+            run_update(&args, root, TODAY, None).unwrap()
+        };
+
+        let id = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let own = root.join(DECISION_DIR).join("0001-postgres.md");
+        std::fs::rename(find(root, &id).unwrap().path, &own).unwrap();
+        retitle(&id, "Use Postgres 16");
+        assert_eq!(find(root, &id).unwrap().path, own);
+
+        // The name for the new title is taken, so the file keeps its own.
+        let id = create(
+            root,
+            "Use Redis",
+            &["MUST: Use Redis."],
+            SaveStatus::Accepted,
+        );
+        let synced = find(root, &id).unwrap().path;
+        let taken = root
+            .join(DECISION_DIR)
+            .join(decision_doc_file_name(&id, "Use Redis 7"));
+        std::fs::write(&taken, "# Notes\n").unwrap();
+        retitle(&id, "Use Redis 7");
+        assert_eq!(find(root, &id).unwrap().path, synced);
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "# Notes\n");
+    }
+
+    #[test]
+    fn unpublish_and_delete_say_what_they_did_and_unpublish_needs_a_status_line() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let id = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let text = run_status(&id_args(&id, false), root, TODAY, None, false).unwrap();
+        assert!(
+            text.contains("Unpublished") && text.contains("is a draft, which no check reads."),
+            "{text}"
+        );
+        assert!(text.contains("Removed rule file"), "{text}");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&run_delete(&id_args(&id, true), root, TODAY, None).unwrap())
+                .unwrap();
+        assert_eq!(json["adr_id"], id.as_str());
+        assert!(json["status"].is_null(), "{json}");
+
+        // A header with no status reads as accepted, but has no line to change.
+        let id = create(
+            root,
+            "Use Redis",
+            &["MUST: Use Redis."],
+            SaveStatus::Accepted,
+        );
+        let path = find(root, &id).unwrap().path;
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replacen("    status: accepted\n", "", 1)).unwrap();
+        let err = run_status(&id_args(&id, false), root, TODAY, None, false).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("has no status line to change")),
+            "{err:?}"
+        );
     }
 }

@@ -33,12 +33,13 @@ use crate::cli::commands::advisor::{
 use crate::error::{sanitize_server_text, ActualError};
 use crate::rules::types::RuleLevel;
 
+/// Run an `adr` command on Actual AI's pathway with a sign-in, else on the
+/// files'. `check` and `refresh` read the files on both.
 pub fn exec(args: &AdrArgs) -> Result<(), ActualError> {
-    match &args.action {
-        AdrAction::Check(a) => local::exec_check(a),
-        AdrAction::Refresh(a) => refresh::exec_refresh(a),
-        action if signed_in() => exec_signed_in(action),
-        action => signed_out::exec(action),
+    if signed_in() {
+        exec_signed_in(&args.action)
+    } else {
+        signed_out::exec(&args.action)
     }
 }
 
@@ -423,6 +424,11 @@ mod tests {
             "Ana",
         ]));
         assert!(matches!(err, Err(ActualError::AdrPathway(_))), "{err:?}");
+        // `check` and `refresh` read the files signed in too.
+        let repo = tempdir().unwrap();
+        let root = repo.path().to_str().unwrap();
+        exec(&parse(&["check", "--root", root, "--no-cloud"])).unwrap();
+        exec(&parse(&["refresh", "--root", root, "--json"])).unwrap();
     }
 
     #[test]

@@ -1334,6 +1334,65 @@ mod tests {
     }
 
     #[test]
+    fn create_from_flags_with_a_scope_saves_a_draft_scopes_it_then_publishes() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let mut server = mockito::Server::new();
+        let create = server
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .match_body(Matcher::PartialJson(json!({"adr": {"status": "draft"}})))
+            .with_status(200)
+            .with_body(created_body())
+            .expect(1)
+            .create();
+        let read = server
+            .mock("GET", READ)
+            .match_query(repo_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(
+                ADR,
+                "Use Postgres for storage",
+                "draft",
+                &[("MUST", "Store relational data in Postgres.")],
+            )]))
+            .expect(1)
+            .create();
+        let scope = server
+            .mock("POST", "/v1/gcp/product/adr-group-update")
+            .match_body(Matcher::PartialJson(json!({
+                "group_id": ADR,
+                "content": {"scope": {"root": ".", "paths": ["src/**"]}}
+            })))
+            .with_status(200)
+            .with_body(format!(
+                r#"{{"success":true,"members":[{{"adr_id":"{ADR}"}}]}}"#
+            ))
+            .expect(1)
+            .create();
+        let publish = server
+            .mock("POST", "/v1/gcp/product/adr-publish")
+            .match_body(Matcher::Json(
+                json!({"organization_id": ORG, "adr_id": ADR}),
+            ))
+            .with_status(200)
+            .with_body(r#"{"success":true}"#)
+            .expect(1)
+            .create();
+        let args = AdrCreateArgs {
+            scope: vec!["src/**".to_string()],
+            allow_duplicate: true,
+            ..create_args(&server)
+        };
+        let text = block(run_create(&args, tmp.path(), true)).unwrap();
+        create.assert();
+        read.assert();
+        scope.assert();
+        publish.assert();
+        assert!(text.contains("as accepted"), "{text}");
+    }
+
+    #[test]
     fn create_at_a_terminal_saves_an_active_decision_and_prints_json() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
