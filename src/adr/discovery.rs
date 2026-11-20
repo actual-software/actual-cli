@@ -32,6 +32,7 @@ use serde::Serialize;
 
 use crate::adr::context_file::{self, h1_title, ContextFile};
 use crate::adr::files::{self, DecisionFile, DECISION_DIR, RULES_DIR};
+use crate::adr::normalize::title_without_number;
 use crate::adr::overlap::{find_overlaps, ExistingDecision};
 use crate::adr::provenance::digest;
 use crate::adr::save_check::check_document;
@@ -307,8 +308,9 @@ fn classify(
         .map(|parsed| parsed.doc);
     let title = parsed
         .as_ref()
-        .map(|doc| doc.title.clone())
-        .or_else(|| h1_title(&file.body).map(str::to_string));
+        .map(|doc| doc.title.as_str())
+        .or_else(|| h1_title(&file.body))
+        .map(title_without_number);
     // A doc that lost its header, paired with its rule file by the id in its
     // name, or by the source record of a rule file this CLI wrote from it.
     let rel = relative(root, &file.path);
@@ -438,7 +440,7 @@ fn legacy(root: &Path, file: &DecisionFile) -> Option<Entry> {
          sync replaces it; `actual adr normalize --legacy` converts it in place.",
     );
     entry.adr_id = id;
-    entry.title = h1_title(&file.body).map(str::to_string);
+    entry.title = h1_title(&file.body).map(title_without_number);
     entry.legacy_files = vec![rule_path];
     Some(entry)
 }
@@ -758,6 +760,37 @@ mod tests {
         let notes = find(&entries, "notes.md");
         assert_eq!(notes.state, State::Unmanaged);
         assert_eq!(notes.title, None);
+    }
+
+    #[test]
+    fn titles_lose_their_adr_number_for_display_and_duplicates() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        synced_pair(
+            root,
+            ID,
+            &doc(
+                "Choose Postgres as the storage engine for teams",
+                "Store relational data in Postgres.",
+            ),
+            "accepted",
+        );
+        // "adr" and "0012" would count as title words, and dilute the match
+        // below the threshold.
+        write(
+            &root.join(DECISION_DIR).join("0012-postgres.md"),
+            "# ADR-0012: Postgres storage\n\nWe keep one store.\n",
+        );
+        write(
+            &root.join(DECISION_DIR).join("0001-logging.md"),
+            "# 1. Structured logging\n\nLogs are JSON.\n",
+        );
+        let entries = discover(root);
+        let dup = find(&entries, "0012-postgres.md");
+        assert_eq!(dup.state, State::PossibleDuplicate, "{dup:#?}");
+        assert_eq!(dup.title.as_deref(), Some("Postgres storage"));
+        let logging = find(&entries, "0001-logging.md");
+        assert_eq!(logging.title.as_deref(), Some("Structured logging"));
     }
 
     #[test]
