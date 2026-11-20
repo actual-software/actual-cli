@@ -5,6 +5,51 @@ fn cmd() -> Command {
     assert_cmd::cargo::cargo_bin_cmd!("actual")
 }
 
+/// How the line a debug build writes first to stderr on every invocation
+/// starts (`write_debug_invocation_line` in `src/main.rs`).
+const DEBUG_INVOCATION_LINE: &str = "actual debug build: ";
+
+/// Stderr with nothing on it but, in a debug build, that first line.
+fn quiet_stderr() -> impl predicates::Predicate<[u8]> {
+    predicate::function(|stderr: &str| without_debug_invocation_line(stderr).is_empty()).from_utf8()
+}
+
+fn without_debug_invocation_line(stderr: &str) -> &str {
+    match stderr.strip_prefix(DEBUG_INVOCATION_LINE) {
+        Some(rest) if cfg!(debug_assertions) => {
+            rest.split_once('\n').map_or("", |(_, after)| after)
+        }
+        _ => stderr,
+    }
+}
+
+/// A debug build names the binary, its version, its path and the directory it
+/// was started in, as the first line on stderr, before parsing its arguments:
+/// `--version` reports it too, and stdout keeps only the version.
+#[cfg(debug_assertions)]
+#[test]
+fn test_debug_build_names_the_running_binary_first_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    let output = cmd()
+        .arg("--version")
+        .current_dir(&cwd)
+        .assert()
+        .success()
+        .stdout(format!("actual {}\n", env!("CARGO_PKG_VERSION")))
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).unwrap();
+    let expected = format!(
+        "{DEBUG_INVOCATION_LINE}name=actual version={} path={} cwd={}\n",
+        env!("CARGO_PKG_VERSION"),
+        std::path::Path::new(env!("CARGO_BIN_EXE_actual")).display(),
+        cwd.display(),
+    );
+    assert_eq!(stderr, expected);
+}
+
 #[test]
 fn test_help() {
     cmd()
@@ -258,7 +303,7 @@ fn test_update_check_command_makes_no_request_when_turned_off() {
         .assert()
         .success()
         .stdout("")
-        .stderr("");
+        .stderr(quiet_stderr());
     assert!(!dir.path().join("update-check.yaml").exists());
 }
 
@@ -3228,7 +3273,7 @@ fn test_session_end_delivers_once_with_sign_in_and_respects_opt_out() {
             .assert()
             .success()
             .stdout("")
-            .stderr("");
+            .stderr(quiet_stderr());
     };
     run("env-disabled", true);
     assert!(!config_dir.path().join("session-telemetry").exists());
@@ -3298,7 +3343,7 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
             .assert()
             .success()
             .stdout("")
-            .stderr("");
+            .stderr(quiet_stderr());
         };
     run();
     assert_eq!(std::fs::read_to_string(&state).unwrap(), pending);

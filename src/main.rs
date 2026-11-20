@@ -4,6 +4,10 @@ use actual_cli::{handle_result, run, update_check, Cli, Command};
 use clap::Parser;
 
 fn main() {
+    // First, before parsing, so `--help`, `--version` and a rejected
+    // invocation report it too.
+    #[cfg(debug_assertions)]
+    write_debug_invocation_line();
     let cli = Cli::parse();
     init_logging(&cli);
     let update_notice = update_check::should_run_after(&cli.command);
@@ -12,6 +16,35 @@ fn main() {
         update_check::after_command();
     }
     std::process::exit(exit_code);
+}
+
+/// Debug builds only: name which binary is running, its version, where it is
+/// and the directory it was started in, as the first line on stderr.
+///
+/// Several `actual` binaries are often on one machine (a development build
+/// and released ones), and a hook runs whichever `PATH` finds first. Release
+/// builds compile none of this. It goes to stderr, never stdout, which carries
+/// `--json` and `--claude-hook` output. A failed write is ignored, so a closed
+/// stderr cannot stop the command.
+#[cfg(debug_assertions)]
+fn write_debug_invocation_line() {
+    use std::io::Write;
+
+    fn shown(path: std::io::Result<PathBuf>) -> String {
+        path.map_or_else(
+            |err| format!("<unknown: {err}>"),
+            |p| p.display().to_string(),
+        )
+    }
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "actual debug build: name={} version={} path={} cwd={}",
+        env!("CARGO_BIN_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        shown(std::env::current_exe()),
+        shown(std::env::current_dir()),
+    );
 }
 
 /// Initialize the tracing subscriber.
