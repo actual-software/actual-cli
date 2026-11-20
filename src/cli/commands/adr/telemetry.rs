@@ -10,7 +10,8 @@
 //! review event is one decision. An AI-grouped decision acts on its rows
 //! through one group action, so the event says it was grouped and how many
 //! rows that action covers. A check event counts the files it checked. A
-//! create event is the one decision `new` wrote or `create` saved.
+//! create event is the one decision `create` wrote signed out or saved
+//! signed in.
 //!
 //! **Signed in or not, by the sender.** The records are spooled like every
 //! other OTLP record: under a sign-in they go with its token, and otherwise
@@ -102,12 +103,12 @@ pub(super) struct Creation {
     pub(super) policies: usize,
     /// A cloud save whose scope or publish step after it failed.
     pub(super) partial: bool,
-    /// The saved decision's id; `adr new` has none to send.
+    /// The saved decision's id; a signed-out run has none to send.
     pub(super) id: Option<String>,
 }
 
 impl Creation {
-    /// An `adr new` run, which writes files from flags.
+    /// A signed-out `adr create` run, which writes files from flags.
     pub(super) fn local() -> Self {
         Self {
             target: "local",
@@ -116,7 +117,7 @@ impl Creation {
         }
     }
 
-    /// An `adr create` run, from `--file` or from flags.
+    /// A signed-in `adr create` run, from `--file` or from flags.
     pub(super) fn cloud(from_file: bool) -> Self {
         Self {
             target: "cloud",
@@ -179,7 +180,7 @@ pub(super) fn report_review<T>(
     let outcome = match result {
         Ok(_) => "succeeded",
         Err(ActualError::AdrNotAllowed(_)) => "refused",
-        Err(ActualError::NotLoggedIn) => "not_signed_in",
+        Err(ActualError::NotLoggedIn | ActualError::AdrPathway(_)) => "not_signed_in",
         Err(_) => "failed",
     };
     let decision = reviewed.map_or_else(ReviewedDecision::default, |r| ReviewedDecision {

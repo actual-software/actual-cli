@@ -104,7 +104,7 @@ async fn run_list(args: &AdrListArgs, dir: &Path) -> Result<String, ActualError>
     })
 }
 
-fn render_list(page: &DecisionList, scope: &str, offset: u64) -> String {
+pub(super) fn render_list(page: &DecisionList, scope: &str, offset: u64) -> String {
     if page.decisions.is_empty() {
         return format!("No decisions in {scope}.\n");
     }
@@ -150,11 +150,12 @@ async fn run_show(args: &AdrShowArgs) -> Result<String, ActualError> {
     Ok(if args.api.json {
         format!("{}\n", json_text(&decision))
     } else {
-        render_decision(&decision)
+        render_decision(&decision, None)
     })
 }
 
-fn render_decision(decision: &Decision) -> String {
+/// A decision as `show` prints it, with the file it came from signed out.
+pub(super) fn render_decision(decision: &Decision, file: Option<&str>) -> String {
     let clean = |text: &str| sanitize_server_text(text);
     let mut out = format!("{}\n", theme::heading(clean(&decision.title)));
     let mut row = |label: &str, value: String| {
@@ -165,6 +166,9 @@ fn render_decision(decision: &Decision) -> String {
         "State:",
         format!("{} ({})", clean(&decision.state), clean(&decision.status)),
     );
+    if let Some(file) = file {
+        row("File:", clean(file));
+    }
     if decision.kind == "group" {
         row("Kind:", "AI-grouped".to_string());
     }
@@ -256,16 +260,18 @@ struct CreateOutcome {
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
+    if args.deciders.is_some() {
+        return Err(ActualError::AdrPathway(
+            "`--deciders` writes a decision file's Deciders line, and a decision in Actual AI \
+             has none. Signed in, `create` saves to Actual AI, so leave it out."
+                .to_string(),
+        ));
+    }
     let run = telemetry::Run::start();
     let mut creation = Creation::cloud(args.file.is_some());
-    let result = runtime().and_then(|rt| {
-        rt.block_on(run_create_noting(
-            args,
-            &resolve_cwd(),
-            interactive(),
-            &mut creation,
-        ))
-    });
+    let dir = args.root.clone().unwrap_or_else(resolve_cwd);
+    let result = runtime()
+        .and_then(|rt| rt.block_on(run_create_noting(args, &dir, interactive(), &mut creation)));
     telemetry::report_create(&run, &creation, &result);
     print!("{}", result?);
     Ok(())
@@ -282,7 +288,7 @@ struct Outgoing {
 /// saves it, but its create route takes no decision without a policy.
 fn outgoing(args: &AdrCreateArgs, dir: &Path) -> Result<Outgoing, ActualError> {
     let Some(path) = &args.file else {
-        let title = args.title.as_deref().unwrap_or_default();
+        let title = args.title().unwrap_or_default();
         let doc = content_from_flags(title, &args.content)?;
         if doc.policies.is_empty() {
             return Err(ActualError::AdrInvalid {
@@ -349,7 +355,7 @@ async fn run_create_noting(
         check_for_duplicates(&session, &repo, &outgoing).await?;
     }
     let outcome = match &outgoing.file {
-        None => create_from_flags(&session, &repo, &outgoing.doc, status).await?,
+        None => create_from_flags(&session, &repo, &outgoing.doc, status, &args.scope).await?,
         Some(file) => create_from_file(&session, &repo, &root, file, &outgoing.doc, status).await?,
     };
     creation.status.clone_from(&outcome.created.status);
@@ -363,19 +369,27 @@ async fn run_create_noting(
 }
 
 /// Save a decision built from flags in one request, as the web app's New
-/// Decision does: a draft, or an active decision that governs at once.
+/// Decision does: a draft, or an active decision that governs at once. With
+/// a scope it is saved as a draft, given the scope, then published when it
+/// was to be accepted, as a file's decision is.
 async fn create_from_flags(
     session: &Session,
     repo: &Repo,
     doc: &ContextFile,
     status: SaveStatus,
+    scope: &[String],
 ) -> Result<CreateOutcome, ActualError> {
+    let staged = if scope.is_empty() {
+        status
+    } else {
+        SaveStatus::Draft
+    };
     let adr = NewDecision {
         title: doc.title.clone(),
         context: (!doc.context.is_empty()).then(|| doc.context.join("\n")),
         policies: doc.policies.iter().map(|p| p.statement.clone()).collect(),
         policy_levels: doc.policies.iter().map(|p| p.level).collect(),
-        status: (status == SaveStatus::Draft).then_some("draft"),
+        status: (staged == SaveStatus::Draft).then_some("draft"),
     };
     let adr_id = session
         .client
@@ -385,18 +399,102 @@ async fn create_from_flags(
             adr,
         })
         .await?;
+    let finished = if scope.is_empty() {
+        Finished {
+            saved: status,
+            scope_problem: None,
+            publish_problem: None,
+        }
+    } else {
+        scope_and_publish(
+            session,
+            repo,
+            &adr_id,
+            scope,
+            status == SaveStatus::Accepted,
+        )
+        .await
+    };
     Ok(CreateOutcome {
         created: Created {
             adr_id,
-            status: status.as_str().to_string(),
+            status: finished.saved.as_str().to_string(),
             title: stored_title(doc),
             repo_unique_id: repo.id.clone(),
         },
         files: None,
-        scope_problem: None,
-        publish_problem: None,
+        scope_problem: finished.scope_problem,
+        publish_problem: finished.publish_problem,
         local_status_was: None,
     })
+}
+
+/// How the steps after a draft's save ended: the status the decision has
+/// now, and what failed with how to finish it.
+#[derive(Debug)]
+struct Finished {
+    saved: SaveStatus,
+    scope_problem: Option<String>,
+    publish_problem: Option<String>,
+}
+
+/// Set `paths` as the scope of the draft just saved as `adr_id`, then
+/// publish it when `publish` asks. A step that fails leaves a draft, and its
+/// problem says how to finish.
+async fn scope_and_publish(
+    session: &Session,
+    repo: &Repo,
+    adr_id: &str,
+    paths: &[String],
+    publish: bool,
+) -> Finished {
+    let id = sanitize_server_text(adr_id);
+    let scope_problem = if paths.is_empty() {
+        None
+    } else {
+        set_scope(session, repo, adr_id, paths)
+            .await
+            .err()
+            .map(|e| {
+                let flags: Vec<String> = paths
+                    .iter()
+                    .map(|path| format!("--scope '{path}'"))
+                    .collect();
+                let mut problem = format!(
+                    "The decision was saved, but its scope wasn't set ({e}). Run `actual adr \
+                     update {id} {}` to set it.",
+                    flags.join(" ")
+                );
+                if publish {
+                    let _ = write!(
+                        problem,
+                        " It stays a draft until then; `actual adr publish {id}` publishes it."
+                    );
+                }
+                problem
+            })
+    };
+    let publish_problem = if publish && scope_problem.is_none() {
+        let write = workflow::publish_write(adr_id, &session.org_id);
+        session.client.write_decision(&write).await.err().map(|e| {
+            format!(
+                "The decision was saved as a draft, but publishing it failed ({e}). Run \
+                 `actual adr publish {id}` to publish it."
+            )
+        })
+    } else {
+        None
+    };
+    let saved = if publish && scope_problem.is_none() && publish_problem.is_none() {
+        SaveStatus::Accepted
+    } else {
+        SaveStatus::Draft
+    };
+    Finished {
+        saved,
+        scope_problem,
+        publish_problem,
+    }
 }
 
 /// Save a decision file as the web app's Import does, which keeps the whole
@@ -420,54 +518,20 @@ async fn create_from_file(
             markdown: file.body.clone(),
         })
         .await?;
-    let id = sanitize_server_text(&adr_id);
-    let publish = status == SaveStatus::Accepted;
     let paths = file
         .meta
         .as_ref()
         .map(|meta| meta.paths.clone())
         .unwrap_or_default();
-    let scope_problem = if paths.is_empty() {
-        None
-    } else {
-        set_scope(session, repo, &adr_id, &paths)
-            .await
-            .err()
-            .map(|e| {
-                let flags: Vec<String> = paths
-                    .iter()
-                    .map(|path| format!("--scope '{path}'"))
-                    .collect();
-                let mut problem = format!(
-                "The decision was saved, but its scope wasn't set ({e}). Run `actual adr update \
-                 {id} {}` to set it.",
-                flags.join(" ")
-            );
-                if publish {
-                    let _ = write!(
-                        problem,
-                        " It stays a draft until then; `actual adr publish {id}` publishes it."
-                    );
-                }
-                problem
-            })
-    };
-    let publish_problem = if publish && scope_problem.is_none() {
-        let write = workflow::publish_write(&adr_id, &session.org_id);
-        session.client.write_decision(&write).await.err().map(|e| {
-            format!(
-                "The decision was saved as a draft, but publishing it failed ({e}). Run \
-                 `actual adr publish {id}` to publish it."
-            )
-        })
-    } else {
-        None
-    };
-    let saved = if publish && scope_problem.is_none() && publish_problem.is_none() {
-        SaveStatus::Accepted
-    } else {
-        SaveStatus::Draft
-    };
+    let finished = scope_and_publish(
+        session,
+        repo,
+        &adr_id,
+        &paths,
+        status == SaveStatus::Accepted,
+    )
+    .await;
+    let saved = finished.saved;
     let title = stored_title(doc);
     let files = files::rename_pair(root, file, &adr_id, &title, saved.as_str());
     let local_status_was = file
@@ -483,8 +547,8 @@ async fn create_from_file(
             repo_unique_id: repo.id.clone(),
         },
         files: Some(files),
-        scope_problem,
-        publish_problem,
+        scope_problem: finished.scope_problem,
+        publish_problem: finished.publish_problem,
         local_status_was,
     })
 }
@@ -728,7 +792,7 @@ fn parse_level_edit(text: &str) -> Result<LevelEdit, String> {
 }
 
 /// The change the flags describe.
-fn update_edit(args: &AdrUpdateArgs) -> Result<DecisionEdit, ActualError> {
+pub(super) fn update_edit(args: &AdrUpdateArgs) -> Result<DecisionEdit, ActualError> {
     let mut reasons = Vec::new();
     let policies: Vec<PolicyEdit> = args
         .policies
@@ -809,7 +873,7 @@ async fn run_update(
     let mut out = format!("{} Updated {id}.\n", theme::success(&theme::SUCCESS));
     if let Some(decision) = &outcome.decision {
         out.push('\n');
-        out.push_str(&render_decision(decision));
+        out.push_str(&render_decision(decision, None));
     }
     if let Some(problem) = &outcome.read_back_problem {
         let _ = writeln!(out, "{} {problem}", theme::warning("warning:"));
@@ -914,7 +978,7 @@ mod tests {
     use super::super::tests::{api, git_repo, sign_in, CONNECTED, ORG, REPO};
     use super::*;
     use crate::api::adr_types::{DecisionCategory, DecisionPolicy, DecisionScope};
-    use crate::cli::args::{AdrApiOptions, AdrContentArgs, AdrNewArgs};
+    use crate::cli::args::{AdrApiOptions, AdrContentArgs};
     use crate::testutil::ENV_MUTEX;
     use mockito::Matcher;
     use serde_json::json;
@@ -1157,7 +1221,7 @@ mod tests {
 
     #[test]
     fn render_decision_shows_every_field_it_has() {
-        let text = render_decision(&sample_decision());
+        let text = render_decision(&sample_decision(), None);
         assert!(!text.contains('\u{1b}'), "server text is cleaned: {text:?}");
         for expected in [
             "Kind:        AI-grouped",
@@ -1180,7 +1244,7 @@ mod tests {
         bare.base_adr_id = None;
         bare.context = Some("  ".to_string());
         bare.scope = None;
-        let text = render_decision(&bare);
+        let text = render_decision(&bare, None);
         assert!(
             !text.contains("Kind:") && !text.contains("Repository:") && !text.contains("Date:")
         );
@@ -1212,16 +1276,14 @@ mod tests {
 
     fn create_args(server: &mockito::Server) -> AdrCreateArgs {
         AdrCreateArgs {
-            file: None,
-            title: Some("Use Postgres for storage".to_string()),
+            title_flag: Some("Use Postgres for storage".to_string()),
             content: AdrContentArgs {
                 context: vec!["We need one relational store.".to_string()],
                 policies: vec!["MUST: Store relational data in Postgres.".to_string()],
             },
-            status: None,
             repo: Some(REPO.to_string()),
-            allow_duplicate: false,
             api: api(server),
+            ..AdrCreateArgs::default()
         }
     }
 
@@ -1422,19 +1484,18 @@ mod tests {
 
     /// Write a pair with `adr new` into `root`, as a person at a terminal would.
     fn new_pair(root: &Path, scope: &[&str]) -> PathBuf {
-        let args = AdrNewArgs {
-            title: "Use Postgres for storage".to_string(),
+        let args = AdrCreateArgs {
+            title: Some("Use Postgres for storage".to_string()),
             content: AdrContentArgs {
                 context: vec!["We need one relational store.".to_string()],
                 policies: vec!["MUST: Store relational data in Postgres.".to_string()],
             },
-            deciders: None,
             scope: scope.iter().map(|s| s.to_string()).collect(),
             status: Some(SaveStatus::Accepted),
             root: Some(root.to_path_buf()),
-            json: false,
+            ..AdrCreateArgs::default()
         };
-        super::super::local::write_new(&args, root, true, TODAY)
+        super::super::local::write_new(&args, root, TODAY, None)
             .unwrap()
             .decision_file
     }
@@ -1442,12 +1503,8 @@ mod tests {
     fn file_args(server: &mockito::Server, file: PathBuf) -> AdrCreateArgs {
         AdrCreateArgs {
             file: Some(file),
-            title: None,
-            content: AdrContentArgs::default(),
-            status: None,
-            repo: None,
-            allow_duplicate: false,
             api: api(server),
+            ..AdrCreateArgs::default()
         }
     }
 
@@ -2389,7 +2446,9 @@ mod tests {
 
     /// A `create` run sends one event naming the decision it saved and its
     /// status and policy count. A run refused as a likely duplicate says so
-    /// and names no decision. Neither sends the decision's text.
+    /// and names no decision. Neither sends the decision's text, and
+    /// `--deciders`, which a signed-in `create` refuses before the run, sends
+    /// nothing.
     #[cfg(feature = "telemetry")]
     #[test]
     fn create_sends_one_event_and_none_of_the_content() {
@@ -2428,6 +2487,11 @@ mod tests {
             )]))
             .create();
         assert!(exec_create(&args).is_err());
+        args.deciders = Some("Ana".to_string());
+        assert!(matches!(
+            exec_create(&args),
+            Err(ActualError::AdrPathway(_))
+        ));
 
         let records = take_captured();
         assert_eq!(records.len(), 2);
@@ -2498,6 +2562,7 @@ mod tests {
             repo: Some(REPO.to_string()),
             allow_duplicate: true,
             api: api.clone(),
+            ..AdrCreateArgs::default()
         };
 
         exec_create(&args(new_pair(&tmp.path().join("first"), &[]))).unwrap();

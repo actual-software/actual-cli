@@ -3332,10 +3332,22 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
         }));
 }
 
+/// `cmd()` with no stored sign-in: a config directory of its own.
+fn signed_out_cmd(home: &std::path::Path) -> Command {
+    let mut command = cmd();
+    command
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_CONFIG_DIR", home)
+        .env("ACTUAL_NO_TELEMETRY", "1")
+        .env("ACTUAL_NO_UPDATE_CHECK", "1");
+    command
+}
+
 #[test]
 fn test_adr_new_then_check_work_signed_out() {
+    let home = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    cmd()
+    signed_out_cmd(home.path())
         .args(["adr", "new", "Use Postgres for storage"])
         .args(["--context", "Services need one relational store."])
         .args([
@@ -3345,16 +3357,59 @@ fn test_adr_new_then_check_work_signed_out() {
         .arg("--root")
         .arg(dir.path())
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("It is accepted"));
     for sub in ["docs/adr", ".actual/rules"] {
         let written: Vec<_> = std::fs::read_dir(dir.path().join(sub)).unwrap().collect();
         assert_eq!(written.len(), 1, "{sub}");
     }
-    cmd()
+    signed_out_cmd(home.path())
         .args(["adr", "check", "--no-cloud", "--root"])
         .arg(dir.path())
         .assert()
         .success();
+}
+
+/// The refresh the plugin's hooks run: signed out it follows docs/adr, says
+/// nothing once the rule files match, and exits 0 even for a file it can't
+/// read as a decision.
+#[test]
+fn test_adr_refresh_follows_docs_adr_signed_out() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    signed_out_cmd(home.path())
+        .args(["adr", "create", "Use Postgres for storage"])
+        .args([
+            "--policy",
+            "MUST: Services store relational data in Postgres.",
+        ])
+        .arg("--root")
+        .arg(dir.path())
+        .assert()
+        .success();
+    std::fs::write(dir.path().join("docs/adr/0002-kafka.md"), "# Use Kafka\n").unwrap();
+    let refresh = || {
+        let output = signed_out_cmd(home.path())
+            .args(["adr", "refresh", "--json", "--root"])
+            .arg(dir.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let first = refresh();
+    assert_eq!(first["mode"], "signed-out");
+    assert_eq!(first["written"].as_array().unwrap().len(), 0, "{first}");
+    assert_eq!(first["unnormalized"][0]["path"], "docs/adr/0002-kafka.md");
+    assert!(first["message"]
+        .as_str()
+        .unwrap()
+        .contains("It has no ADR header."));
+    let second = refresh();
+    assert_eq!(second["unnormalized_changed"], false);
+    assert!(second["message"].is_null(), "{second}");
 }
 
 /// `rules report-use` with no question open refuses and records nothing,
