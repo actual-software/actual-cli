@@ -1085,8 +1085,12 @@ async fn push(args: &AdrNormalizeArgs, doc_path: &Path, status: &str, outcome: &
     let create = AdrCreateArgs {
         file: Some(doc_path.to_path_buf()),
         title: None,
+        title_flag: None,
         content: Default::default(),
+        deciders: None,
+        scope: Vec::new(),
         status: Some(status),
+        root: None,
         repo: args.repo.clone(),
         allow_duplicate: args.allow_duplicate,
         api: AdrApiOptions {
