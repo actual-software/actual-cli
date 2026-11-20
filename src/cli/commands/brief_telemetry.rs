@@ -214,7 +214,8 @@ pub(super) mod tests {
         })
     }
 
-    /// A record's string attribute, or a list attribute as a list.
+    /// A record's string or integer attribute (an OTLP integer is a JSON
+    /// string), or a list attribute as a list.
     pub(in crate::cli::commands) fn attribute(
         record: &serde_json::Value,
         key: &str,
@@ -233,7 +234,11 @@ pub(super) mod tests {
                 .iter()
                 .map(|v| v["stringValue"].clone())
                 .collect(),
-            None => value["stringValue"].clone(),
+            None => value
+                .get("stringValue")
+                .or_else(|| value.get("intValue"))
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
