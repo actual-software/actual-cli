@@ -1879,7 +1879,7 @@ pub enum OverrideReasonCodeArg {
 /// from an agent's default tool-execution environment (see that function's
 /// doc for exactly what the terminal and `CLAUDECODE` checks do and do not
 /// close) — the whole point of an override is that it is a human decision,
-/// made outside the agent's control, and [`crate::cli::commands::governance_session::record_override_with`]
+/// made outside the agent's control, and [`crate::cli::commands::governance_session::record_override_ending`]
 /// writes a durable, append-only audit-log entry for every one, so an
 /// override is visible, never silent.
 #[derive(Parser, Debug)]

@@ -358,7 +358,7 @@ Neither event carries a decision's title, context, policies or scope globs, a
 file path, or the text of `reject --reason`. `adr new`, `adr create`,
 `adr list` and `adr show` send neither.
 
-Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
+Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
@@ -503,7 +503,7 @@ has only the classes its fields carry below:
 | `actual.gate.resolution` | How the ADR's block ended: `fixed`, `overridden`, `not_rechecked`, `round_limit` or `still_open`, as described above | anonymous |
 | `actual.gate.rounds` | The gate's judged checks from the one that opened the block to the one that ended it, both included | anonymous |
 | `actual.gate.denials` | How many times the gate denied the ADR's rules while the block was open | anonymous |
-| `actual.gate.block_action_id` | The `actual.action.id` of the check that opened the block, which joins the event to that check's `breached` event and, when that check asked the end-of-turn question, to a report's `actual.report.check_action_id` | anonymous |
+| `actual.gate.block_action_id` | The `actual.action.id` of the check that opened the block, which joins the event to that check's other events (including its `breached` event, when the block was the ADR's first at that gate in the session) and, when that check asked the end-of-turn question, to a report's `actual.report.check_action_id` | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also

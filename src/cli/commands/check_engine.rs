@@ -2958,7 +2958,12 @@ fn finish_verdicts(
 /// is among `round_limited`, and `not_rechecked` when `verdicts` leaves it out.
 /// Each rule in `denied` then joins its ADR's episode, or opens one at this
 /// round. A rule from a file without a v2 header has no ADR, so opens nothing.
-/// With nowhere to send the records, no episode is kept.
+/// With nowhere to send or log the records, no episode is kept.
+///
+/// The episodes are settled under the sessions lock on a fresh copy, not on
+/// `session`, which was loaded before the judge call: two overlapping rounds of
+/// one gate would otherwise each end, and each report, the same episode.
+/// [`governance_session::store_loop`] leaves them as this stores them.
 #[cfg(feature = "telemetry")]
 fn settle_episodes(
     run: &HookRun<'_>,
@@ -2970,9 +2975,12 @@ fn settle_episodes(
 ) -> Vec<crate::telemetry::otlp::LogRecord> {
     use governance_session::Resolution;
 
-    let Some(destination) = super::brief_telemetry::Destination::resolve_quietly() else {
+    let Some(session_id) = run.session_id else {
         return Vec::new();
     };
+    if super::brief_telemetry::Destination::resolve_quietly().is_none() {
+        return Vec::new();
+    }
     let passes: BTreeMap<String, bool> = verdicts
         .iter()
         .map(|v| {
@@ -2982,27 +2990,40 @@ fn settle_episodes(
             )
         })
         .collect();
-    let state = session.loop_state_mut(run.kind);
-    state.end_blocks(|key| match passes.get(key) {
-        Some(true) => Some(Resolution::Fixed),
-        Some(false) if round_limited.iter().any(|k| k == key) => Some(Resolution::RoundLimit),
-        Some(false) => None,
-        None => Some(Resolution::NotRechecked),
-    });
+    let denied: Vec<(String, Vec<super::brief_telemetry::BriefedAdr>)> = denied
+        .iter()
+        .map(|rule| {
+            (
+                governance_session::key(&rule.doc_slug, &rule.rule_id),
+                super::brief_telemetry::group_headers(headers.get(&rule.doc_slug)),
+            )
+        })
+        .collect();
+    let round = session.loop_state(run.kind).rounds;
     let action_id = crate::telemetry::otlp::current_action_id();
     let mut opened = false;
-    for rule in denied {
-        let key = governance_session::key(&rule.doc_slug, &rule.rule_id);
-        for adr in super::brief_telemetry::group_headers(headers.get(&rule.doc_slug)) {
-            opened |= state.open_block(&adr.key, &adr.adr_ids, &key, action_id);
+    let mut ended = Vec::new();
+    let stored = governance_session::update(session_id, run.rules_dir, |s| {
+        let state = s.loop_state_mut(run.kind);
+        state.end_blocks(|key| match passes.get(key) {
+            Some(true) => Some(Resolution::Fixed),
+            Some(false) if round_limited.iter().any(|k| k == key) => Some(Resolution::RoundLimit),
+            Some(false) => None,
+            None => Some(Resolution::NotRechecked),
+        });
+        for (key, adrs) in &denied {
+            for adr in adrs {
+                opened |= state.open_block(round, &adr.key, &adr.adr_ids, key, action_id);
+            }
         }
-    }
-    let ended: Vec<_> = state
-        .take_ended()
-        .into_iter()
-        .map(|episode| (run.kind, episode))
-        .collect();
-    if let Some(session_id) = run.session_id.filter(|_| opened && destination.sends()) {
+        ended = state
+            .take_ended_at(round)
+            .into_iter()
+            .map(|episode| (run.kind, episode))
+            .collect();
+    });
+    session.loop_state_mut(run.kind).episodes = stored.loop_state(run.kind).episodes.clone();
+    if opened {
         super::session_end::record_rules_dir(session_id, run.rules_dir);
     }
     super::check_telemetry::resolved_records(run.session_id, run.agent_id, &ended)
@@ -7414,6 +7435,22 @@ pub(crate) mod tests {
     /// the attributes every one of them shares for a plan-check round.
     #[cfg(feature = "telemetry")]
     fn resolved(session_id: &str, gate: &str, mechanism: &str) -> Vec<Resolved> {
+        resolved_in(
+            &super::super::brief_telemetry::tests::take_captured(),
+            session_id,
+            gate,
+            mechanism,
+        )
+    }
+
+    /// [`resolved`] over `records`.
+    #[cfg(feature = "telemetry")]
+    fn resolved_in(
+        records: &[serde_json::Value],
+        session_id: &str,
+        gate: &str,
+        mechanism: &str,
+    ) -> Vec<Resolved> {
         let value = |record: &serde_json::Value, key: &str| -> serde_json::Value {
             record["attributes"]
                 .as_array()
@@ -7436,7 +7473,7 @@ pub(crate) mod tests {
                 .parse::<i64>()
                 .unwrap()
         };
-        super::super::brief_telemetry::tests::take_captured()
+        records
             .iter()
             .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
             .map(|record| {
@@ -7649,9 +7686,141 @@ pub(crate) mod tests {
                 &mut session,
                 round_of(vec![rule_of("signing-1", "R-1", Verdict::Followed)]),
             );
+            let records = super::super::brief_telemetry::tests::take_captured();
             assert_eq!(
-                resolved("s-roll", "planning", "plan_deny"),
+                resolved_in(&records, "s-roll", "planning", "plan_deny"),
                 vec![ended("not_rechecked", "grp-sign", 3, 3)]
+            );
+            // Both files' ids, as the `breached` record for the ADR carries.
+            let ids: Vec<serde_json::Value> = records
+                .iter()
+                .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
+                .map(|record| {
+                    super::super::brief_telemetry::tests::attribute(record, "actual.adr.ids")
+                })
+                .collect();
+            assert_eq!(ids, [serde_json::json!(["adr-sign-1", "adr-sign-2"])]);
+        });
+    }
+
+    /// A file of an ADR that first blocks in a later round of its episode
+    /// adds its id to the episode.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_file_that_joins_an_open_block_adds_its_adr_id() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-join"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("signing-1", "R-1", Verdict::Conflicting)]),
+            );
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![
+                    rule_of("signing-1", "R-1", Verdict::Conflicting),
+                    rule_of("signing-2", "R-1", Verdict::Conflicting),
+                ]),
+            );
+            assert_eq!(
+                governance_session::load("s-join", &rules_dir).plan.episodes["grp-sign"].adr_ids,
+                ["adr-sign-1", "adr-sign-2"]
+            );
+        });
+    }
+
+    /// Two overlapping rounds of one gate that both loaded the session while
+    /// its block was open, and both judge it fixed, send its resolution once.
+    /// A round that loaded the session before another round opened a block
+    /// ends that block when it stores rather than dropping it.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_overlapping_rounds_of_one_gate_end_a_block_once() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-race"), &rules_dir, 3);
+            let conflict = |slug: &str| round_of(vec![rule_of(slug, "R-1", Verdict::Conflicting)]);
+            let pass = || round_of(vec![rule_of("rotation", "R-1", Verdict::Followed)]);
+            finish_hook(
+                &run,
+                &mut GovernanceSession::default(),
+                conflict("rotation"),
+            );
+            assert_eq!(resolved("s-race", "planning", "plan_deny"), vec![]);
+
+            let mut first = governance_session::load("s-race", &rules_dir);
+            let mut second = first.clone();
+            finish_hook(&run, &mut first, pass());
+            finish_hook(&run, &mut second, pass());
+            assert_eq!(
+                resolved("s-race", "planning", "plan_deny"),
+                vec![ended("fixed", "adr-rotate", 2, 1)]
+            );
+
+            let mut stale = governance_session::load("s-race", &rules_dir);
+            finish_hook(
+                &run,
+                &mut governance_session::load("s-race", &rules_dir),
+                conflict("signing-1"),
+            );
+            assert_eq!(resolved("s-race", "planning", "plan_deny"), vec![]);
+            finish_hook(&run, &mut stale, pass());
+            assert_eq!(
+                resolved("s-race", "planning", "plan_deny"),
+                vec![ended("not_rechecked", "grp-sign", 1, 1)]
+            );
+            assert!(governance_session::load("s-race", &rules_dir)
+                .plan
+                .episodes
+                .is_empty());
+        });
+    }
+
+    /// With telemetry off in debug mode, a block a gate opens is still found
+    /// at the session's end, which logs it as `still_open` and sends nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_debug_mode_logs_a_block_a_gate_left_open_at_the_end() {
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
+        with_telemetry_output(|home| {
+            let _fresh = FreshId::new();
+            let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+            let _debug = EnvGuard::set(debug::ENV, "1");
+            debug::use_session("s-debug");
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-debug"), &rules_dir, 3);
+            finish_hook(
+                &run,
+                &mut GovernanceSession::default(),
+                round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]),
+            );
+
+            super::super::session_end::report(
+                &serde_json::json!({"session_id": "s-debug", "hook_event_name": "SessionEnd", "reason": "clear"})
+                    .to_string(),
+            );
+
+            assert!(super::super::brief_telemetry::tests::take_captured().is_empty());
+            let ended: Vec<serde_json::Value> = logged("s-debug")
+                .iter()
+                .filter(|line| {
+                    line["event"]["eventName"] == crate::telemetry::otlp::SESSION_ENDED
+                        || line["event"]["eventName"] == crate::telemetry::otlp::GATE_RESOLVED
+                })
+                .map(|line| line["event"]["eventName"].clone())
+                .collect();
+            assert_eq!(
+                ended,
+                [
+                    crate::telemetry::otlp::SESSION_ENDED,
+                    crate::telemetry::otlp::GATE_RESOLVED
+                ]
             );
         });
     }
