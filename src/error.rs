@@ -164,6 +164,10 @@ pub enum ActualError {
     /// which one from the working tree.
     #[error("{0}")]
     AdrRepoRequired(String),
+    /// An `actual adr` step that only Actual AI can do ran signed out. The
+    /// message names the commands that work on `docs/adr` without a sign-in.
+    #[error("{0}")]
+    AdrSignInRequired(String),
     /// `actual adr create` stopped before Actual AI saved anything: the save
     /// couldn't reach it, or the read before the save failed. The message
     /// says which, without [`Self::ApiError`]'s prefix in front of its own.
@@ -247,7 +251,8 @@ impl ActualError {
             | Self::NotInteractive(_)
             | Self::SelfUpdateRefused { .. }
             | Self::AdrAccessDenied { .. }
-            | Self::AdrRepoRequired(_) => 2,
+            | Self::AdrRepoRequired(_)
+            | Self::AdrSignInRequired(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_)
             | Self::ApiResponseError { .. }
@@ -275,7 +280,7 @@ impl ActualError {
                 Some(Cow::Borrowed("pip install semgrep\n  or: brew install semgrep"))
             }
             Self::ClaudeNotAuthenticated => Some(Cow::Borrowed("claude auth login")),
-            Self::NotLoggedIn => Some(Cow::Borrowed("actual login")),
+            Self::NotLoggedIn | Self::AdrSignInRequired(_) => Some(Cow::Borrowed("actual login")),
             Self::CodexNotAuthenticated => {
                 Some(Cow::Borrowed("Set OPENAI_API_KEY or run: codex login"))
             }
@@ -1217,6 +1222,11 @@ mod tests {
         let repo = ActualError::AdrRepoRequired("no repository".to_string());
         assert_eq!(repo.exit_code(), 2);
         assert!(repo.hint().unwrap().contains("--repo"));
+
+        let signed_out = ActualError::AdrSignInRequired("Signed out, use check.".to_string());
+        assert_eq!(signed_out.exit_code(), 2);
+        assert_eq!(signed_out.to_string(), "Signed out, use check.");
+        assert_eq!(signed_out.hint().as_deref(), Some("actual login"));
 
         let missing = ActualError::AdrNotFound("No decision has the id d1.".to_string());
         assert_eq!(missing.exit_code(), 3);

@@ -10,6 +10,8 @@
 //! status through `create --file`'s steps, and its pair takes the new id, so
 //! the next run skips it. The run stops at the first save whose outcome is
 //! unknown, and at the first error that isn't about the file being saved.
+//! Signed out, a run with a file to send sends nothing and names
+//! `adr check` and `adr discover`, which work on the files without a sign-in.
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -97,6 +99,16 @@ enum Unsent {
     NotSaved(String),
 }
 
+/// Signed out there's nowhere to send the files, so the run names the
+/// commands that work on them without a sign-in.
+fn signed_out() -> ActualError {
+    ActualError::AdrSignInRequired(format!(
+        "`create --all` saves the files under {DECISION_DIR}/ to Actual AI, which needs a \
+         sign-in. Signed out, `actual adr check` lists the files that won't publish and why, \
+         and `actual adr discover` copies the ADRs other tools keep into {DECISION_DIR}/imported/."
+    ))
+}
+
 /// Send each decision file under `root/docs/adr/`, writing a progress line
 /// per file. Returns the report and the error that stopped the run partway,
 /// if one did; an error before the first file comes back on its own.
@@ -126,7 +138,10 @@ async fn run_create_all(
     if found.decisions.is_empty() {
         return Ok((report, None));
     }
-    let session = session(&args.api).await?;
+    let session = match session(&args.api).await {
+        Err(ActualError::NotLoggedIn) => return Err(signed_out()),
+        other => other?,
+    };
     let repo = match pick_repo(&session, args.repo.as_deref(), root).await? {
         RepoPick::Chosen(repo) => repo,
         RepoPick::Unresolved(reason) => {
@@ -391,6 +406,7 @@ mod tests {
     use super::super::tests::{api, git_repo, sign_in, CONNECTED, ORG, REPO};
     use super::*;
     use crate::adr::files::RenameOutcome;
+    use crate::auth::store::{self, StoredCredentials};
     use crate::cli::args::{AdrArgs, AdrContentArgs, AdrNewArgs};
     use crate::testutil::{EnvGuard, ENV_MUTEX};
     use clap::Parser;
@@ -949,7 +965,8 @@ mod tests {
             Err(ActualError::AdrCheckFailed(_))
         ));
 
-        // With a file to send, signing in comes next.
+        // With a file to send, signing in comes next, and signed out the run
+        // names the commands that work without it.
         pair(
             root,
             "a.md",
@@ -958,8 +975,39 @@ mod tests {
             &[],
             true,
         );
+        let mut progress = Vec::new();
+        let err = block(run_create_all(&all_args(&server), root, &mut progress))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&err, ActualError::AdrSignInRequired(m)
+                if m.contains("`actual adr check`") && m.contains("`actual adr discover`")),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.hint().as_deref(), Some("actual login"));
+        assert!(progress.is_empty());
+
+        // A stored sign-in that can't be renewed (here, no auth server to ask)
+        // reads as signed out too.
+        store::save(&StoredCredentials {
+            access_token: "tok".to_string(),
+            refresh_token: "rt".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            scope: None,
+            organization_id: ORG.to_string(),
+            member_id: "member".to_string(),
+            email: None,
+            subject: None,
+            auth_url: None,
+        })
+        .unwrap();
         let err = block(run_create_all(&all_args(&server), root, &mut Vec::new())).err();
-        assert!(matches!(err, Some(ActualError::NotLoggedIn)), "{err:?}");
+        assert!(
+            matches!(err, Some(ActualError::AdrSignInRequired(_))),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -162,6 +162,8 @@ actual adr create --all
 
 Each saved pair is renamed to the names the sync uses for its new id, as with `--file`, and a step after the save that fails leaves a draft and says how to finish. A line on standard error reports each file as the run reaches it, and the summary lists what was skipped or not saved, with the reason. A file takes up to four requests: the save, a read of the repository's decisions and a write when its header names a scope, and the publish when it's accepted. The run stops at the first save whose outcome is unknown (exit 3), and at the first error that isn't about the file, such as an expired sign-in, and names the files it never sent.
 
+Signed out, `create --all` sends nothing. With a file to send, it exits 2 and names [`check`](#checking-decision-files), which lists the files that won't publish and why, and [`discover`](#finding-the-adrs-a-repository-already-has), which copies the ADRs other tools keep into `docs/adr/imported/`. Both work without a sign-in.
+
 ### Changing a decision
 
 ```bash
