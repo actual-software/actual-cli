@@ -155,7 +155,7 @@ The refresh exits 0 whatever happens, so a hook that runs it can't fail on it. `
 
 ## Decision files signed out
 
-Signed out, `list`, `show`, `update`, `publish`, `unpublish` and `delete` work on the decision files under `docs/adr/`. A command that takes an id finds the file whose ADR header names it, the id `list` prints. A file stores no policy ids, so `show` gives each policy the rule id its rule file prints, such as `R-0B6F-001`, and `update` takes those ids with the flags it takes signed in, described in [Changing a decision](#changing-a-decision).
+Signed out, `list`, `show`, `update`, `publish`, `unpublish` and `delete` work on the decision files under `docs/adr/`, leaving out `docs/adr/drafts/` as the refresh does. A command that takes an id finds the file whose ADR header names it, the id `list` prints, and refuses one found only under `docs/adr/drafts/`, saying to move it into `docs/adr/` first. A file stores no policy ids, so `show` gives each policy the rule id its rule file prints, such as `R-0B6F-001`, and `update` takes those ids with the flags it takes signed in, described in [Changing a decision](#changing-a-decision).
 
 - `list` takes `--state active` or `--state draft`, with `--limit` and `--offset`, and says how many files it left out for having no ADR header. `--repo` and the states only Actual AI keeps (`suggested`, `updated`, `archived`) are refused.
 - `update` writes the whole file back, so it refuses a file with text or header fields outside the layout `create` writes, rather than drop them; edit such a file yourself. A file under the sync's name moves to the name for its new title.
