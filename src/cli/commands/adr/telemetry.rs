@@ -364,7 +364,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 9);
+                assert_eq!(all["actual.event.schema_version"], 10);
             }
         });
     }
@@ -517,7 +517,7 @@ pub(super) mod tests {
                     }),
                     "{outcome}"
                 );
-                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 9);
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 10);
             }
 
             let saved = Creation {

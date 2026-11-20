@@ -333,9 +333,25 @@ were kept. It names the kept ones only by their ADR reference, with each ADR's
 best score. A dropped rule file is never named, and a manual run of any of the
 three sends nothing.
 
+The actual-cli plugin's mod for Claude Code sends `actual.gate.delivered`
+through the hidden `actual __gate-delivered` command, once for each gate
+denial it handles. It says whether the override dialog showed or why not (`off`
+when turned off or in unattended mode, `no_ui` when there was nothing to show
+it on, as in `claude -p`, `cli_too_old` when the CLI couldn't list the
+blocking rules, `no_rules` when there were none), the user's answer (`revise`,
+`override`, `other` or `dismissed`), what reached the agent (`as_written`,
+`rewritten` or `let_through`), how many rules the dialog listed, and the
+`actual.action.id` of the check that denied. For an `other` answer it sends
+only that the answer was `other`: the words typed under "Other" are never
+sent, signed in or out. A denial the plugin's shell hooks let through with a
+notice sends nothing, and so does a session where the mod doesn't load. The
+command refuses to run from an agent's own shell, which carries Claude Code's
+`CLAUDECODE` or Codex's `CODEX_THREAD_ID` or `CODEX_SESSION_ID` marker, and
+records nothing then.
+
 The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events. The end also sends `actual.gate.resolved` with `still_open` for each block still open, once.
 
-While telemetry is on, or in debug mode, the gates keep each open block in the session's state under `plan-check-sessions/` in the user config directory: the ADR reference and file ids, the rules blocking, the `actual.action.id` of the check that opened it and its counts. A block's entry is removed when its event is sent, and the rest of that state is pruned after 7 days.
+While telemetry is on, or in debug mode, the gates keep each open block in the session's state under `plan-check-sessions/` in the user config directory: the ADR reference and file ids, the rules blocking, the `actual.action.id` of the check that opened it and its counts. A block's entry is removed when its event is sent, and the rest of that state is pruned after 7 days. Each gate also keeps the `actual.action.id` of its latest check when that check denied, for `actual.gate.delivered`, until its next judged check.
 
 While telemetry is on, at the end of each Claude Code turn that changed files, `impl-check --claude-hook` asks the agent which of the session's ADRs it used, and the agent answers with `actual rules report-use`, naming an ADR and a line for each claim, with the file's path relative to the repository root. Nothing on your machine reads the answer, so with telemetry off, or in a build without telemetry, the question isn't asked; debug mode still asks, and logs the events it would have sent. The CLI checks each claim on your machine: it holds when the ADR was one the question listed and the line is one the turn added or changed (or within three lines of one, in the same hunk), or a line of the plan `plan-check` judged that turn. For each listed ADR the answer names it sends `actual.adr.reported`, with the turn and the check's verdict on the claim. Every name the question never listed shares one more event, with an empty ADR reference, and the names themselves are never sent. Only a verified diff claim sends its file's repository path, and only in a signed-in request; an unverified claim sends no path. A path outside the repository, one that climbs with `..` and one longer than 1024 bytes name no file, so their claims are unverified and the session state keeps no path for them. The claims, the lines they point to and anything the agent wrote beside them stay in the session's state under `plan-check-sessions/` in the user config directory, which is pruned after 7 days like the rest of that state. So that a claim can point at a plan line, `plan-check` keeps the full text of the plan it judged in the same state until that turn's answer is recorded or the next prompt starts, and then only the plan's line count. A session that ends before either keeps the plan until the 7-day prune. With telemetry off, outside debug mode, no plan is kept. An answer of `--none` sends nothing.
 
@@ -441,6 +457,7 @@ all three add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
 A report event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.turn.index`, `actual.report.check_action_id`, `actual.report.evidence`, `actual.report.evidence_reason` and `actual.report.anchor`, plus `actual.report.file_path` in a signed-in request.
 A filter event adds `actual.filter.selector`, `actual.filter.min_score`, `actual.filter.index_size`, the nine `actual.filter.dropped.*` counts, `actual.filter.kept_count`, `actual.filter.kept_refs` and `actual.filter.kept_scores`.
 A resolution event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.gate.type`, `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`, `actual.gate.denials` and `actual.gate.block_action_id`.
+A delivery event names no ADR and no agent. It adds `actual.gate.type`, `actual.gate.mechanism`, `actual.gate.dialog`, `actual.gate.answer`, `actual.gate.delivery`, `actual.gate.rules_listed` and `actual.gate.deny_action_id`.
 An unknown value is sent as an empty string. Apart from
 `actual.override.reason_text`, which holds whatever a person typed,
 `actual.adr.decision_id` and `actual.report.file_path`, all of which go only
@@ -455,7 +472,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `9` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, and 9 added `actual.adr.created` and its attributes) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `10` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, 9 added `actual.adr.created` and its attributes, and 10 added `actual.gate.delivered` and its attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -519,13 +536,18 @@ has only the classes its fields carry below:
 | `actual.gate.rounds` | The gate's judged checks from the one that opened the block to the one that ended it, both included | anonymous |
 | `actual.gate.denials` | How many times the gate denied the ADR's rules while the block was open | anonymous |
 | `actual.gate.block_action_id` | The `actual.action.id` of the check that opened the block, which joins the event to that check's other events (including its `breached` event, when the block was the ADR's first at that gate in the session) and, when that check asked the end-of-turn question, to a report's `actual.report.check_action_id` | anonymous |
+| `actual.gate.dialog` | Whether the plugin's override dialog showed for the denial: `shown`, or why not, `off`, `no_ui`, `cli_too_old` or `no_rules`, as described above | anonymous |
+| `actual.gate.answer` | The user's answer to the dialog: `revise`, `override`, `other` or `dismissed`, and empty when it didn't show. Never the words typed under "Other" | anonymous |
+| `actual.gate.delivery` | What reached the agent: `as_written` for the denial as the CLI wrote it, `rewritten` for the denial with the user's answer in place of the override commands, `let_through` when the dialog's override let the call go on | anonymous |
+| `actual.gate.rules_listed` | How many rules the dialog listed, `0` when it didn't show | anonymous |
+| `actual.gate.deny_action_id` | The `actual.action.id` of the check whose denial the plugin handled, which joins the event to that check's other events and, when that check opened a block, to its resolution event's `actual.gate.block_action_id`. Empty when the session holds none | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also
 names the CLI, its version, the deployment environment (`production` for
 release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
-override was recorded, when a check started or completed, when a selection was made, when a block ended, when the session ended, or when an `actual adr` run finished), and, when the
+override was recorded, when a check started or completed, when a selection was made, when a block ended, when the plugin handled a denial, when the session ended, or when an `actual adr` run finished), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
 **Apart from the `actual.override.reason_text` of an `other` override and the
 `actual.report.file_path` of a verified, signed-in report, no event carries rule text,

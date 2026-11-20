@@ -111,6 +111,11 @@ pub(crate) const FILTER_EVALUATED: &str = "actual.filter.evaluated";
 /// it ended, and how long and how hard it held.
 pub(crate) const GATE_RESOLVED: &str = "actual.gate.resolved";
 
+/// The event the plugin's mod sends, through `actual __gate-delivered`, for
+/// each gate denial it handles: whether its dialog showed, what the user
+/// answered, and what reached the agent.
+pub(crate) const GATE_DELIVERED: &str = "actual.gate.delivered";
+
 /// The typed reason of an `other` override, which only a request carrying the
 /// sign-in's token holds.
 const REASON_TEXT: &str = "actual.override.reason_text";
@@ -135,8 +140,11 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`,
 /// `actual.gate.denials` and `actual.gate.block_action_id` attributes; 8 is
 /// the web app's `actual.adr.reviewed` attributes, which the CLI doesn't
-/// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes.
-const SCHEMA_VERSION: i64 = 9;
+/// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes;
+/// 10 adds [`GATE_DELIVERED`] and its `actual.gate.dialog`,
+/// `actual.gate.answer`, `actual.gate.delivery`, `actual.gate.rules_listed`
+/// and `actual.gate.deny_action_id` attributes.
+const SCHEMA_VERSION: i64 = 10;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -806,6 +814,22 @@ impl Origin {
         record
     }
 
+    /// The [`GATE_DELIVERED`] record for one denial the plugin's mod handled.
+    /// No agent: the mod reports it, not a subagent's round.
+    pub(crate) fn delivered(&self, session_id: &str, delivered: &GateDelivery<'_>) -> LogRecord {
+        let mut record = self.record(GATE_DELIVERED, session_id, None);
+        record.attributes.extend([
+            text("actual.gate.type", Some(delivered.gate)),
+            text("actual.gate.mechanism", Some(delivered.mechanism)),
+            text("actual.gate.dialog", Some(delivered.dialog)),
+            text("actual.gate.answer", delivered.answer),
+            text("actual.gate.delivery", Some(delivered.delivery)),
+            count("actual.gate.rules_listed", delivered.rules_listed),
+            text("actual.gate.deny_action_id", delivered.deny_action_id),
+        ]);
+        record
+    }
+
     /// A record carrying the attributes every event shares, each present on
     /// every record and an empty string when unknown: its own event id, which
     /// `log.record.uid` repeats, the schema version, and the action, session
@@ -900,6 +924,28 @@ pub(crate) struct GateResolution<'a> {
     pub denials: u32,
     /// The `actual.action.id` of the round that opened the block.
     pub block_action_id: &'a str,
+}
+
+/// One denial the plugin's mod handled, as a [`GATE_DELIVERED`] record names
+/// it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GateDelivery<'a> {
+    /// `planning` or `implementation`.
+    pub gate: &'a str,
+    /// How the gate blocked: `plan_deny` or `stop_block`.
+    pub mechanism: &'a str,
+    /// `shown`, or why not: `off`, `no_ui`, `cli_too_old` or `no_rules`.
+    pub dialog: &'a str,
+    /// `revise`, `override`, `other` or `dismissed`, sent empty when the
+    /// dialog didn't show. Never the words typed under "Other".
+    pub answer: Option<&'a str>,
+    /// What reached the agent: `as_written`, `rewritten` or `let_through`.
+    pub delivery: &'a str,
+    /// How many rules the dialog listed, 0 when it didn't show.
+    pub rules_listed: usize,
+    /// The `actual.action.id` of the round that denied, sent empty when the
+    /// session holds none.
+    pub deny_action_id: Option<&'a str>,
 }
 
 /// This execution's `actual.action.id`, the one its records carry.
@@ -1678,7 +1724,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "9"})
+            serde_json::json!({"intValue": "10"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2263,7 +2309,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(9))
+            Some(&common::any_value::Value::IntValue(10))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2446,6 +2492,92 @@ mod tests {
         assert_eq!(decoded.attributes.len(), 14);
     }
 
+    /// The delivery event names the gate and how it blocked, whether the
+    /// dialog showed, the answer, what reached the agent, the rules listed and
+    /// the round that denied, after the shared envelope, with no agent and no
+    /// ADR. It encodes as the official message.
+    #[test]
+    fn test_a_delivery_record_names_the_dialog_the_answer_and_what_reached_the_agent() {
+        let record = origin(None).delivered(
+            "s1",
+            &GateDelivery {
+                gate: "planning",
+                mechanism: "plan_deny",
+                dialog: "shown",
+                answer: Some("override"),
+                delivery: "let_through",
+                rules_listed: 2,
+                deny_action_id: Some("action-0"),
+            },
+        );
+        assert_eq!(record.event_name, GATE_DELIVERED);
+        let json = serde_json::to_value(&record).unwrap();
+        let all = json["attributes"].as_array().unwrap();
+        let agent = all
+            .iter()
+            .find(|kv| kv["key"] == "actual.agent.id")
+            .map(|kv| kv["value"].clone());
+        let string = |value: &str| serde_json::json!({ "stringValue": value });
+        let int = |value: &str| serde_json::json!({ "intValue": value });
+        assert_eq!(agent, Some(string("")));
+        let attributes: Vec<(String, Value)> = all
+            .iter()
+            .skip(6)
+            .map(|kv| (kv["key"].as_str().unwrap().to_string(), kv["value"].clone()))
+            .collect();
+        assert_eq!(
+            attributes,
+            [
+                ("actual.gate.type".to_string(), string("planning")),
+                ("actual.gate.mechanism".to_string(), string("plan_deny")),
+                ("actual.gate.dialog".to_string(), string("shown")),
+                ("actual.gate.answer".to_string(), string("override")),
+                ("actual.gate.delivery".to_string(), string("let_through")),
+                ("actual.gate.rules_listed".to_string(), int("2")),
+                ("actual.gate.deny_action_id".to_string(), string("action-0")),
+            ]
+        );
+
+        let request = decoded(&[record]);
+        let decoded = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(decoded.event_name, GATE_DELIVERED);
+        assert_eq!(decoded.attributes.len(), 13);
+    }
+
+    /// A dialog that didn't show, from a session with no denying round on
+    /// file, sends the answer and the action id empty, never absent.
+    #[test]
+    fn test_a_delivery_record_without_a_dialog_sends_the_answer_empty() {
+        let record = origin(None).delivered(
+            "s1",
+            &GateDelivery {
+                gate: "implementation",
+                mechanism: "stop_block",
+                dialog: "off",
+                answer: None,
+                delivery: "as_written",
+                rules_listed: 0,
+                deny_action_id: None,
+            },
+        );
+        let json = serde_json::to_value(&record).unwrap();
+        let value = |key: &str| {
+            json["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .map(|kv| kv["value"].clone())
+        };
+        let empty = Some(serde_json::json!({ "stringValue": "" }));
+        assert_eq!(value("actual.gate.answer"), empty);
+        assert_eq!(value("actual.gate.deny_action_id"), empty);
+        assert_eq!(
+            value("actual.gate.rules_listed"),
+            Some(serde_json::json!({ "intValue": "0" }))
+        );
+    }
+
     /// A score JSON can't hold goes as 0 rather than breaking the spool line.
     #[test]
     fn test_a_non_finite_score_goes_as_zero() {
@@ -2482,7 +2614,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"9"}"#, r#"{"intValue":"nine"}"#),
+            whole.replace(r#"{"intValue":"10"}"#, r#"{"intValue":"nine"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
