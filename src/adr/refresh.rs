@@ -514,6 +514,10 @@ pub struct Applied {
     pub removed: Vec<String>,
     /// Each change that failed, with the reason.
     pub problems: Vec<String>,
+    /// Why the record of these changes couldn't be saved, when it couldn't:
+    /// rule files then stop following their decisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_problem: Option<String>,
 }
 
 impl Applied {
