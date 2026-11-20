@@ -900,9 +900,9 @@ mod tests {
         let records = tempdir().unwrap();
         let root = tempdir().unwrap();
         let held = brief_ledger::lock(records.path(), LOCK_WAIT).unwrap();
-        assert!(!save(records.path(), root.path(), |record| {
-            record.unnormalized = Some("x".to_string());
-        }));
+        // Never called: `save` gives up before it reads the record.
+        let change = |record: &mut Record| record.unnormalized = Some("x".to_string());
+        assert!(!save(records.path(), root.path(), change));
         drop(held);
         assert_eq!(load(records.path(), root.path()), Record::default());
     }
