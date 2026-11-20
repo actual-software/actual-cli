@@ -1,10 +1,12 @@
 # ADR commands
 
-`actual adr` writes and checks Architecture Decision Records (ADRs) in your repository, and manages your organization's decisions in Actual AI from the terminal. `new` and `check` work on local files and need no sign-in. The other ten commands act on the decisions in your Actual AI account and need `actual login`.
+`actual adr` writes and checks Architecture Decision Records (ADRs) in your repository, and manages your organization's decisions in Actual AI from the terminal. `new`, `check`, `discover` and `normalize` work on local files and need no sign-in. The other ten commands act on the decisions in your Actual AI account and need `actual login`.
 
 ```bash
 actual adr new "Use Postgres for storage" --policy "MUST: Services store relational data in Postgres."
 actual adr check                      # check every decision file under docs/adr/
+actual adr discover                   # which ADRs under docs/adr/ no check reads yet
+actual adr normalize --all            # convert them, and re-index any whose doc changed
 actual adr list                       # this repository's decisions in Actual AI
 actual adr create --file docs/adr/<file>.md
 actual adr publish <id>
@@ -55,6 +57,50 @@ actual adr check --no-cloud            # compare only with the files in this rep
 `adr check` runs Actual AI's save check on each file and lists likely duplicates: pairs of files in the repository and, when you're signed in, decisions in Actual AI. Those are the connected repository's decisions, or the whole organization's when the checkout names no connected repository, and the report says which. It exits 1 when a file fails the check. A likely duplicate is reported without failing the run. When the comparison with Actual AI can't run (signed out, or the request failed), the report says why and the local check still counts.
 
 Two decisions look the same when their titles share at least half their content words, or when any policy of one does with any policy of the other. Content words leave out common English words and the policy levels, and the comparison runs locally with no model.
+
+### ADRs written elsewhere
+
+An ADR someone wrote by hand, or a coding agent wrote, governs nothing until it has a rule file under `.actual/rules/`. `discover` finds those ADRs and `normalize` converts them.
+
+```bash
+actual adr discover                         # every file under docs/adr/, by state
+actual adr normalize --all --dry-run        # what normalize would write, as a diff
+actual adr normalize --all                  # convert, and re-index docs that changed
+actual adr normalize docs/adr/0007-x.md     # only this file
+```
+
+`discover` gives each file one of these states:
+
+| State | Meaning | `normalize` |
+|-------|---------|-------------|
+| `synced` | Actual AI's sync wrote it | leaves it |
+| `synced-edited` | A synced doc with uncommitted changes, or, when you're signed in, a title or policies that differ from the decision in Actual AI. The next sync overwrites the change | leaves it: save the change with `actual adr update`, or revert it |
+| `managed` | This CLI wrote it, and its rule file is up to date | leaves it |
+| `stale` | This CLI wrote it, and the doc's title, status, scope or policies changed since (or the doc moved) | writes the rule file again |
+| `missing-rule` | The doc has a decision header but no rule file | writes the rule file |
+| `broken` | The doc had a decision header but no longer reads as a decision, or lost its header | converts it again, keeping its id |
+| `unmanaged` | An ADR in another format | converts it |
+| `possible-duplicate` | Like `unmanaged`, but it looks like a decision the repository already has | asks first |
+| `legacy` | Written by `actual adr-bot`, with a `.claude/rules/` file beside it | leaves it unless you pass `--legacy` |
+| `orphan-rule` | A rule file whose decision has no doc | leaves it |
+| `ignored` | `README.md`, `index.md`, a template, a `0000-*` file, or a file containing `<!-- actual:ignore -->` | leaves it |
+
+A rule file this CLI writes records the doc it came from under `metadata.actual.source`: the doc's path and a digest of its title, status, scope and policies. That record tells a CLI-written decision from a synced one, and shows when the doc has changed since. Rewording a doc's context or rationale doesn't make its rule file stale. `adr new` writes the record too.
+
+`normalize` converts without a model whenever the file's layout allows: a Context File, a Nygard ADR (Status, Context, Decision, Consequences), a MADR (front matter, Context and Problem Statement, Decision Outcome) and adr-bot's layout all convert directly. A decision line with an upper-case RFC-2119 keyword (`Services MUST …`) becomes a policy, and so does each bullet under a `## Policies` heading, at MUST. Sections the Context File has no place for, such as Considered Options, are carried over after it word for word, so nothing the author wrote is lost. A decision section's `###` sub-sections map as their own sections would, so MADR's `### Consequences` under Decision Outcome fill the Consequences lists and its `### Confirmation` is carried as a section of its own; neutral consequences, which the Context File has no list for, are carried as `Neutral Consequences`. Front matter keys nothing reads, such as MADR's `consulted` and `informed`, are carried as a `Front Matter` section, and MADR 4's `decision-makers` fills the Deciders line. A carried section whose heading the Context File reads, such as a Decision written as prose, is renamed `Original Decision`. The doc keeps its file name unless you pass `--rename`.
+
+When the layout gives no policy, because the decision is written as prose, `normalize` asks a model through the configured runner (`--runner`, `--model`, `--no-model`). No Actual AI account is needed: a signed-in `claude` CLI or an API key is enough. The report notes each doc whose policies a model wrote, so a person can review them.
+
+What's still open after that becomes a question: is this a decision at all, which policies, governing or draft, and which paths when a glob matches no file. At a terminal, `normalize` asks. Without one, it writes nothing for that file and lists the questions in its report (with `--json`, as `questions`). There are two ways to answer:
+
+- `--answers answers.json` takes the answers, keyed by each doc's path from the repository root, with the field each question names: `{"docs/adr/0007-x.md": {"status": "accepted", "policies": ["MUST: …"], "scope": ["src/**"]}}`.
+- `--yes` takes the safe answer to every question. The decision is written as a draft, which no check reads, and a file with no policy is left alone.
+
+`--extracted extracted.json` takes extractions in the same shape in place of a model, for an agent that reads the ADR itself.
+
+`--push` saves each decision it writes to Actual AI, as `actual adr create --file` does, and needs `actual login`. Actual AI's sync then owns the files. When a file is written but can't be saved (signed out, a refusal, or a status other than accepted or draft), the report says why and the command exits 3.
+
+ADRs `actual adr-bot` wrote are reported as `legacy` and left alone. adr-bot writes them again on its next run, and Actual AI's sync replaces them for a signed-in repository. `normalize --legacy` converts them in place, keeping each one's id, and lists its `.claude/rules/` file for you to remove.
 
 ## Accepted or draft
 

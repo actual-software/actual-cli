@@ -818,8 +818,9 @@ pub enum CacheAction {
 /// Arguments for the `adr` command
 #[derive(Parser, Debug)]
 #[command(
-    after_help = "Local commands (new, check) need no sign-in. The others act on \
-    your organization's decisions in Actual AI and need `actual login`. See docs/ADR_COMMANDS.md."
+    after_help = "Local commands (new, check, discover, normalize) need no sign-in. The others \
+    act on your organization's decisions in Actual AI and need `actual login`. See \
+    docs/ADR_COMMANDS.md."
 )]
 pub struct AdrArgs {
     #[command(subcommand)]
@@ -834,6 +835,14 @@ pub enum AdrAction {
     /// Check decision files with Actual AI's save rules and list likely
     /// duplicates
     Check(AdrCheckArgs),
+
+    /// Sort every ADR under docs/adr/ by state: synced by Actual AI, managed
+    /// by this CLI, stale, or written elsewhere and not yet normalized
+    Discover(AdrDiscoverArgs),
+
+    /// Convert ADRs written elsewhere to Actual's format and write their
+    /// rule files, or re-index those whose doc changed
+    Normalize(AdrNormalizeArgs),
 
     /// List your organization's decisions
     List(AdrListArgs),
@@ -943,6 +952,102 @@ pub struct AdrCheckArgs {
     /// Connected repository to compare with: its name, owner/name or id.
     /// Defaults to the one the working tree's origin remote names.
     #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr discover`
+#[derive(Parser, Debug)]
+pub struct AdrDiscoverArgs {
+    /// Don't compare synced decisions with Actual AI, even when signed in.
+    #[arg(long)]
+    pub no_cloud: bool,
+
+    /// Connected repository to compare with: its name, owner/name or id.
+    /// Defaults to the one the working tree's origin remote names.
+    #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr normalize`
+#[derive(Parser, Debug)]
+#[command(group(clap::ArgGroup::new("which").required(true).args(["files", "all"])))]
+pub struct AdrNormalizeArgs {
+    /// Decision docs under docs/adr/ to normalize or re-index.
+    #[arg(value_name = "FILE")]
+    pub files: Vec<std::path::PathBuf>,
+
+    /// Every doc `actual adr discover` says needs normalizing or re-indexing.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Show what would be written, and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Ask nothing: an open question takes its safe answer, which writes the
+    /// decision as a draft, and a file with no policy is left alone.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// A JSON file of extractions, keyed by each doc's path from the
+    /// repository root, used instead of a model.
+    #[arg(long, value_name = "FILE")]
+    pub extracted: Option<std::path::PathBuf>,
+
+    /// A JSON file of answers to the questions a previous run asked, keyed
+    /// the same way.
+    #[arg(long, value_name = "FILE")]
+    pub answers: Option<std::path::PathBuf>,
+
+    /// Rename each normalized doc to the `<id>-<title>.md` name Actual AI's
+    /// sync uses. By default it keeps its name, so links to it still work.
+    #[arg(long)]
+    pub rename: bool,
+
+    /// Also convert ADRs `actual adr-bot` wrote. Their `.claude/rules/` files
+    /// are left as they are.
+    #[arg(long)]
+    pub legacy: bool,
+
+    /// Write a doc that looks like a decision the repository has already.
+    #[arg(long)]
+    pub allow_duplicate: bool,
+
+    /// Never call a model; a doc whose policies can't be read without one
+    /// asks for them instead.
+    #[arg(long)]
+    pub no_model: bool,
+
+    /// Runner for extracting decisions written as prose. Probed
+    /// automatically when omitted.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerChoice>,
+
+    /// Model for that runner, overriding the configured one.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Save each decision written to Actual AI too, as `actual adr create
+    /// --file` does. Needs `actual login`.
+    #[arg(long)]
+    pub push: bool,
+
+    /// Connected repository for --push: its name, owner/name or id.
+    #[arg(long, value_name = "REPO", requires = "push")]
     pub repo: Option<String>,
 
     /// Repository root to read. Defaults to the current directory.
