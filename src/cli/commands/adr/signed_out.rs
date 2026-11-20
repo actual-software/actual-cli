@@ -533,9 +533,6 @@ fn run_status(
                 sanitize_server_text(&was)
             )));
         }
-        // An accepted file has to read as a decision, or it gets no rule file.
-        read_normalized(&file, false, today)
-            .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
         ("accepted", "accepted")
     } else {
         if !meta.is_active() {
@@ -547,6 +544,10 @@ fn run_status(
         // The Status line a draft's Context File carries, as the save writes it.
         ("draft", "proposed")
     };
+    // The file has to read as a decision either way: an accepted one gets its
+    // rule file from it, and the refresh keeps the rule file of one that
+    // doesn't read, which an unpublish would then leave in place.
+    read_normalized(&file, false, today).map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let text = std::fs::read_to_string(&file.path)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let rewritten = with_status(text, status, line).ok_or_else(|| {
@@ -593,9 +594,10 @@ fn run_delete(
 ) -> Result<String, ActualError> {
     let file = find(root, &args.id)?;
     let adr_id = file.adr_id().unwrap_or_default().to_string();
+    let shown = relative(root, &file.path);
+    let restorable = tracked(root, &shown);
     std::fs::remove_file(&file.path)?;
     let applied = refresh_decision(root, &adr_id, today, record, false);
-    let shown = relative(root, &file.path);
     if args.api.json {
         return Ok(format!(
             "{}\n",
@@ -608,12 +610,30 @@ fn run_delete(
             })
         ));
     }
+    let undo = if restorable {
+        format!("`git restore {shown}` brings it back.")
+    } else {
+        format!("Git wasn't tracking {shown}, so the deletion can't be undone.")
+    };
     Ok(format!(
-        "{} Deleted {}: removed {shown}.\n{}`git restore {shown}` brings it back.\n",
+        "{} Deleted {}: removed {shown}.\n{}{undo}\n",
         theme::success(&theme::SUCCESS),
         sanitize_server_text(&adr_id),
         render_applied(&applied)
     ))
+}
+
+/// Whether git tracks `file` (from `root`), so `git restore` can bring it
+/// back. No git, or no repository, reads as untracked.
+fn tracked(root: &Path, file: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--", file])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
@@ -994,9 +1014,11 @@ mod tests {
             .join(".actual/rules")
             .join(rule_file_name(&id, "Use Postgres"));
         assert!(rule.exists());
+        // Not a git repository: nothing can bring the file back.
         let text = run_delete(&id_args(&id, false), root, TODAY, None).unwrap();
+        assert!(text.contains("Deleted"), "{text}");
         assert!(
-            text.contains("Deleted") && text.contains("git restore"),
+            text.contains("so the deletion can't be undone.") && !text.contains("git restore"),
             "{text}"
         );
         assert!(text.contains("Removed rule file"), "{text}");
@@ -1006,6 +1028,76 @@ mod tests {
             run_delete(&id_args(&id, true), root, TODAY, None),
             Err(ActualError::AdrNotFound(_))
         ));
+    }
+
+    #[test]
+    fn delete_points_at_git_restore_only_for_a_file_git_tracks() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        super::super::tests::git_repo(root, None);
+        let kept = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let shown = relative(root, &find(root, &kept).unwrap().path);
+        let added = std::process::Command::new("git")
+            .args(["add", "--", &shown])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        let text = run_delete(&id_args(&kept, false), root, TODAY, None).unwrap();
+        assert!(
+            text.contains(&format!("`git restore {shown}` brings it back.")),
+            "{text}"
+        );
+        let restored = std::process::Command::new("git")
+            .args(["restore", "--", &shown])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(restored.success() && root.join(&shown).exists());
+
+        // Written since the last commit, and never added: gone for good.
+        let new = create(
+            root,
+            "Use Redis",
+            &["MUST: Use Redis."],
+            SaveStatus::Accepted,
+        );
+        let text = run_delete(&id_args(&new, false), root, TODAY, None).unwrap();
+        assert!(
+            text.contains("Git wasn't tracking docs/adr/") && !text.contains("git restore"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn unpublish_refuses_a_file_that_no_longer_reads_and_keeps_its_rule_file() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let id = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let rule = rule_text(root, &id).unwrap();
+        let path = find(root, &id).unwrap().path;
+        // The header still names the decision, but its one policy is gone.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let broken: String = text
+            .lines()
+            .filter(|line| !line.contains("MUST: Use Postgres."))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&path, &broken).unwrap();
+        let err = run_status(&id_args(&id, false), root, TODAY, None, false).unwrap_err();
+        assert!(matches!(&err, ActualError::AdrInvalid { .. }), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        assert_eq!(rule_text(root, &id), Some(rule));
     }
 
     #[test]

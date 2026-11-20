@@ -34,6 +34,9 @@ pub(super) struct Written {
     pub(super) decision_file: PathBuf,
     /// The rule file the checks read, for an accepted decision.
     pub(super) rule_file: Option<PathBuf>,
+    /// Why the refresh record couldn't be saved, when it couldn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) record_problem: Option<String>,
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
@@ -125,6 +128,7 @@ fn write_new_noting(
         status,
         decision_file,
         rule_file: applied.written.first().map(|path| root.join(path)),
+        record_problem: applied.record_problem,
     })
 }
 
@@ -178,6 +182,7 @@ fn render_written(written: &Written) -> String {
         }
     });
     out.push_str("Next: `actual adr check` checks it with Actual AI's save rules.\n");
+    out.push_str(&record_warning(written.record_problem.as_deref()));
     out
 }
 
@@ -199,7 +204,15 @@ pub(super) fn render_applied(applied: &Applied) -> String {
             theme::warning("warning:")
         ));
     }
+    out.push_str(&record_warning(applied.record_problem.as_deref()));
     out
+}
+
+/// The warning line for a refresh record that couldn't be saved, if any.
+fn record_warning(problem: Option<&str>) -> String {
+    problem.map_or_else(String::new, |problem| {
+        format!("{} {problem}\n", theme::warning("warning:"))
+    })
 }
 
 // ── check ──────────────────────────────────────────────────────────────────
@@ -653,6 +666,8 @@ mod tests {
         let text = render_written(&written);
         assert!(text.contains("enforce it now"), "{text}");
         assert!(text.contains(&rule_file.display().to_string()), "{text}");
+        assert!(!text.contains("warning:"), "{text}");
+        assert!(!json_text(&written).contains("record_problem"));
         // The refresh recorded the rule file it wrote.
         let record = super::super::refresh::load(records.path(), tmp.path());
         assert!(record.rules.contains_key(&written.adr_id));
@@ -667,7 +682,15 @@ mod tests {
         assert_eq!(written.status, SaveStatus::Draft);
         assert_eq!(written.rule_file, None);
         assert!(!tmp.path().join(".actual").exists());
-        assert!(render_written(&written).contains("a draft"));
+        let text = render_written(&written);
+        assert!(text.contains("a draft"), "{text}");
+        // With nowhere to keep the refresh record, the decision is written
+        // all the same, and both outputs say what that costs.
+        assert!(
+            text.contains("warning: Couldn't save the refresh record (there's no config directory"),
+            "{text}"
+        );
+        assert!(json_text(&written).contains("\"record_problem\": \"Couldn't save"));
     }
 
     #[test]
@@ -1200,6 +1223,15 @@ mod tests {
                 "Couldn't update a rule file (disk full); `actual adr refresh` tries again."
             ),
             "{text}"
+        );
+        assert!(!text.contains("refresh record"), "{text}");
+        let unrecorded = Applied {
+            record_problem: Some("Couldn't save the refresh record (x).".to_string()),
+            ..Applied::default()
+        };
+        assert_eq!(
+            render_applied(&unrecorded),
+            "warning: Couldn't save the refresh record (x).\n"
         );
     }
 }
