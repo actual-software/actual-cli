@@ -221,7 +221,8 @@ pub fn applies_to(command: &Command) -> bool {
         | Command::SelfUpdate
         | Command::UpdateCheck
         | Command::TelemetryFlush
-        | Command::SessionEnded => false,
+        | Command::SessionEnded
+        | Command::GateDelivered(_) => false,
     }
 }
 

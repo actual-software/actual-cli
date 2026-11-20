@@ -169,6 +169,14 @@ pub struct LoopState {
     /// nothing blocking, and once overrides leave nothing blocking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
+    /// The `actual.action.id` of the latest judged round, when it denied:
+    /// what `__gate-delivered` names the denial by, so the plugin's report
+    /// joins to that round's records. Dropped by the next judged round (see
+    /// [`begin_round`](Self::begin_round)). Kept, like
+    /// [`episodes`](Self::episodes), only where telemetry is on or in debug
+    /// mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny_action_id: Option<String>,
 }
 
 /// How a block ended, as `actual.gate.resolution` names it. Ordered from most
@@ -314,6 +322,7 @@ impl LoopState {
         self.rounds += 1;
         self.blocking.clear();
         self.pending = None;
+        self.deny_action_id = None;
     }
 
     /// Record one more denial of `key` in this loop and return its new total.

@@ -2323,7 +2323,7 @@ fn short_ids(keys: &[String]) -> String {
 
 /// The Codex marker set on this process, when it is one the agent's own shell
 /// commands carry. A Codex hook ran without either on Codex CLI 0.167.0.
-fn codex_agent_marker() -> Option<&'static str> {
+pub(super) fn codex_agent_marker() -> Option<&'static str> {
     ["CODEX_THREAD_ID", "CODEX_SESSION_ID"]
         .into_iter()
         .find(|name| std::env::var_os(name).is_some())
@@ -3041,9 +3041,11 @@ fn finish_verdicts(
 /// round. A rule from a file without a v2 header has no ADR, so opens nothing.
 /// Every round that leaves an episode open notes the rules directory for the
 /// session's end, since that note is best-effort and one write can be lost.
-/// With nowhere to send or log the records, no episode is kept, and any an
-/// earlier round kept are dropped, so a block can't carry its rounds and
-/// denials across a stretch with telemetry off.
+/// A round that denies also keeps its action id on `session`'s loop, for the
+/// plugin's delivery report. With nowhere to send or log the records, no
+/// episode or action id is kept, and any episodes an earlier round kept are
+/// dropped, so a block can't carry its rounds and denials across a stretch
+/// with telemetry off.
 ///
 /// The episodes are settled under the sessions lock on a fresh copy, not on
 /// `session`, which was loaded before the judge call: two overlapping rounds of
@@ -3105,8 +3107,12 @@ fn settle_episodes(
             .map(|episode| (run.kind, episode))
             .collect();
     });
-    session.loop_state_mut(run.kind).episodes = stored.loop_state(run.kind).episodes.clone();
-    if !stored.loop_state(run.kind).episodes.is_empty() {
+    let state = session.loop_state_mut(run.kind);
+    state.episodes = stored.loop_state(run.kind).episodes.clone();
+    if !denied.is_empty() {
+        state.deny_action_id = Some(action_id.to_string());
+    }
+    if !state.episodes.is_empty() {
         super::session_end::record_rules_dir(session_id, run.rules_dir);
     }
     super::check_telemetry::resolved_records(run.session_id, run.agent_id, &ended)
@@ -7704,6 +7710,15 @@ pub(crate) mod tests {
     /// the gates build records, and nothing captured from before.
     #[cfg(feature = "telemetry")]
     fn with_telemetry_output(body: impl FnOnce(&Path)) {
+        with_telemetry_config(
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-resolved-test.jsonl\n",
+            body,
+        );
+    }
+
+    /// [`with_telemetry_output`] with `config` as the config file.
+    #[cfg(feature = "telemetry")]
+    fn with_telemetry_config(config: &str, body: impl FnOnce(&Path)) {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
@@ -7720,11 +7735,7 @@ pub(crate) mod tests {
         .into_iter()
         .map(EnvGuard::remove)
         .collect();
-        std::fs::write(
-            home.path().join("config.yaml"),
-            "telemetry:\n  otlp_file: /tmp/actual-otlp-resolved-test.jsonl\n",
-        )
-        .unwrap();
+        std::fs::write(home.path().join("config.yaml"), config).unwrap();
         super::super::brief_telemetry::tests::take_captured();
         body(home.path());
     }
@@ -7866,6 +7877,65 @@ pub(crate) mod tests {
             let mut session = GovernanceSession::default();
             finish_hook(&direct, &mut session, conflict());
             assert!(session.plan.episodes.is_empty());
+        });
+    }
+
+    /// A round that denies keeps its action id on its own gate's loop, for
+    /// the plugin's delivery report, and the next judged round that denies
+    /// nothing drops it. The other gate's loop is left alone.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_denying_round_keeps_its_action_id_until_the_next_judged_round() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-deny-id"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            let stored = || governance_session::load("s-deny-id", &rules_dir);
+
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]),
+            );
+            assert_eq!(
+                stored().plan.deny_action_id.as_deref(),
+                Some(crate::telemetry::otlp::current_action_id())
+            );
+            assert_eq!(stored().diff.deny_action_id, None);
+
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("rotation", "R-1", Verdict::Followed)]),
+            );
+            assert_eq!(stored().plan.deny_action_id, None);
+            super::super::brief_telemetry::tests::take_captured();
+        });
+    }
+
+    /// With nowhere to send or log the delivery report, a denying round keeps
+    /// no action id.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_denying_round_without_an_output_keeps_no_action_id() {
+        with_telemetry_config("", |home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-no-out"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]),
+            );
+
+            assert_eq!(
+                governance_session::load("s-no-out", &rules_dir)
+                    .plan
+                    .deny_action_id,
+                None
+            );
+            super::super::brief_telemetry::tests::take_captured();
         });
     }
 

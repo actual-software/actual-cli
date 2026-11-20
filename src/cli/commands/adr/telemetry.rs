@@ -485,7 +485,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 13);
+                assert_eq!(all["actual.event.schema_version"], 14);
             }
         });
     }
@@ -688,7 +688,7 @@ pub(super) mod tests {
                     }),
                     "{outcome}"
                 );
-                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 13);
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 14);
             }
 
             let saved = Creation {
@@ -792,7 +792,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 13);
+                assert_eq!(all["actual.event.schema_version"], 14);
             }
         });
     }
@@ -836,7 +836,7 @@ pub(super) mod tests {
                         "actual.adr.command.stdin_is_terminal": true,
                     })
                 );
-                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 13);
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 14);
             }
         });
     }
