@@ -170,10 +170,11 @@ fn loose(text: &str) -> String {
 }
 
 /// Mark each synced doc whose title or policies differ from its decision in
-/// Actual AI as edited, and each with a rule file whose decision isn't in
-/// Actual AI at all as a local decision written before its source was
-/// recorded. A decision Actual AI grouped is skipped: its files carry the
-/// ids of its parts, which the list doesn't show.
+/// Actual AI as edited. A synced doc whose decision isn't in the list stays
+/// synced, with the reason noted: the list leaves out archived decisions and
+/// other repositories', so absence doesn't show who wrote the doc. A decision
+/// Actual AI grouped is skipped: its files carry the ids of its parts, which
+/// the list doesn't show.
 fn compare_with_cloud(entries: &mut [Entry], decisions: &[ExistingDecision]) {
     for entry in entries
         .iter_mut()
@@ -209,10 +210,12 @@ fn compare_with_cloud(entries: &mut [Entry], decisions: &[ExistingDecision]) {
                     );
                 }
             }
-            None if entry.rule_file.is_some() => entry.set_state(
-                State::Stale,
-                "Not a decision in Actual AI: written locally before its source was recorded.",
-            ),
+            None if entry.rule_file.is_some() => {
+                entry.reason = "Not among the decisions compared in Actual AI: archived, in \
+                                another repository, or written locally before its source was \
+                                recorded."
+                    .to_string();
+            }
             None => {}
         }
     }
@@ -388,7 +391,23 @@ pub(super) fn exec_normalize(args: &AdrNormalizeArgs) -> Result<(), ActualError>
     } else {
         print!("{}", render_normalize(&report));
     }
-    Ok(())
+    unsaved_error(&report).map_or(Ok(()), Err)
+}
+
+/// The error for a run whose `--push` left files written here but not saved
+/// to Actual AI, so a caller that reads only the exit code sees it.
+fn unsaved_error(report: &NormalizeReport) -> Option<ActualError> {
+    let unsaved = report
+        .files
+        .iter()
+        .filter(|file| file.push_problem.is_some())
+        .count();
+    (unsaved > 0).then(|| {
+        ActualError::AdrNotSaved(format!(
+            "{unsaved} file{} written here but not saved to Actual AI; see the report.",
+            if unsaved == 1 { " was" } else { "s were" }
+        ))
+    })
 }
 
 /// How long one extraction may run.
@@ -1374,7 +1393,13 @@ mod tests {
             .iter()
             .find(|e| e.adr_id.as_deref() == Some(OTHER))
             .unwrap();
-        assert_eq!(local.state, State::Stale);
+        assert_eq!(local.state, State::Synced);
+        assert_eq!(local.action, discovery::Action::None);
+        assert!(
+            local.reason.starts_with("Not among the decisions"),
+            "{}",
+            local.reason
+        );
     }
 
     #[test]
@@ -1864,6 +1889,12 @@ mod tests {
         a.allow_duplicate = true;
         let report = run(&a, root, None, None).unwrap();
         assert!(file(&report, "0011-new.md").push_problem.is_some());
+        let err = unsaved_error(&report).expect("a push problem fails the run");
+        assert_eq!(err.exit_code(), 3);
+        assert!(err.to_string().contains("written here but not saved"));
+        let mut clean = report.clone();
+        clean.files.retain(|f| f.push_problem.is_none());
+        assert!(unsaved_error(&clean).is_none());
     }
 
     #[test]

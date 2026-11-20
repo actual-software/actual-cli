@@ -98,7 +98,7 @@ What's still open after that becomes a question: is this a decision at all, whic
 
 `--extracted extracted.json` takes extractions in the same shape in place of a model, for an agent that reads the ADR itself.
 
-`--push` saves each decision it writes to Actual AI, as `actual adr create --file` does, and needs `actual login`. Actual AI's sync then owns the files.
+`--push` saves each decision it writes to Actual AI, as `actual adr create --file` does, and needs `actual login`. Actual AI's sync then owns the files. When a file is written but can't be saved (signed out, a refusal, or a status other than accepted or draft), the report says why and the command exits 3.
 
 ADRs `actual adr-bot` wrote are reported as `legacy` and left alone. adr-bot writes them again on its next run, and Actual AI's sync replaces them for a signed-in repository. `normalize --legacy` converts them in place, keeping each one's id, and lists its `.claude/rules/` file for you to remove.
 
