@@ -7732,6 +7732,33 @@ pub(crate) mod tests {
         });
     }
 
+    /// A round without a session has no session file to keep an episode in,
+    /// so settling it opens, ends and sends nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_round_without_a_session_settles_no_episode() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, None, &rules_dir, 3);
+            let verdicts = vec![rule_of("rotation", "R-1", Verdict::Conflicting)];
+            let headers: BTreeMap<String, AdrMeta> = [(
+                "rotation".to_string(),
+                AdrMeta {
+                    adr_id: Some("adr-rotate".to_string()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect();
+            let mut session = GovernanceSession::default();
+            let denied: Vec<&CheckedRule> = verdicts.iter().collect();
+            assert!(
+                settle_episodes(&run, &mut session, &verdicts, &headers, &denied, &[]).is_empty()
+            );
+            assert!(session.plan.episodes.is_empty());
+        });
+    }
+
     /// Two overlapping rounds of one gate that both loaded the session while
     /// its block was open, and both judge it fixed, send its resolution once.
     /// A round that loaded the session before another round opened a block
