@@ -95,6 +95,9 @@ pub(crate) const ADR_DISCOVERED: &str = "actual.adr.discovered";
 /// `reject`, `publish`, `unpublish`, `delete`, `restore` or `update`.
 pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
 
+/// The event a run of `actual adr new` or `actual adr create` sends.
+pub(crate) const ADR_CREATED: &str = "actual.adr.created";
+
 /// The event `rules report-use` sends for each ADR the agent says it used in
 /// a turn, in answer to the Stop hook's question.
 pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
@@ -130,8 +133,10 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// and `actual.report.*` attributes; 6 adds [`FILTER_EVALUATED`] and its
 /// `actual.filter.*` attributes; 7 adds [`GATE_RESOLVED`] and its
 /// `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`,
-/// `actual.gate.denials` and `actual.gate.block_action_id` attributes.
-const SCHEMA_VERSION: i64 = 7;
+/// `actual.gate.denials` and `actual.gate.block_action_id` attributes; 8 is
+/// the web app's `actual.adr.reviewed` attributes, which the CLI doesn't
+/// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes.
+const SCHEMA_VERSION: i64 = 9;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -480,6 +485,24 @@ pub(crate) struct ReviewedDecision<'a> {
     pub group_rows: usize,
 }
 
+/// The decision an `adr new` or `adr create` run wrote or saved, as its
+/// [`ADR_CREATED`] record describes it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CreatedDecision<'a> {
+    /// `local` for `adr new`, `cloud` for `adr create`.
+    pub target: &'a str,
+    /// `flags`, or `file` for `adr create --file`.
+    pub source: &'a str,
+    /// `accepted` or `draft`: as saved, or as asked for when nothing was.
+    pub status: &'a str,
+    pub policies: usize,
+    /// A cloud save whose scope or publish step after it failed.
+    pub partial: bool,
+    /// The saved decision's id: [`DECISION_ID`], sent empty by `adr new` and
+    /// by a run that saved nothing.
+    pub id: Option<&'a str>,
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -675,6 +698,22 @@ impl Origin {
             text(DECISION_ID, decision.id),
             boolean("actual.adr.review.grouped", decision.grouped),
             count("actual.adr.review.group_rows", decision.group_rows),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
+    /// The [`ADR_CREATED`] record for one `adr new` or `adr create` run: the
+    /// decision it wrote or saved, then how the run ended.
+    pub(crate) fn adr_created(&self, decision: CreatedDecision<'_>, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_CREATED, "", None);
+        record.attributes.extend([
+            text("actual.adr.create.target", Some(decision.target)),
+            text("actual.adr.create.source", Some(decision.source)),
+            text("actual.adr.create.status", Some(decision.status)),
+            count("actual.adr.create.policies", decision.policies),
+            boolean("actual.adr.create.partial", decision.partial),
+            text(DECISION_ID, decision.id),
         ]);
         record.attributes.extend(adr_run(run));
         record
@@ -1639,7 +1678,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "7"})
+            serde_json::json!({"intValue": "9"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2224,7 +2263,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(7))
+            Some(&common::any_value::Value::IntValue(9))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2443,7 +2482,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"7"}"#, r#"{"intValue":"seven"}"#),
+            whole.replace(r#"{"intValue":"9"}"#, r#"{"intValue":"nine"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -4184,9 +4223,18 @@ mod tests {
             grouped: true,
             group_rows: 2,
         };
+        let created = CreatedDecision {
+            target: "cloud",
+            source: "flags",
+            status: "accepted",
+            policies: 1,
+            partial: false,
+            id: Some(id),
+        };
         vec![
             origin.adr_discovered(CheckCounts::default(), run),
             origin.adr_reviewed("accept", decision, run),
+            origin.adr_created(created, run),
         ]
     }
 
@@ -4217,7 +4265,7 @@ mod tests {
             .collect()
     }
 
-    /// Both events carry the same attributes signed in or out, except the
+    /// The events carry the same attributes signed in or out, except the
     /// decision id, which a signed-out copy leaves out.
     #[test]
     fn test_adr_events_name_a_decision_only_signed_in() {
@@ -4229,22 +4277,25 @@ mod tests {
         assert_eq!(events[1].event_name, ADR_REVIEWED);
         assert_ne!(ADR_DISCOVERED, ADR_DETECTED);
         assert_ne!(ADR_REVIEWED, ADR_DETECTED);
+        assert_eq!(events[2].event_name, ADR_CREATED);
         assert_eq!(keys(&events[0]), keys(&events[0].clone().signed_out()));
-        let review = keys(&events[1]);
-        let signed_out = keys(&events[1].clone().signed_out());
-        assert!(review.iter().any(|key| key == DECISION_ID));
-        assert_eq!(
-            review
-                .into_iter()
-                .filter(|key| key != DECISION_ID)
-                .collect::<Vec<_>>(),
-            signed_out
-        );
+        for event in &events[1..] {
+            let signed_in = keys(event);
+            let signed_out = keys(&event.clone().signed_out());
+            assert!(signed_in.iter().any(|key| key == DECISION_ID));
+            assert_eq!(
+                signed_in
+                    .into_iter()
+                    .filter(|key| key != DECISION_ID)
+                    .collect::<Vec<_>>(),
+                signed_out
+            );
+        }
     }
 
-    /// Recorded signed out, neither event gets a stamp and the review event
-    /// is spooled without its decision id. Recorded signed in, both are
-    /// stamped and the id waits in the spool.
+    /// Recorded signed out, no event gets a stamp and the review and create
+    /// events are spooled without their decision id. Recorded signed in, all
+    /// are stamped and the id waits in the spool.
     #[test]
     fn test_adr_events_are_spooled_with_the_sign_in_they_were_recorded_under() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -4280,15 +4331,17 @@ mod tests {
             [
                 (None, ADR_DISCOVERED, false),
                 (None, ADR_REVIEWED, false),
+                (None, ADR_CREATED, false),
                 (Some(stamp.as_str()), ADR_DISCOVERED, false),
                 (Some(stamp.as_str()), ADR_REVIEWED, true),
+                (Some(stamp.as_str()), ADR_CREATED, true),
             ]
         );
     }
 
     /// The events recorded under the current sign-in go with its token and
     /// name the decision. Those recorded signed out go without it, and the
-    /// review event among them names none.
+    /// review and create events among them name none.
     #[tokio::test]
     async fn test_adr_events_go_with_the_token_only_when_recorded_signed_in() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -4317,6 +4370,7 @@ mod tests {
             [vec![
                 (ADR_DISCOVERED.to_string(), None),
                 (ADR_REVIEWED.to_string(), Some("in-1".to_string())),
+                (ADR_CREATED.to_string(), Some("in-1".to_string())),
             ]]
         );
         assert_eq!(
@@ -4324,6 +4378,7 @@ mod tests {
             [vec![
                 (ADR_DISCOVERED.to_string(), None),
                 (ADR_REVIEWED.to_string(), None),
+                (ADR_CREATED.to_string(), None),
             ]]
         );
     }

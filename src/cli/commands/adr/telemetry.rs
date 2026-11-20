@@ -1,14 +1,16 @@
 //! The OpenTelemetry events the `actual adr` commands send: one
-//! [`otlp::ADR_DISCOVERED`] record per `adr check` run, and one
+//! [`otlp::ADR_DISCOVERED`] record per `adr check` run, one
 //! [`otlp::ADR_REVIEWED`] record per run of `accept`, `reject`, `publish`,
-//! `unpublish`, `delete`, `restore` or `update`.
+//! `unpublish`, `delete`, `restore` or `update`, and one
+//! [`otlp::ADR_CREATED`] record per run of `adr new` or `adr create`.
 //!
 //! # Design
 //!
 //! **One event per run.** Each review command takes one decision id, so a
 //! review event is one decision. An AI-grouped decision acts on its rows
 //! through one group action, so the event says it was grouped and how many
-//! rows that action covers. A check event counts the files it checked.
+//! rows that action covers. A check event counts the files it checked. A
+//! create event is the one decision `new` wrote or `create` saved.
 //!
 //! **Signed in or not, by the sender.** The records are spooled like every
 //! other OTLP record: under a sign-in they go with its token, and otherwise
@@ -17,13 +19,15 @@
 //! sends outcome `not_signed_in` and never had an id to send.
 //!
 //! **Counts and outcomes, never content.** No title, context, policy, scope,
-//! file path or `reject --reason` text is sent.
+//! file path or `reject --reason` text is sent. A create event counts the
+//! decision's policies.
 //!
 //! **Nothing without an output.** With telemetry opted out, or no output
 //! resolved, a report returns before it builds anything.
 //!
 //! **Nothing without the feature.** A build without the `telemetry` feature
-//! has neither event, and both reports are no-ops that take the same calls.
+//! has none of the events, and the reports are no-ops that take the same
+//! calls.
 
 use std::time::Instant;
 
@@ -35,7 +39,7 @@ use crate::error::ActualError;
 #[cfg(feature = "telemetry")]
 pub(super) use crate::telemetry::otlp::CheckCounts;
 #[cfg(feature = "telemetry")]
-use crate::telemetry::otlp::{self, ReviewedDecision};
+use crate::telemetry::otlp::{self, CreatedDecision, ReviewedDecision};
 
 /// A command run being timed, and whether a person was at the terminal.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
@@ -82,6 +86,42 @@ impl Reviewed {
             } else {
                 0
             },
+        }
+    }
+}
+
+/// What an `adr new` or `adr create` run wrote or saved, filled in as the
+/// run learns it, so a run that stops early still reports what it knew.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Creation {
+    target: &'static str,
+    source: &'static str,
+    /// `accepted` or `draft`: as asked for, then as saved.
+    pub(super) status: String,
+    pub(super) policies: usize,
+    /// A cloud save whose scope or publish step after it failed.
+    pub(super) partial: bool,
+    /// The saved decision's id; `adr new` has none to send.
+    pub(super) id: Option<String>,
+}
+
+impl Creation {
+    /// An `adr new` run, which writes files from flags.
+    pub(super) fn local() -> Self {
+        Self {
+            target: "local",
+            source: "flags",
+            ..Self::default()
+        }
+    }
+
+    /// An `adr create` run, from `--file` or from flags.
+    pub(super) fn cloud(from_file: bool) -> Self {
+        Self {
+            target: "cloud",
+            source: if from_file { "file" } else { "flags" },
+            ..Self::default()
         }
     }
 }
@@ -150,6 +190,29 @@ pub(super) fn report_review<T>(
     send(|origin| origin.adr_reviewed(action, decision, run.ended(outcome, exit_code(result))));
 }
 
+/// Report one `adr new` or `adr create` run that learned `creation`:
+/// `succeeded`, `invalid` when the decision fails the save rules, `duplicate`
+/// when `create` finds it likely already exists, `not_signed_in`, or `failed`.
+#[cfg(feature = "telemetry")]
+pub(super) fn report_create<T>(run: &Run, creation: &Creation, result: &Result<T, ActualError>) {
+    let outcome = match result {
+        Ok(_) => "succeeded",
+        Err(ActualError::AdrInvalid { .. }) => "invalid",
+        Err(ActualError::AdrDuplicate { .. }) => "duplicate",
+        Err(ActualError::NotLoggedIn) => "not_signed_in",
+        Err(_) => "failed",
+    };
+    let decision = CreatedDecision {
+        target: creation.target,
+        source: creation.source,
+        status: &creation.status,
+        policies: creation.policies,
+        partial: creation.partial,
+        id: creation.id.as_deref(),
+    };
+    send(|origin| origin.adr_created(decision, run.ended(outcome, exit_code(result))));
+}
+
 #[cfg(feature = "telemetry")]
 fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
     let Some(destination) = brief_telemetry::Destination::resolve() else {
@@ -164,6 +227,9 @@ pub(super) fn report_check(_: &Run, _: CheckCounts, _: &Result<(), ActualError>)
 #[cfg(not(feature = "telemetry"))]
 pub(super) fn report_review<T>(_: &Run, _: &str, _: Option<&Reviewed>, _: &Result<T, ActualError>) {
 }
+
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_create<T>(_: &Run, _: &Creation, _: &Result<T, ActualError>) {}
 
 #[cfg(all(test, feature = "telemetry"))]
 pub(super) mod tests {
@@ -298,7 +364,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 7);
+                assert_eq!(all["actual.event.schema_version"], 9);
             }
         });
     }
@@ -407,13 +473,107 @@ pub(super) mod tests {
         });
     }
 
-    /// Opted out by config or by env, neither event is built.
+    /// Each create outcome, for a local write and for a cloud save.
     #[test]
-    fn the_telemetry_off_switch_stops_both_events() {
+    fn create_reports_its_target_and_each_outcome() {
+        with_config(WITH_FILE, |_| {
+            let local = Creation {
+                status: "accepted".to_string(),
+                policies: 2,
+                ..Creation::local()
+            };
+            let cases: [(Result<(), ActualError>, &str, i64); 3] = [
+                (Ok(()), "succeeded", 0),
+                (
+                    Err(ActualError::AdrInvalid {
+                        reasons: vec!["Add a title.".to_string()],
+                    }),
+                    "invalid",
+                    1,
+                ),
+                (
+                    Err(ActualError::InternalError("disk full".to_string())),
+                    "failed",
+                    1,
+                ),
+            ];
+            for (result, outcome, code) in cases {
+                report_create(&run(true), &local, &result);
+                let records = take_captured();
+                assert_eq!(records.len(), 1, "{outcome}");
+                assert_eq!(records[0]["eventName"], otlp::ADR_CREATED);
+                assert_eq!(
+                    Value::Object(own(&records[0])),
+                    json!({
+                        "actual.adr.create.target": "local",
+                        "actual.adr.create.source": "flags",
+                        "actual.adr.create.status": "accepted",
+                        "actual.adr.create.policies": 2,
+                        "actual.adr.create.partial": false,
+                        "actual.adr.decision_id": "",
+                        "actual.adr.command.outcome": outcome,
+                        "actual.adr.command.exit_code": code,
+                        "actual.adr.command.stdin_is_terminal": true,
+                    }),
+                    "{outcome}"
+                );
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 9);
+            }
+
+            let saved = Creation {
+                status: "draft".to_string(),
+                policies: 1,
+                partial: true,
+                id: Some("d-9".to_string()),
+                ..Creation::cloud(true)
+            };
+            report_create(&run(false), &saved, &Ok(()));
+            let records = take_captured();
+            assert_eq!(
+                Value::Object(own(&records[0])),
+                json!({
+                    "actual.adr.create.target": "cloud",
+                    "actual.adr.create.source": "file",
+                    "actual.adr.create.status": "draft",
+                    "actual.adr.create.policies": 1,
+                    "actual.adr.create.partial": true,
+                    "actual.adr.decision_id": "d-9",
+                    "actual.adr.command.outcome": "succeeded",
+                    "actual.adr.command.exit_code": 0,
+                    "actual.adr.command.stdin_is_terminal": false,
+                })
+            );
+
+            let refused: [(ActualError, &str); 2] = [
+                (
+                    ActualError::AdrDuplicate {
+                        message: "looks like one".to_string(),
+                        hint: String::new(),
+                    },
+                    "duplicate",
+                ),
+                (ActualError::NotLoggedIn, "not_signed_in"),
+            ];
+            for (error, outcome) in refused {
+                let code = i64::from(error.exit_code());
+                report_create(&run(false), &Creation::cloud(false), &Err::<(), _>(error));
+                let own = own(&take_captured()[0]);
+                assert_eq!(own["actual.adr.create.source"], "flags");
+                assert_eq!(own["actual.adr.command.outcome"], outcome);
+                assert_eq!(own["actual.adr.command.exit_code"], code);
+                assert_eq!(own["actual.adr.decision_id"], "");
+            }
+        });
+    }
+
+    /// Opted out by config or by env, no event is built.
+    #[test]
+    fn the_telemetry_off_switch_stops_every_event() {
         let reviewed = Reviewed::of(&decision("d-1", None, &[]));
         let report_both = || {
             report_check(&run(true), COUNTS, &Ok(()));
             report_review(&run(true), "accept", Some(&reviewed), &Ok(()));
+            report_create(&run(true), &Creation::local(), &Ok(()));
             take_captured()
         };
         with_config(&format!("{WITH_FILE}  enabled: false\n"), |_| {
@@ -427,23 +587,27 @@ pub(super) mod tests {
             assert!(report_both().is_empty(), "no output resolved");
         });
         with_config(WITH_FILE, |_| {
-            assert_eq!(report_both().len(), 2, "the positive control");
+            assert_eq!(report_both().len(), 3, "the positive control");
         });
     }
 
-    /// Telemetry off in debug mode: both events are built and logged as not
+    /// Telemetry off in debug mode: the events are built and logged as not
     /// sent, and nothing is sent.
     #[test]
-    fn debug_mode_logs_both_events_as_not_sent_with_telemetry_off() {
+    fn debug_mode_logs_the_events_as_not_sent_with_telemetry_off() {
         let reviewed = Reviewed::of(&decision("d-1", None, &[]));
         with_config(&format!("{WITH_FILE}  enabled: false\n"), |home| {
             let _debug = crate::telemetry::debug::tests::debug_on(home, "adr-off");
             report_check(&run(true), COUNTS, &Ok(()));
             report_review(&run(true), "accept", Some(&reviewed), &Ok(()));
+            report_create(&run(true), &Creation::local(), &Ok(()));
             assert!(take_captured().is_empty());
             let lines = crate::telemetry::debug::tests::logged("adr-off");
             let names: Vec<_> = lines.iter().map(|l| &l["event"]["eventName"]).collect();
-            assert_eq!(names, [otlp::ADR_DISCOVERED, otlp::ADR_REVIEWED]);
+            assert_eq!(
+                names,
+                [otlp::ADR_DISCOVERED, otlp::ADR_REVIEWED, otlp::ADR_CREATED]
+            );
             for line in &lines {
                 assert_eq!(line["stage"], "not_sent");
                 assert_eq!(line["reason"], "telemetry_off");

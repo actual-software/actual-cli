@@ -353,10 +353,17 @@ The `actual adr` commands send one event per run:
   action covers, then the same outcome, exit code, terminal flag and duration.
   These commands need a sign-in, so a run while signed out stops before it
   reads a decision and sends the outcome `not_signed_in` with no decision.
+- `actual.adr.created` from each run of `adr new` and `adr create`: where the
+  decision went (`local` files for `new`, Actual AI for `create`), whether it
+  came from flags or from `create --file`, the status it was written or saved
+  with, how many policies it has, whether a `create --file` save left its
+  scope or publish step unfinished, and the id `create` saved it under, then
+  the same outcome, exit code, terminal flag and duration. `adr new` has no id
+  to send.
 
-Neither event carries a decision's title, context, policies or scope globs, a
-file path, or the text of `reject --reason`. `adr new`, `adr create`,
-`adr list` and `adr show` send neither.
+None of these events carries a decision's title, context, policy text or
+scope globs, a file path, or the text of `reject --reason`. `adr list` and
+`adr show` send none of them.
 
 Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
@@ -405,7 +412,7 @@ request Actual refuses with a 401 is sent once more without it. Any other
 endpoint, a custom one included, never gets the token. The default endpoint is
 at that address unless the config file's `api_url` or `ACTUAL_API_URL` names
 another one. Typed reason text, `actual.override.reason_text`, the decision a
-review command acted on, `actual.adr.decision_id`, and a reported claim's file
+review or create command acted on, `actual.adr.decision_id`, and a reported claim's file
 path, `actual.report.file_path`, go only in a request that carries the token:
 every request without it, and the file sink's copy of that request, leaves
 those attributes out and keeps the rest, the reason code included.
@@ -425,8 +432,11 @@ request that carries your sign-in's token. A check event adds
 event adds `actual.adr.check.files`, `actual.adr.check.failed_files` and
 `actual.adr.check.duplicates`; a review event adds `actual.adr.review.action`,
 `actual.adr.review.grouped` and `actual.adr.review.group_rows`, plus
-`actual.adr.decision_id` in a request that carries your sign-in's token; and
-both add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
+`actual.adr.decision_id` in a request that carries your sign-in's token; a
+create event adds `actual.adr.create.target`, `actual.adr.create.source`,
+`actual.adr.create.status`, `actual.adr.create.policies` and
+`actual.adr.create.partial`, plus `actual.adr.decision_id` the same way; and
+all three add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
 `actual.adr.command.stdin_is_terminal` and `actual.adr.command.duration_ms`.
 A report event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.turn.index`, `actual.report.check_action_id`, `actual.report.evidence`, `actual.report.evidence_reason` and `actual.report.anchor`, plus `actual.report.file_path` in a signed-in request.
 A filter event adds `actual.filter.selector`, `actual.filter.min_score`, `actual.filter.index_size`, the nine `actual.filter.dropped.*` counts, `actual.filter.kept_count`, `actual.filter.kept_refs` and `actual.filter.kept_scores`.
@@ -445,7 +455,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `7` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, and 7 added `actual.gate.resolved` and its attributes) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `9` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, and 9 added `actual.adr.created` and its attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -471,10 +481,15 @@ has only the classes its fields carry below:
 | `actual.adr.check.failed_files` | How many of them failed the save rules | anonymous |
 | `actual.adr.check.duplicates` | How many likely duplicates it listed, between two files or between a file and a decision in Actual AI | anonymous |
 | `actual.adr.review.action` | The review command that ran: `accept`, `reject`, `publish`, `unpublish`, `delete`, `restore` or `update` | anonymous |
-| `actual.adr.decision_id` | The id of the decision the command acted on, the one `actual adr list` prints, empty when the run stopped before it found one. Sent only in a request that carries your sign-in's token, and left out of every request without it | first-party identity-linked |
+| `actual.adr.decision_id` | The id of the decision the command acted on or `adr create` saved, the one `actual adr list` prints, empty when the run stopped before it found or saved one, and always empty from `adr new`. Sent only in a request that carries your sign-in's token, and left out of every request without it | first-party identity-linked |
 | `actual.adr.review.grouped` | Whether the decision is AI-grouped, so the change went through its group's route | anonymous |
 | `actual.adr.review.group_rows` | For an AI-grouped decision, how many rows its group action covers, and `0` otherwise | anonymous |
-| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error | anonymous |
+| `actual.adr.create.target` | Where the decision went: `local` for `adr new`, which writes files in the repository, or `cloud` for `adr create`, which saves it to Actual AI | anonymous |
+| `actual.adr.create.source` | `file` for `adr create --file`, `flags` otherwise | anonymous |
+| `actual.adr.create.status` | `accepted` or `draft`: the status the decision was written or saved with, or the one the run asked for when it stopped first. A `create --file` that can't set the scope or publish is saved as a draft | anonymous |
+| `actual.adr.create.policies` | How many policies the decision has, `0` when the run stopped before it read them | anonymous |
+| `actual.adr.create.partial` | Whether `create --file` saved the decision but couldn't set its scope or publish it. Always `false` for `adr new` and `create` from flags | anonymous |
+| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error. For `adr new` and `adr create`: `succeeded`, `invalid` when the decision fails the save rules, `duplicate` when `create` finds it likely already exists, `not_signed_in`, or `failed` for any other error | anonymous |
 | `actual.adr.command.exit_code` | The exit code the run ended with, `0` on success | anonymous |
 | `actual.adr.command.stdin_is_terminal` | Whether standard input was a terminal, which tells a person at the keyboard from a coding agent, script or CI job | anonymous |
 | `actual.adr.command.duration_ms` | How long the run took, in milliseconds | anonymous |
