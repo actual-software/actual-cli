@@ -1042,4 +1042,43 @@ mod tests {
         record.apply_edits(&BTreeMap::new(), &["a".to_string()]);
         assert!(record.rules.is_empty());
     }
+
+    #[test]
+    fn each_pathway_leaves_the_rule_files_the_other_wrote() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let (name, text) =
+            render_rule_file(&source("Use Postgres", "Add a second database."), None);
+        let rule = write(root, &format!("{RULES_DIR}/{name}"), &text);
+        let entry = |origin| Entry {
+            fingerprint: "f".to_string(),
+            origin,
+        };
+        // Written while signed in; signed out, with no file under docs/adr/.
+        let mut record = Record::default();
+        record.rules.insert(ID.to_string(), entry(Origin::ActualAi));
+        let plan = plan_from_docs(root, &scan_docs(root, TODAY), &on_disk(root), &record);
+        assert!(
+            plan.changes.is_empty() && plan.drop.is_empty(),
+            "{:?}",
+            plan.changes
+        );
+        // Written from docs/adr/; signed in, with Actual AI listing nothing.
+        record.rules.insert(ID.to_string(), entry(Origin::DocsAdr));
+        let plan = plan_from_cloud(root, &[], &on_disk(root), &record);
+        assert!(
+            plan.changes.is_empty() && plan.drop.is_empty(),
+            "{:?}",
+            plan.changes
+        );
+        assert!(rule.exists());
+    }
+
+    #[test]
+    fn remove_counts_a_file_already_gone_and_reports_one_it_cannot_remove() {
+        let tmp = tempdir().unwrap();
+        assert!(remove(&tmp.path().join("gone.md")).is_ok());
+        // A directory is no file to remove.
+        assert!(remove(tmp.path()).is_err());
+    }
 }

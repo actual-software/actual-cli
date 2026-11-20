@@ -294,19 +294,18 @@ async fn read_decisions(
 /// start leaves the next signed-in command to renew.
 #[cfg(not(test))]
 fn spawn_renewal() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let mut child = std::process::Command::new(exe);
-    child
-        .args(["whoami", "--check"])
-        .env(crate::update_check::OPT_OUT_ENV, "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut child, 0);
-    let _ = child.spawn();
+    if let Ok(exe) = std::env::current_exe() {
+        let mut child = std::process::Command::new(exe);
+        child
+            .args(["whoami", "--check"])
+            .env(crate::update_check::OPT_OUT_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut child, 0);
+        let _ = child.spawn();
+    }
 }
 
 /// The test binary isn't `actual`, so a test only counts the renewals.
@@ -685,6 +684,10 @@ mod tests {
             second.written.is_empty() && second.message.is_none(),
             "{second:?}"
         );
+        assert_eq!(
+            render(&second),
+            ".actual/rules/ already matches your decisions in Actual AI.\n"
+        );
         repos.assert();
         list.assert();
     }
@@ -717,11 +720,8 @@ mod tests {
             "{report:?}"
         );
         assert!(report.problems[0].ends_with("so the rule files were left as they are."));
-        assert!(
-            render(&report).starts_with("warning: "),
-            "{}",
-            render(&report)
-        );
+        let rendered = render(&report);
+        assert!(rendered.starts_with("warning: "), "{rendered}");
 
         git_repo(root, Some("git@github.com:actual-software/actual-cli.git"));
         server
@@ -858,5 +858,52 @@ mod tests {
         );
         assert!(load(records.path(), root).rules.is_empty());
         assert_eq!(rule_files_by_id(root).len(), 0);
+    }
+
+    #[test]
+    fn refresh_decision_leaves_the_rule_file_of_a_file_that_isnt_normalized() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        // The header names the decision, but its one policy has no level.
+        write(
+            root,
+            "docs/adr/a.md",
+            &decision_file(ID, "accepted", "Use Postgres", "Use it."),
+        );
+        let applied = refresh_decision(root, ID, TODAY, None, true);
+        assert!(applied.written.is_empty(), "{applied:?}");
+        assert!(
+            applied.problems[0].starts_with("docs/adr/a.md isn't normalized ("),
+            "{applied:?}"
+        );
+    }
+
+    #[test]
+    fn the_list_message_counts_its_files() {
+        let file = |path: &str| Unnormalized {
+            path: path.to_string(),
+            adr_id: None,
+            reasons: vec!["It has no ADR header.".to_string()],
+        };
+        let list = [file("docs/adr/a.md"), file("docs/adr/b.md")];
+        let text = message(Mode::SignedOut, &Applied::default(), Some(&list)).unwrap();
+        assert!(
+            text.starts_with(
+                "2 files under docs/adr/ aren't normalized, so they get no rule file:"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_record_another_refresh_holds_is_left_as_it_is() {
+        let records = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let held = brief_ledger::lock(records.path(), LOCK_WAIT).unwrap();
+        assert!(!save(records.path(), root.path(), |record| {
+            record.unnormalized = Some("x".to_string());
+        }));
+        drop(held);
+        assert_eq!(load(records.path(), root.path()), Record::default());
     }
 }

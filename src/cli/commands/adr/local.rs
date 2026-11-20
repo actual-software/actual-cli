@@ -1182,4 +1182,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn render_applied_lists_each_change_and_warns_about_a_rule_file_it_could_not_update() {
+        let applied = Applied {
+            written: vec![".actual/rules/a.md".to_string()],
+            problems: vec!["disk full".to_string()],
+            ..Applied::default()
+        };
+        let text = render_applied(&applied);
+        assert!(
+            text.contains("  Wrote rule file .actual/rules/a.md\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Couldn't update a rule file (disk full); `actual adr refresh` tries again."
+            ),
+            "{text}"
+        );
+    }
 }
