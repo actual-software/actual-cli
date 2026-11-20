@@ -20,8 +20,8 @@ use crate::adr::files::{self, split_header, write_atomic, DecisionFile, DECISION
 use crate::adr::header::{description_for, render_header, AdrHeader, REPOSITORY_ROOT};
 use crate::adr::names::decision_doc_file_name;
 use crate::adr::refresh::{
-    fingerprint, is_decision_candidate, policy_rule_id, read_normalized, relative, Applied,
-    RuleSource,
+    fingerprint, in_drafts, is_decision_candidate, policy_rule_id, read_normalized, relative,
+    Applied, RuleSource,
 };
 use crate::adr::save_check::check_document;
 use crate::adr::workflow::DecisionEdit;
@@ -82,18 +82,30 @@ fn needs_sign_in(action: LifecycleAction) -> Result<(), ActualError> {
 
 // ── reading ────────────────────────────────────────────────────────────────
 
-/// The decision file under `docs/adr/` whose header names `id`.
+/// The decision file under `docs/adr/` whose header names `id`. A file under
+/// `docs/adr/drafts/` is work in progress the refresh leaves out, so these
+/// commands leave it out too, and say so when it holds the only match.
 fn find(root: &Path, id: &str) -> Result<DecisionFile, ActualError> {
-    files::discover(root)
+    let (drafts, found): (Vec<DecisionFile>, Vec<DecisionFile>) = files::discover(root)
         .decisions
         .into_iter()
-        .find(|file| file.adr_id() == Some(id))
-        .ok_or_else(|| {
-            ActualError::AdrNotFound(format!(
-                "No decision file under {DECISION_DIR}/ has the id {}.",
-                sanitize_server_text(id)
-            ))
-        })
+        .filter(|file| file.adr_id() == Some(id))
+        .partition(|file| in_drafts(Path::new(&relative(root, &file.path))));
+    if let Some(file) = found.into_iter().next() {
+        return Ok(file);
+    }
+    let id = sanitize_server_text(id);
+    Err(match drafts.first() {
+        Some(draft) => ActualError::AdrNotAllowed(format!(
+            "{} is under {DECISION_DIR}/drafts/, work in progress the refresh leaves out, so \
+             `actual adr` leaves it out too. Move it into {DECISION_DIR}/ to work on decision \
+             {id} here.",
+            relative(root, &draft.path)
+        )),
+        None => ActualError::AdrNotFound(format!(
+            "No decision file under {DECISION_DIR}/ has the id {id}."
+        )),
+    })
 }
 
 /// A decision file as `list` and `show` print a decision: its status as the
@@ -183,6 +195,7 @@ fn run_list(args: &AdrListArgs, root: &Path) -> Result<String, ActualError> {
     let matching: Vec<FileDecision> = found
         .decisions
         .iter()
+        .filter(|file| !in_drafts(Path::new(&relative(root, &file.path))))
         .map(|file| FileDecision {
             decision: view(file),
             file: relative(root, &file.path),
@@ -1130,5 +1143,66 @@ mod tests {
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("has no status line to change")),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn a_file_under_drafts_is_left_out_and_a_copy_there_never_stands_in() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let decisions = root.join(DECISION_DIR);
+        std::fs::create_dir_all(decisions.join("drafts")).unwrap();
+
+        // A copy under drafts/ sorts ahead of the decision's own file.
+        let id = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let own = decisions.join("use-postgres.md");
+        std::fs::rename(find(root, &id).unwrap().path, &own).unwrap();
+        let copy = decisions.join("drafts/use-postgres.md");
+        std::fs::copy(&own, &copy).unwrap();
+        assert_eq!(find(root, &id).unwrap().path, own);
+        let mut listed = list_args();
+        listed.api.json = true;
+        let json: serde_json::Value =
+            serde_json::from_str(&run_list(&listed, root).unwrap()).unwrap();
+        assert_eq!(json["total"], 1, "{json}");
+        let mut retitle = update_args(&id);
+        retitle.title = Some("Use Postgres 16".to_string());
+        run_update(&retitle, root, TODAY, None).unwrap();
+        assert!(std::fs::read_to_string(&own)
+            .unwrap()
+            .contains("# Use Postgres 16"));
+        assert!(std::fs::read_to_string(&copy)
+            .unwrap()
+            .contains("# Use Postgres\n"));
+
+        // Only under drafts/: refused with the reason, and its rule file stays.
+        let moved = create(
+            root,
+            "Use Redis",
+            &["MUST: Use Redis."],
+            SaveStatus::Accepted,
+        );
+        let path = find(root, &moved).unwrap().path;
+        let draft = decisions.join("drafts").join(path.file_name().unwrap());
+        std::fs::rename(&path, &draft).unwrap();
+        let mut retitle = update_args(&moved);
+        retitle.title = Some("Use Redis 7".to_string());
+        for err in [
+            run_update(&retitle, root, TODAY, None).unwrap_err(),
+            run_status(&id_args(&moved, false), root, TODAY, None, true).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("Move it into docs/adr/")),
+                "{err:?}"
+            );
+        }
+        assert!(rule_text(root, &moved).is_some());
+        assert!(std::fs::read_to_string(&draft)
+            .unwrap()
+            .contains("# Use Redis\n"));
     }
 }
