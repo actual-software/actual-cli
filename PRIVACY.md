@@ -108,7 +108,8 @@ repository.
 ### Plan-governance events (pseudonymous when logged out; first-party identity-linked when logged in)
 
 When `actual plan-check` or `actual impl-check` (including each command's
-`--claude-hook` path Claude Code drives automatically) reaches a verdict --
+`--claude-hook` path Claude Code drives automatically, and the `--codex-hook`
+path Codex drives) reaches a verdict --
 i.e. it actually judged the plan or diff against at least one selected rule
 -- and on `actual check-override`, the CLI sends discrete events describing
 the governance outcome, proxied through `api-service.api.prod.actual.ai` to
@@ -134,7 +135,7 @@ Each event includes a subset of these properties:
 | Property | Description |
 |----------|--------------|
 | `cli_version` | CLI version string |
-| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"impl-check"`, `"impl-check --claude-hook"`, `"check-override"`, `"rules select"`) |
+| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"plan-check --codex-hook"`, `"impl-check"`, `"impl-check --claude-hook"`, `"impl-check --codex-hook"`, `"check-override"`, `"rules select"`) |
 | `rule_id` | The internal id of the specific rule involved -- an Actual-internal identifier, same category as `adr_ids` above, not a file path |
 | `rule_source` | The rule document's internal slug, derived from its filename -- not a filesystem path |
 | `decision` | `allow`, `warn`, or `block` -- the outcome for this rule or run |
@@ -269,14 +270,15 @@ The CLI sends OpenTelemetry log events about ADRs on five occasions:
 
 - `actual.adr.detected`, with `actual.detection.method` set to `context`, the
   first time any of an ADR's rules is added to an agent's context during a
-  Claude Code session, even when the brief has room for only some of them. It
-  comes from the `rules brief --claude-hook` path Claude Code drives, and it
+  Claude Code or Codex session, even when the brief has room for only some of
+  them. It comes from the `rules brief --claude-hook` path Claude Code drives
+  or the `rules brief --codex-hook` path Codex drives, and it
   counts an ADR once per session, whichever agent or subagent it reached and
   however often the context is compacted. A manual `actual rules brief` run
   sends nothing.
 - `actual.adr.detected`, with `actual.detection.method` set to the gate,
-  `planning` or `implementation`, when `plan-check --claude-hook` or
-  `impl-check --claude-hook` judges any of an ADR's rules, whatever the
+  `planning` or `implementation`, when `plan-check` or `impl-check` judges any
+  of an ADR's rules through `--claude-hook` or `--codex-hook`, whatever the
   verdict, with `actual.adr.verdict` set to the strongest verdict the check
   gave any of those rules. It counts an ADR once per session at each gate, and
   again when a later check at that gate gives it a stronger verdict.
@@ -306,6 +308,18 @@ ran the command:
 They're sent on the same runs as the plan-governance `check_started` and
 `check_completed` events, with the same outcome, but only to the outputs
 below. A run outside a Claude Code hook sends them with no session or agent.
+
+The brief and both gates also send `actual.filter.evaluated`, which says how
+they narrowed the repository's rule files down to what reached the agent or
+the judge. `plan-check` and `impl-check` send one every round of
+`--claude-hook` or `--codex-hook`, including a round where nothing applies.
+`rules brief` sends one from either hook mode only when its brief adds an ADR
+the session hasn't reported yet, alongside that ADR's `actual.adr.detected`, so a brief that
+repeats what the agent already has sends nothing. The event counts rule files:
+how many the index holds, how many each step dropped and why, and how many
+were kept. It names the kept ones only by their ADR reference, with each ADR's
+best score. A dropped rule file is never named, and a manual run of any of the
+three sends nothing.
 
 The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
 
@@ -401,6 +415,7 @@ event adds `actual.adr.check.files`, `actual.adr.check.failed_files` and
 both add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
 `actual.adr.command.stdin_is_terminal` and `actual.adr.command.duration_ms`.
 A report event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.turn.index`, `actual.report.check_action_id`, `actual.report.evidence`, `actual.report.evidence_reason` and `actual.report.anchor`, plus `actual.report.file_path` in a signed-in request.
+A filter event adds `actual.filter.selector`, `actual.filter.min_score`, `actual.filter.index_size`, the nine `actual.filter.dropped.*` counts, `actual.filter.kept_count`, `actual.filter.kept_refs` and `actual.filter.kept_scores`.
 An unknown value is sent as an empty string. Apart from
 `actual.override.reason_text`, which holds whatever a person typed,
 `actual.adr.decision_id` and `actual.report.file_path`, all of which go only
@@ -415,7 +430,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `5` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, and 5 added `actual.adr.reported` and its attributes) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `6` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, and 6 added `actual.filter.evaluated` and its attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -454,13 +469,28 @@ has only the classes its fields carry below:
 | `actual.report.evidence_reason` | Why a claim is unverified, and empty when it is verified: `adr_not_in_session` (the ADR wasn't one the question listed), `file_not_changed` (the file has no change this turn, or no plan was judged this turn) or `line_not_in_diff` (the line isn't one the turn added or changed or within three lines of one in the same hunk, or isn't a line of the plan) | anonymous |
 | `actual.report.anchor` | What the claim's line is a line of: `diff` or `plan` | anonymous |
 | `actual.report.file_path` | The repository-relative path of the file a verified `diff` claim names, sent only in a request that carries your sign-in's token. An unverified claim sends no path. The line itself, its text and anything the agent wrote are never sent | first-party identity-linked |
+| `actual.filter.selector` | Which selection the event describes: `context` for the brief, `planning` for `plan-check`'s, `implementation` for `impl-check`'s, the same words `actual.detection.method` uses | anonymous |
+| `actual.filter.min_score` | The score floor the selection applied, `0` for none | anonymous |
+| `actual.filter.index_size` | How many rule files the scope index holds, retired ones included. Every file lands in exactly one of the counts below, so they add up to this | anonymous |
+| `actual.filter.dropped.inactive` | Rule files left out for a retired status (draft, deferred, archived and the like), or that no longer read or parse when the selection went to use them | anonymous |
+| `actual.filter.dropped.excluded_path` | Rule files whose own scope excludes every path the plan, diff or read names, or whose root holds none of them | anonymous |
+| `actual.filter.dropped.no_match` | Rule files that matched nothing in the plan, diff or path. For the brief this includes files that matched on fewer than two words when the path alone matched nothing | anonymous |
+| `actual.filter.dropped.below_floor` | Rule files that matched but scored under `actual.filter.min_score` | anonymous |
+| `actual.filter.dropped.capped` | Rule files cut by the candidate cap or the selection's limit | anonymous |
+| `actual.filter.dropped.unrelated` | Rule files stage 2's rank judged unrelated. A hook never runs stage 2, so it sends `0` | anonymous |
+| `actual.filter.dropped.session` | Gates only: rule files whose every rule was already cleared or overridden in this session | anonymous |
+| `actual.filter.dropped.window` | Gates only: rule files with a rule still to judge, none of them inside the 40 rules the judge sees in one round | anonymous |
+| `actual.filter.dropped.brief_cap` | Brief only: rule files cut by the brief's decision limit, by what the agent was already briefed on, or by the brief's size budget | anonymous |
+| `actual.filter.kept_count` | Rule files that reached the agent, or whose rules reached the judge | anonymous |
+| `actual.filter.kept_refs` | The ADRs of the kept rule files, each once, best first, named as `actual.adr.ref` names them. A kept file without a v2 header has no reference and isn't listed, so this can be shorter than `actual.filter.kept_count` | first-party identity-linked |
+| `actual.filter.kept_scores` | Each listed ADR's best selection score, in the same order | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also
 names the CLI, its version, the deployment environment (`production` for
 release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
-override was recorded, when a check started or completed, when the session ended, or when an `actual adr` run finished), and, when the
+override was recorded, when a check started or completed, when a selection was made, when the session ended, or when an `actual adr` run finished), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
 **Apart from the `actual.override.reason_text` of an `other` override and the
 `actual.report.file_path` of a verified, signed-in report, no event carries rule text,

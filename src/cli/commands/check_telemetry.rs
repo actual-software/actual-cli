@@ -8,6 +8,11 @@
 //! [`otlp::GATE_EVALUATED`] record per logical ADR it blocked on, with the
 //! outcome `breached` and the gate.
 //!
+//! Every hook round, verdict or not, also sends one [`otlp::FILTER_EVALUATED`]
+//! record accounting for what its selection kept and dropped, with the gate as
+//! the selector. A round with a verdict sends it with the records above; one
+//! without sends it alone.
+//!
 //! # Design
 //!
 //! **Started is stamped at the start and sent at the end.** A run reads the
@@ -63,6 +68,7 @@ use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::HookRun;
 use crate::api::types::PlanGovernanceDecision;
 use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
+use crate::rules::scope::FilterTally;
 use crate::rules::types::AdrMeta;
 use crate::telemetry::otlp;
 
@@ -182,6 +188,36 @@ pub(super) fn report_round(
         started: run.started,
     };
     report(&action, decision, warn_reasons, records);
+}
+
+/// The gate selector's [`otlp::FILTER_EVALUATED`] record for a hook round,
+/// with the gate as the selector, or `None` when the round has no account or
+/// nowhere to send it.
+pub(super) fn filter_record(run: &HookRun<'_>) -> Option<otlp::LogRecord> {
+    let tally = run.filter?;
+    brief_telemetry::Destination::resolve_quietly()?;
+    Some(filter_evaluated(run, tally))
+}
+
+/// Send a hook round's [`filter_record`] on its own, for a round that stops
+/// before a verdict and so sends no other record.
+pub(super) fn report_filter(run: &HookRun<'_>) {
+    let Some(tally) = run.filter else {
+        return;
+    };
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
+        return;
+    };
+    destination.deliver(vec![filter_evaluated(run, tally)]);
+}
+
+fn filter_evaluated(run: &HookRun<'_>, tally: &FilterTally) -> otlp::LogRecord {
+    otlp::Origin::resolve().filter_evaluated(
+        run.session_id.unwrap_or_default(),
+        run.agent_id,
+        gate(run.kind),
+        tally,
+    )
 }
 
 /// The records for the logical ADRs a hook round judged, and those it blocked
@@ -412,6 +448,7 @@ pub(super) mod tests {
     fn round(home: &Path, kind: ArtifactKind, session: Option<&str>, verdicts: &[CheckedRule]) {
         let rules_dir = home.join("rules");
         let run = HookRun {
+            host: crate::cli::commands::hook_host::HookHost::Claude,
             kind,
             command: "test --claude-hook",
             session_id: session,
@@ -421,6 +458,9 @@ pub(super) mod tests {
             rules_dir: &rules_dir,
             max_rounds: 3,
             ask: None,
+            filter: None,
+            codex_ask: false,
+            picker: false,
             started: Started::now(),
         };
         let blocking: Vec<&CheckedRule> = verdicts
@@ -1041,6 +1081,7 @@ pub(super) mod tests {
         with_config(WITH_FILE, |home| {
             let rules_dir = home.join("rules");
             let run = HookRun {
+                host: crate::cli::commands::hook_host::HookHost::Claude,
                 kind: ArtifactKind::Diff,
                 command: "impl-check --claude-hook",
                 session_id: Some("s2"),
@@ -1050,6 +1091,9 @@ pub(super) mod tests {
                 rules_dir: &rules_dir,
                 max_rounds: 3,
                 ask: None,
+                filter: None,
+                codex_ask: false,
+                picker: false,
                 started: Started {
                     time: std::time::UNIX_EPOCH + std::time::Duration::from_secs(7),
                     instant: Instant::now(),
@@ -1162,6 +1206,80 @@ pub(super) mod tests {
             round(home, ArtifactKind::Plan, Some("s1"), &blocking);
             assert_eq!(reported("s1").len(), 2);
             assert!(!home.join("brief-ledger").exists());
+        });
+    }
+
+    fn filter_run<'a>(
+        home: &'a Path,
+        rules_dir: &'a Path,
+        filter: Option<&'a FilterTally>,
+    ) -> HookRun<'a> {
+        HookRun {
+            host: crate::cli::commands::hook_host::HookHost::Claude,
+            kind: ArtifactKind::Diff,
+            command: "impl-check --claude-hook",
+            session_id: Some("s1"),
+            agent_id: Some("agent-1"),
+            artifact_digest: "digest-1",
+            root: home,
+            rules_dir,
+            max_rounds: 3,
+            ask: None,
+            filter,
+            codex_ask: false,
+            picker: false,
+            started: Started::now(),
+        }
+    }
+
+    /// A round with an account and somewhere to send it has a filter record,
+    /// naming the gate as its selector; one without either has none.
+    #[test]
+    fn test_a_round_has_a_filter_record_only_with_an_account_and_an_output() {
+        let tally = FilterTally {
+            index_size: 1,
+            no_match: 1,
+            ..FilterTally::default()
+        };
+        with_config(WITH_FILE, |home| {
+            let rules_dir = home.join("rules");
+            let record =
+                filter_record(&filter_run(home, &rules_dir, Some(&tally))).expect("a record");
+            let record = serde_json::to_value(record).unwrap();
+            assert_eq!(record["eventName"], otlp::FILTER_EVALUATED);
+            assert_eq!(
+                attribute(&record, "actual.filter.selector"),
+                "implementation"
+            );
+            assert_eq!(attribute(&record, "actual.session.id"), "s1");
+            assert_eq!(attribute(&record, "actual.agent.id"), "agent-1");
+            assert!(filter_record(&filter_run(home, &rules_dir, None)).is_none());
+        });
+        with_config("", |home| {
+            let rules_dir = home.join("rules");
+            assert!(filter_record(&filter_run(home, &rules_dir, Some(&tally))).is_none());
+        });
+    }
+
+    /// A round that stops before a verdict sends its filter record alone, and
+    /// only when it has an account and an output.
+    #[test]
+    fn test_a_round_without_a_verdict_sends_its_filter_record_alone() {
+        let tally = FilterTally::default();
+        with_config(WITH_FILE, |home| {
+            let rules_dir = home.join("rules");
+            report_filter(&filter_run(home, &rules_dir, Some(&tally)));
+            let sent = take_captured();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0]["eventName"], otlp::FILTER_EVALUATED);
+
+            report_filter(&filter_run(home, &rules_dir, None));
+            assert!(take_captured().is_empty());
+        });
+        with_config("", |home| {
+            let rules_dir = home.join("rules");
+            report_filter(&filter_run(home, &rules_dir, Some(&tally)));
+            assert!(take_captured().is_empty());
         });
     }
 }

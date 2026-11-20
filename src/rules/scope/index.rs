@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::rules::scope::signals::{self, DocumentSignals, PathGlob};
+use crate::rules::scope::tally::FilterTally;
 use crate::rules::{RuleDocument, RuleLevel, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
@@ -673,6 +674,28 @@ impl ScopeIndex {
 
     /// [`Self::search`] with explicit weights, for ablation measurements.
     pub fn search_weighted(&self, query: &Query, limit: usize, weights: &Weights) -> Vec<Match> {
+        self.search_tallied_weighted(query, limit, weights).0
+    }
+
+    /// [`Self::search`], with a tally of the files it dropped and why. The
+    /// matches it returns are in no bucket yet: what keeps or drops them is
+    /// the caller's to count.
+    pub fn search_tallied(&self, query: &Query, limit: usize) -> (Vec<Match>, FilterTally) {
+        self.search_tallied_weighted(query, limit, &Weights::default())
+    }
+
+    fn search_tallied_weighted(
+        &self,
+        query: &Query,
+        limit: usize,
+        weights: &Weights,
+    ) -> (Vec<Match>, FilterTally) {
+        let mut tally = FilterTally {
+            index_size: self.documents.len() + self.inactive_documents,
+            min_score: query.min_score,
+            inactive: self.inactive_documents,
+            ..FilterTally::default()
+        };
         let query_terms: Vec<String> = dedup(signals::terms(&query.text));
         let query_paths = query.all_paths();
 
@@ -694,17 +717,18 @@ impl ScopeIndex {
             .map(|term| idf.get(term.as_str()).copied().unwrap_or(0.0))
             .sum();
 
-        let mut matches: Vec<Match> = self
-            .documents
-            .iter()
-            .filter_map(|doc| {
-                self.score_document(doc, &query_terms, &idf, total_idf, &query_paths, weights)
-            })
-            // Applied here rather than inside the cap so it is a statement
-            // about the match, not about the budget: a document below the
-            // floor is dropped whether or not there is room for it.
-            .filter(|hit| hit.score >= query.min_score)
-            .collect();
+        let mut matches: Vec<Match> = Vec::new();
+        for doc in &self.documents {
+            match self.score_document(doc, &query_terms, &idf, total_idf, &query_paths, weights) {
+                Scored::Excluded => tally.excluded_path += 1,
+                Scored::NoMatch => tally.no_match += 1,
+                // Applied here rather than inside the cap so it is a statement
+                // about the match, not about the budget: a document below the
+                // floor is dropped whether or not there is room for it.
+                Scored::Hit(hit) if hit.score < query.min_score => tally.below_floor += 1,
+                Scored::Hit(hit) => matches.push(*hit),
+            }
+        }
 
         let glob_frequency = self.glob_document_frequency();
         let declared_globs: HashMap<&str, usize> = self
@@ -725,8 +749,9 @@ impl ScopeIndex {
                 })
                 .then_with(|| a.slug.cmp(&b.slug))
         });
+        tally.capped = matches.len().saturating_sub(limit);
         matches.truncate(limit);
-        matches
+        (matches, tally)
     }
 
     /// Glob pattern → number of documents declaring it.
@@ -772,12 +797,30 @@ impl ScopeIndex {
         limit: usize,
         weights: &Weights,
     ) -> Vec<AdrGroup> {
+        self.search_adrs_tallied_weighted(query, limit, weights).0
+    }
+
+    /// [`Self::search_adrs`], with a tally of the files it dropped and why,
+    /// as [`Self::search_tallied`] keeps one.
+    pub fn search_adrs_tallied(&self, query: &Query, limit: usize) -> (Vec<AdrGroup>, FilterTally) {
+        self.search_adrs_tallied_weighted(query, limit, &Weights::default())
+    }
+
+    fn search_adrs_tallied_weighted(
+        &self,
+        query: &Query,
+        limit: usize,
+        weights: &Weights,
+    ) -> (Vec<AdrGroup>, FilterTally) {
         // Every scoring document, not the top `limit`: the cap counts
         // decisions here, and the documents of the second decision can sit
         // below any number of documents of the first.
-        let matches = self.search_weighted(query, self.documents.len(), weights);
-
-        group_matches(matches, limit)
+        let (matches, mut tally) =
+            self.search_tallied_weighted(query, self.documents.len(), weights);
+        let matched = matches.len();
+        let groups = group_matches(matches, limit);
+        tally.capped += matched - groups.iter().map(|g| g.documents.len()).sum::<usize>();
+        (groups, tally)
     }
 
     /// The decisions a brief can add to context: those with at least one MUST
@@ -804,7 +847,7 @@ impl ScopeIndex {
         total_idf: f64,
         query_paths: &[String],
         weights: &Weights,
-    ) -> Option<Match> {
+    ) -> Scored {
         let mut contributions: Vec<FieldContribution> = Vec::new();
         let mut score = 0.0;
 
@@ -823,7 +866,7 @@ impl ScopeIndex {
                 .cloned()
                 .collect();
             if kept_paths.is_empty() && !query_paths.is_empty() {
-                return None;
+                return Scored::Excluded;
             }
             &kept_paths
         };
@@ -856,7 +899,7 @@ impl ScopeIndex {
         }
 
         if score <= 0.0 {
-            return None;
+            return Scored::NoMatch;
         }
         contributions.sort_by(|a, b| {
             b.weighted
@@ -865,7 +908,7 @@ impl ScopeIndex {
                 .then_with(|| a.field.cmp(&b.field))
         });
 
-        Some(Match {
+        Scored::Hit(Box::new(Match {
             slug: doc.slug.clone(),
             relative_path: doc.relative_path.clone(),
             title: doc.title.clone(),
@@ -876,8 +919,18 @@ impl ScopeIndex {
             score,
             contributions,
             matched_globs,
-        })
+        }))
     }
+}
+
+/// What scoring one document came to.
+enum Scored {
+    Hit(Box<Match>),
+    /// Every path the query names is outside the document's root or excluded
+    /// by it.
+    Excluded,
+    /// No signal scored.
+    NoMatch,
 }
 
 /// Partition ranked documents into contiguous decision groups.

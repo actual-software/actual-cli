@@ -17,7 +17,7 @@ actual check-override --claude-hook [--via prompt|dialog] [--gate plan|impl [--l
 | `--list-blocking` | Record nothing: print the rules the `--gate` is blocking now (see [Listing a gate's blocking rules](#listing-a-gates-blocking-rules)). Requires `--gate`. |
 | `--repo`, `--rules-dir` | Which governed context to override, resolved the same way the gates resolve it. Both default as they do for `plan-check`. |
 
-The command refuses to run from an agent's own shell. It exits with code 2, prints why on stderr, prints nothing on stdout and records nothing. Only the mod's own spawn is expected to call it.
+The command refuses to run from an agent's own shell: one carrying Claude Code's `CLAUDECODE` marker, or Codex's `CODEX_THREAD_ID` or `CODEX_SESSION_ID`. It exits with code 2, prints why on stderr, prints nothing on stdout and records nothing. Only the mod's own spawn is expected to call it.
 
 ## Input
 
@@ -75,3 +75,35 @@ The command named no rule, no rule matched, a bare id was ambiguous, or `all` fo
 ## What is recorded
 
 Each overridden rule gets an entry in the session file and a line in `~/.actualai/actual/plan-check-overrides.log` with its source (`session_prompt` or `session_dialog`), the reason and its code if one was given, and which gate was blocking it (`plan`, `impl`, `both`, or none). An override applies to both gates for the rest of the session.
+
+## Codex
+
+Codex has no mod, so the plugin's Codex hooks reach the same overrides another way. Two pieces work together: the gates' `--codex-ask` flag, and `impl-check --codex-hook` on `UserPromptSubmit`.
+
+**`--codex-ask` on `plan-check --codex-hook` and `impl-check --codex-hook`.** A conflict ends the turn instead of sending the agent back. The reply is:
+
+```json
+{ "continue": false, "stopReason": "..." }
+```
+
+Codex shows `stopReason` to the user and never to the model, and it outranks a block from another `Stop` hook running alongside. The text lists the conflicts and the two answers: reply to have the agent revise, or type `actual override <rule-id|all> [code]`. The conflicts are also kept in the session, worded for the agent, until the user's next message. They are dropped by the gate's next judged round, by a round that finds nothing blocking, and once overrides leave nothing blocking. Without `--codex-ask`, a conflict is `{"decision":"block","reason":…}`, which sends the agent back to revise at once. The plugin passes the flag unless the run is unattended.
+
+**`impl-check --codex-hook` on `UserPromptSubmit`.** It records the turn start as on Claude Code, then reads the envelope's `prompt`:
+
+- **An override.** The prompt starts with `actual override` (any case) followed by `all`, a rule id with a hyphen, or a full `<doc-slug>::<rule-id>`, or with nothing at all. `/override` and `/actual-cli:override` work too. The target, code and reason are read as above, and the gate whose conflicts are waiting is the one `all` covers. The override is recorded with source `session_prompt`. The reply is `{"continue":false,"stopReason":"Actual AI: overrode ..."}`, which keeps the prompt from reaching the model. It says what was recorded, what still blocks, or why nothing was recorded. A message such as "actual override is confusing" is not an override and reaches the agent.
+- **Otherwise, with conflicts waiting.** The reply is `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}`. It tells the agent that its last turn was stopped on these conflicts and that the user's message answers them, and the conflicts are no longer kept.
+- **Otherwise.** Nothing.
+
+**`--codex-picker`, with `--codex-ask`.** Codex's only picker is the agent's own `request_user_input` tool. Plan mode always has it, and Default mode has it with Codex's `default_mode_request_user_input` feature on, which the gates read from the tool's description in the session rollout. Where the agent can use it, a conflict is a `{"decision":"block","reason":…}` again, but the reason tells the agent to call `request_user_input` with exact arguments: question id `actual_choice_<nonce>`, options "Revise the changes to conform (Recommended)" (or "the plan") and "Override all N rules" (or "Override <rule-id>"). The question is kept in the session with its nonce and the digest of the work it is about. `impl-check --codex-hook` reads the answer from a `PostToolUse` on `request_user_input`, but only for a question id it issued, and never with `CODEX_THREAD_ID` or `CODEX_SESSION_ID` set. It replies with `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":…}}`:
+
+- **Revise:** the conflicts, to fix.
+- **Override:** a second call to make, id `actual_reason_<nonce>`, with "The check misread my change", "This ADR doesn't apply here" and "This ADR is wrong". Under Other, a typed `accepted` or `adr-outdated` is that code, and other words are `other`.
+- **The why answer:** every rule the gate is blocking is overridden, with source `session_dialog`, and the agent is told to end its turn.
+- **Other text in the first question:** no rule was overridden; the agent acts on the words.
+
+A question that goes unanswered (the agent didn't ask, the user dismissed it, or the answer never arrived) ends the turn at the next check of the same work with the plain `--codex-ask` stop, without judging again.
+
+Codex also runs `UserPromptSubmit` and tool hooks inside subagents the agent spawns, under the root session's id and the subagent's own `agent_id`. A subagent's first prompt is written by the agent that spawned it, so an envelope with an `agent_id` is never a turn start, never takes the waiting conflicts, and never records an override, typed or picked.
+
+An override never comes from the agent's own shell. Codex sets `CODEX_THREAD_ID` and `CODEX_SESSION_ID` there, and a Codex hook ran without either on Codex CLI 0.167.0. When either is set, nothing is recorded, and the stop reason names the variable.
+

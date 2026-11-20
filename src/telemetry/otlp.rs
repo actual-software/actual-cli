@@ -1,6 +1,7 @@
 //! ADR telemetry as OpenTelemetry log events in Actual's `actual.*` event
 //! catalog, over OTLP/HTTP with protobuf encoding: ADRs entering an agent's
-//! context and meeting the gates, the gate checks themselves, and session ends.
+//! context and meeting the gates, the selections that chose them, the gate
+//! checks themselves, and session ends.
 //!
 //! # Design
 //!
@@ -65,6 +66,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::config::types::{validate_otlp_file, validate_otlp_logs_endpoint, Config};
+use crate::rules::scope::FilterTally;
 use crate::telemetry::debug::{self, Entry, Stage, Stream};
 use crate::telemetry::opt_out;
 use crate::telemetry::sign_in::{self, SignIn};
@@ -97,6 +99,11 @@ pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
 /// a turn, in answer to the Stop hook's question.
 pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
 
+/// The event the rules brief and the gates send for each selection that
+/// reaches the agent or the judge: what they kept, and what they dropped at
+/// each step and why.
+pub(crate) const FILTER_EVALUATED: &str = "actual.filter.evaluated";
+
 /// The typed reason of an `other` override, which only a request carrying the
 /// sign-in's token holds.
 const REASON_TEXT: &str = "actual.override.reason_text";
@@ -116,8 +123,9 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
 /// the [`ADR_DISCOVERED`] and [`ADR_REVIEWED`] events; 4 adds
 /// `actual.adr.verdict`; 5 adds [`ADR_REPORTED`] and its `actual.turn.index`
-/// and `actual.report.*` attributes.
-const SCHEMA_VERSION: i64 = 5;
+/// and `actual.report.*` attributes; 6 adds [`FILTER_EVALUATED`] and its
+/// `actual.filter.*` attributes.
+const SCHEMA_VERSION: i64 = 6;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -289,7 +297,8 @@ impl KeyValue {
     }
 }
 
-// The variants spell OTLP/JSON's keys: stringValue, intValue, arrayValue.
+// The variants spell OTLP/JSON's keys: stringValue, intValue, doubleValue,
+// arrayValue.
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -297,6 +306,7 @@ enum AnyValue {
     StringValue(String),
     BoolValue(bool),
     IntValue(#[serde(with = "decimal")] i64),
+    DoubleValue(f64),
     ArrayValue { values: Vec<AnyValue> },
 }
 
@@ -306,6 +316,7 @@ impl AnyValue {
             Self::StringValue(value) => common::any_value::Value::StringValue(value.clone()),
             Self::BoolValue(value) => common::any_value::Value::BoolValue(*value),
             Self::IntValue(value) => common::any_value::Value::IntValue(*value),
+            Self::DoubleValue(value) => common::any_value::Value::DoubleValue(*value),
             Self::ArrayValue { values } => {
                 common::any_value::Value::ArrayValue(common::ArrayValue {
                     values: values.iter().map(Self::to_proto).collect(),
@@ -355,6 +366,28 @@ fn int(key: &'static str, value: i64) -> KeyValue {
         key: key.to_string(),
         value: AnyValue::IntValue(value),
     }
+}
+
+/// A double. NaN and the infinities, which JSON cannot hold and no score is,
+/// go as 0.
+fn double(key: &'static str, value: f64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: finite(value),
+    }
+}
+
+fn doubles(key: &'static str, values: &[f64]) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::ArrayValue {
+            values: values.iter().copied().map(finite).collect(),
+        },
+    }
+}
+
+fn finite(value: f64) -> AnyValue {
+    AnyValue::DoubleValue(if value.is_finite() { value } else { 0.0 })
 }
 
 fn count(key: &'static str, value: usize) -> KeyValue {
@@ -663,6 +696,40 @@ impl Origin {
         if let Some(path) = report.file_path {
             record.attributes.push(text(REPORT_FILE_PATH, Some(path)));
         }
+        record
+    }
+
+    /// The [`FILTER_EVALUATED`] record for one selection by `selector`,
+    /// `context` for the brief or the gate's `planning` or `implementation`:
+    /// the floor it applied, the index it searched, its drops by reason, and
+    /// the logical ADRs it kept with their scores, in rank order. Counts are
+    /// in rule files, so `kept_count` can exceed the ADRs named.
+    pub(crate) fn filter_evaluated(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        selector: &str,
+        tally: &FilterTally,
+    ) -> LogRecord {
+        let (refs, scores): (Vec<&str>, Vec<f64>) = tally.kept_adrs().into_iter().unzip();
+        let mut record = self.record(FILTER_EVALUATED, session_id, agent_id);
+        record.attributes.extend([
+            text("actual.filter.selector", Some(selector)),
+            double("actual.filter.min_score", tally.min_score),
+            count("actual.filter.index_size", tally.index_size),
+            count("actual.filter.dropped.inactive", tally.inactive),
+            count("actual.filter.dropped.excluded_path", tally.excluded_path),
+            count("actual.filter.dropped.no_match", tally.no_match),
+            count("actual.filter.dropped.below_floor", tally.below_floor),
+            count("actual.filter.dropped.capped", tally.capped),
+            count("actual.filter.dropped.unrelated", tally.unrelated),
+            count("actual.filter.dropped.session", tally.session),
+            count("actual.filter.dropped.window", tally.window),
+            count("actual.filter.dropped.brief_cap", tally.brief_cap),
+            count("actual.filter.kept_count", tally.kept.len()),
+            strings("actual.filter.kept_refs", &refs),
+            doubles("actual.filter.kept_scores", &scores),
+        ]);
         record
     }
 
@@ -1519,7 +1586,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "5"})
+            serde_json::json!({"intValue": "6"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2104,7 +2171,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(5))
+            Some(&common::any_value::Value::IntValue(6))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2135,6 +2202,118 @@ mod tests {
         assert_eq!(record.flags, 0);
     }
 
+    fn filter_tally() -> FilterTally {
+        use crate::rules::scope::KeptFile;
+        FilterTally {
+            index_size: 9,
+            min_score: 0.25,
+            inactive: 1,
+            excluded_path: 1,
+            no_match: 1,
+            below_floor: 1,
+            capped: 1,
+            session: 1,
+            window: 1,
+            kept: vec![
+                KeptFile::new(Some("grp-1"), Some("adr-1"), 2.5),
+                KeptFile::new(None, None, 1.5),
+            ],
+            ..FilterTally::default()
+        }
+    }
+
+    /// The selection event carries the selector, the floor, every count, and
+    /// the kept ADRs with their scores, and nothing naming a file, a path or
+    /// a rule's text. It encodes as the official message, doubles included.
+    #[test]
+    fn test_a_filter_record_counts_the_selection_and_encodes() {
+        let record = origin(None).filter_evaluated("s1", Some("a1"), "planning", &filter_tally());
+        assert_eq!(record.event_name, FILTER_EVALUATED);
+        let json = serde_json::to_value(&record).unwrap();
+        let value = |key: &str| -> Value {
+            json["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .unwrap_or_else(|| panic!("no {key}"))["value"]
+                .clone()
+        };
+        assert_eq!(
+            value("actual.filter.selector"),
+            serde_json::json!({"stringValue": "planning"})
+        );
+        assert_eq!(
+            value("actual.filter.min_score"),
+            serde_json::json!({"doubleValue": 0.25})
+        );
+        assert_eq!(
+            value("actual.filter.index_size"),
+            serde_json::json!({"intValue": "9"})
+        );
+        assert_eq!(
+            value("actual.filter.dropped.window"),
+            serde_json::json!({"intValue": "1"})
+        );
+        assert_eq!(
+            value("actual.filter.dropped.brief_cap"),
+            serde_json::json!({"intValue": "0"})
+        );
+        assert_eq!(
+            value("actual.filter.kept_count"),
+            serde_json::json!({"intValue": "2"})
+        );
+        assert_eq!(
+            value("actual.filter.kept_refs"),
+            serde_json::json!({"arrayValue": {"values": [{"stringValue": "grp-1"}]}})
+        );
+        assert_eq!(
+            value("actual.filter.kept_scores"),
+            serde_json::json!({"arrayValue": {"values": [{"doubleValue": 2.5}]}})
+        );
+        let keys: Vec<&str> = record.attributes.iter().map(|kv| kv.key.as_str()).collect();
+        assert!(
+            keys.iter()
+                .skip(6)
+                .all(|key| key.starts_with("actual.filter.")),
+            "{keys:?}"
+        );
+
+        let request = decoded(&[record]);
+        let decoded = &request.resource_logs[0].scope_logs[0].log_records[0];
+        let min_score = decoded
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "actual.filter.min_score")
+            .and_then(|kv| kv.value.as_ref())
+            .and_then(|value| value.value.as_ref());
+        assert_eq!(
+            min_score,
+            Some(&common::any_value::Value::DoubleValue(0.25))
+        );
+    }
+
+    /// A score JSON can't hold goes as 0 rather than breaking the spool line.
+    #[test]
+    fn test_a_non_finite_score_goes_as_zero() {
+        let tally = FilterTally {
+            min_score: f64::INFINITY,
+            kept: vec![crate::rules::scope::KeptFile::new(
+                None,
+                Some("adr-1"),
+                f64::NAN,
+            )],
+            ..FilterTally::default()
+        };
+        let record = origin(None).filter_evaluated("s1", None, "context", &tally);
+        let line = serde_json::to_string(&record).unwrap();
+        assert!(
+            line.contains(r#""key":"actual.filter.min_score","value":{"doubleValue":0.0}"#),
+            "{line}"
+        );
+        assert!(line.contains(r#"{"doubleValue":0.0}]"#), "{line}");
+    }
+
     /// A damaged spool line is dropped: one that isn't a record, and one whose
     /// time or ids won't encode. A batch of nothing else is empty.
     #[test]
@@ -2150,7 +2329,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"5"}"#, r#"{"intValue":"five"}"#),
+            whole.replace(r#"{"intValue":"6"}"#, r#"{"intValue":"six"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");

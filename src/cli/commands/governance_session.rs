@@ -154,6 +154,84 @@ pub struct LoopState {
     /// conflicting. A fail-open outcome (no runner, a failed judge call)
     /// leaves it alone: nothing was decided.
     pub blocking: BTreeSet<String>,
+    /// The conflicts a `--codex-ask` check stopped the last turn on, worded
+    /// for the agent, waiting to be handed to it with the user's next
+    /// message. Codex shows a stopped turn's reason to the user only, so
+    /// without this the agent would answer "revise" with no idea what to
+    /// revise. Taken when the next prompt arrives; dropped by the next judged
+    /// round (see [`begin_round`](Self::begin_round)), by a round that finds
+    /// nothing blocking, and once overrides leave nothing blocking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Pending>,
+}
+
+/// The conflicts a `--codex-ask` check stopped or paused a turn on (see
+/// [`LoopState::pending`]), and the picker question the agent was told to
+/// show the user, when there is one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "PendingOnDisk")]
+pub struct Pending {
+    /// The conflict lines, worded for the agent.
+    pub text: String,
+    /// The `request_user_input` question outstanding for these conflicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<PickerAsk>,
+}
+
+impl Pending {
+    /// Conflicts with no picker question.
+    pub fn new(text: String) -> Self {
+        Self { text, ask: None }
+    }
+}
+
+/// [`Pending`] as read: a file written before picker questions existed holds
+/// the conflict text alone.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PendingOnDisk {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        ask: Option<PickerAsk>,
+    },
+}
+
+impl From<PendingOnDisk> for Pending {
+    fn from(on_disk: PendingOnDisk) -> Self {
+        match on_disk {
+            PendingOnDisk::Text(text) => Self::new(text),
+            PendingOnDisk::Full { text, ask } => Self { text, ask },
+        }
+    }
+}
+
+/// A picker question the agent was told to show with `request_user_input`.
+/// Its answer is accepted only under these ids and labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerAsk {
+    /// Part of every question id, `actual_choice_<nonce>` and
+    /// `actual_reason_<nonce>`, so an answer to some other question, or to an
+    /// earlier denial, is never read as this one's.
+    pub nonce: String,
+    pub stage: PickerStage,
+    /// [`content_digest`] of the plan or diff the conflicts were found in.
+    /// An unanswered question over unchanged work ends the turn with the
+    /// text choices instead of judging the same work again.
+    pub digest: String,
+    /// The override option's exact label, such as `Override all 2 rules`.
+    pub override_label: String,
+}
+
+/// Which picker question is outstanding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickerStage {
+    /// Revise, or override.
+    Choice,
+    /// Why override, after the user chose to.
+    Reason,
 }
 
 impl LoopState {
@@ -164,6 +242,7 @@ impl LoopState {
     pub fn begin_round(&mut self) {
         self.rounds += 1;
         self.blocking.clear();
+        self.pending = None;
     }
 
     /// Record one more denial of `key` in this loop and return its new total.
@@ -645,6 +724,7 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             cleared: v2.cleared,
             deny_counts: v2.deny_counts,
             blocking: BTreeSet::new(),
+            pending: None,
         },
         diff: LoopState::default(),
         ..GovernanceSession::default()

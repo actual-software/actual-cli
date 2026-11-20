@@ -145,10 +145,12 @@ use serde::Serialize;
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::{
-    capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
-    CheckJson, HookRun, Outcome,
+    self, capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
+    run_pipeline_filtered, CheckJson, HookRun, Outcome,
 };
+use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession};
+use crate::cli::commands::hook_host::HookHost;
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
 use crate::cli::commands::{rules_brief, rules_scope};
 use crate::cli::ui::term_size;
@@ -166,8 +168,8 @@ pub(super) fn repo_root(explicit: Option<&PathBuf>) -> PathBuf {
 }
 
 pub fn exec(args: &PlanCheckArgs) -> Result<(), ActualError> {
-    if args.claude_hook {
-        exec_hook(args);
+    if let Some(host) = HookHost::select(args.claude_hook, args.codex_hook) {
+        exec_hook(args, host);
         return Ok(());
     }
     exec_direct(args)
@@ -325,7 +327,7 @@ fn resolve_direct_plan(args: &PlanCheckArgs) -> Result<String, ActualError> {
 /// which takes the bytes as a plain `&str` and is exercised directly; this
 /// wrapper itself is covered by a subprocess test in `tests/cli_test.rs`,
 /// which controls stdin safely because it drives a separate process.
-fn exec_hook(args: &PlanCheckArgs) {
+fn exec_hook(args: &PlanCheckArgs, host: HookHost) {
     // Capped via `capped_read`, same as `resolve_direct_plan`'s reads: an
     // over-long, non-UTF8, or outright unreadable payload all collapse to
     // the same fail-open notice here -- unlike direct mode, this path has no
@@ -334,13 +336,11 @@ fn exec_hook(args: &PlanCheckArgs) {
     let raw = match capped_read(std::io::stdin(), "the hook payload") {
         Ok(text) => text,
         Err(_) => {
-            emit(plan_check_hook::render_notice(
-                "plan-check could not read the hook payload on stdin",
-            ));
+            emit(host.notice("plan-check could not read the hook payload on stdin"));
             return;
         }
     };
-    exec_hook_with(args, &raw);
+    exec_hook_with(args, host, &raw);
 }
 
 /// Run the `--claude-hook` path against an already-read payload.
@@ -355,23 +355,32 @@ fn exec_hook(args: &PlanCheckArgs) {
 /// error, so this function has no path that reaches an ordinary nonzero
 /// exit. The only way [`exec`] could surface one from this path is an actual
 /// Rust panic, which this function's own logic never triggers.
-fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
+fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
     let envelope: HookEnvelope = match serde_json::from_str(raw) {
         Ok(envelope) => envelope,
         Err(_) => {
-            emit(plan_check_hook::render_notice(
-                "plan-check could not parse the hook payload as JSON",
-            ));
+            emit(host.notice("plan-check could not parse the hook payload as JSON"));
             return;
         }
     };
 
-    let Some((plan_text, _source)) = plan_check_hook::resolve_plan(&envelope) else {
-        emit(plan_check_hook::render_notice(
-            "plan-check found no plan text to check (no tool_input.plan, no readable \
-             planFilePath, and no plan_mode attachment in the transcript)",
-        ));
-        return;
+    let (plan_text, picker_available) = match host {
+        HookHost::Claude => {
+            let Some((plan_text, _source)) = plan_check_hook::resolve_plan(&envelope) else {
+                emit(host.notice(
+                    "plan-check found no plan text to check (no tool_input.plan, no readable \
+                     planFilePath, and no plan_mode attachment in the transcript)",
+                ));
+                return;
+            };
+            (plan_text, false)
+        }
+        // Codex runs this on every `Stop`, so a turn that was not in Plan
+        // mode, or proposed no plan, is the common case and says nothing.
+        HookHost::Codex => match codex_plan(&envelope) {
+            Some(found) => found,
+            None => return,
+        },
     };
 
     let root = repo_root(args.repo.as_ref());
@@ -396,6 +405,19 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
         super::adr_report::keep_plan(session_id, &rules_dir, &plan_text);
     }
+    // A picker question about this same plan went unanswered: end the turn
+    // with the text choices instead of judging it again.
+    if let Some(reply) = check_engine::codex_unanswered_picker(
+        host,
+        ArtifactKind::Plan,
+        session_id,
+        &rules_dir,
+        &session,
+        &plan_digest,
+    ) {
+        emit(reply);
+        return;
+    }
 
     // Noted before the judge runs, so a judge that outlasts the hook's
     // timeout cannot lose them.
@@ -408,18 +430,20 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
 
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
     // hook's one model call stays reserved for the judge. See the module doc.
-    let outcome = match run_pipeline(
+    // `filter` only feeds telemetry.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let (outcome, filter) = match run_pipeline_filtered(
         &plan_text,
         &root,
         &rules_dir,
-        &args.check_knobs(),
+        &args.check_knobs().for_host(host),
         crate::rules::check::ArtifactKind::Plan,
         false,
         &session,
     ) {
-        Ok(outcome) => outcome,
+        Ok(run) => run,
         Err(e) => {
-            emit(plan_check_hook::render_notice(&format!(
+            emit(host.notice(&format!(
                 "plan-check could not read {}: {e}",
                 rules_dir.display()
             )));
@@ -429,8 +453,12 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
 
     finish_hook(
         &HookRun {
+            host,
             kind: ArtifactKind::Plan,
-            command: "plan-check --claude-hook",
+            command: match host {
+                HookHost::Claude => "plan-check --claude-hook",
+                HookHost::Codex => "plan-check --codex-hook",
+            },
             session_id,
             agent_id: envelope.agent_id.as_deref(),
             artifact_digest: &plan_digest,
@@ -438,12 +466,32 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             rules_dir: &rules_dir,
             max_rounds: args.max_rounds,
             ask: None,
+            codex_ask: args.codex_ask,
+            picker: args.codex_picker && picker_available,
             #[cfg(feature = "telemetry")]
             started,
+            #[cfg(feature = "telemetry")]
+            filter: filter.as_ref(),
         },
         &mut session,
         outcome,
     );
+}
+
+/// The plan a Codex `Stop` envelope's turn proposed, when that turn ran in
+/// Plan mode. `None` for any other turn, and whenever the rollout cannot say:
+/// see `codex_rollout`'s module doc.
+fn codex_plan(envelope: &HookEnvelope) -> Option<(String, bool)> {
+    let facts = codex_rollout::turn_facts(
+        Path::new(envelope.transcript_path.as_deref()?),
+        envelope.turn_id.as_deref()?,
+    );
+    let picker = facts.picker == Some(true);
+    facts
+        .plan_mode
+        .filter(|&plan| plan)
+        .and(facts.plan)
+        .map(|plan| (plan, picker))
 }
 
 /// Direct mode's `--json`: the check, and beside it the folder pass when the
@@ -717,6 +765,9 @@ mod tests {
             repo: None,
             rules_dir: None,
             claude_hook: false,
+            codex_hook: false,
+            codex_ask: false,
+            codex_picker: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
@@ -1256,7 +1307,7 @@ mod tests {
         // No panic, no emitted deny -- covered by not panicking, since stdout
         // capture is not exercised at this layer (see the subprocess tests
         // in tests/cli_test.rs for the observable-stdout contract).
-        exec_hook_with(&base_args(), "not json");
+        exec_hook_with(&base_args(), HookHost::Claude, "not json");
     }
 
     #[test]
@@ -1264,7 +1315,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
-        exec_hook_with(&base_args(), "{}");
+        exec_hook_with(&base_args(), HookHost::Claude, "{}");
     }
 
     #[test]
@@ -1279,7 +1330,7 @@ mod tests {
         let mut args = base_args();
         args.rules_dir = Some(not_a_dir);
         let raw = serde_json::json!({"tool_input": {"plan": "a plan"}}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
     }
 
     #[test]
@@ -1294,7 +1345,7 @@ mod tests {
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
         let raw = serde_json::json!({"tool_input": {"plan": "a plan"}}).to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
     }
 
     #[test]
@@ -1310,7 +1361,7 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
     }
 
     #[cfg(unix)]
@@ -1333,7 +1384,7 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
     }
 
     #[cfg(unix)]
@@ -1358,7 +1409,7 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
     }
 
     /// AK-678: a real deny must emit a `block`-decision batch with exactly
@@ -1387,7 +1438,8 @@ mod tests {
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
 
-        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let events =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let names: Vec<_> = events.iter().map(|e| e.event).collect();
         assert!(
@@ -1489,7 +1541,8 @@ mod tests {
         .to_string();
         take_captured();
 
-        let governance = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let governance =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let records = take_captured();
         let events: Vec<&str> = records
@@ -1500,12 +1553,22 @@ mod tests {
             events,
             [
                 otlp::ACTION_STARTED,
+                otlp::FILTER_EVALUATED,
                 otlp::ADR_DETECTED,
                 otlp::GATE_EVALUATED,
                 otlp::ACTION_COMPLETED
             ]
         );
-        assert_completed_before_governance(&records[3], &governance);
+        assert_completed_before_governance(&records[4], &governance);
+        assert_eq!(attribute(&records[1], "actual.filter.selector"), "planning");
+        assert_eq!(
+            attribute(&records[1], "actual.filter.kept_refs"),
+            serde_json::json!(["grp-sign"])
+        );
+        let records: Vec<serde_json::Value> = [&records[0], &records[2], &records[3], &records[4]]
+            .into_iter()
+            .cloned()
+            .collect();
         for record in &records {
             assert_eq!(attribute(record, "actual.session.id"), "sess-plan-otlp-1");
             assert_eq!(attribute(record, "actual.agent.id"), "agent-plan-1");
@@ -1573,7 +1636,7 @@ mod tests {
             "tool_input": {"plan": "Sign access tokens with RS256"},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         // A requires_decision verdict must be recorded as a denial, exactly
         // like a real conflict -- proving it went through the same per-rule
@@ -1633,7 +1696,7 @@ mod tests {
             "tool_input": {"plan": "Add a new widget in services/widgets"},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-partial-1", &rules_dir);
         // The one conflicting rule in the prefix was denied...
@@ -1707,7 +1770,7 @@ mod tests {
             "tool_input": {"plan": "Add a new widget in services/widgets"},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         // Every rule in the capped prefix was cleared, proving the judge
         // ran the capped batch to completion rather than the round being
@@ -1747,7 +1810,7 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
     }
 
     /// AK-678: a fully-conforming round emits `allow`, with no violation
@@ -1775,7 +1838,8 @@ mod tests {
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
 
-        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let events =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let completed = events
             .iter()
@@ -1835,7 +1899,7 @@ mod tests {
                 "tool_input": {"plan": "Add a health-check endpoint to the auth service."},
             })
             .to_string();
-            exec_hook_with(&args, &raw);
+            exec_hook_with(&args, HookHost::Claude, &raw);
         }
         let after_round1 = governance_session::load("sess-rejudge-1", &rules_dir);
         assert!(after_round1
@@ -1867,7 +1931,7 @@ mod tests {
             "tool_input": {"plan": "Sign access tokens with HS256 and a hardcoded shared secret."},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         // R-A-001 must have been re-judged (not silently excluded): its
         // cleared entry must be gone (the judge called it conflicting this
@@ -1917,7 +1981,7 @@ mod tests {
             "tool_input": {"plan": "Sign access tokens with RS256"},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-persist-1", &rules_dir);
         assert_eq!(session.plan.rounds, 1);
@@ -1965,7 +2029,7 @@ mod tests {
         .to_string();
 
         // Round 1: rounds becomes 1, 1 > max_rounds(1) is false -> normal deny.
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
         assert_eq!(
             governance_session::load("sess-limit-1", &rules_dir)
                 .plan
@@ -1974,7 +2038,7 @@ mod tests {
         );
 
         // Round 2: rounds becomes 2, 2 > 1 -> the gate stops denying.
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
         assert_eq!(
             governance_session::load("sess-limit-1", &rules_dir)
                 .plan
@@ -2018,9 +2082,10 @@ mod tests {
         .to_string();
 
         // Round 1: normal deny, not under test here.
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
         // Round 2: round limit exceeded -> pass, `warn` not `block`.
-        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+        let events =
+            with_captured_plan_governance_events(|| exec_hook_with(&args, HookHost::Claude, &raw));
 
         let completed = events
             .iter()
@@ -2084,7 +2149,7 @@ mod tests {
                     "tool_input": {"plan": plan},
                 })
                 .to_string();
-                exec_hook_with(&args, &raw);
+                exec_hook_with(&args, HookHost::Claude, &raw);
             }
         }
         assert_eq!(
@@ -2117,7 +2182,7 @@ mod tests {
             "tool_input": {"plan": "Sign access tokens with HS256 and a hardcoded shared secret."},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let session = governance_session::load("sess-clean-rounds", &rules_dir);
         let key_a001 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
@@ -2170,7 +2235,7 @@ mod tests {
                 "tool_input": {"plan": "Sign with HS256."},
             })
             .to_string();
-            exec_hook_with(&args, &raw);
+            exec_hook_with(&args, HookHost::Claude, &raw);
         }
 
         // Round 2: R-A-001 conflicts again (count -> 2, now exhausted at
@@ -2192,7 +2257,7 @@ mod tests {
                 "tool_input": {"plan": "Sign with HS256 and log the key."},
             })
             .to_string();
-            exec_hook_with(&args, &raw);
+            exec_hook_with(&args, HookHost::Claude, &raw);
         }
         let after_round2 = governance_session::load("sess-mixed-exhaustion", &rules_dir);
         assert!(after_round2
@@ -2226,7 +2291,7 @@ mod tests {
             "tool_input": {"plan": "Sign with HS256, key no longer logged."},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         let log_after_round3 =
             std::fs::read_to_string(governance_session::audit_log_path().unwrap()).unwrap();
@@ -2268,7 +2333,7 @@ mod tests {
             "tool_input": {"plan": "Sign access tokens with RS256"},
         })
         .to_string();
-        exec_hook_with(&args, &raw);
+        exec_hook_with(&args, HookHost::Claude, &raw);
 
         // The override itself is untouched by this round (exec_hook_with
         // only ever adds to `cleared`, never to `overrides`).
@@ -2371,12 +2436,12 @@ mod tests {
 
         for session in [None, Some("")] {
             let raw = serde_json::json!({"session_id": session, "tool_input": {"plan": plan}});
-            exec_hook_with(&args, &raw.to_string());
+            exec_hook_with(&args, HookHost::Claude, &raw.to_string());
         }
         assert!(nothing_noted());
 
         let raw = serde_json::json!({"session_id": "s1", "tool_input": {"plan": plan}});
-        exec_hook_with(&args, &raw.to_string());
+        exec_hook_with(&args, HookHost::Claude, &raw.to_string());
         assert_eq!(
             noted(root.path()),
             (
@@ -2885,5 +2950,142 @@ mod tests {
         );
         assert_eq!(without["status"], "not_checked");
         assert!(without.get("folders").is_none());
+    }
+
+    // ── --codex-hook: the plan comes from the rollout ──────────────────────
+
+    /// A rollout holding one turn in `mode`, proposing `plan` when given, and
+    /// the Codex `Stop` envelope that ends it.
+    fn codex_stop(dir: &Path, mode: &str, plan: Option<&str>) -> String {
+        let path = dir.join("rollout.jsonl");
+        let mut lines = vec![serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1","collaboration_mode_kind":mode}}).to_string()];
+        if let Some(plan) = plan {
+            lines.push(serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"Plan","id":"p","text":plan}}}).to_string());
+        }
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        serde_json::json!({
+            "session_id": "sess-codex-plan",
+            "turn_id": "t1",
+            "transcript_path": path.to_string_lossy(),
+            "cwd": dir.to_string_lossy(),
+            "hook_event_name": "Stop",
+            "permission_mode": "default",
+            "stop_hook_active": false,
+            "last_assistant_message": null,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_plan_is_the_plan_of_a_plan_mode_turn_only() {
+        let dir = tempdir().unwrap();
+        let read = |raw: String| codex_plan(&serde_json::from_str(&raw).unwrap());
+        assert_eq!(
+            read(codex_stop(dir.path(), "plan", Some("# Plan"))),
+            Some(("# Plan".to_string(), false))
+        );
+        assert_eq!(
+            read(codex_stop(dir.path(), "default", Some("# Plan"))),
+            None
+        );
+        assert_eq!(read(codex_stop(dir.path(), "plan", None)), None);
+        assert_eq!(read(r#"{"turn_id":"t1"}"#.to_string()), None);
+        assert_eq!(
+            read(r#"{"transcript_path":"/nonexistent"}"#.to_string()),
+            None
+        );
+    }
+
+    /// Outside Plan mode, and for anything it cannot read, the Codex hook
+    /// runs nothing.
+    #[test]
+    fn test_exec_hook_with_codex_outside_plan_mode_runs_nothing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let dir = tempdir().unwrap();
+        exec_hook_with(
+            &base_args(),
+            HookHost::Codex,
+            &codex_stop(dir.path(), "default", None),
+        );
+        exec_hook_with(&base_args(), HookHost::Codex, "not json");
+        assert!(!home.path().join("plan-check-sessions").exists());
+    }
+
+    /// A conflicting plan is denied, and counted on the session like any
+    /// other denial.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_codex_denies_a_conflicting_plan() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir.clone());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = codex_stop(root.path(), "plan", Some("Sign access tokens with RS256"));
+        exec_hook_with(&args, HookHost::Codex, &raw);
+
+        let session = governance_session::load("sess-codex-plan", &rules_dir);
+        assert_eq!(
+            session.plan.deny_counts.get(&governance_session::key(
+                "cross-cutting-token-signing-1c57",
+                "R-A-002"
+            )),
+            Some(&1)
+        );
+    }
+
+    /// A picker question about this same plan that went unanswered ends the
+    /// turn with the text choices, without judging the plan again, and is
+    /// forgotten.
+    #[test]
+    fn test_exec_hook_with_codex_ends_an_unanswered_picker_without_judging() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let plan = "Sign access tokens with HS256";
+        governance_session::update("sess-codex-plan", &rules_dir, |s| {
+            s.plan.pending = Some(governance_session::Pending {
+                text: "CONFLICT R-A-001".to_string(),
+                ask: Some(governance_session::PickerAsk {
+                    nonce: "abcd1234".to_string(),
+                    stage: governance_session::PickerStage::Choice,
+                    digest: governance_session::content_digest(plan),
+                    override_label: "Override R-A-001".to_string(),
+                }),
+            });
+        });
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir.clone());
+        // No runner is set up, so a judge call would fail open and leave the
+        // question in place.
+        exec_hook_with(
+            &args,
+            HookHost::Codex,
+            &codex_stop(root.path(), "plan", Some(plan)),
+        );
+        let session = governance_session::load("sess-codex-plan", &rules_dir);
+        let pending = session
+            .plan
+            .pending
+            .expect("conflicts kept for the next prompt");
+        assert_eq!(pending.ask, None);
+        assert_eq!(session.plan.rounds, 0, "not judged again");
     }
 }

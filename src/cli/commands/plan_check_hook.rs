@@ -58,6 +58,9 @@ pub struct HookEnvelope {
     pub prompt_id: Option<String>,
     pub transcript_path: Option<String>,
     pub tool_input: Option<ToolInput>,
+    /// Codex only: the turn a `Stop` envelope ends, which is how
+    /// `codex_rollout` finds that turn's mode and plan in the rollout.
+    pub turn_id: Option<String>,
 }
 
 /// `tool_input` uses `planFilePath` because that key comes from the
