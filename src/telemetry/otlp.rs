@@ -104,6 +104,10 @@ pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
 /// each step and why.
 pub(crate) const FILTER_EVALUATED: &str = "actual.filter.evaluated";
 
+/// The event a gate sends once per logical ADR when a block on it ends: how
+/// it ended, and how long and how hard it held.
+pub(crate) const GATE_RESOLVED: &str = "actual.gate.resolved";
+
 /// The typed reason of an `other` override, which only a request carrying the
 /// sign-in's token holds.
 const REASON_TEXT: &str = "actual.override.reason_text";
@@ -124,8 +128,10 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// the [`ADR_DISCOVERED`] and [`ADR_REVIEWED`] events; 4 adds
 /// `actual.adr.verdict`; 5 adds [`ADR_REPORTED`] and its `actual.turn.index`
 /// and `actual.report.*` attributes; 6 adds [`FILTER_EVALUATED`] and its
-/// `actual.filter.*` attributes.
-const SCHEMA_VERSION: i64 = 6;
+/// `actual.filter.*` attributes; 7 adds [`GATE_RESOLVED`] and its
+/// `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`,
+/// `actual.gate.denials` and `actual.gate.block_action_id` attributes.
+const SCHEMA_VERSION: i64 = 7;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -733,6 +739,34 @@ impl Origin {
         record
     }
 
+    /// The [`GATE_RESOLVED`] record for one logical ADR's ended block.
+    pub(crate) fn resolved(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        resolved: &GateResolution<'_>,
+    ) -> LogRecord {
+        let mut record = self.adr_record(
+            GATE_RESOLVED,
+            session_id,
+            agent_id,
+            resolved.adr_ref,
+            resolved.adr_ids,
+        );
+        record.attributes.extend([
+            text("actual.gate.type", Some(resolved.gate)),
+            text("actual.gate.mechanism", Some(resolved.mechanism)),
+            text("actual.gate.resolution", Some(resolved.resolution)),
+            int("actual.gate.rounds", i64::from(resolved.rounds)),
+            int("actual.gate.denials", i64::from(resolved.denials)),
+            text(
+                "actual.gate.block_action_id",
+                Some(resolved.block_action_id),
+            ),
+        ]);
+        record
+    }
+
     /// A record carrying the attributes every event shares, each present on
     /// every record and an empty string when unknown: its own event id, which
     /// `log.record.uid` repeats, the schema version, and the action, session
@@ -808,6 +842,25 @@ pub(crate) struct AdrReport<'a> {
     pub anchor: &'a str,
     /// The file a verified diff claim names, sent only signed in.
     pub file_path: Option<&'a str>,
+}
+
+/// One logical ADR's ended block, as a [`GATE_RESOLVED`] record names it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GateResolution<'a> {
+    pub adr_ref: &'a str,
+    pub adr_ids: &'a [String],
+    /// `planning` or `implementation`.
+    pub gate: &'a str,
+    /// How the gate blocked: `plan_deny` or `stop_block`.
+    pub mechanism: &'a str,
+    /// `fixed`, `overridden`, `round_limit`, `not_rechecked` or `still_open`.
+    pub resolution: &'a str,
+    /// Judged rounds from the block's first deny to its outcome, inclusive.
+    pub rounds: u32,
+    /// Denials the ADR's rules took while it was blocked.
+    pub denials: u32,
+    /// The `actual.action.id` of the round that opened the block.
+    pub block_action_id: &'a str,
 }
 
 /// This execution's `actual.action.id`, the one its records carry.
@@ -1586,7 +1639,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "6"})
+            serde_json::json!({"intValue": "7"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2171,7 +2224,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(6))
+            Some(&common::any_value::Value::IntValue(7))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2293,6 +2346,67 @@ mod tests {
         );
     }
 
+    /// The resolution event names the ADR, the gate and how it blocked, how
+    /// the block ended, its rounds and denials, and the round that opened it,
+    /// after the shared envelope and nothing else. It encodes as the official
+    /// message.
+    #[test]
+    fn test_a_resolution_record_names_the_block_and_how_it_ended() {
+        let ids = vec!["adr-1".to_string()];
+        let record = origin(None).resolved(
+            "s1",
+            Some("a1"),
+            &GateResolution {
+                adr_ref: "grp-1",
+                adr_ids: &ids,
+                gate: "implementation",
+                mechanism: "stop_block",
+                resolution: "not_rechecked",
+                rounds: 3,
+                denials: 2,
+                block_action_id: "action-0",
+            },
+        );
+        assert_eq!(record.event_name, GATE_RESOLVED);
+        let json = serde_json::to_value(&record).unwrap();
+        let attributes: Vec<(String, Value)> = json["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(6)
+            .map(|kv| (kv["key"].as_str().unwrap().to_string(), kv["value"].clone()))
+            .collect();
+        let string = |value: &str| serde_json::json!({ "stringValue": value });
+        let int = |value: &str| serde_json::json!({ "intValue": value });
+        assert_eq!(
+            attributes,
+            [
+                ("actual.adr.ref".to_string(), string("grp-1")),
+                (
+                    "actual.adr.ids".to_string(),
+                    serde_json::json!({"arrayValue": {"values": [string("adr-1")]}})
+                ),
+                ("actual.gate.type".to_string(), string("implementation")),
+                ("actual.gate.mechanism".to_string(), string("stop_block")),
+                (
+                    "actual.gate.resolution".to_string(),
+                    string("not_rechecked")
+                ),
+                ("actual.gate.rounds".to_string(), int("3")),
+                ("actual.gate.denials".to_string(), int("2")),
+                (
+                    "actual.gate.block_action_id".to_string(),
+                    string("action-0")
+                ),
+            ]
+        );
+
+        let request = decoded(&[record]);
+        let decoded = &request.resource_logs[0].scope_logs[0].log_records[0];
+        assert_eq!(decoded.event_name, GATE_RESOLVED);
+        assert_eq!(decoded.attributes.len(), 14);
+    }
+
     /// A score JSON can't hold goes as 0 rather than breaking the spool line.
     #[test]
     fn test_a_non_finite_score_goes_as_zero() {
@@ -2329,7 +2443,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"6"}"#, r#"{"intValue":"six"}"#),
+            whole.replace(r#"{"intValue":"7"}"#, r#"{"intValue":"seven"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");

@@ -154,6 +154,12 @@ pub struct LoopState {
     /// conflicting. A fail-open outcome (no runner, a failed judge call)
     /// leaves it alone: nothing was decided.
     pub blocking: BTreeSet<String>,
+    /// Logical ADR ref -> its block episode in this loop, open from the round
+    /// that first denied one of its rules until the last of them stops
+    /// blocking. What the gate-resolution event reports once it ends; a build
+    /// without telemetry never opens one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub episodes: BTreeMap<String, BlockEpisode>,
     /// The conflicts a `--codex-ask` check stopped the last turn on, worded
     /// for the agent, waiting to be handed to it with the user's next
     /// message. Codex shows a stopped turn's reason to the user only, so
@@ -163,6 +169,39 @@ pub struct LoopState {
     /// nothing blocking, and once overrides leave nothing blocking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
+}
+
+/// How a block ended, as `actual.gate.resolution` names it. Ordered from most
+/// resolved to least, so an ADR whose rules ended differently reports the
+/// greatest and a mixed ending never reads as a fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// A later round judged it passing.
+    Fixed,
+    /// A human overrode it.
+    Overridden,
+    /// A later round decided without judging it: the selection or the judged
+    /// window left it out, or nothing applied.
+    NotRechecked,
+    /// The round limit let the call through over it.
+    RoundLimit,
+    /// The session ended while it still blocked.
+    StillOpen,
+}
+
+impl Resolution {
+    // Only telemetry events carry these names.
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Resolution::Fixed => "fixed",
+            Resolution::Overridden => "overridden",
+            Resolution::NotRechecked => "not_rechecked",
+            Resolution::RoundLimit => "round_limit",
+            Resolution::StillOpen => "still_open",
+        }
+    }
 }
 
 /// The conflicts a `--codex-ask` check stopped or paused a turn on (see
@@ -205,6 +244,37 @@ impl From<PendingOnDisk> for Pending {
             PendingOnDisk::Full { text, ask } => Self { text, ask },
         }
     }
+}
+
+/// One logical ADR's open block in one loop (see [`LoopState::episodes`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlockEpisode {
+    /// The `adr_id` of each of the ADR's files.
+    pub adr_ids: Vec<String>,
+    /// The `actual.action.id` of the round that opened it.
+    pub action_id: String,
+    /// The loop's [`LoopState::rounds`] when it opened.
+    pub opened_round: u32,
+    /// Denials its rules took while it was open.
+    pub denials: u32,
+    /// Every rule key that has blocked in it: `None` while it still blocks,
+    /// else how its block ended.
+    pub rules: BTreeMap<String, Option<Resolution>>,
+}
+
+/// A block episode that has ended, as the gate-resolution event reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndedEpisode {
+    pub adr_ref: String,
+    pub adr_ids: Vec<String>,
+    /// The `actual.action.id` of the round that opened it.
+    pub action_id: String,
+    /// The least resolved of its rules' endings.
+    pub resolution: Resolution,
+    /// Judged rounds from the one that opened it to the outcome, inclusive.
+    pub rounds: u32,
+    pub denials: u32,
 }
 
 /// A picker question the agent was told to show with `request_user_input`.
@@ -266,6 +336,68 @@ impl LoopState {
     /// [`blocking`](Self::blocking)).
     pub fn is_blocking(&self, key: &str) -> bool {
         self.blocking.contains(key)
+    }
+
+    /// Record that the round `action_id` names denied `key`, a rule of the
+    /// logical ADR `adr_ref`: it joins that ADR's open episode, or opens one
+    /// at this round. True when it opened one.
+    // Only the gate-resolution event's rounds open one.
+    #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+    pub fn open_block(
+        &mut self,
+        adr_ref: &str,
+        adr_ids: &[String],
+        key: &str,
+        action_id: &str,
+    ) -> bool {
+        let opened = !self.episodes.contains_key(adr_ref);
+        let rounds = self.rounds;
+        let episode = self
+            .episodes
+            .entry(adr_ref.to_string())
+            .or_insert_with(|| BlockEpisode {
+                adr_ids: adr_ids.to_vec(),
+                action_id: action_id.to_string(),
+                opened_round: rounds,
+                ..BlockEpisode::default()
+            });
+        episode.denials += 1;
+        episode.rules.insert(key.to_string(), None);
+        opened
+    }
+
+    /// End each rule that still blocks in an episode with the resolution
+    /// `outcome` gives its key; `None` leaves it blocking.
+    pub fn end_blocks(&mut self, outcome: impl Fn(&str) -> Option<Resolution>) {
+        for episode in self.episodes.values_mut() {
+            for (key, ended) in &mut episode.rules {
+                if ended.is_none() {
+                    *ended = outcome(key);
+                }
+            }
+        }
+    }
+
+    /// Remove and return every episode none of whose rules still blocks.
+    pub fn take_ended(&mut self) -> Vec<EndedEpisode> {
+        let rounds = self.rounds;
+        let (ended, open): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut self.episodes)
+            .into_iter()
+            .partition(|(_, episode)| episode.rules.values().all(Option::is_some));
+        self.episodes = open;
+        ended
+            .into_iter()
+            .filter_map(|(adr_ref, episode)| {
+                Some(EndedEpisode {
+                    resolution: episode.rules.values().flatten().copied().max()?,
+                    adr_ref,
+                    adr_ids: episode.adr_ids,
+                    action_id: episode.action_id,
+                    rounds: rounds.saturating_sub(episode.opened_round) + 1,
+                    denials: episode.denials,
+                })
+            })
+            .collect()
     }
 }
 
@@ -558,6 +690,25 @@ impl GovernanceSession {
         self.loop_state(kind).deny_limit_exceeded(key, max_rounds)
     }
 
+    /// [`LoopState::end_blocks`] then [`LoopState::take_ended`] in both loops,
+    /// plan first, each ended episode with the kind of the loop it was in.
+    pub fn end_blocks(
+        &mut self,
+        outcome: impl Fn(&str) -> Option<Resolution>,
+    ) -> Vec<(ArtifactKind, EndedEpisode)> {
+        [ArtifactKind::Plan, ArtifactKind::Diff]
+            .into_iter()
+            .flat_map(|kind| {
+                let state = self.loop_state_mut(kind);
+                state.end_blocks(&outcome);
+                state
+                    .take_ended()
+                    .into_iter()
+                    .map(move |ended| (kind, ended))
+            })
+            .collect()
+    }
+
     /// Informational round for audit entries not tied to a single loop
     /// (`check-override`). Uses the higher of the two loops' round counts.
     fn effort_rounds(&self) -> u32 {
@@ -723,8 +874,7 @@ fn migrate_v2(v2: V2Session) -> GovernanceSession {
             rounds: v2.rounds,
             cleared: v2.cleared,
             deny_counts: v2.deny_counts,
-            blocking: BTreeSet::new(),
-            pending: None,
+            ..LoopState::default()
         },
         diff: LoopState::default(),
         ..GovernanceSession::default()
@@ -903,6 +1053,7 @@ pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGa
 /// write cannot drop it.
 /// Returns that gate for each of `keys`, read from the same locked copy the
 /// override was recorded on, for the caller's events and reply.
+#[cfg(test)]
 pub fn record_override_with(
     session_id: &str,
     rules_dir: &std::path::Path,
@@ -911,7 +1062,22 @@ pub fn record_override_with(
     reason_code: Option<OverrideReasonCode>,
     source: OverrideSource,
 ) -> Vec<Option<OverrideGate>> {
+    record_override_ending(session_id, rules_dir, keys, reason, reason_code, source).0
+}
+
+/// [`record_override_with`], which also ends each block the override closes
+/// as [`Resolution::Overridden`], on the same locked copy, and returns the
+/// episodes that ended with it.
+pub fn record_override_ending(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    keys: &[String],
+    reason: Option<&str>,
+    reason_code: Option<OverrideReasonCode>,
+    source: OverrideSource,
+) -> (Vec<Option<OverrideGate>>, Vec<(ArtifactKind, EndedEpisode)>) {
     let mut gates = Vec::new();
+    let mut ended = Vec::new();
     update(session_id, rules_dir, |session| {
         gates = record_overrides_in(
             session,
@@ -921,8 +1087,35 @@ pub fn record_override_with(
             (reason, reason_code),
             source,
         );
+        ended = session.end_blocks(|key| {
+            keys.iter()
+                .any(|k| k == key)
+                .then_some(Resolution::Overridden)
+        });
     });
-    gates
+    (gates, ended)
+}
+
+/// End every block still open in `(session_id, rules_dir)` as
+/// [`Resolution::StillOpen`] and return the episodes, for the session's end.
+/// With `store` false, the session file is read and left as it was, for a
+/// run that keeps no state.
+// Only the session-end event reads this.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub fn end_open_blocks(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    store: bool,
+) -> Vec<(ArtifactKind, EndedEpisode)> {
+    let still_open = |_: &str| Some(Resolution::StillOpen);
+    if !store {
+        return load(session_id, rules_dir).end_blocks(still_open);
+    }
+    let mut ended = Vec::new();
+    update(session_id, rules_dir, |session| {
+        ended = session.end_blocks(still_open);
+    });
+    ended
 }
 
 fn record_overrides_in(
@@ -1850,5 +2043,143 @@ mod tests {
         let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
         let line = log.lines().last().unwrap();
         assert!(line.contains("\"reason_code\":\"adr-outdated\""), "{line}");
+    }
+
+    /// An episode opens at its ADR's first denial and stays open while any of
+    /// its rules blocks, a rule that blocks again rejoins it, and once all
+    /// have ended it is taken once, with the least resolved ending, the rounds
+    /// from its opening inclusive, and every denial.
+    #[test]
+    fn test_a_block_episode_spans_its_adrs_rules() {
+        let (a, b) = (key("doc-1", "R-1"), key("doc-2", "R-1"));
+        let mut state = LoopState::default();
+        state.begin_round();
+        assert!(state.open_block("grp", &["adr-1".to_string()], &a, "action-1"));
+        state.begin_round();
+        assert!(!state.open_block("grp", &[], &b, "action-2"));
+        state.end_blocks(|k| (k == a).then_some(Resolution::Fixed));
+        assert!(state.take_ended().is_empty());
+        assert!(!state.open_block("grp", &[], &a, "action-2"));
+        state.begin_round();
+        state.end_blocks(|k| {
+            Some(if k == a {
+                Resolution::Overridden
+            } else {
+                Resolution::Fixed
+            })
+        });
+        assert_eq!(
+            state.take_ended(),
+            [EndedEpisode {
+                adr_ref: "grp".to_string(),
+                adr_ids: vec!["adr-1".to_string()],
+                action_id: "action-1".to_string(),
+                resolution: Resolution::Overridden,
+                rounds: 3,
+                denials: 3,
+            }]
+        );
+        assert!(state.episodes.is_empty());
+        assert!(state.take_ended().is_empty());
+    }
+
+    /// The least resolved ending wins, in the documented order.
+    #[test]
+    fn test_resolutions_order_from_most_to_least_resolved() {
+        use Resolution::*;
+        let order = [Fixed, Overridden, NotRechecked, RoundLimit, StillOpen];
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
+        let names: Vec<&str> = order.iter().map(|r| r.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "fixed",
+                "overridden",
+                "not_rechecked",
+                "round_limit",
+                "still_open"
+            ]
+        );
+    }
+
+    /// A session with no episode writes none, so its file reads the same to
+    /// a binary that predates them, and an open one survives a store.
+    #[test]
+    fn test_episodes_are_stored_only_when_there_are_some() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+        let json = serde_json::to_value(GovernanceSession::default()).unwrap();
+        assert!(json["plan"].get("episodes").is_none(), "{json}");
+
+        let mut session = GovernanceSession::default();
+        session
+            .diff
+            .open_block("adr-1", &[], &key("doc", "R-1"), "action-1");
+        store("s-episodes", &rd(), &session);
+        assert_eq!(load("s-episodes", &rd()).diff, session.diff);
+    }
+
+    /// An override ends the open blocks of the rules it names, in both loops,
+    /// and leaves an ADR open while another of its rules still blocks.
+    #[test]
+    fn test_an_override_ends_only_the_blocks_it_names() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+        let (a, b, c) = (
+            key("doc-1", "R-1"),
+            key("doc-2", "R-1"),
+            key("doc-3", "R-1"),
+        );
+        let mut session = GovernanceSession::default();
+        session.plan.open_block("adr-a", &[], &a, "action-1");
+        session.diff.open_block("adr-a", &[], &a, "action-1");
+        session.diff.open_block("grp", &[], &b, "action-1");
+        session.diff.open_block("grp", &[], &c, "action-1");
+        store("s-over", &rd(), &session);
+
+        let (gates, ended) = record_override_ending(
+            "s-over",
+            &rd(),
+            &[a.clone(), b.clone()],
+            None,
+            None,
+            OverrideSource::Terminal,
+        );
+        assert_eq!(gates.len(), 2);
+        let ended: Vec<(ArtifactKind, &str, Resolution)> = ended
+            .iter()
+            .map(|(kind, e)| (*kind, e.adr_ref.as_str(), e.resolution))
+            .collect();
+        assert_eq!(
+            ended,
+            [
+                (ArtifactKind::Plan, "adr-a", Resolution::Overridden),
+                (ArtifactKind::Diff, "adr-a", Resolution::Overridden),
+            ]
+        );
+        let stored = load("s-over", &rd());
+        assert_eq!(stored.diff.episodes.keys().collect::<Vec<_>>(), ["grp"]);
+    }
+
+    /// The session's end ends every open block, and stores that only when
+    /// asked to.
+    #[test]
+    fn test_the_end_ends_every_open_block() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+        let mut session = GovernanceSession::default();
+        session
+            .plan
+            .open_block("adr-a", &[], &key("doc", "R-1"), "action-1");
+        store("s-end", &rd(), &session);
+
+        let read_only = end_open_blocks("s-end", &rd(), false);
+        assert_eq!(read_only.len(), 1);
+        assert_eq!(read_only[0].1.resolution, Resolution::StillOpen);
+        assert_eq!(load("s-end", &rd()).plan, session.plan);
+
+        assert_eq!(end_open_blocks("s-end", &rd(), true), read_only);
+        assert!(load("s-end", &rd()).plan.episodes.is_empty());
+        assert!(end_open_blocks("s-end", &rd(), true).is_empty());
     }
 }

@@ -13,6 +13,11 @@
 //! the selector. A round with a verdict sends it with the records above; one
 //! without sends it alone.
 //!
+//! When a block ends, one [`otlp::GATE_RESOLVED`] record per logical ADR says
+//! how: `fixed` or `not_rechecked` from the next round, `round_limit` from the
+//! round the limit lets through, `overridden` from `check-override`, and
+//! `still_open` from the session's end.
+//!
 //! # Design
 //!
 //! **Started is stamped at the start and sent at the end.** A run reads the
@@ -53,6 +58,18 @@
 //! session id, have nothing to count an ADR once against. Their action events
 //! still go, with the session id empty.
 //!
+//! **A block is an episode, per ADR.** A logical ADR's block opens at the
+//! first round that denies one of its rules and ends when the last of them
+//! stops blocking, so blocked, fixed and blocked again sends two records. A
+//! rule ends `fixed` when a later round judges it passing, and `not_rechecked`
+//! when a later round decides without judging it, because the selection or the
+//! judged window left it out or nothing applied. When an ADR's rules end
+//! differently the record reports the least resolved of them, in the order
+//! of [`Resolution`](super::governance_session::Resolution). The open
+//! episodes live in the session file beside the deny counts. A killed session
+//! runs no end hook, so its open blocks send nothing, and a `breached` with no
+//! resolution reads as unknown.
+//!
 //! **What the hook pays.** The judge's prompt, output and call count are
 //! unchanged. With telemetry opted out, or no output resolved, a round reads
 //! the config and builds nothing. Otherwise, which a release build's default
@@ -66,6 +83,7 @@ use std::time::{Instant, SystemTime};
 use super::brief_ledger::{self, LedgerKey};
 use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::HookRun;
+use super::governance_session::EndedEpisode;
 use crate::api::types::PlanGovernanceDecision;
 use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
 use crate::rules::scope::FilterTally;
@@ -220,6 +238,59 @@ fn filter_evaluated(run: &HookRun<'_>, tally: &FilterTally) -> otlp::LogRecord {
     )
 }
 
+/// The [`otlp::GATE_RESOLVED`] records for the blocks `ended` in `session_id`,
+/// each with the kind of the loop it was in, or none without a session or
+/// anywhere to send them. `agent_id` is the subagent whose round ended them,
+/// absent for an override or the session's end.
+pub(super) fn resolved_records(
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    ended: &[(ArtifactKind, EndedEpisode)],
+) -> Vec<otlp::LogRecord> {
+    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+        return Vec::new();
+    };
+    if ended.is_empty() || brief_telemetry::Destination::resolve_quietly().is_none() {
+        return Vec::new();
+    }
+    let origin = otlp::Origin::resolve();
+    ended
+        .iter()
+        .map(|(kind, episode)| {
+            origin.resolved(
+                session_id,
+                agent_id,
+                &otlp::GateResolution {
+                    adr_ref: &episode.adr_ref,
+                    adr_ids: &episode.adr_ids,
+                    gate: gate(*kind),
+                    mechanism: mechanism(*kind),
+                    resolution: episode.resolution.as_str(),
+                    rounds: episode.rounds,
+                    denials: episode.denials,
+                    block_action_id: &episode.action_id,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Send [`resolved_records`] on their own, for a run that sends no other
+/// record with them.
+pub(super) fn report_resolved(
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    ended: &[(ArtifactKind, EndedEpisode)],
+) {
+    let records = resolved_records(session_id, agent_id, ended);
+    if records.is_empty() {
+        return;
+    }
+    if let Some(destination) = brief_telemetry::Destination::resolve() {
+        destination.deliver(records);
+    }
+}
+
 /// The records for the logical ADRs a hook round judged, and those it blocked
 /// on, that are new to this session at this stage. `headers` names each
 /// judged rule's ADR.
@@ -333,6 +404,15 @@ fn gate(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::Plan => "planning",
         ArtifactKind::Diff => "implementation",
+    }
+}
+
+/// How the gate that judges `kind` blocks: `plan-check` denies ExitPlanMode
+/// (in Codex it blocks a Plan-mode turn's Stop), and `impl-check` blocks the Stop.
+fn mechanism(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Plan => "plan_deny",
+        ArtifactKind::Diff => "stop_block",
     }
 }
 
@@ -1280,6 +1360,36 @@ pub(super) mod tests {
             let rules_dir = home.join("rules");
             report_filter(&filter_run(home, &rules_dir, Some(&tally)));
             assert!(take_captured().is_empty());
+        });
+    }
+
+    /// Resolution records need a session and somewhere to send them, and
+    /// sending none dispatches nothing.
+    #[test]
+    fn test_resolution_records_need_a_session_and_an_output() {
+        use super::super::governance_session::{EndedEpisode, Resolution};
+        let ended = [(
+            ArtifactKind::Plan,
+            EndedEpisode {
+                adr_ref: "adr-1".to_string(),
+                adr_ids: vec!["adr-1".to_string()],
+                action_id: "action-0".to_string(),
+                resolution: Resolution::Fixed,
+                rounds: 2,
+                denials: 1,
+            },
+        )];
+        with_config(WITH_FILE, |_| {
+            assert_eq!(resolved_records(Some("s1"), None, &ended).len(), 1);
+            assert!(resolved_records(None, None, &ended).is_empty());
+            assert!(resolved_records(Some(""), None, &ended).is_empty());
+            report_resolved(Some("s1"), None, &[]);
+            assert!(take_captured().is_empty());
+            report_resolved(Some("s1"), None, &ended);
+            assert_eq!(take_captured().len(), 1);
+        });
+        with_config("", |_| {
+            assert!(resolved_records(Some("s1"), None, &ended).is_empty());
         });
     }
 }
