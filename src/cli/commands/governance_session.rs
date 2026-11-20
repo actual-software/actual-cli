@@ -338,29 +338,34 @@ impl LoopState {
         self.blocking.contains(key)
     }
 
-    /// Record that the round `action_id` names denied `key`, a rule of the
-    /// logical ADR `adr_ref`: it joins that ADR's open episode, or opens one
-    /// at this round. True when it opened one.
+    /// Record that judged round `round`, which `action_id` names, denied
+    /// `key`, a rule of the logical ADR `adr_ref` held in the files `adr_ids`:
+    /// it joins that ADR's open episode, adding any of those ids it lacks, or
+    /// opens one at this round. True when it opened one.
     // Only the gate-resolution event's rounds open one.
     #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
     pub fn open_block(
         &mut self,
+        round: u32,
         adr_ref: &str,
         adr_ids: &[String],
         key: &str,
         action_id: &str,
     ) -> bool {
         let opened = !self.episodes.contains_key(adr_ref);
-        let rounds = self.rounds;
         let episode = self
             .episodes
             .entry(adr_ref.to_string())
             .or_insert_with(|| BlockEpisode {
-                adr_ids: adr_ids.to_vec(),
                 action_id: action_id.to_string(),
-                opened_round: rounds,
+                opened_round: round,
                 ..BlockEpisode::default()
             });
+        for id in adr_ids {
+            if !episode.adr_ids.contains(id) {
+                episode.adr_ids.push(id.clone());
+            }
+        }
         episode.denials += 1;
         episode.rules.insert(key.to_string(), None);
         opened
@@ -378,9 +383,14 @@ impl LoopState {
         }
     }
 
-    /// Remove and return every episode none of whose rules still blocks.
+    /// Remove and return every episode none of whose rules still blocks,
+    /// counting its rounds up to this loop's latest.
     pub fn take_ended(&mut self) -> Vec<EndedEpisode> {
-        let rounds = self.rounds;
+        self.take_ended_at(self.rounds)
+    }
+
+    /// [`take_ended`](Self::take_ended), counting rounds up to `rounds`.
+    pub fn take_ended_at(&mut self, rounds: u32) -> Vec<EndedEpisode> {
         let (ended, open): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut self.episodes)
             .into_iter()
             .partition(|(_, episode)| episode.rules.values().all(Option::is_some));
@@ -795,6 +805,9 @@ pub fn update(
 /// drop any override, turn start or other gate's round written meanwhile.
 /// Two concurrent rounds of the *same* gate still race on that gate's loop
 /// state, and the later one wins — merging their counts is not worth it.
+/// The block episodes are the exception: they are kept as stored, because
+/// each is ended and opened under the lock on a fresh copy, and a held copy
+/// would bring back one another round ended or drop one it opened.
 pub fn store_loop(
     session_id: &str,
     rules_dir: &std::path::Path,
@@ -802,7 +815,10 @@ pub fn store_loop(
     state: &LoopState,
 ) {
     update(session_id, rules_dir, |session| {
-        *session.loop_state_mut(kind) = state.clone();
+        let stored = session.loop_state_mut(kind);
+        let episodes = std::mem::take(&mut stored.episodes);
+        *stored = state.clone();
+        stored.episodes = episodes;
     });
 }
 
@@ -1013,7 +1029,7 @@ fn append_audit(entry: &AuditEntry) {
 }
 
 /// Record an explicit, human-issued override from a terminal. See
-/// [`record_override_with`]. Test convenience; production callers pass a source.
+/// [`record_override_ending`]. Test convenience; production callers pass a source.
 #[cfg(test)]
 pub fn record_override(
     session_id: &str,
@@ -1045,14 +1061,8 @@ pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGa
     }
 }
 
-/// Record an explicit, human-issued override: mark `keys` settled for
-/// `(session_id, rules_dir)` and append one audit-log entry per key, noting
-/// how it was issued (`source`), its reason code, and which gate was blocking
-/// the rule. Updates the session itself under [`update`]'s lock, so the
-/// caller does not need to separately `load`/`store`, and a concurrent hook's
-/// write cannot drop it.
-/// Returns that gate for each of `keys`, read from the same locked copy the
-/// override was recorded on, for the caller's events and reply.
+/// [`record_override_ending`]'s gates, without the episodes it ended. Test
+/// convenience.
 #[cfg(test)]
 pub fn record_override_with(
     session_id: &str,
@@ -1065,9 +1075,15 @@ pub fn record_override_with(
     record_override_ending(session_id, rules_dir, keys, reason, reason_code, source).0
 }
 
-/// [`record_override_with`], which also ends each block the override closes
-/// as [`Resolution::Overridden`], on the same locked copy, and returns the
-/// episodes that ended with it.
+/// Record an explicit, human-issued override: mark `keys` settled for
+/// `(session_id, rules_dir)` and append one audit-log entry per key, noting
+/// how it was issued (`source`), its reason code, and which gate was blocking
+/// the rule. Updates the session itself under [`update`]'s lock, so the
+/// caller does not need to separately `load`/`store`, and a concurrent hook's
+/// write cannot drop it. Also ends each block the override closes as
+/// [`Resolution::Overridden`], on the same locked copy.
+/// Returns the blocking gate for each of `keys`, read from that locked copy,
+/// for the caller's events and reply, and the episodes the override ended.
 pub fn record_override_ending(
     session_id: &str,
     rules_dir: &std::path::Path,
@@ -1192,7 +1208,7 @@ pub fn record_round_limit(
 
 /// Append one audit-log entry recording that a round found nothing blocking
 /// but judged only `judged` of `total` applicable rules. Unlike
-/// [`record_override_with`] and [`record_round_limit`], this names no specific
+/// [`record_override_ending`] and [`record_round_limit`], this names no specific
 /// rule key — the whole point is that the unjudged tail was never
 /// individually identified, only counted — so it is not keyed to any one
 /// rule and does not touch the session file itself. Exists so a coverage gap
@@ -2054,12 +2070,12 @@ mod tests {
         let (a, b) = (key("doc-1", "R-1"), key("doc-2", "R-1"));
         let mut state = LoopState::default();
         state.begin_round();
-        assert!(state.open_block("grp", &["adr-1".to_string()], &a, "action-1"));
+        assert!(state.open_block(state.rounds, "grp", &["adr-1".to_string()], &a, "action-1"));
         state.begin_round();
-        assert!(!state.open_block("grp", &[], &b, "action-2"));
+        assert!(!state.open_block(state.rounds, "grp", &[], &b, "action-2"));
         state.end_blocks(|k| (k == a).then_some(Resolution::Fixed));
         assert!(state.take_ended().is_empty());
-        assert!(!state.open_block("grp", &[], &a, "action-2"));
+        assert!(!state.open_block(state.rounds, "grp", &[], &a, "action-2"));
         state.begin_round();
         state.end_blocks(|k| {
             Some(if k == a {
@@ -2114,7 +2130,7 @@ mod tests {
         let mut session = GovernanceSession::default();
         session
             .diff
-            .open_block("adr-1", &[], &key("doc", "R-1"), "action-1");
+            .open_block(0, "adr-1", &[], &key("doc", "R-1"), "action-1");
         store("s-episodes", &rd(), &session);
         assert_eq!(load("s-episodes", &rd()).diff, session.diff);
     }
@@ -2131,10 +2147,18 @@ mod tests {
             key("doc-3", "R-1"),
         );
         let mut session = GovernanceSession::default();
-        session.plan.open_block("adr-a", &[], &a, "action-1");
-        session.diff.open_block("adr-a", &[], &a, "action-1");
-        session.diff.open_block("grp", &[], &b, "action-1");
-        session.diff.open_block("grp", &[], &c, "action-1");
+        session
+            .plan
+            .open_block(session.plan.rounds, "adr-a", &[], &a, "action-1");
+        session
+            .diff
+            .open_block(session.diff.rounds, "adr-a", &[], &a, "action-1");
+        session
+            .diff
+            .open_block(session.diff.rounds, "grp", &[], &b, "action-1");
+        session
+            .diff
+            .open_block(session.diff.rounds, "grp", &[], &c, "action-1");
         store("s-over", &rd(), &session);
 
         let (gates, ended) = record_override_ending(
@@ -2170,7 +2194,7 @@ mod tests {
         let mut session = GovernanceSession::default();
         session
             .plan
-            .open_block("adr-a", &[], &key("doc", "R-1"), "action-1");
+            .open_block(0, "adr-a", &[], &key("doc", "R-1"), "action-1");
         store("s-end", &rd(), &session);
 
         let read_only = end_open_blocks("s-end", &rd(), false);

@@ -107,7 +107,7 @@ fn read_state(session_id: &str) -> State {
 }
 
 #[cfg(feature = "telemetry")]
-fn report(raw: &str) {
+pub(super) fn report(raw: &str) {
     use crate::telemetry::otlp;
 
     let Ok(envelope) = serde_json::from_str::<Envelope>(raw) else {
@@ -398,7 +398,7 @@ mod tests {
         session.plan.rounds += 1;
         session
             .plan
-            .open_block(adr_ref, &[], &format!("{adr_ref}::R-1"), "action-0");
+            .open_block(1, adr_ref, &[], &format!("{adr_ref}::R-1"), "action-0");
         super::super::governance_session::store(session_id, rules_dir, &session);
         record_rules_dir(session_id, rules_dir);
     }
