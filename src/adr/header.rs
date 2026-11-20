@@ -13,6 +13,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::adr::provenance::Source;
+
 /// The header format version.
 const HEADER_VERSION: u32 = 2;
 /// Longest description the sync writes, in JavaScript (UTF-16) units.
@@ -36,6 +38,10 @@ pub struct AdrHeader {
     pub scope_root: String,
     /// Globs relative to `scope_root`; a `!` prefix makes an exclude.
     pub scope_paths: Vec<String>,
+    /// Where a rule file came from, written under `metadata.actual.source`;
+    /// `None` for a decision doc and for the header the sync writes. See
+    /// [`crate::adr::provenance`].
+    pub source: Option<Source>,
 }
 
 /// The header block, from the opening `---` line through the closing `---` line and its newline, laid out and quoted the way the sync's YAML dump writes it (field order version, name, description, metadata.actual.adr_id, status, metadata.scope.root, paths when non-empty).
@@ -49,6 +55,12 @@ pub fn render_header(header: &AdrHeader) -> String {
     out.push_str("metadata:\n  actual:\n");
     push_field(&mut out, "    ", "adr_id", &header.adr_id);
     push_field(&mut out, "    ", "status", &header.status);
+    if let Some(source) = &header.source {
+        out.push_str("    source:\n");
+        push_field(&mut out, "      ", "origin", &source.origin);
+        push_field(&mut out, "      ", "path", &source.path);
+        push_field(&mut out, "      ", "digest", &source.digest);
+    }
     out.push_str("  scope:\n");
     push_field(
         &mut out,
@@ -370,6 +382,7 @@ mod tests {
             status: "created-from-user".to_string(),
             scope_root: root.to_string(),
             scope_paths: paths.iter().map(|p| p.to_string()).collect(),
+            source: None,
         }
     }
 
@@ -403,6 +416,22 @@ mod tests {
     }
 
     #[test]
+    fn renders_a_source_record_after_the_status() {
+        let mut h = header("Use Postgres for storage", ".", &[]);
+        h.source = Some(Source::local(
+            "docs/adr/0007 use: postgres.md",
+            "sha256:ab".to_string(),
+        ));
+        let rendered = render_header(&h);
+        assert!(rendered.contains(
+            "    status: created-from-user\n    source:\n      origin: local\n      \
+             path: \"docs/adr/0007 use: postgres.md\"\n"
+        ));
+        assert!(rendered.contains("      digest: sha256:ab\n  scope:\n"));
+        assert_round_trips(&rendered, &h);
+    }
+
+    #[test]
     fn renders_the_cli_create_header() {
         let h = header("Use Postgres for storage", ".", &[]);
         let rendered = render_header(&h);
@@ -431,6 +460,7 @@ mod tests {
                 "**".to_string(),
                 "!**/*.test.ts".to_string(),
             ],
+            source: None,
         };
         let rendered = render_header(&h);
         assert_eq!(

@@ -114,6 +114,7 @@ still point at the real file. Every field is optional.
 | `metadata.scope.languages` | Stored in the index. Not used for ranking or selection yet. |
 | `metadata.actual.candidate_group_id` | The decision key when present: files sharing it are one decision (see `--by-adr`), and it is printed as `candidate_group_id` in JSON output. |
 | `name`, `description`, `metadata.actual.evidence.source` | Parsed into the document; no command uses them yet. |
+| `metadata.actual.source` (`origin`, `path`, `digest`) | Written only by this CLI (`adr new`, `adr normalize`): the decision doc the rule file came from and a digest of what it governs. The index ignores it; `adr discover` uses it to tell a CLI-written decision from a synced one and to spot a doc that changed. See "ADRs written elsewhere" in `ADR_COMMANDS.md`. |
 
 **Declared paths replace derived globs.** When the header declares at least one
 include, those are the document's globs, and neither the `### Verify` operands
