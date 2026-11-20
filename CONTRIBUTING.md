@@ -49,14 +49,26 @@ configuration files.
 
 ### Coverage
 
-CI enforces **100% per-file line coverage** for most source files (a small
-set of files is excluded — see `.github/workflows/coverage.yml`). To check
-coverage locally with the same exclusions as CI:
+CI enforces **100% per-file line coverage** for most source files. The [coverage workflow](.github/workflows/coverage.yml) defines the test selection and file exclusions; keep the command below aligned with its `Run coverage` step.
+
+Run coverage from the repository root. CI selects library tests and the integration tests listed below, excluding `tui_e2e` because its terminal interactions hang under coverage instrumentation. The exclusions also omit the interactive `cli/commands/login.rs` shell, whose logic is tested in the auth modules.
 
 ```bash
 cargo install cargo-llvm-cov
-cargo llvm-cov --workspace \
-  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+cargo llvm-cov --lib \
+  --test cli_test \
+  --test integration_errors \
+  --test integration_http_runners \
+  --test integration_no_tailor \
+  --test integration_smoke \
+  --test integration_scope_index \
+  --test integration_scope_select \
+  --test integration_static_analyzer \
+  --test integration_sync_modes \
+  --test integration_tailor \
+  --test lib_test \
+  --test mint_token_cli \
+  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
   --lcov --output-path lcov.info
 ```
 
