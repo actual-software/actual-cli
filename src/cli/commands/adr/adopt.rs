@@ -1504,6 +1504,29 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_whose_rule_file_was_deleted_is_reindexed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        adr(
+            root,
+            "0009-logging.md",
+            &NYGARD.replace("\nAccepted\n", "\nProposed\n"),
+        );
+        let first = run(&args(&[]), root, None, None).unwrap();
+        let written = file(&first, "0009-logging.md");
+        assert_eq!(written.status.as_deref(), Some("draft"));
+        let rule = root.join(written.rule_file.as_deref().unwrap());
+        std::fs::remove_file(&rule).unwrap();
+
+        let entries = discovery::discover(root);
+        assert_eq!(entries[0].state, State::MissingRule, "{entries:#?}");
+        let again = run(&args(&[]), root, None, None).unwrap();
+        assert_eq!(file(&again, "0009-logging.md").outcome, Outcome::Reindexed);
+        assert!(rule.exists());
+        assert_eq!(discovery::discover(root)[0].state, State::Managed);
+    }
+
+    #[test]
     fn dry_run_writes_nothing_and_shows_the_diff() {
         let dir = tempdir().unwrap();
         let root = dir.path();
