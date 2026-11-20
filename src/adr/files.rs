@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::adr::header::{description_for, render_header, AdrHeader};
 use crate::adr::names::{decision_doc_file_name, rule_file_name};
+use crate::adr::provenance::Source;
 use crate::error::ActualError;
 use crate::rules::types::AdrMeta;
 
@@ -27,6 +28,9 @@ pub struct DecisionFile {
     pub path: PathBuf,
     /// The header's fields, when the file opens with one.
     pub meta: Option<AdrMeta>,
+    /// The header's `metadata.actual.source`, which only a rule file this
+    /// CLI wrote carries.
+    pub source: Option<Source>,
     /// The Context File: everything after the header.
     pub body: String,
 }
@@ -107,6 +111,16 @@ struct RawMetadata {
 struct RawActual {
     adr_id: Option<String>,
     status: Option<String>,
+    candidate_group_id: Option<String>,
+    source: Option<RawSource>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct RawSource {
+    origin: Option<String>,
+    path: Option<String>,
+    digest: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -116,37 +130,55 @@ struct RawScope {
     paths: Vec<String>,
 }
 
-/// The fields of a header block, or `None` when its YAML doesn't read as a
-/// header.
-fn header_meta(header: &str) -> Option<AdrMeta> {
+/// The YAML between a header block's `---` lines.
+pub fn header_yaml(header: &str) -> String {
     let yaml: Vec<&str> = header
         .lines()
         .skip(1)
         .take_while(|line| line.trim_end() != "---")
         .collect();
-    let raw: RawHeader = serde_yaml::from_str(&yaml.join("\n")).ok()?;
-    Some(AdrMeta {
+    yaml.join("\n")
+}
+
+/// The fields of a header block and its source record, or `None` when its
+/// YAML doesn't read as a header. A source record missing a field is dropped.
+fn header_meta(header: &str) -> Option<(AdrMeta, Option<Source>)> {
+    let raw: RawHeader = serde_yaml::from_str(&header_yaml(header)).ok()?;
+    let source = raw.metadata.actual.source.and_then(|source| {
+        Some(Source {
+            origin: source.origin?,
+            path: source.path?,
+            digest: source.digest?,
+        })
+    });
+    let meta = AdrMeta {
         name: raw.name,
         description: raw.description,
         adr_id: raw.metadata.actual.adr_id,
         status: raw.metadata.actual.status,
+        candidate_group_id: raw.metadata.actual.candidate_group_id,
         root: raw.metadata.scope.root,
         paths: raw.metadata.scope.paths,
         ..AdrMeta::default()
-    })
+    };
+    Some((meta, source))
 }
 
 /// Read a decision doc, refusing one over [`MAX_FILE_SIZE`].
 pub fn read_decision_file(path: &Path) -> Result<DecisionFile, ActualError> {
     let text = read_text(path)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let (meta, body) = match split_header(text) {
-        Some((header, body)) => (header_meta(header), body),
-        None => (None, text),
+    let ((meta, source), body) = match split_header(text) {
+        Some((header, body)) => (
+            header_meta(header).map_or((None, None), |(meta, source)| (Some(meta), source)),
+            body,
+        ),
+        None => ((None, None), text),
     };
     Ok(DecisionFile {
         path: path.to_path_buf(),
         meta,
+        source,
         body: body.to_string(),
     })
 }
@@ -166,18 +198,39 @@ fn read_text(path: &Path) -> Result<String, ActualError> {
 
 /// The decision docs under `<root>/docs/adr/` and its subdirectories.
 pub fn discover(root: &Path) -> Discovered {
-    let mut paths = Vec::new();
-    collect_markdown(&root.join(DECISION_DIR), MAX_DEPTH, &mut paths);
-    paths.sort();
     let mut found = Discovered::default();
-    for path in paths {
-        match read_decision_file(&path) {
+    for read in decision_docs(root) {
+        match read {
             Ok(file) if file.adr_id().is_some() => found.decisions.push(file),
-            Ok(_) => found.skipped.push(path),
-            Err(e) => found.unreadable.push((path, e.to_string())),
+            Ok(file) => found.skipped.push(file.path),
+            Err((path, reason)) => found.unreadable.push((path, reason)),
         }
     }
     found
+}
+
+/// Every markdown file under `<root>/docs/adr/` and its subdirectories,
+/// sorted by path, read or with the reason it couldn't be.
+pub fn decision_docs(root: &Path) -> Vec<Result<DecisionFile, (PathBuf, String)>> {
+    let mut paths = Vec::new();
+    collect_markdown(&root.join(DECISION_DIR), MAX_DEPTH, &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| read_decision_file(&path).map_err(|e| (path, e.to_string())))
+        .collect()
+}
+
+/// Every rule file directly under `<root>/.actual/rules/` that can be read,
+/// sorted by path.
+pub fn rule_files(root: &Path) -> Vec<DecisionFile> {
+    let mut paths = Vec::new();
+    collect_markdown(&root.join(RULES_DIR), 1, &mut paths);
+    paths.sort();
+    paths
+        .iter()
+        .filter_map(|path| read_decision_file(path).ok())
+        .collect()
 }
 
 /// Push every `.md` file under `dir` onto `out`, `depth` levels down. A
@@ -201,14 +254,10 @@ fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 /// The rule file under `<root>/.actual/rules/` whose header names `adr_id`.
 pub fn find_rule_file(root: &Path, adr_id: &str) -> Option<PathBuf> {
-    let mut paths = Vec::new();
-    collect_markdown(&root.join(RULES_DIR), 1, &mut paths);
-    paths.sort();
-    paths.into_iter().find(|path| {
-        read_decision_file(path)
-            .ok()
-            .is_some_and(|file| file.adr_id() == Some(adr_id))
-    })
+    rule_files(root)
+        .into_iter()
+        .find(|file| file.adr_id() == Some(adr_id))
+        .map(|file| file.path)
 }
 
 /// The repository root a decision doc sits in: the directory above its
@@ -272,6 +321,8 @@ pub fn rename_pair(
         status: status.to_string(),
         scope_root: meta.root.clone().unwrap_or_else(|| ".".to_string()),
         scope_paths: meta.paths.clone(),
+        // A pushed decision is Actual AI's from now on.
+        source: None,
     };
 
     let doc_name = decision_doc_file_name(new_id, title);
@@ -347,6 +398,7 @@ mod tests {
             status: status.to_string(),
             scope_root: ".".to_string(),
             scope_paths: paths.iter().map(|p| p.to_string()).collect(),
+            source: None,
         })
     }
 
@@ -420,8 +472,23 @@ mod tests {
     #[test]
     fn a_header_that_is_not_yaml_gives_no_fields() {
         assert_eq!(header_meta("---\n: [\n---\n"), None);
-        let meta = header_meta("---\nversion: 2\n---\n").unwrap();
+        let (meta, source) = header_meta("---\nversion: 2\n---\n").unwrap();
         assert_eq!(meta.adr_id, None);
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn a_header_reads_its_source_record_and_group() {
+        let header = "---\nmetadata:\n  actual:\n    adr_id: a\n    candidate_group_id: g\n    source:\n      origin: local\n      path: docs/adr/a.md\n      digest: sha256:00\n---\n";
+        let (meta, source) = header_meta(header).unwrap();
+        assert_eq!(meta.candidate_group_id.as_deref(), Some("g"));
+        assert_eq!(
+            source,
+            Some(Source::local("docs/adr/a.md", "sha256:00".to_string()))
+        );
+        // A record missing a field is no record.
+        let partial = "---\nmetadata:\n  actual:\n    source:\n      origin: local\n---\n";
+        assert_eq!(header_meta(partial).unwrap().1, None);
     }
 
     #[test]

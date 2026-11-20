@@ -1,9 +1,11 @@
 //! `actual adr`: write and check ADRs in this repository, and manage the
 //! organization's decisions in Actual AI.
 //!
-//! `new` and `check` work on local files and need no sign-in; the rest call
-//! the decision routes with the signed-in session's token.
+//! `new`, `check`, `discover` and `normalize` work on local files and need no
+//! sign-in (sign-in adds a comparison with Actual AI, and `normalize --push`);
+//! the rest call the decision routes with the signed-in session's token.
 
+mod adopt;
 mod cloud;
 mod local;
 mod telemetry;
@@ -14,6 +16,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::adr::context_file::{ContextFile, Policy};
+use crate::adr::pair::rule_spelling;
 use crate::api::adr_types::{LifecycleAction, SaveStatus};
 use crate::api::{resolve_api_url, ActualApiClient};
 use crate::auth::refresh::ensure_fresh;
@@ -30,6 +33,8 @@ pub fn exec(args: &AdrArgs) -> Result<(), ActualError> {
     match &args.action {
         AdrAction::New(a) => local::exec_new(a),
         AdrAction::Check(a) => local::exec_check(a),
+        AdrAction::Discover(a) => adopt::exec_discover(a),
+        AdrAction::Normalize(a) => adopt::exec_normalize(a),
         AdrAction::List(a) => cloud::exec_list(a),
         AdrAction::Show(a) => cloud::exec_show(a),
         AdrAction::Create(a) => cloud::exec_create(a),
@@ -161,17 +166,6 @@ async fn pick_repo(
     })
 }
 
-/// A level as rule files spell it: `MUST NOT`, not `MUST_NOT`.
-fn rule_spelling(level: RuleLevel) -> &'static str {
-    match level {
-        RuleLevel::Must => "MUST",
-        RuleLevel::MustNot => "MUST NOT",
-        RuleLevel::Should => "SHOULD",
-        RuleLevel::ShouldNot => "SHOULD NOT",
-        RuleLevel::May => "MAY",
-    }
-}
-
 /// The reason a `--policy` value has no level.
 fn missing_level(n: usize) -> String {
     format!(
@@ -301,21 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn rule_spelling_uses_spaces() {
-        let spelled: Vec<_> = [
-            RuleLevel::Must,
-            RuleLevel::MustNot,
-            RuleLevel::Should,
-            RuleLevel::ShouldNot,
-            RuleLevel::May,
-        ]
-        .into_iter()
-        .map(rule_spelling)
-        .collect();
-        assert_eq!(spelled, ["MUST", "MUST NOT", "SHOULD", "SHOULD NOT", "MAY"]);
-    }
-
-    #[test]
     fn content_from_flags_reads_levels_and_reports_every_bad_policy() {
         let content = AdrContentArgs {
             context: vec!["Why.".to_string()],
@@ -383,6 +362,8 @@ mod tests {
         for args in [
             vec!["new", "T", "--root", root],
             vec!["check", "--root", root, "--no-cloud"],
+            vec!["discover", "--root", root, "--no-cloud"],
+            vec!["normalize", "--all", "--root", root, "--no-model"],
         ] {
             let mut argv = vec!["actual", "adr"];
             argv.extend(args.iter().copied());

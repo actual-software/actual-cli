@@ -309,8 +309,9 @@ fn stored_title(doc: &ContextFile) -> String {
     if title.is_empty() { "Untitled" } else { title }.to_string()
 }
 
-#[cfg(test)]
-async fn run_create(
+/// Run `create` without noting what it did, for `normalize --push` and the
+/// tests.
+pub(super) async fn run_create(
     args: &AdrCreateArgs,
     dir: &Path,
     interactive: bool,
