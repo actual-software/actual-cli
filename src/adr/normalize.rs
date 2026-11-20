@@ -25,7 +25,12 @@
 //! Nothing the author wrote is lost. Sections the Context File has no place
 //! for are carried over after it, verbatim, under their own headings; a
 //! heading the Context File parser reads (such as `Decision`) is renamed
-//! `Original Decision` so it doesn't shadow the converted one.
+//! `Original Decision` so it doesn't shadow the converted one. A decision
+//! section's `###` sub-sections (MADR's `Consequences` and `Confirmation`
+//! under `Decision Outcome`) map as their own sections would, front matter
+//! keys nothing reads (MADR's `consulted`, `informed`) are carried as a
+//! `Front Matter` section, and neutral consequences, which the Context File
+//! has no list for, as `Neutral Consequences`.
 
 use std::sync::LazyLock;
 
@@ -269,11 +274,18 @@ pub fn header_status(said: &str) -> Option<&'static str> {
     })
 }
 
-/// Front matter fields a MADR or a hand-written ADR may carry, and the
-/// status a broken decision header still names.
-fn front_matter(header: &str) -> Extraction {
+/// Front matter keys [`front_matter`] reads into the decision.
+const FRONT_MATTER_READ: &[&str] = &["title", "status", "date", "deciders", "decision-makers"];
+/// Keys of a decision header, which the new header replaces.
+const HEADER_KEYS: &[&str] = &["version", "name", "description", "metadata"];
+
+/// Front matter fields a MADR or a hand-written ADR may carry (MADR 3 names
+/// its deciders `deciders`, MADR 4 `decision-makers`), and the status a
+/// broken decision header still names. Every other key is returned as a
+/// section to carry, since the new header replaces the front matter.
+fn front_matter(header: &str) -> (Extraction, Option<(String, String)>) {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&header_yaml(header)) else {
-        return Extraction::default();
+        return (Extraction::default(), None);
     };
     let text = |v: &serde_yaml::Value| match v {
         serde_yaml::Value::String(s) => Some(s.clone()),
@@ -286,13 +298,69 @@ fn front_matter(header: &str) -> Extraction {
         ),
         _ => None,
     };
-    Extraction {
+    let found = Extraction {
         title: text(&value["title"]),
         status: text(&value["status"]).or_else(|| text(&value["metadata"]["actual"]["status"])),
         date: text(&value["date"]),
-        deciders: text(&value["deciders"]),
+        deciders: text(&value["deciders"]).or_else(|| text(&value["decision-makers"])),
         ..Extraction::default()
+    };
+    (found, unread_front_matter(&value))
+}
+
+/// The front matter keys nothing reads, such as MADR's `consulted` and
+/// `informed`, as a `Front Matter` section: a `- key: value` line each, or
+/// the YAML itself when a value is nested. Empty values are left out, and so
+/// are a decision header's own keys.
+fn unread_front_matter(value: &serde_yaml::Value) -> Option<(String, String)> {
+    use serde_yaml::Value;
+    let mapping = value.as_mapping()?;
+    let decision_header = mapping.contains_key("metadata");
+    let unread = |key: &Value| {
+        key.as_str().is_none_or(|key| {
+            !FRONT_MATTER_READ.contains(&key) && !(decision_header && HEADER_KEYS.contains(&key))
+        })
+    };
+    let empty = |value: &Value| match value {
+        Value::Null => true,
+        Value::String(s) => js_trim(s).is_empty(),
+        Value::Sequence(items) => items.is_empty(),
+        _ => false,
+    };
+    let rest: serde_yaml::Mapping = mapping
+        .iter()
+        .filter(|(key, value)| unread(key) && !empty(value))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if rest.is_empty() {
+        return None;
     }
+    fn scalar(value: &Value) -> Option<String> {
+        match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+    let flat = |value: &Value| {
+        scalar(value).or_else(|| {
+            let items: Option<Vec<String>> = value.as_sequence()?.iter().map(scalar).collect();
+            items.map(|items| items.join(", "))
+        })
+    };
+    let lines: Option<Vec<String>> = rest
+        .iter()
+        .map(|(key, value)| Some(format!("- {}: {}", scalar(key)?, flat(value)?)))
+        .collect();
+    let body = match lines {
+        Some(lines) => lines.join("\n"),
+        None => format!(
+            "```yaml\n{}```",
+            serde_yaml::to_string(&rest).unwrap_or_default()
+        ),
+    };
+    Some(("Front Matter".to_string(), body))
 }
 
 /// The preamble's `Label:` field, with an optional list marker before it.
@@ -306,11 +374,15 @@ fn preamble_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
 /// Read what a decision doc's layout says. `text` is the whole file.
 pub fn read(text: &str) -> Read {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out = Read::default();
     let (mut found, body) = match split_header(text) {
-        Some((header, body)) => (front_matter(header), body),
+        Some((header, body)) => {
+            let (found, unread) = front_matter(header);
+            out.carried.extend(unread);
+            (found, body)
+        }
         None => (Extraction::default(), text),
     };
-    let mut out = Read::default();
 
     let mut preamble: Vec<&str> = Vec::new();
     let mut sections: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -348,6 +420,7 @@ pub fn read(text: &str) -> Read {
 
     let mut policies: Vec<String> = Vec::new();
     let mut rationale: Vec<String> = Vec::new();
+    let mut neutral: Vec<String> = Vec::new();
     for (heading, lines) in sections {
         let key = heading_key(heading);
         let body = js_trim(&lines.join("\n")).to_string();
@@ -367,29 +440,21 @@ pub fn read(text: &str) -> Read {
         } else if CONTEXT_KEYS.contains(&k) {
             context.extend(items(&body));
         } else if DECISION_KEYS.contains(&k) {
-            let policy_list = POLICY_LIST_KEYS.contains(&k);
-            let mut leftover: Vec<&str> = Vec::new();
-            for line in &lines {
-                let policy = policy_line(line)
-                    .or_else(|| policy_list.then(|| unleveled_policy(line)).flatten());
-                match policy {
-                    Some(policy) => policies.push(policy),
-                    None if !js_trim(line).is_empty() => leftover.push(line),
-                    None => {}
-                }
+            let decision = read_decision(&lines, POLICY_LIST_KEYS.contains(&k));
+            policies.extend(decision.policies);
+            rationale.extend(decision.rationale);
+            for mapped in decision.consequences {
+                add_consequences(&mut out, &mut neutral, mapped);
             }
-            if !leftover.is_empty() {
-                carry_as(&mut out, body);
+            if let Some(kept) = decision.kept {
+                carry_as(&mut out, kept);
             }
+            out.carried.extend(decision.own_sections);
         } else if RATIONALE_KEYS.contains(&k) {
             rationale.extend(items(&body));
         } else if CONSEQUENCE_KEYS.contains(&k) {
             match consequences(&body) {
-                Some(mapped) => {
-                    let into = out.consequences.get_or_insert_with(Consequences::default);
-                    into.positive.extend(mapped.positive);
-                    into.negative.extend(mapped.negative);
-                }
+                Some(mapped) => add_consequences(&mut out, &mut neutral, mapped),
                 None if !body.is_empty() => carry_as(&mut out, body),
                 None => {}
             }
@@ -398,6 +463,11 @@ pub fn read(text: &str) -> Read {
         } else {
             carry_as(&mut out, body);
         }
+    }
+    if !neutral.is_empty() {
+        let items: Vec<String> = neutral.iter().map(|item| format!("- {item}")).collect();
+        out.carried
+            .push(("Neutral Consequences".to_string(), items.join("\n")));
     }
     if !context.is_empty() {
         found.context = Some(context);
@@ -412,45 +482,184 @@ pub fn read(text: &str) -> Read {
     out
 }
 
-/// A Consequences section as the Context File's two lists: labeled blocks
-/// (`Positive:` then bullets), labeled bullets (`- Positive: x`, adr-bot's
-/// layout) and MADR's `Good, because x` / `Bad, because x`. `None` when
-/// any line fits none of these, so the section is carried as written.
-fn consequences(body: &str) -> Option<Consequences> {
-    static LABELED: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)^(positive|negative|good|bad|pro|con)\b[,:]?\s*(?:because\s+)?(.*)$")
-            .expect("valid regex")
+/// A `### ` heading's text.
+fn h3_heading(line: &str) -> Option<&str> {
+    line.strip_prefix("###")
+        .filter(|rest| rest.starts_with([' ', '\t']))
+}
+
+/// What a decision section gives once its `###` sub-sections are mapped.
+#[derive(Debug, Default)]
+struct DecisionSection {
+    policies: Vec<String>,
+    rationale: Vec<String>,
+    consequences: Vec<MappedConsequences>,
+    /// The section as it is carried, less the sub-sections mapped
+    /// elsewhere; `None` when its policies were all there was.
+    kept: Option<String>,
+    /// Sub-sections carried as sections of their own, such as MADR's
+    /// `Confirmation`.
+    own_sections: Vec<(String, String)>,
+}
+
+/// A decision section split at its `###` headings, as MADR nests
+/// `Consequences` and `Confirmation` under `Decision Outcome`. The text
+/// before the first sub-heading is the decision: its keyword lines are
+/// policies, and the reason in a MADR `Chosen option: …, because …` line is
+/// rationale. A `Consequences`, `Rationale` or `Policies` sub-section maps
+/// as its section would, a `Confirmation` is carried as its own section, and
+/// any other sub-section stays in the decision as written.
+fn read_decision(lines: &[&str], policy_list: bool) -> DecisionSection {
+    let mut parts: Vec<(Option<&str>, Vec<&str>)> = vec![(None, Vec::new())];
+    for line in lines {
+        match h3_heading(line).map(js_trim).filter(|h| !h.is_empty()) {
+            Some(heading) => parts.push((Some(heading), Vec::new())),
+            None => parts.last_mut().expect("starts with one").1.push(line),
+        }
+    }
+    let mut out = DecisionSection::default();
+    let mut kept: Vec<String> = Vec::new();
+    let mut leftover = false;
+    for (heading, part) in parts {
+        let key = heading.map(heading_key);
+        let body = js_trim(&part.join("\n")).to_string();
+        match (heading, key.as_deref()) {
+            (_, Some(k)) if CONSEQUENCE_KEYS.contains(&k) => {
+                if let Some(mapped) = consequences(&body) {
+                    out.consequences.push(mapped);
+                    continue;
+                }
+            }
+            (_, Some(k)) if RATIONALE_KEYS.contains(&k) => {
+                out.rationale.extend(items(&body));
+                continue;
+            }
+            (Some(heading), Some("confirmation")) => {
+                if !body.is_empty() {
+                    out.own_sections.push((heading.to_string(), body));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let list = policy_list
+            || key
+                .as_deref()
+                .is_some_and(|k| POLICY_LIST_KEYS.contains(&k));
+        let mut part_leftover = false;
+        for line in &part {
+            let policy =
+                policy_line(line).or_else(|| list.then(|| unleveled_policy(line)).flatten());
+            match policy {
+                Some(policy) => out.policies.push(policy),
+                None if !js_trim(line).is_empty() => {
+                    part_leftover = true;
+                    if heading.is_none() {
+                        out.rationale.extend(chosen_because(line));
+                    }
+                }
+                None => {}
+            }
+        }
+        // The decision's own text is kept whole when anything in the section
+        // is; a sub-section only when it isn't all policies.
+        match heading {
+            None => kept.extend(part.iter().map(|line| line.to_string())),
+            Some(heading) if part_leftover => {
+                kept.push(format!("### {heading}"));
+                kept.extend(part.iter().map(|line| line.to_string()));
+            }
+            Some(_) => {}
+        }
+        leftover |= part_leftover;
+    }
+    out.kept = leftover.then(|| js_trim(&kept.join("\n")).to_string());
+    out
+}
+
+/// The reason in a MADR `Chosen option: "X", because Y` line, capitalized.
+fn chosen_because(line: &str) -> Option<String> {
+    static CHOSEN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^chosen option:.*?\bbecause,?\s+(.+)$").expect("valid regex")
     });
-    let mut found = Consequences::default();
-    let mut block: Option<bool> = None;
+    let (text, _) = unmarked(line);
+    let reason = js_trim(CHOSEN.captures(text)?.get(1)?.as_str());
+    let mut chars = reason.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().chain(chars).collect())
+}
+
+/// A Consequences section as the Context File's two lists, and the neutral
+/// items it has no list for, which are carried as a section of their own.
+#[derive(Debug, Default)]
+struct MappedConsequences {
+    lists: Consequences,
+    neutral: Vec<String>,
+}
+
+/// Add `mapped` to what `out` has found, and its neutral items to `neutral`.
+fn add_consequences(out: &mut Read, neutral: &mut Vec<String>, mapped: MappedConsequences) {
+    if !mapped.lists.positive.is_empty() || !mapped.lists.negative.is_empty() {
+        let into = out.consequences.get_or_insert_with(Consequences::default);
+        into.positive.extend(mapped.lists.positive);
+        into.negative.extend(mapped.lists.negative);
+    }
+    neutral.extend(mapped.neutral);
+}
+
+/// Which list a consequence goes in.
+#[derive(Debug, Clone, Copy)]
+enum Effect {
+    Positive,
+    Negative,
+    Neutral,
+}
+
+/// A Consequences section's items: labeled blocks (`Positive:` then
+/// bullets), labeled bullets (`- Positive: x`, adr-bot's layout) and MADR's
+/// `Good, because x` / `Neutral, because x` / `Bad, because x`. `None` when
+/// any line fits none of these, so the section is carried as written.
+fn consequences(body: &str) -> Option<MappedConsequences> {
+    static LABELED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)^(positive|negative|neutral|good|bad|pro|con)\b[,:]?\s*(?:because\s+)?(.*)$",
+        )
+        .expect("valid regex")
+    });
+    let mut found = MappedConsequences::default();
+    let mut block: Option<Effect> = None;
     for line in split_lines(body) {
         let (text, _) = unmarked(line);
         if text.is_empty() {
             continue;
         }
-        let (positive, item) = match LABELED.captures(text) {
+        let (effect, item) = match LABELED.captures(text) {
             Some(caps) => {
-                let positive = matches!(
-                    caps[1].to_ascii_lowercase().as_str(),
-                    "positive" | "good" | "pro"
-                );
+                let effect = match caps[1].to_ascii_lowercase().as_str() {
+                    "positive" | "good" | "pro" => Effect::Positive,
+                    "neutral" => Effect::Neutral,
+                    _ => Effect::Negative,
+                };
                 let rest = js_trim(caps.get(2).map_or("", |m| m.as_str()));
                 if rest.is_empty() {
-                    block = Some(positive);
+                    block = Some(effect);
                     continue;
                 }
-                (positive, rest)
+                (effect, rest)
             }
             None => (block?, text),
         };
-        let list = if positive {
-            &mut found.positive
-        } else {
-            &mut found.negative
+        let list = match effect {
+            Effect::Positive => &mut found.lists.positive,
+            Effect::Negative => &mut found.lists.negative,
+            Effect::Neutral => &mut found.neutral,
         };
         list.push(item.to_string());
     }
-    (!found.positive.is_empty() || !found.negative.is_empty()).then_some(found)
+    let any = !found.lists.positive.is_empty()
+        || !found.lists.negative.is_empty()
+        || !found.neutral.is_empty();
+    any.then_some(found)
 }
 
 /// One question [`plan`] needs answered. The answer goes in the field of
@@ -764,7 +973,8 @@ pub fn model_prompt(path: &str, text: &str, dirs: &[String]) -> String {
          - policies: what the decision requires, each as `LEVEL: statement` on one line. LEVEL is \
            MUST, MUST NOT, SHOULD, SHOULD NOT or MAY. Write each statement as a checkable rule \
            about the code (\"Services store relational data in Postgres\"), not as history \
-           (\"We chose Postgres\").\n\
+           (\"We chose Postgres\"). A Confirmation section (MADR) says how compliance is \
+           checked, and often states the rule most directly.\n\
          - scope: globs from the repository root for the code the decision governs, only when \
            the file names specific paths or packages; an empty list means the whole repository. \
            Top-level directories: {dirs}.\n\
@@ -965,8 +1175,11 @@ See the wiki.
             found.policies.as_deref(),
             Some(&["MUST: Services MUST log JSON lines.".to_string()][..])
         );
-        // Pros and cons of the options aren't the decision's consequences.
-        assert_eq!(read.consequences, None);
+        // The `### Consequences` under Decision Outcome are the decision's;
+        // the pros and cons of the options aren't.
+        let consequences = read.consequences.clone().unwrap();
+        assert_eq!(consequences.positive, ["logs are searchable."]);
+        assert_eq!(consequences.negative, ["they are harder to read raw."]);
         let headings: Vec<&str> = read.carried.iter().map(|(h, _)| h.as_str()).collect();
         assert_eq!(
             headings,
@@ -977,13 +1190,173 @@ See the wiki.
                 "More Information"
             ]
         );
-        assert!(read.carried[1]
-            .1
-            .contains("Good, because logs are searchable."));
+        assert_eq!(
+            read.carried[1].1,
+            "Chosen option: JSON lines.\n\n* Services MUST log JSON lines."
+        );
+        assert!(read.carried[2].1.contains("Good, because one format"));
 
         let plan = ready(plan(&read, &read.found, &settings(&any)));
         assert_eq!(plan.status, "draft");
         assert_eq!(plan.doc.deciders, "Ana, Bo");
+    }
+
+    /// MADR 4's template, filled in.
+    const MADR4: &str = "---
+status: accepted
+date: 2026-04-10
+decision-makers: [alice, bob]
+consulted: [carol]
+informed: platform team
+---
+# Return RFC 7807 problem details from the API
+
+## Context and Problem Statement
+
+API errors come back in three shapes.
+
+## Considered Options
+
+* RFC 7807 problem details
+* A custom envelope
+
+## Decision Outcome
+
+Chosen option: \"RFC 7807 problem details\", because clients already parse it.
+
+### Consequences
+
+* Good, because clients share one error parser.
+* Neutral, because the payload grows slightly.
+* Bad, because existing clients need a migration.
+
+### Confirmation
+
+A contract test checks every error response for application/problem+json.
+
+## Pros and Cons of the Options
+
+### RFC 7807 problem details
+
+* Good, because it is a standard.
+* Bad, because it is verbose.
+";
+
+    #[test]
+    fn reads_madr_4_sub_sections_and_front_matter() {
+        let read = read(MADR4);
+        let found = &read.found;
+        assert_eq!(found.deciders.as_deref(), Some("alice, bob"));
+        assert_eq!(
+            found.rationale.as_deref(),
+            Some(&["Clients already parse it.".to_string()][..])
+        );
+        // A prose outcome: the policies still need a model or a person.
+        assert!(found.needs_model());
+        let consequences = read.consequences.clone().unwrap();
+        assert_eq!(consequences.positive, ["clients share one error parser."]);
+        assert_eq!(
+            consequences.negative,
+            ["existing clients need a migration."]
+        );
+        assert_eq!(
+            read.carried,
+            [
+                (
+                    "Front Matter".to_string(),
+                    "- consulted: carol\n- informed: platform team".to_string()
+                ),
+                (
+                    "Considered Options".to_string(),
+                    "* RFC 7807 problem details\n* A custom envelope".to_string()
+                ),
+                (
+                    "Decision Outcome".to_string(),
+                    "Chosen option: \"RFC 7807 problem details\", because clients already parse it."
+                        .to_string()
+                ),
+                (
+                    "Confirmation".to_string(),
+                    "A contract test checks every error response for application/problem+json."
+                        .to_string()
+                ),
+                (
+                    "Pros and Cons of the Options".to_string(),
+                    "### RFC 7807 problem details\n\n* Good, because it is a standard.\n\
+                     * Bad, because it is verbose."
+                        .to_string()
+                ),
+                (
+                    "Neutral Consequences".to_string(),
+                    "- the payload grows slightly.".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn decision_sub_sections_map_or_stay() {
+        let text =
+            "# T\n\n## Decision\n\nWe keep one store.\n\n### Policies\n\n- Use Postgres.\n\n\
+                    ### Rationale\n\n- Fewer backups.\n\n### Notes\n\nAsk ops first.\n\n\
+                    ### Consequences\n\nOps get simpler.\n\n### Confirmation\n\n";
+        let read = read(text);
+        assert_eq!(
+            read.found.policies.as_deref(),
+            Some(&["MUST: Use Postgres.".to_string()][..])
+        );
+        assert_eq!(
+            read.found.rationale.as_deref(),
+            Some(&["Fewer backups.".to_string()][..])
+        );
+        // A Notes sub-section and unlabeled consequences stay in the decision;
+        // the policy list, the rationale and an empty Confirmation don't.
+        assert_eq!(
+            read.carried,
+            [(
+                "Original Decision".to_string(),
+                "We keep one store.\n\n### Notes\n\nAsk ops first.\n\n\
+                 ### Consequences\n\nOps get simpler."
+                    .to_string()
+            )]
+        );
+
+        // A decision of policies alone carries nothing, sub-sections or not.
+        let read = super::read(
+            "# T\n\n## Decision\n\n- MUST: Use Postgres.\n\n### Policies\n\n- Back up nightly.\n",
+        );
+        assert_eq!(read.found.policies.as_ref().unwrap().len(), 2);
+        assert!(read.carried.is_empty());
+        // A chosen option without a reason gives no rationale.
+        assert_eq!(chosen_because("Chosen option: \"X\""), None);
+        assert_eq!(h3_heading("#### Deeper"), None);
+    }
+
+    #[test]
+    fn unread_front_matter_is_carried() {
+        // Empty values are dropped, and nested ones carried as YAML.
+        let read = super::read(
+            "---\nstatus: accepted\nconsulted: []\ninformed:\ntags: [a, 1, true]\n\
+             links:\n  issue: 42\n---\n# T\n",
+        );
+        assert_eq!(
+            read.carried,
+            [(
+                "Front Matter".to_string(),
+                "```yaml\ntags:\n- a\n- 1\n- true\nlinks:\n  issue: 42\n```".to_string()
+            )]
+        );
+        let read = super::read("---\nstatus: accepted\ntags: [a, 1, true]\nnote: ''\n---\n# T\n");
+        assert_eq!(read.carried[0].1, "- tags: a, 1, true");
+        // A decision header's own keys aren't carried; the same key elsewhere is.
+        let read = super::read(
+            "---\nversion: 2\nname: n\ndescription: d\nmetadata:\n  actual:\n    status: draft\n---\n# T\n",
+        );
+        assert!(read.carried.is_empty());
+        let read = super::read("---\nname: n\n---\n# T\n");
+        assert_eq!(read.carried[0].1, "- name: n");
+        // Front matter that isn't a mapping carries nothing.
+        assert!(super::read("---\n- a\n---\n# T\n").carried.is_empty());
     }
 
     const LEGACY: &str = "The codebase requires consistent testing.
