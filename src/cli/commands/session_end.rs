@@ -1,6 +1,12 @@
 //! Best-effort session-end telemetry. The state is session-wide across rule
 //! sets and agents. Checks share the brief ledger's lock wait and age pruning;
 //! ends use a shorter wait to leave time for dispatch before the hook exits.
+//!
+//! The end also sends, beside `actual.session.ended`, one
+//! `actual.gate.resolved` record with the resolution `still_open` for each
+//! block still open. A gate's session file is keyed by its rules directory as
+//! well as the session, so the state names every rules directory a block
+//! opened under.
 
 use crate::error::ActualError;
 
@@ -15,6 +21,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "telemetry")]
 use sha2::{Digest, Sha256};
 #[cfg(feature = "telemetry")]
+use std::collections::BTreeSet;
+#[cfg(feature = "telemetry")]
+use std::path::{Path, PathBuf};
+#[cfg(feature = "telemetry")]
 use std::time::Duration;
 
 #[cfg(feature = "telemetry")]
@@ -26,6 +36,9 @@ const END_LOCK_WAIT: Duration = Duration::from_millis(100);
 struct State {
     last_check_blocked: bool,
     ended: bool,
+    /// The rules directories a gate opened a block under in this session.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    rules_dirs: BTreeSet<PathBuf>,
 }
 
 #[cfg(feature = "telemetry")]
@@ -44,6 +57,18 @@ pub(super) fn record_check(session_id: &str, blocked: bool) {
     with_state(session_id, super::brief_ledger::LOCK_WAIT, |state| {
         state.last_check_blocked = blocked;
         state.ended = false;
+    });
+}
+
+/// Note that a gate opened a block under `rules_dir` in `session_id`, so the
+/// session's end can find it.
+#[cfg(feature = "telemetry")]
+pub(super) fn record_rules_dir(session_id: &str, rules_dir: &Path) {
+    if session_id.is_empty() || session_id.len() > 256 {
+        return;
+    }
+    with_state(session_id, super::brief_ledger::LOCK_WAIT, |state| {
+        state.rules_dirs.insert(rules_dir.to_path_buf());
     });
 }
 
@@ -82,7 +107,7 @@ fn read_state(session_id: &str) -> State {
 }
 
 #[cfg(feature = "telemetry")]
-fn report(raw: &str) {
+pub(super) fn report(raw: &str) {
     use crate::telemetry::otlp;
 
     let Ok(envelope) = serde_json::from_str::<Envelope>(raw) else {
@@ -121,11 +146,28 @@ fn report(raw: &str) {
         "clear" | "resume" | "logout" | "prompt_input_exit" => envelope.reason.as_str(),
         _ => "other",
     };
-    destination.deliver(vec![otlp::Origin::resolve().session_ended(
+    let ended: Vec<_> = state
+        .rules_dirs
+        .iter()
+        .flat_map(|rules_dir| {
+            super::governance_session::end_open_blocks(
+                &envelope.session_id,
+                rules_dir,
+                destination.sends(),
+            )
+        })
+        .collect();
+    let mut records = vec![otlp::Origin::resolve().session_ended(
         &envelope.session_id,
         reason,
         state.last_check_blocked,
-    )]);
+    )];
+    records.extend(super::check_telemetry::resolved_records(
+        Some(&envelope.session_id),
+        None,
+        &ended,
+    ));
+    destination.deliver(records);
 }
 
 #[cfg(all(test, feature = "telemetry"))]
@@ -347,5 +389,125 @@ mod tests {
         report(&envelope("debug-session-2", "clear"));
         assert!(take_captured().is_empty());
         assert_eq!(logged("debug-session-2").len(), 0);
+    }
+
+    /// Open a block on `adr_ref` in `session_id`'s plan loop under
+    /// `rules_dir`, as a denied round does, and note the directory.
+    fn open_block(session_id: &str, rules_dir: &Path, adr_ref: &str) {
+        let mut session = super::super::governance_session::load(session_id, rules_dir);
+        session.plan.rounds += 1;
+        session
+            .plan
+            .open_block(1, adr_ref, &[], &format!("{adr_ref}::R-1"), "action-0");
+        super::super::governance_session::store(session_id, rules_dir, &session);
+        record_rules_dir(session_id, rules_dir);
+    }
+
+    /// The end sends `still_open` for each block still open, under every
+    /// rules directory a block opened under, beside the session's end, and
+    /// only once: the blocks are ended in the session file. A session with no
+    /// open block sends the end alone.
+    #[test]
+    fn the_end_sends_each_block_still_open_once() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
+        let (a, b) = (home.path().join("a/rules"), home.path().join("b/rules"));
+        open_block("open", &a, "adr-a");
+        open_block("open", &b, "adr-b");
+        record_rules_dir("", &a);
+        record_rules_dir(&"s".repeat(257), &a);
+        take_captured();
+
+        report(&envelope("open", "clear"));
+        report(&envelope("open", "clear"));
+        report(&envelope("quiet", "clear"));
+        let records = take_captured();
+        let events: Vec<(&str, String, String)> = records
+            .iter()
+            .map(|record| {
+                let attrs = attributes(record);
+                let text = |key: &str| attrs[key]["stringValue"].as_str().unwrap_or("").to_string();
+                (
+                    record["eventName"].as_str().unwrap(),
+                    text("actual.session.id"),
+                    text("actual.adr.ref") + &text("actual.gate.resolution"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            events,
+            [
+                ("actual.session.ended", "open".into(), String::new()),
+                (
+                    "actual.gate.resolved",
+                    "open".into(),
+                    "adr-astill_open".into()
+                ),
+                (
+                    "actual.gate.resolved",
+                    "open".into(),
+                    "adr-bstill_open".into()
+                ),
+                ("actual.session.ended", "quiet".into(), String::new()),
+            ]
+        );
+        assert_eq!(
+            attributes(&records[1])["actual.gate.rounds"]["intValue"],
+            "1"
+        );
+        assert!(super::super::governance_session::load("open", &a)
+            .plan
+            .episodes
+            .is_empty());
+    }
+
+    /// Telemetry off in debug mode: a block still open at the end is logged
+    /// as not sent, and the session file keeps it.
+    #[test]
+    fn debug_mode_logs_a_block_still_open_and_keeps_it() {
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _fresh = FreshId::new();
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
+        let _debug = EnvGuard::set(debug::ENV, "1");
+        let _id = EnvGuard::remove(debug::ID_ENV);
+        let rules_dir = home.path().join("rules");
+        open_block("debug-open", &rules_dir, "adr-a");
+        let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        take_captured();
+
+        report(&envelope("debug-open", "clear"));
+
+        assert!(take_captured().is_empty());
+        let events: Vec<serde_json::Value> = logged("debug-open")
+            .iter()
+            .map(|line| line["event"]["eventName"].clone())
+            .collect();
+        assert_eq!(
+            events,
+            [
+                crate::telemetry::otlp::SESSION_ENDED,
+                crate::telemetry::otlp::GATE_RESOLVED
+            ]
+        );
+        assert_eq!(
+            super::super::governance_session::load("debug-open", &rules_dir)
+                .plan
+                .episodes
+                .len(),
+            1
+        );
     }
 }

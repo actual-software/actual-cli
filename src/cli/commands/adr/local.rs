@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::telemetry::CheckCounts;
+use super::telemetry::{CheckCounts, Creation};
 use super::{
     content_from_flags, interactive, json_text, pick_repo, rule_spelling, runtime, save_status,
     session, today, RepoPick,
@@ -38,8 +38,16 @@ pub(super) struct Written {
 }
 
 pub(super) fn exec_new(args: &AdrNewArgs) -> Result<(), ActualError> {
+    let run = super::telemetry::Run::start();
+    let mut creation = Creation::local();
+    let result = new_and_print(args, &mut creation);
+    super::telemetry::report_create(&run, &creation, &result);
+    result
+}
+
+fn new_and_print(args: &AdrNewArgs, creation: &mut Creation) -> Result<(), ActualError> {
     let root = args.root.clone().unwrap_or_else(resolve_cwd);
-    let written = write_new(args, &root, interactive(), &today())?;
+    let written = write_new_noting(args, &root, interactive(), &today(), creation)?;
     if args.json {
         println!("{}", json_text(&written));
     } else {
@@ -48,19 +56,34 @@ pub(super) fn exec_new(args: &AdrNewArgs) -> Result<(), ActualError> {
     Ok(())
 }
 
-/// Check the decision the flags describe, then write its decision doc and
-/// rule file under a new local id, as the repository sync lays them out.
+/// [`write_new_noting`], for a test with no creation to note.
+#[cfg(test)]
 pub(super) fn write_new(
     args: &AdrNewArgs,
     root: &Path,
     interactive: bool,
     today: &str,
 ) -> Result<Written, ActualError> {
+    write_new_noting(args, root, interactive, today, &mut Creation::local())
+}
+
+/// Check the decision the flags describe, then write its decision doc and
+/// rule file under a new local id, as the repository sync lays them out.
+/// `creation` notes the status and policy count as they're known.
+fn write_new_noting(
+    args: &AdrNewArgs,
+    root: &Path,
+    interactive: bool,
+    today: &str,
+    creation: &mut Creation,
+) -> Result<Written, ActualError> {
     let status = save_status(args.status, interactive);
+    creation.status = status.as_str().to_string();
     let doc = ContextFile {
         deciders: args.deciders.clone().unwrap_or_default(),
         ..content_from_flags(&args.title, &args.content)?
     };
+    creation.policies = doc.policies.len();
     let doc = check_document(&doc, status == SaveStatus::Draft, today)
         .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let adr_id = Uuid::new_v4().to_string();
@@ -1012,6 +1035,57 @@ mod tests {
         let sent = records[0].to_string().to_lowercase();
         for content in ["zeta", "postgres", "docs/adr", "bad.md"] {
             assert!(!sent.contains(content), "{content} in {sent}");
+        }
+    }
+
+    /// An `adr new` run sends one event saying it wrote locally from flags,
+    /// with the status and policy count, and none of the decision's text or
+    /// paths. A run the save rules refuse says so.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn new_sends_one_event_with_counts_and_no_content() {
+        use super::super::telemetry::tests::{own, sending_to_a_file};
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _telemetry = sending_to_a_file(home.path());
+        let tmp = tempdir().unwrap();
+        let mut args = new_args(
+            "Zeta title",
+            &["MUST: Zeta policy.", "SHOULD: Zeta second."],
+            &["zeta/**"],
+        );
+        args.root = Some(tmp.path().to_path_buf());
+        args.status = Some(SaveStatus::Draft);
+
+        exec_new(&args).unwrap();
+        args.title = String::new();
+        assert!(exec_new(&args).is_err());
+
+        let records = take_captured();
+        assert_eq!(records.len(), 2);
+        for (record, outcome, code) in [(&records[0], "succeeded", 0), (&records[1], "invalid", 1)]
+        {
+            assert_eq!(record["eventName"], crate::telemetry::otlp::ADR_CREATED);
+            assert_eq!(
+                serde_json::Value::Object(own(record)),
+                serde_json::json!({
+                    "actual.adr.create.target": "local",
+                    "actual.adr.create.source": "flags",
+                    "actual.adr.create.status": "draft",
+                    "actual.adr.create.policies": 2,
+                    "actual.adr.create.partial": false,
+                    "actual.adr.decision_id": "",
+                    "actual.adr.command.outcome": outcome,
+                    "actual.adr.command.exit_code": code,
+                    "actual.adr.command.stdin_is_terminal": interactive(),
+                })
+            );
+            let sent = record.to_string().to_lowercase();
+            for content in ["zeta", "relational", "ana", "docs/adr"] {
+                assert!(!sent.contains(content), "{content} in {sent}");
+            }
         }
     }
 }

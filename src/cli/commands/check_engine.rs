@@ -1568,7 +1568,9 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     };
     let reason = parsed.reason.as_deref();
     let reason_code = parsed.reason_code;
-    let gates = governance_session::record_override_with(
+    // The ended blocks only feed telemetry.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let (gates, ended) = governance_session::record_override_ending(
         &session_id,
         &rules_dir,
         &keys,
@@ -1580,6 +1582,8 @@ fn exec_override_hook_with(args: &PlanCheckOverrideArgs, raw: &str) -> Option<St
     send_override_events(&root, &keys, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
     super::override_telemetry::report(&rules_dir, &session_id, &keys, source, reason_code, reason);
+    #[cfg(feature = "telemetry")]
+    super::check_telemetry::report_resolved(Some(&session_id), None, &ended);
     let reason = describe_reason(reason_code, reason);
     let not_blocking: Vec<&str> = keys
         .iter()
@@ -1647,9 +1651,9 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     let reason = args.reason.as_deref().filter(|r| !r.trim().is_empty());
     let reason_code = terminal_reason_code(args.reason_code, reason);
     let source = governance_session::OverrideSource::Terminal;
-    // The gates only feed telemetry here.
+    // The gates and the ended blocks only feed telemetry here.
     #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
-    let gates = governance_session::record_override_with(
+    let (gates, ended) = governance_session::record_override_ending(
         session_id,
         &rules_dir,
         &args.rules,
@@ -1668,6 +1672,8 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
         reason_code,
         reason,
     );
+    #[cfg(feature = "telemetry")]
+    super::check_telemetry::report_resolved(Some(session_id), None, &ended);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", session_id);
@@ -2141,7 +2147,8 @@ pub(super) fn codex_answer_reply(
             }
             let source = governance_session::OverrideSource::SessionDialog;
             let reason = reason.as_deref();
-            let _gates = governance_session::record_override_with(
+            #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+            let (gates, ended) = governance_session::record_override_ending(
                 session_id,
                 rules_dir,
                 &keys,
@@ -2150,7 +2157,7 @@ pub(super) fn codex_answer_reply(
                 source,
             );
             #[cfg(feature = "telemetry")]
-            send_override_events(root, &keys, reason.unwrap_or(""), source, &_gates);
+            send_override_events(root, &keys, reason.unwrap_or(""), source, &gates);
             #[cfg(feature = "telemetry")]
             super::override_telemetry::report(
                 rules_dir,
@@ -2160,6 +2167,8 @@ pub(super) fn codex_answer_reply(
                 reason_code,
                 reason,
             );
+            #[cfg(feature = "telemetry")]
+            super::check_telemetry::report_resolved(Some(session_id), None, &ended);
             set_pending(None);
             format!(
                 "The user overrode {} in the picker (reason: {}). These rules won't block again \
@@ -2361,7 +2370,9 @@ fn codex_typed_override(
     let source = governance_session::OverrideSource::SessionPrompt;
     let reason = parsed.reason.as_deref();
     let reason_code = parsed.reason_code;
-    let gates = governance_session::record_override_with(
+    // The ended blocks only feed telemetry.
+    #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
+    let (gates, ended) = governance_session::record_override_ending(
         session_id,
         rules_dir,
         &keys,
@@ -2373,6 +2384,8 @@ fn codex_typed_override(
     send_override_events(root, &keys, reason.unwrap_or(""), source, &gates);
     #[cfg(feature = "telemetry")]
     super::override_telemetry::report(rules_dir, session_id, &keys, source, reason_code, reason);
+    #[cfg(feature = "telemetry")]
+    super::check_telemetry::report_resolved(Some(session_id), None, &ended);
     // Once nothing a stopped turn named is still blocking, its conflicts are
     // settled and must not be handed to the agent with the next message.
     let after = governance_session::update(session_id, rules_dir, |s| {
@@ -2582,15 +2595,29 @@ pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, ou
         Outcome::NothingApplies => {
             // Nothing applies, so nothing blocks: the previous round's
             // blocking rules must not stay targets for `/override all`.
+            // It decides without judging, so it ends every open block.
             let state = session.loop_state_mut(run.kind);
             state.blocking.clear();
             state.pending = None;
             if let Some(session_id) = run.session_id {
+                #[cfg(feature = "telemetry")]
+                let mut ended = Vec::new();
                 governance_session::update(session_id, run.rules_dir, |s| {
                     let state = s.loop_state_mut(run.kind);
                     state.blocking.clear();
+                    #[cfg(feature = "telemetry")]
+                    {
+                        state.end_blocks(|_| Some(governance_session::Resolution::NotRechecked));
+                        ended = state
+                            .take_ended()
+                            .into_iter()
+                            .map(|episode| (run.kind, episode))
+                            .collect();
+                    }
                     state.pending = None;
                 });
+                #[cfg(feature = "telemetry")]
+                super::check_telemetry::report_resolved(run.session_id, run.agent_id, &ended);
             }
             reply(
                 run,
@@ -2682,7 +2709,7 @@ fn finish_verdicts(
         .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
         .collect();
     #[cfg(feature = "telemetry")]
-    let records = super::check_telemetry::filter_record(run)
+    let mut records: Vec<_> = super::check_telemetry::filter_record(run)
         .into_iter()
         .chain(super::check_telemetry::adr_records(
             run, headers, &verdicts, &blocking,
@@ -2732,6 +2759,15 @@ fn finish_verdicts(
                     &keys,
                     &message,
                 );
+                #[cfg(feature = "telemetry")]
+                records.extend(settle_episodes(
+                    run,
+                    session,
+                    &verdicts,
+                    headers,
+                    &[],
+                    &keys,
+                ));
                 governance_session::store_loop(
                     session_id,
                     run.rules_dir,
@@ -2765,6 +2801,15 @@ fn finish_verdicts(
                 );
                 return;
             }
+            #[cfg(feature = "telemetry")]
+            records.extend(settle_episodes(
+                run,
+                session,
+                &verdicts,
+                headers,
+                &blocking,
+                &[],
+            ));
             if ask {
                 // Worded for the agent, without the line telling it how the
                 // user overrides: the user is told that in the stop reason,
@@ -2828,6 +2873,8 @@ fn finish_verdicts(
     }
 
     if let Some(session_id) = session_id {
+        #[cfg(feature = "telemetry")]
+        records.extend(settle_episodes(run, session, &verdicts, headers, &[], &[]));
         governance_session::store_loop(session_id, run.rules_dir, kind, session.loop_state(kind));
     }
 
@@ -2903,6 +2950,83 @@ fn finish_verdicts(
             (session.loop_state(kind).rounds, run.max_rounds),
         );
     }
+}
+
+/// Bring the block episodes of `run`'s loop up to date with a judged round, and
+/// return the resolution records for those that ended. A rule still blocking
+/// in an episode ends `fixed` when `verdicts` passes it, `round_limit` when it
+/// is among `round_limited`, and `not_rechecked` when `verdicts` leaves it out.
+/// Each rule in `denied` then joins its ADR's episode, or opens one at this
+/// round. A rule from a file without a v2 header has no ADR, so opens nothing.
+/// With nowhere to send or log the records, no episode is kept.
+///
+/// The episodes are settled under the sessions lock on a fresh copy, not on
+/// `session`, which was loaded before the judge call: two overlapping rounds of
+/// one gate would otherwise each end, and each report, the same episode.
+/// [`governance_session::store_loop`] leaves them as this stores them.
+#[cfg(feature = "telemetry")]
+fn settle_episodes(
+    run: &HookRun<'_>,
+    session: &mut GovernanceSession,
+    verdicts: &[CheckedRule],
+    headers: &BTreeMap<String, AdrMeta>,
+    denied: &[&CheckedRule],
+    round_limited: &[String],
+) -> Vec<crate::telemetry::otlp::LogRecord> {
+    use governance_session::Resolution;
+
+    let Some(session_id) = run.session_id else {
+        return Vec::new();
+    };
+    if super::brief_telemetry::Destination::resolve_quietly().is_none() {
+        return Vec::new();
+    }
+    let passes: BTreeMap<String, bool> = verdicts
+        .iter()
+        .map(|v| {
+            (
+                governance_session::key(&v.doc_slug, &v.rule_id),
+                v.verdict.passes(),
+            )
+        })
+        .collect();
+    let denied: Vec<(String, Vec<super::brief_telemetry::BriefedAdr>)> = denied
+        .iter()
+        .map(|rule| {
+            (
+                governance_session::key(&rule.doc_slug, &rule.rule_id),
+                super::brief_telemetry::group_headers(headers.get(&rule.doc_slug)),
+            )
+        })
+        .collect();
+    let round = session.loop_state(run.kind).rounds;
+    let action_id = crate::telemetry::otlp::current_action_id();
+    let mut opened = false;
+    let mut ended = Vec::new();
+    let stored = governance_session::update(session_id, run.rules_dir, |s| {
+        let state = s.loop_state_mut(run.kind);
+        state.end_blocks(|key| match passes.get(key) {
+            Some(true) => Some(Resolution::Fixed),
+            Some(false) if round_limited.iter().any(|k| k == key) => Some(Resolution::RoundLimit),
+            Some(false) => None,
+            None => Some(Resolution::NotRechecked),
+        });
+        for (key, adrs) in &denied {
+            for adr in adrs {
+                opened |= state.open_block(round, &adr.key, &adr.adr_ids, key, action_id);
+            }
+        }
+        ended = state
+            .take_ended_at(round)
+            .into_iter()
+            .map(|episode| (run.kind, episode))
+            .collect();
+    });
+    session.loop_state_mut(run.kind).episodes = stored.loop_state(run.kind).episodes.clone();
+    if opened {
+        super::session_end::record_rules_dir(session_id, run.rules_dir);
+    }
+    super::check_telemetry::resolved_records(run.session_id, run.agent_id, &ended)
 }
 
 /// A non-blocking reminder naming every active override on `session`. An
@@ -7269,6 +7393,681 @@ pub(crate) mod tests {
         assert_eq!(gathered.judged, vec![1]);
         assert_eq!((gathered.settled, gathered.windowed), (1, 1));
         assert_eq!(gathered.unusable, 0);
+    }
+
+    // ── gate resolution: one event per ADR when its block ends ─────────────
+
+    /// One `actual.gate.resolved` record as (resolution, ADR ref, rounds,
+    /// denials).
+    #[cfg(feature = "telemetry")]
+    type Resolved = (String, String, i64, i64);
+
+    /// Run `body` with a scratch config whose telemetry writes to a file, so
+    /// the gates build records, and nothing captured from before.
+    #[cfg(feature = "telemetry")]
+    fn with_telemetry_output(body: impl FnOnce(&Path)) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _guards: Vec<EnvGuard> = [
+            "ACTUAL_CONFIG",
+            "ACTUAL_NO_TELEMETRY",
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "ACTUAL_OTLP_FILE",
+            "TRACEPARENT",
+            "CI",
+            crate::telemetry::debug::ENV,
+            crate::telemetry::debug::ID_ENV,
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect();
+        std::fs::write(
+            home.path().join("config.yaml"),
+            "telemetry:\n  otlp_file: /tmp/actual-otlp-resolved-test.jsonl\n",
+        )
+        .unwrap();
+        super::super::brief_telemetry::tests::take_captured();
+        body(home.path());
+    }
+
+    /// The resolution records captured since the last call, after checking
+    /// the attributes every one of them shares for a plan-check round.
+    #[cfg(feature = "telemetry")]
+    fn resolved(session_id: &str, gate: &str, mechanism: &str) -> Vec<Resolved> {
+        resolved_in(
+            &super::super::brief_telemetry::tests::take_captured(),
+            session_id,
+            gate,
+            mechanism,
+        )
+    }
+
+    /// [`resolved`] over `records`.
+    #[cfg(feature = "telemetry")]
+    fn resolved_in(
+        records: &[serde_json::Value],
+        session_id: &str,
+        gate: &str,
+        mechanism: &str,
+    ) -> Vec<Resolved> {
+        let value = |record: &serde_json::Value, key: &str| -> serde_json::Value {
+            record["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .unwrap_or_else(|| panic!("no {key} in {record}"))["value"]
+                .clone()
+        };
+        let text = |record: &serde_json::Value, key: &str| {
+            value(record, key)["stringValue"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let int = |record: &serde_json::Value, key: &str| {
+            value(record, key)["intValue"]
+                .as_str()
+                .unwrap()
+                .parse::<i64>()
+                .unwrap()
+        };
+        records
+            .iter()
+            .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
+            .map(|record| {
+                assert_eq!(text(record, "actual.session.id"), session_id);
+                assert_eq!(text(record, "actual.gate.type"), gate);
+                assert_eq!(text(record, "actual.gate.mechanism"), mechanism);
+                // In a test every round is one process, so one action id.
+                assert_eq!(
+                    text(record, "actual.gate.block_action_id"),
+                    crate::telemetry::otlp::current_action_id()
+                );
+                (
+                    text(record, "actual.gate.resolution"),
+                    text(record, "actual.adr.ref"),
+                    int(record, "actual.gate.rounds"),
+                    int(record, "actual.gate.denials"),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn ended(resolution: &str, adr_ref: &str, rounds: i64, denials: i64) -> Resolved {
+        (resolution.to_string(), adr_ref.to_string(), rounds, denials)
+    }
+
+    /// A rule of `doc_slug` judged `verdict`.
+    #[cfg(feature = "telemetry")]
+    fn rule_of(doc_slug: &str, rule_id: &str, verdict: Verdict) -> CheckedRule {
+        CheckedRule {
+            doc_slug: doc_slug.to_string(),
+            ..checked(rule_id, verdict, "span", "reason")
+        }
+    }
+
+    /// A judged round's outcome for `verdicts`, where `signing-1` and
+    /// `signing-2` are two files of the ADR group `grp-sign`, `rotation` is the
+    /// ADR `adr-rotate`, and `legacy` has no v2 header.
+    #[cfg(feature = "telemetry")]
+    fn round_of(verdicts: Vec<CheckedRule>) -> Outcome {
+        let header = |adr_id: &str, group: Option<&str>| AdrMeta {
+            adr_id: Some(adr_id.to_string()),
+            candidate_group_id: group.map(str::to_string),
+            ..Default::default()
+        };
+        Outcome::Verdicts {
+            selection: Selection {
+                plan: "p".to_string(),
+                paths: Vec::new(),
+                indexed_documents: 1,
+                limit: 10,
+                selected: vec![],
+                stage2: Stage2::NotRequested,
+            },
+            verdicts,
+            runner_label: Some("claude-cli (sonnet)".to_string()),
+            partial: None,
+            headers: [
+                ("signing-1", header("adr-sign-1", Some("grp-sign"))),
+                ("signing-2", header("adr-sign-2", Some("grp-sign"))),
+                ("rotation", header("adr-rotate", None)),
+                ("doc", header("adr-oauth", None)),
+            ]
+            .into_iter()
+            .map(|(slug, meta)| (slug.to_string(), meta))
+            .collect(),
+        }
+    }
+
+    /// Blocked, fixed and blocked again is two episodes, each `fixed` after
+    /// two rounds and one denial, and each sent once, in the round that
+    /// learned it. A session that never blocks sends none, and a round
+    /// without a session keeps no episodes at all.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_each_block_episode_sends_one_resolution_when_it_is_fixed() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-fix"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            let conflict = || round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]);
+            let pass = || round_of(vec![rule_of("rotation", "R-1", Verdict::Followed)]);
+
+            for (outcome, expected) in [
+                (conflict(), vec![]),
+                (conflict(), vec![]),
+                (pass(), vec![ended("fixed", "adr-rotate", 3, 2)]),
+                (pass(), vec![]),
+                (conflict(), vec![]),
+                (pass(), vec![ended("fixed", "adr-rotate", 2, 1)]),
+            ] {
+                finish_hook(&run, &mut session, outcome);
+                assert_eq!(resolved("s-fix", "planning", "plan_deny"), expected);
+            }
+            assert!(governance_session::load("s-fix", &rules_dir)
+                .plan
+                .episodes
+                .is_empty());
+
+            let quiet = hook_run(check::ArtifactKind::Plan, Some("s-quiet"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            finish_hook(&quiet, &mut session, pass());
+            finish_hook(&quiet, &mut session, pass());
+            assert_eq!(resolved("s-quiet", "planning", "plan_deny"), vec![]);
+
+            let direct = hook_run(check::ArtifactKind::Plan, None, &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            finish_hook(&direct, &mut session, conflict());
+            assert!(session.plan.episodes.is_empty());
+        });
+    }
+
+    /// A block the next decision doesn't judge ends `not_rechecked`, never
+    /// `fixed`: a judged round that leaves its rule out, a round where every
+    /// applicable rule was already settled, and a round where nothing applies.
+    /// The Stop gate names itself and its mechanism.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_block_the_next_round_leaves_out_is_not_rechecked() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Diff, Some("s-left"), &rules_dir, 3);
+            let all_settled = || {
+                let mut outcome = verdicts_outcome(Vec::new());
+                if let Outcome::Verdicts { runner_label, .. } = &mut outcome {
+                    *runner_label = None;
+                }
+                outcome
+            };
+            let left_out = || round_of(vec![rule_of("signing-1", "R-1", Verdict::Followed)]);
+
+            for next in [left_out(), all_settled(), Outcome::NothingApplies] {
+                let mut session = GovernanceSession::default();
+                finish_hook(
+                    &run,
+                    &mut session,
+                    round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]),
+                );
+                assert_eq!(resolved("s-left", "implementation", "stop_block"), vec![]);
+                finish_hook(&run, &mut session, next);
+                let rounds = governance_session::load("s-left", &rules_dir).diff.rounds;
+                assert_eq!(
+                    resolved("s-left", "implementation", "stop_block"),
+                    vec![ended("not_rechecked", "adr-rotate", i64::from(rounds), 1)]
+                );
+                assert!(governance_session::load("s-left", &rules_dir)
+                    .diff
+                    .episodes
+                    .is_empty());
+                governance_session::store("s-left", &rules_dir, &GovernanceSession::default());
+            }
+
+            // A round that never decided ends nothing.
+            let mut session = GovernanceSession::default();
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]),
+            );
+            finish_hook(
+                &run,
+                &mut session,
+                Outcome::CheckFailed {
+                    documents_selected: 1,
+                    reason: "boom".into(),
+                },
+            );
+            assert_eq!(resolved("s-left", "implementation", "stop_block"), vec![]);
+        });
+    }
+
+    /// An ADR's episode spans its rules: it stays open while any of them
+    /// blocks, counts every denial, and when they end differently reports the
+    /// least resolved. A rule from a file without a v2 header has no ADR and
+    /// opens nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_an_adr_whose_rules_end_differently_reports_the_least_resolved() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-roll"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            let both = || {
+                round_of(vec![
+                    rule_of("signing-1", "R-1", Verdict::Conflicting),
+                    rule_of("signing-2", "R-1", Verdict::RequiresDecision),
+                    rule_of("legacy", "R-1", Verdict::Conflicting),
+                ])
+            };
+
+            finish_hook(&run, &mut session, both());
+            assert_eq!(resolved("s-roll", "planning", "plan_deny"), vec![]);
+            assert_eq!(
+                session.plan.episodes.keys().collect::<Vec<_>>(),
+                ["grp-sign"]
+            );
+            // One rule fixed, the other still blocking: still open.
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![
+                    rule_of("signing-1", "R-1", Verdict::Followed),
+                    rule_of("signing-2", "R-1", Verdict::Conflicting),
+                ]),
+            );
+            assert_eq!(resolved("s-roll", "planning", "plan_deny"), vec![]);
+            // The other left out: fixed and not rechecked reads not rechecked.
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("signing-1", "R-1", Verdict::Followed)]),
+            );
+            let records = super::super::brief_telemetry::tests::take_captured();
+            assert_eq!(
+                resolved_in(&records, "s-roll", "planning", "plan_deny"),
+                vec![ended("not_rechecked", "grp-sign", 3, 3)]
+            );
+            // Both files' ids, as the `breached` record for the ADR carries.
+            let ids: Vec<serde_json::Value> = records
+                .iter()
+                .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
+                .map(|record| {
+                    super::super::brief_telemetry::tests::attribute(record, "actual.adr.ids")
+                })
+                .collect();
+            assert_eq!(ids, [serde_json::json!(["adr-sign-1", "adr-sign-2"])]);
+        });
+    }
+
+    /// A file of an ADR that first blocks in a later round of its episode
+    /// adds its id to the episode.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_file_that_joins_an_open_block_adds_its_adr_id() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-join"), &rules_dir, 3);
+            let mut session = GovernanceSession::default();
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![rule_of("signing-1", "R-1", Verdict::Conflicting)]),
+            );
+            finish_hook(
+                &run,
+                &mut session,
+                round_of(vec![
+                    rule_of("signing-1", "R-1", Verdict::Conflicting),
+                    rule_of("signing-2", "R-1", Verdict::Conflicting),
+                ]),
+            );
+            assert_eq!(
+                governance_session::load("s-join", &rules_dir).plan.episodes["grp-sign"].adr_ids,
+                ["adr-sign-1", "adr-sign-2"]
+            );
+        });
+    }
+
+    /// A round without a session has no session file to keep an episode in,
+    /// so settling it opens, ends and sends nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_round_without_a_session_settles_no_episode() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, None, &rules_dir, 3);
+            let verdicts = vec![rule_of("rotation", "R-1", Verdict::Conflicting)];
+            let headers: BTreeMap<String, AdrMeta> = [(
+                "rotation".to_string(),
+                AdrMeta {
+                    adr_id: Some("adr-rotate".to_string()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect();
+            let mut session = GovernanceSession::default();
+            let denied: Vec<&CheckedRule> = verdicts.iter().collect();
+            assert!(
+                settle_episodes(&run, &mut session, &verdicts, &headers, &denied, &[]).is_empty()
+            );
+            assert!(session.plan.episodes.is_empty());
+        });
+    }
+
+    /// Two overlapping rounds of one gate that both loaded the session while
+    /// its block was open, and both judge it fixed, send its resolution once.
+    /// A round that loaded the session before another round opened a block
+    /// ends that block when it stores rather than dropping it.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_overlapping_rounds_of_one_gate_end_a_block_once() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-race"), &rules_dir, 3);
+            let conflict = |slug: &str| round_of(vec![rule_of(slug, "R-1", Verdict::Conflicting)]);
+            let pass = || round_of(vec![rule_of("rotation", "R-1", Verdict::Followed)]);
+            finish_hook(
+                &run,
+                &mut GovernanceSession::default(),
+                conflict("rotation"),
+            );
+            assert_eq!(resolved("s-race", "planning", "plan_deny"), vec![]);
+
+            let mut first = governance_session::load("s-race", &rules_dir);
+            let mut second = first.clone();
+            finish_hook(&run, &mut first, pass());
+            finish_hook(&run, &mut second, pass());
+            assert_eq!(
+                resolved("s-race", "planning", "plan_deny"),
+                vec![ended("fixed", "adr-rotate", 2, 1)]
+            );
+
+            let mut stale = governance_session::load("s-race", &rules_dir);
+            finish_hook(
+                &run,
+                &mut governance_session::load("s-race", &rules_dir),
+                conflict("signing-1"),
+            );
+            assert_eq!(resolved("s-race", "planning", "plan_deny"), vec![]);
+            finish_hook(&run, &mut stale, pass());
+            assert_eq!(
+                resolved("s-race", "planning", "plan_deny"),
+                vec![ended("not_rechecked", "grp-sign", 1, 1)]
+            );
+            assert!(governance_session::load("s-race", &rules_dir)
+                .plan
+                .episodes
+                .is_empty());
+        });
+    }
+
+    /// With telemetry off in debug mode, a block a gate opens is still found
+    /// at the session's end, which logs it as `still_open` and sends nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_debug_mode_logs_a_block_a_gate_left_open_at_the_end() {
+        use crate::telemetry::debug::{
+            self,
+            tests::{logged, FreshId},
+        };
+        with_telemetry_output(|home| {
+            let _fresh = FreshId::new();
+            let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+            let _debug = EnvGuard::set(debug::ENV, "1");
+            debug::use_session("s-debug");
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-debug"), &rules_dir, 3);
+            finish_hook(
+                &run,
+                &mut GovernanceSession::default(),
+                round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]),
+            );
+
+            super::super::session_end::report(
+                &serde_json::json!({"session_id": "s-debug", "hook_event_name": "SessionEnd", "reason": "clear"})
+                    .to_string(),
+            );
+
+            assert!(super::super::brief_telemetry::tests::take_captured().is_empty());
+            let ended: Vec<serde_json::Value> = logged("s-debug")
+                .iter()
+                .filter(|line| {
+                    line["event"]["eventName"] == crate::telemetry::otlp::SESSION_ENDED
+                        || line["event"]["eventName"] == crate::telemetry::otlp::GATE_RESOLVED
+                })
+                .map(|line| line["event"]["eventName"].clone())
+                .collect();
+            assert_eq!(
+                ended,
+                [
+                    crate::telemetry::otlp::SESSION_ENDED,
+                    crate::telemetry::otlp::GATE_RESOLVED
+                ]
+            );
+        });
+    }
+
+    /// The round the limit lets through ends a block `round_limit`. A later
+    /// round the limit lets through again blocked no call, so opens and ends
+    /// nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_the_round_limit_ends_a_block_once() {
+        with_telemetry_output(|home| {
+            let rules_dir = home.join("rules");
+            let run = hook_run(check::ArtifactKind::Plan, Some("s-limit"), &rules_dir, 1);
+            let mut session = GovernanceSession::default();
+            let conflict = || round_of(vec![rule_of("rotation", "R-1", Verdict::Conflicting)]);
+
+            for expected in [
+                vec![],
+                vec![ended("round_limit", "adr-rotate", 2, 1)],
+                vec![],
+            ] {
+                finish_hook(&run, &mut session, conflict());
+                assert_eq!(resolved("s-limit", "planning", "plan_deny"), expected);
+            }
+            assert!(session.plan.episodes.is_empty());
+        });
+    }
+
+    /// An override ends the blocks it names `overridden`, in both gates, with
+    /// no agent. An override of a rule with no open block sends no resolution.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_an_override_ends_the_blocks_it_names() {
+        with_telemetry_output(|_| {
+            let repo = seed(&[("doc.md", OAUTH_DOC)]);
+            let rules_dir = crate::rules::rules_dir(repo.path());
+            let conflict = || round_of(vec![rule_of("doc", "R-A-001", Verdict::Conflicting)]);
+            let mut session = GovernanceSession::default();
+            for kind in [check::ArtifactKind::Plan, check::ArtifactKind::Diff] {
+                finish_hook(
+                    &hook_run(kind, Some("sess-over"), &rules_dir, 3),
+                    &mut session,
+                    conflict(),
+                );
+            }
+            super::super::brief_telemetry::tests::take_captured();
+
+            let args = |rule: &str| PlanCheckOverrideArgs {
+                session: Some("sess-over".to_string()),
+                rules: vec![governance_session::key("doc", rule)],
+                reason: None,
+                reason_code: None,
+                repo: Some(repo.path().to_path_buf()),
+                rules_dir: None,
+                claude_hook: false,
+                via: OverrideVia::Prompt,
+                gate: None,
+                list_blocking: false,
+            };
+            assert!(exec_override_impl(&args("R-A-001")).is_ok());
+            let records = super::super::brief_telemetry::tests::take_captured();
+            let resolved: Vec<_> = records
+                .iter()
+                .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
+                .map(|record| {
+                    let attribute = |key| {
+                        super::super::brief_telemetry::tests::attribute(record, key)
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    };
+                    assert_eq!(attribute("actual.agent.id"), "");
+                    (
+                        attribute("actual.gate.type"),
+                        attribute("actual.gate.resolution"),
+                        attribute("actual.adr.ref"),
+                    )
+                })
+                .collect();
+            let overridden = |gate: &str| {
+                (
+                    gate.to_string(),
+                    "overridden".to_string(),
+                    "adr-oauth".to_string(),
+                )
+            };
+            assert_eq!(
+                resolved,
+                [overridden("planning"), overridden("implementation")]
+            );
+
+            assert!(exec_override_impl(&args("R-A-002")).is_ok());
+            let records = super::super::brief_telemetry::tests::take_captured();
+            assert!(records
+                .iter()
+                .all(|record| record["eventName"] != crate::telemetry::otlp::GATE_RESOLVED));
+        });
+    }
+
+    /// `/override` in the session ends a block the same way.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_session_override_ends_the_block_it_names() {
+        with_telemetry_output(|_| {
+            let repo = seed(&[("doc.md", OAUTH_DOC)]);
+            let rules_dir = crate::rules::rules_dir(repo.path());
+            let mut session = GovernanceSession::default();
+            finish_hook(
+                &hook_run(check::ArtifactKind::Plan, Some("sess-slash"), &rules_dir, 3),
+                &mut session,
+                round_of(vec![rule_of("doc", "R-A-001", Verdict::Conflicting)]),
+            );
+            super::super::brief_telemetry::tests::take_captured();
+
+            let env = serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "sess-slash",
+                "prompt": "/override all",
+            });
+            exec_override_hook_with(&hook_args(repo.path()), &env.to_string())
+                .expect("hook output");
+            let resolutions: Vec<serde_json::Value> =
+                super::super::brief_telemetry::tests::take_captured()
+                    .iter()
+                    .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
+                    .map(|record| {
+                        super::super::brief_telemetry::tests::attribute(
+                            record,
+                            "actual.gate.resolution",
+                        )
+                    })
+                    .collect();
+            assert_eq!(resolutions, [serde_json::json!("overridden")]);
+        });
+    }
+
+    /// The `actual.gate.resolution` of each resolution record captured since
+    /// the last call.
+    #[cfg(feature = "telemetry")]
+    fn resolutions() -> Vec<serde_json::Value> {
+        super::super::brief_telemetry::tests::take_captured()
+            .iter()
+            .filter(|record| record["eventName"] == crate::telemetry::otlp::GATE_RESOLVED)
+            .map(|record| {
+                super::super::brief_telemetry::tests::attribute(record, "actual.gate.resolution")
+            })
+            .collect()
+    }
+
+    /// A Codex `--codex-ask` block that opens a resolution record for `doc`'s
+    /// R-A-001, with the picker when `picker` is set.
+    #[cfg(feature = "telemetry")]
+    fn codex_block(session_id: &str, rules_dir: &Path, picker: bool) {
+        let run = HookRun {
+            picker,
+            ..codex_ask_run(check::ArtifactKind::Diff, session_id, rules_dir)
+        };
+        finish_hook(
+            &run,
+            &mut GovernanceSession::default(),
+            round_of(vec![rule_of("doc", "R-A-001", Verdict::Conflicting)]),
+        );
+        super::super::brief_telemetry::tests::take_captured();
+    }
+
+    /// `actual override` typed into Codex ends the block as an override does.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_codex_typed_override_ends_the_block() {
+        with_telemetry_output(|_| {
+            let _codex = no_codex_markers();
+            let repo = seed(&[("doc.md", OAUTH_DOC)]);
+            let rules_dir = crate::rules::rules_dir(repo.path());
+            codex_block("sess-typed", &rules_dir, false);
+
+            codex_prompt_reply(
+                "sess-typed",
+                Some("actual override all accepted"),
+                repo.path(),
+                &rules_dir,
+            )
+            .expect("a reply");
+            assert_eq!(resolutions(), [serde_json::json!("overridden")]);
+        });
+    }
+
+    /// An override chosen in the Codex picker ends the block once its reason
+    /// is given, and not before.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_codex_picker_override_ends_the_block() {
+        with_telemetry_output(|_| {
+            let _codex = no_codex_markers();
+            let repo = seed(&[("doc.md", OAUTH_DOC)]);
+            let rules_dir = crate::rules::rules_dir(repo.path());
+            codex_block("sess-picker", &rules_dir, true);
+            let ask = governance_session::load("sess-picker", &rules_dir)
+                .diff
+                .pending
+                .and_then(|pending| pending.ask)
+                .expect("a picker question");
+            let answer = |id: &str, label: &str| {
+                codex_answer_reply(
+                    "sess-picker",
+                    Some(&answer_input(id)),
+                    Some(&answer_output(id, label)),
+                    repo.path(),
+                    &rules_dir,
+                )
+                .expect("a reply")
+            };
+
+            answer(&format!("actual_choice_{}", ask.nonce), &ask.override_label);
+            assert!(resolutions().is_empty());
+            answer(
+                &format!("actual_reason_{}", ask.nonce),
+                "This ADR doesn't apply here",
+            );
+            assert_eq!(resolutions(), [serde_json::json!("overridden")]);
+        });
     }
 
     // ── --codex-ask and the Codex prompt ──────────────────────────────────

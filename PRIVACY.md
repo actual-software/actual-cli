@@ -266,7 +266,7 @@ network send: an opted-out run never touches git for telemetry and never writes
 
 ### ADR, check and session events (OpenTelemetry, sent to Actual's API by default; first-party identity-linked when sent there while you're signed in)
 
-The CLI sends OpenTelemetry log events about ADRs on five occasions:
+The CLI sends OpenTelemetry log events about ADRs on six occasions:
 
 - `actual.adr.detected`, with `actual.detection.method` set to `context`, the
   first time any of an ADR's rules is added to an agent's context during a
@@ -290,6 +290,18 @@ The CLI sends OpenTelemetry log events about ADRs on five occasions:
 - `actual.gate.evaluated`, with `actual.gate.outcome` set to `overridden`, each
   time a human records an override with `actual check-override`: one event per
   ADR with a rule the command names, every time it runs.
+- `actual.gate.resolved`, once per ADR when a gate's block on it ends, with
+  `actual.gate.resolution` saying how: `fixed` when a later check judges its
+  rules passing, `not_rechecked` when a later check decides without judging
+  them (its selection or the judged window left them out, or nothing applied),
+  `round_limit` when the round limit lets the check through over them,
+  `overridden` when a human overrides them, and `still_open` when the session
+  ends with them still blocking. A block opens at the first check that denies
+  one of the ADR's rules and ends when the last of them stops blocking, so a
+  block that returns after a fix sends a second event. When the ADR's rules
+  end differently, the event reports the least resolved of them. A session
+  killed before its end hook runs sends nothing for its open blocks, and
+  neither does a Codex session, which has no end hook.
 - `actual.adr.reported`, when the agent answers the end-of-turn question about
   which ADRs it used (described below): one event per listed ADR it names,
   and one more for any names the question never listed.
@@ -321,7 +333,9 @@ were kept. It names the kept ones only by their ADR reference, with each ADR's
 best score. A dropped rule file is never named, and a manual run of any of the
 three sends nothing.
 
-The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events.
+The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events. The end also sends `actual.gate.resolved` with `still_open` for each block still open, once.
+
+While telemetry is on, or in debug mode, the gates keep each open block in the session's state under `plan-check-sessions/` in the user config directory: the ADR reference and file ids, the rules blocking, the `actual.action.id` of the check that opened it and its counts. A block's entry is removed when its event is sent, and the rest of that state is pruned after 7 days.
 
 While telemetry is on, at the end of each Claude Code turn that changed files, `impl-check --claude-hook` asks the agent which of the session's ADRs it used, and the agent answers with `actual rules report-use`, naming an ADR and a line for each claim, with the file's path relative to the repository root. Nothing on your machine reads the answer, so with telemetry off, or in a build without telemetry, the question isn't asked; debug mode still asks, and logs the events it would have sent. The CLI checks each claim on your machine: it holds when the ADR was one the question listed and the line is one the turn added or changed (or within three lines of one, in the same hunk), or a line of the plan `plan-check` judged that turn. For each listed ADR the answer names it sends `actual.adr.reported`, with the turn and the check's verdict on the claim. Every name the question never listed shares one more event, with an empty ADR reference, and the names themselves are never sent. Only a verified diff claim sends its file's repository path, and only in a signed-in request; an unverified claim sends no path. A path outside the repository, one that climbs with `..` and one longer than 1024 bytes name no file, so their claims are unverified and the session state keeps no path for them. The claims, the lines they point to and anything the agent wrote beside them stay in the session's state under `plan-check-sessions/` in the user config directory, which is pruned after 7 days like the rest of that state. So that a claim can point at a plan line, `plan-check` keeps the full text of the plan it judged in the same state until that turn's answer is recorded or the next prompt starts, and then only the plan's line count. A session that ends before either keeps the plan until the 7-day prune. With telemetry off, outside debug mode, no plan is kept. An answer of `--none` sends nothing.
 
@@ -339,12 +353,19 @@ The `actual adr` commands send one event per run:
   action covers, then the same outcome, exit code, terminal flag and duration.
   These commands need a sign-in, so a run while signed out stops before it
   reads a decision and sends the outcome `not_signed_in` with no decision.
+- `actual.adr.created` from each run of `adr new` and `adr create`: where the
+  decision went (`local` files for `new`, Actual AI for `create`), whether it
+  came from flags or from `create --file`, the status it was written or saved
+  with, how many policies it has, whether a `create --file` save left its
+  scope or publish step unfinished, and the id `create` saved it under, then
+  the same outcome, exit code, terminal flag and duration. `adr new` has no id
+  to send.
 
-Neither event carries a decision's title, context, policies or scope globs, a
-file path, or the text of `reject --reason`. `adr new`, `adr create`,
-`adr list` and `adr show` send neither.
+None of these events carries a decision's title, context, policy text or
+scope globs, a file path, or the text of `reject --reason`. `adr list` and
+`adr show` send none of them.
 
-Local session state stores only that boolean and a duplicate-suppression flag, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state. The hook never sends the transcript, its path, the working directory or free-form end reasons.
+Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
@@ -391,7 +412,7 @@ request Actual refuses with a 401 is sent once more without it. Any other
 endpoint, a custom one included, never gets the token. The default endpoint is
 at that address unless the config file's `api_url` or `ACTUAL_API_URL` names
 another one. Typed reason text, `actual.override.reason_text`, the decision a
-review command acted on, `actual.adr.decision_id`, and a reported claim's file
+review or create command acted on, `actual.adr.decision_id`, and a reported claim's file
 path, `actual.report.file_path`, go only in a request that carries the token:
 every request without it, and the file sink's copy of that request, leaves
 those attributes out and keeps the rest, the reason code included.
@@ -411,11 +432,15 @@ request that carries your sign-in's token. A check event adds
 event adds `actual.adr.check.files`, `actual.adr.check.failed_files` and
 `actual.adr.check.duplicates`; a review event adds `actual.adr.review.action`,
 `actual.adr.review.grouped` and `actual.adr.review.group_rows`, plus
-`actual.adr.decision_id` in a request that carries your sign-in's token; and
-both add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
+`actual.adr.decision_id` in a request that carries your sign-in's token; a
+create event adds `actual.adr.create.target`, `actual.adr.create.source`,
+`actual.adr.create.status`, `actual.adr.create.policies` and
+`actual.adr.create.partial`, plus `actual.adr.decision_id` the same way; and
+all three add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
 `actual.adr.command.stdin_is_terminal` and `actual.adr.command.duration_ms`.
 A report event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.turn.index`, `actual.report.check_action_id`, `actual.report.evidence`, `actual.report.evidence_reason` and `actual.report.anchor`, plus `actual.report.file_path` in a signed-in request.
 A filter event adds `actual.filter.selector`, `actual.filter.min_score`, `actual.filter.index_size`, the nine `actual.filter.dropped.*` counts, `actual.filter.kept_count`, `actual.filter.kept_refs` and `actual.filter.kept_scores`.
+A resolution event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.gate.type`, `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`, `actual.gate.denials` and `actual.gate.block_action_id`.
 An unknown value is sent as an empty string. Apart from
 `actual.override.reason_text`, which holds whatever a person typed,
 `actual.adr.decision_id` and `actual.report.file_path`, all of which go only
@@ -430,7 +455,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `6` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, and 6 added `actual.filter.evaluated` and its attributes) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `9` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, and 9 added `actual.adr.created` and its attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook: random, generated by Claude Code | first-party identity-linked |
@@ -456,10 +481,15 @@ has only the classes its fields carry below:
 | `actual.adr.check.failed_files` | How many of them failed the save rules | anonymous |
 | `actual.adr.check.duplicates` | How many likely duplicates it listed, between two files or between a file and a decision in Actual AI | anonymous |
 | `actual.adr.review.action` | The review command that ran: `accept`, `reject`, `publish`, `unpublish`, `delete`, `restore` or `update` | anonymous |
-| `actual.adr.decision_id` | The id of the decision the command acted on, the one `actual adr list` prints, empty when the run stopped before it found one. Sent only in a request that carries your sign-in's token, and left out of every request without it | first-party identity-linked |
+| `actual.adr.decision_id` | The id of the decision the command acted on or `adr create` saved, the one `actual adr list` prints, empty when the run stopped before it found or saved one, and always empty from `adr new`. Sent only in a request that carries your sign-in's token, and left out of every request without it | first-party identity-linked |
 | `actual.adr.review.grouped` | Whether the decision is AI-grouped, so the change went through its group's route | anonymous |
 | `actual.adr.review.group_rows` | For an AI-grouped decision, how many rows its group action covers, and `0` otherwise | anonymous |
-| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error | anonymous |
+| `actual.adr.create.target` | Where the decision went: `local` for `adr new`, which writes files in the repository, or `cloud` for `adr create`, which saves it to Actual AI | anonymous |
+| `actual.adr.create.source` | `file` for `adr create --file`, `flags` otherwise | anonymous |
+| `actual.adr.create.status` | `accepted` or `draft`: the status the decision was written or saved with, or the one the run asked for when it stopped first. A `create --file` that can't set the scope or publish is saved as a draft | anonymous |
+| `actual.adr.create.policies` | How many policies the decision has, `0` when the run stopped before it read them | anonymous |
+| `actual.adr.create.partial` | Whether `create --file` saved the decision but couldn't set its scope or publish it. Always `false` for `adr new` and `create` from flags | anonymous |
+| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error. For `adr new` and `adr create`: `succeeded`, `invalid` when the decision fails the save rules, `duplicate` when `create` finds it likely already exists, `not_signed_in`, or `failed` for any other error | anonymous |
 | `actual.adr.command.exit_code` | The exit code the run ended with, `0` on success | anonymous |
 | `actual.adr.command.stdin_is_terminal` | Whether standard input was a terminal, which tells a person at the keyboard from a coding agent, script or CI job | anonymous |
 | `actual.adr.command.duration_ms` | How long the run took, in milliseconds | anonymous |
@@ -484,13 +514,18 @@ has only the classes its fields carry below:
 | `actual.filter.kept_count` | Rule files that reached the agent, or whose rules reached the judge | anonymous |
 | `actual.filter.kept_refs` | The ADRs of the kept rule files, each once, best first, named as `actual.adr.ref` names them. A kept file without a v2 header has no reference and isn't listed, so this can be shorter than `actual.filter.kept_count` | first-party identity-linked |
 | `actual.filter.kept_scores` | Each listed ADR's best selection score, in the same order | anonymous |
+| `actual.gate.mechanism` | How the gate blocked: `plan_deny` when `plan-check` blocked a plan, by denying leaving plan mode in Claude Code or by blocking the `Stop` of a Plan-mode turn in Codex, `stop_block` when `impl-check` kept the agent from stopping | anonymous |
+| `actual.gate.resolution` | How the ADR's block ended: `fixed`, `overridden`, `not_rechecked`, `round_limit` or `still_open`, as described above | anonymous |
+| `actual.gate.rounds` | The gate's judged checks from the one that opened the block to the one that ended it, both included | anonymous |
+| `actual.gate.denials` | How many times the gate denied the ADR's rules while the block was open | anonymous |
+| `actual.gate.block_action_id` | The `actual.action.id` of the check that opened the block, which joins the event to that check's other events (including its `breached` event, when the block was the ADR's first at that gate in the session) and, when that check asked the end-of-turn question, to a report's `actual.report.check_action_id` | anonymous |
 
 The ADR references name ADRs Actual generated for your repository, so Actual
 can map them back to that repository and its organization. Each event also
 names the CLI, its version, the deployment environment (`production` for
 release builds) and the surface (`coding-agent`), records when it happened
 (when the ADR entered context, when the gate's judge answered, when the
-override was recorded, when a check started or completed, when a selection was made, when the session ended, or when an `actual adr` run finished), and, when the
+override was recorded, when a check started or completed, when a selection was made, when a block ended, when the session ended, or when an `actual adr` run finished), and, when the
 environment carries a W3C `TRACEPARENT`, copies its trace id, span id and flags.
 **Apart from the `actual.override.reason_text` of an `other` override and the
 `actual.report.file_path` of a verified, signed-in report, no event carries rule text,

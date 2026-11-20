@@ -1881,9 +1881,9 @@ fn test_impl_check_verdict_survives_a_refused_telemetry_endpoint() {
 /// clearing behavior (deny -> override -> re-check no longer blocks) is
 /// exercised instead at the library level, in
 /// `impl_check::tests::test_exec_hook_with_honors_an_override_recorded_via_check_override`,
-/// which goes through the same `governance_session::record_override_with`
-/// function `check-override`'s own implementation calls, bypassing only the
-/// TTY gate this harness cannot satisfy either way.
+/// which records the override through `governance_session::record_override_ending`,
+/// the function `check-override`'s own implementation calls, bypassing only
+/// the TTY gate this harness cannot satisfy either way.
 #[cfg(unix)]
 #[test]
 fn test_check_override_is_gated_the_same_way_for_a_session_impl_check_denied() {

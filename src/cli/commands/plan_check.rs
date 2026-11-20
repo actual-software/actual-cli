@@ -119,7 +119,7 @@
 //!    judging from that point on, exactly like a cleared rule, but every
 //!    subsequent round says so out loud in a non-blocking notice: an override
 //!    is deliberately visible, not a silent bypass. See
-//!    [`governance_session::record_override_with`].
+//!    [`governance_session::record_override_ending`].
 //! 4. **A bounded number of rounds, per rule.** [`DEFAULT_MAX_ROUNDS`] real
 //!    denials of the *same rule* (`--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS`
 //!    to change it) may block a session before the gate stops blocking on
