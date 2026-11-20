@@ -255,7 +255,7 @@ pub fn scan_docs(root: &Path, today: &str) -> DocScan {
 
 /// Whether `path`, from the repository root, is under `docs/adr/drafts/`,
 /// which keeps work in progress.
-fn in_drafts(path: &Path) -> bool {
+pub fn in_drafts(path: &Path) -> bool {
     path.starts_with(Path::new(DECISION_DIR).join("drafts"))
 }
 
