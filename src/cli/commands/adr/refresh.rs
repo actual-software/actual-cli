@@ -644,10 +644,12 @@ mod tests {
             ".actual/rules/old.md",
             "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: archived-1\n---\n# Old\n",
         );
+        // Each read carries the stored sign-in's access token.
         let mut server = mockito::Server::new();
         let repos = server
             .mock("GET", "/v1/connected-repos")
             .match_query(Matcher::Any)
+            .match_header("authorization", "Bearer tok")
             .with_status(200)
             .with_body(CONNECTED)
             .expect(1)
@@ -655,6 +657,7 @@ mod tests {
         let list = server
             .mock("GET", "/v1/gcp/product/decisions")
             .match_query(Matcher::UrlEncoded("repository_id".into(), REPO.into()))
+            .match_header("authorization", "Bearer tok")
             .with_status(200)
             .with_body(DECISIONS)
             .expect(2)
