@@ -1066,7 +1066,7 @@ pub struct AdrShowArgs {
 
 /// Arguments for `adr create`, also `adr new`
 #[derive(Parser, Debug, Default)]
-#[command(group(clap::ArgGroup::new("source").required(true).args(["title", "title_flag", "file"])))]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["title", "title_flag", "file", "all"])))]
 pub struct AdrCreateArgs {
     /// The decision's title, on one line.
     #[arg(value_name = "TITLE", conflicts_with = "title_flag")]
@@ -1121,6 +1121,16 @@ pub struct AdrCreateArgs {
     /// the same.
     #[arg(long)]
     pub allow_duplicate: bool,
+
+    /// Signed in: send every decision file under docs/adr/ that Actual AI
+    /// doesn't have yet, one at a time, keyed on its path. Each keeps the
+    /// status its header names; an accepted one goes up as a draft until it
+    /// is on the default branch when no person is at the terminal.
+    #[arg(
+        long,
+        conflicts_with_all = ["context", "policies", "deciders", "scope", "status"]
+    )]
+    pub all: bool,
 
     #[command(flatten)]
     pub api: AdrApiOptions,
