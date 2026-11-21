@@ -147,6 +147,10 @@ pub struct Record {
     pub unnormalized: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connected_repo: Option<ConnectedRepo>,
+    /// [`paths_fingerprint`] of the files `create --all` would send, as a
+    /// signed-in refresh last listed them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_all: Option<String>,
     /// What the last refresh that read its decisions found, so a refresh
     /// says that none governs only when that's news.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -341,6 +345,12 @@ pub fn read_normalized(
 /// reports the list only when it changed.
 pub fn list_fingerprint(list: &[Unnormalized]) -> String {
     sha256_hex(serde_json::to_string(list).unwrap_or_default().as_bytes())
+}
+
+/// The fingerprint the record keeps of a list of paths, so a refresh lists
+/// them only when they changed.
+pub fn paths_fingerprint(paths: &[String]) -> String {
+    sha256_hex(paths.join("\n").as_bytes())
 }
 
 // ── planning ───────────────────────────────────────────────────────────────
