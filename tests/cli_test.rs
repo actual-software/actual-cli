@@ -3515,6 +3515,32 @@ fn test_adr_refresh_follows_docs_adr_signed_out() {
     assert!(second["message"].is_null(), "{second}");
 }
 
+/// A repository with no decision that governs hears once which skill drafts
+/// its first decisions, and the next refresh says only that nothing changed.
+#[test]
+fn test_adr_refresh_recommends_the_bootstrap_skill_once_for_a_repository_with_no_decisions() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let refresh = || {
+        let output = home_cmd(home.path())
+            .args(["adr", "refresh", "--root"])
+            .arg(dir.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let first = refresh();
+    assert!(
+        first.starts_with("No decision under docs/adr/ governs yet."),
+        "{first}"
+    );
+    assert!(first.contains("`adr-bootstrap` skill"), "{first}");
+    assert_eq!(refresh(), ".actual/rules/ already matches docs/adr/.\n");
+}
+
 /// Signed in with an access token about to expire, the refresh leaves the
 /// rule files alone and starts the renewal in the background. This sign-in
 /// names no auth server, so the background `whoami --check` renews nothing

@@ -33,8 +33,8 @@ use crate::adr::context_file::Policy;
 use crate::adr::files::{rule_files_by_id, DECISION_DIR, RULES_DIR};
 use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::refresh::{
-    self as core, Applied, ConnectedRepo, Origin, Planner, Record, RuleSource, Unnormalized,
-    RECORD_FORMAT,
+    self as core, Applied, ConnectedRepo, Governing, Origin, Planner, Record, RuleSource,
+    Unnormalized, RECORD_FORMAT,
 };
 use crate::api::adr_types::Decision;
 use crate::api::{resolve_api_url, ActualApiClient};
@@ -53,6 +53,9 @@ const DIR_NAME: &str = "adr-refresh";
 /// How long a record write waits for another refresh's.
 const LOCK_WAIT: Duration = Duration::from_millis(500);
 
+/// The plugin skill that drafts a repository's first decisions.
+pub(super) const BOOTSTRAP_SKILL: &str = "adr-bootstrap";
+
 /// Which decisions the refresh followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -64,7 +67,8 @@ pub(super) enum Mode {
 }
 
 /// What a refresh did, for `--json`. `message` is set when a person should
-/// hear about it: rule files changed, or the unnormalized list did.
+/// hear about it: rule files changed, the unnormalized list did, or no
+/// decision governs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Report {
     pub(super) mode: Mode,
@@ -76,6 +80,10 @@ pub(super) struct Report {
     pub(super) kept: bool,
     pub(super) unnormalized: Vec<Unnormalized>,
     pub(super) unnormalized_changed: bool,
+    /// The skill to draft the repository's first decisions with, when the
+    /// refresh read its decisions, none governs, and that's news.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) recommendation: Option<&'static str>,
     pub(super) message: Option<String>,
     pub(super) problems: Vec<String>,
 }
@@ -105,10 +113,14 @@ pub(super) fn refresh(
     let on_disk = rule_files_by_id(root);
     let mut problems = Vec::new();
     let mut repo = record.connected_repo.clone();
-    let (mode, plan) = match store::load() {
+    let (mode, plan, governing) = match store::load() {
         Ok(None) => (
             Mode::SignedOut,
             Some(core::plan_from_docs(root, &scan, &on_disk, &record)),
+            Some(Governing {
+                origin: Origin::DocsAdr,
+                any: scan.decisions.iter().any(|doc| doc.governs),
+            }),
         ),
         Ok(Some(creds)) if needs_refresh(&creds) => {
             let problem = if turned_down(&creds) {
@@ -120,7 +132,7 @@ pub(super) fn refresh(
                  as they are until the next refresh."
             };
             problems.push(problem.to_string());
-            (Mode::SignedIn, None)
+            (Mode::SignedIn, None, None)
         }
         Ok(Some(creds)) => {
             match read_cloud(root, &creds, &args.api, args.timeout_ms, repo.as_ref()) {
@@ -130,12 +142,16 @@ pub(super) fn refresh(
                     (
                         Mode::SignedIn,
                         Some(core::plan_from_cloud(root, &sources, &on_disk, &record)),
+                        Some(Governing {
+                            origin: Origin::ActualAi,
+                            any: sources.iter().any(|(_, source)| source.is_some()),
+                        }),
                     )
                 }
                 Err(problem) => {
                     problems.push(problem);
                     repo = None;
-                    (Mode::SignedIn, None)
+                    (Mode::SignedIn, None, None)
                 }
             }
         }
@@ -143,7 +159,7 @@ pub(super) fn refresh(
             problems.push(format!(
                 "Couldn't read your sign-in ({e}), so the rule files were left as they are."
             ));
-            (Mode::SignedIn, None)
+            (Mode::SignedIn, None, None)
         }
     };
     let kept = plan.is_none();
@@ -153,10 +169,14 @@ pub(super) fn refresh(
         Some(last) => *last != list,
         None => !scan.unnormalized.is_empty(),
     };
+    let recommendation = governing
+        .is_some_and(|found| found.none_is_news(record.governing))
+        .then_some(BOOTSTRAP_SKILL);
     let unrecorded = keep(dir, root, |record| {
         record.apply_edits(&set, &drop);
         record.unnormalized = Some(list);
         record.connected_repo = repo;
+        record.governing = governing.or(record.governing);
     });
     problems.extend(applied.problems.iter().cloned());
     problems.extend(unrecorded);
@@ -164,6 +184,7 @@ pub(super) fn refresh(
         mode,
         &applied,
         unnormalized_changed.then_some(scan.unnormalized.as_slice()),
+        recommendation.is_some(),
     );
     Report {
         mode,
@@ -173,6 +194,7 @@ pub(super) fn refresh(
         kept,
         unnormalized: scan.unnormalized,
         unnormalized_changed,
+        recommendation,
         message,
         problems,
     }
@@ -420,9 +442,15 @@ fn save(dir: &Path, root: &Path, change: impl FnOnce(&mut Record)) -> Result<(),
 
 // ── output ─────────────────────────────────────────────────────────────────
 
-/// What a person should hear about a refresh: the rule files it changed and,
-/// when the list changed, the files that aren't normalized.
-fn message(mode: Mode, applied: &Applied, unnormalized: Option<&[Unnormalized]>) -> Option<String> {
+/// What a person should hear about a refresh: the rule files it changed;
+/// when the list changed, the files that aren't normalized; and, when
+/// `recommend`, that no decision governs and which skill drafts the first.
+fn message(
+    mode: Mode,
+    applied: &Applied,
+    unnormalized: Option<&[Unnormalized]>,
+    recommend: bool,
+) -> Option<String> {
     let mut lines = Vec::new();
     if applied.changed() > 0 {
         let from = match mode {
@@ -476,6 +504,20 @@ fn message(mode: Mode, applied: &Applied, unnormalized: Option<&[Unnormalized]>)
         }
         None => {}
     }
+    if recommend {
+        lines.push(match mode {
+            Mode::SignedOut => format!(
+                "No decision under {DECISION_DIR}/ governs yet. To draft this repository's \
+                 first ADRs, run the plugin's `{BOOTSTRAP_SKILL}` skill: `actual adr create` \
+                 writes each one you pick into {DECISION_DIR}/."
+            ),
+            Mode::SignedIn => format!(
+                "None of this repository's decisions in Actual AI governs yet. To draft its \
+                 first ADRs, run the plugin's `{BOOTSTRAP_SKILL}` skill: `actual adr create` \
+                 saves each one you pick to Actual AI."
+            ),
+        });
+    }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
@@ -510,6 +552,7 @@ mod tests {
 
     const TODAY: &str = "2026-11-20";
     const ID: &str = "0b6f7e2a-1111-4111-8111-111111111111";
+    const OTHER: &str = "0b6f7e2a-2222-4222-8222-222222222222";
 
     thread_local! {
         /// How many renewals this thread's refreshes started.
@@ -1002,6 +1045,126 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_that_finds_no_governing_decision_recommends_the_skill_when_that_is_news() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = signed_out(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let records = config.path().join(DIR_NAME);
+        // A file that isn't normalized isn't a decision yet, so both show.
+        let plain = write(root, "docs/adr/plain.md", "# Use Kafka\n");
+
+        let first = refresh(root, &args(None), TODAY, Some(&records));
+        assert_eq!(first.recommendation, Some(BOOTSTRAP_SKILL));
+        let message = first.message.clone().unwrap();
+        assert!(message.contains("isn't normalized"), "{message}");
+        assert!(
+            message.ends_with(
+                "No decision under docs/adr/ governs yet. To draft this repository's first \
+                 ADRs, run the plugin's `adr-bootstrap` skill: `actual adr create` writes each \
+                 one you pick into docs/adr/."
+            ),
+            "{message}"
+        );
+        let json = json_text(&first);
+        assert!(
+            json.contains("\"recommendation\": \"adr-bootstrap\""),
+            "{json}"
+        );
+
+        // Still none governs, since a draft doesn't: nothing new to say.
+        std::fs::remove_file(plain).unwrap();
+        let draft = decision_file(OTHER, "draft", "Use Redis", "MUST: Use Redis.");
+        write(root, "docs/adr/b.md", &draft);
+        let quiet = refresh(root, &args(None), TODAY, Some(&records));
+        assert_eq!(quiet.recommendation, None);
+        assert!(!quiet.message.as_deref().unwrap().contains("adr-bootstrap"));
+        assert!(!json_text(&quiet).contains("recommendation"));
+
+        // A decision that governs ends it, and losing the last one says it again.
+        let accepted = decision_file(ID, "accepted", "Use Postgres", "MUST: Use Postgres.");
+        let accepted = write(root, "docs/adr/a.md", &accepted);
+        let governed = refresh(root, &args(None), TODAY, Some(&records));
+        assert_eq!(governed.recommendation, None);
+        assert_eq!(
+            load(&records, root).governing,
+            Some(Governing {
+                origin: Origin::DocsAdr,
+                any: true
+            })
+        );
+        std::fs::remove_file(accepted).unwrap();
+        let again = refresh(root, &args(None), TODAY, Some(&records));
+        assert_eq!(again.recommendation, Some(BOOTSTRAP_SKILL), "{again:?}");
+    }
+
+    #[test]
+    fn signed_in_refresh_recommends_the_skill_for_its_own_decisions_and_never_when_kept() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        git_repo(root, Some("git@github.com:actual-software/actual-cli.git"));
+        let records = tmp.path().join("records");
+        // Signed out first, with nothing under docs/adr/.
+        {
+            let config = tempdir().unwrap();
+            let _guards = signed_out(config.path());
+            let out = refresh(root, &args(None), TODAY, Some(&records));
+            assert_eq!(out.recommendation, Some(BOOTSTRAP_SKILL));
+        }
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        // Only an archived decision: none governs.
+        let archived = r#"{"adrs":[{"id":"archived-1","title":"Old","status":"deleted","policyRules":[]}],"suggestions":[]}"#;
+        server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(archived)
+            .expect(2)
+            .create();
+
+        // The decisions it follows changed, so it says so again, signed in.
+        let first = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+        assert_eq!(first.recommendation, Some(BOOTSTRAP_SKILL), "{first:?}");
+        assert_eq!(
+            first.message.as_deref(),
+            Some(
+                "None of this repository's decisions in Actual AI governs yet. To draft its \
+                 first ADRs, run the plugin's `adr-bootstrap` skill: `actual adr create` saves \
+                 each one you pick to Actual AI."
+            )
+        );
+        let second = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+        assert_eq!(second.recommendation, None);
+
+        // A read that fails reads nothing, so it says nothing and keeps the record.
+        let mut failing = mockito::Server::new();
+        failing
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .create();
+        let kept = refresh(root, &args(Some(&failing)), TODAY, Some(&records));
+        assert!(kept.kept && kept.recommendation.is_none(), "{kept:?}");
+        assert_eq!(
+            load(&records, root).governing,
+            Some(Governing {
+                origin: Origin::ActualAi,
+                any: false
+            })
+        );
+    }
+
+    #[test]
     fn the_list_message_counts_its_files() {
         let file = |path: &str| Unnormalized {
             path: path.to_string(),
@@ -1009,7 +1172,7 @@ mod tests {
             reasons: vec!["It has no ADR header.".to_string()],
         };
         let list = [file("docs/adr/a.md"), file("docs/adr/b.md")];
-        let text = message(Mode::SignedOut, &Applied::default(), Some(&list)).unwrap();
+        let text = message(Mode::SignedOut, &Applied::default(), Some(&list), false).unwrap();
         assert!(
             text.starts_with(
                 "2 files under docs/adr/ aren't normalized, so they get no rule file:"

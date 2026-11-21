@@ -147,6 +147,26 @@ pub struct Record {
     pub unnormalized: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connected_repo: Option<ConnectedRepo>,
+    /// What the last refresh that read its decisions found, so a refresh
+    /// says that none governs only when that's news.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governing: Option<Governing>,
+}
+
+/// Which decisions a refresh read, and whether any of them governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Governing {
+    pub origin: Origin,
+    pub any: bool,
+}
+
+impl Governing {
+    /// Whether a refresh that found `self` should say that no decision
+    /// governs, after the last one found `last`: the first time it finds
+    /// none, and again once some governed or the other decisions were read.
+    pub fn none_is_news(self, last: Option<Governing>) -> bool {
+        !self.any && last != Some(self)
+    }
 }
 
 impl Record {
