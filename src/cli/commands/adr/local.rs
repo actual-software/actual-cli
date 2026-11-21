@@ -694,6 +694,7 @@ mod tests {
         );
         assert!(json_text(&written).contains("\"record_problem\": \"Couldn't save"));
     }
+
     #[test]
     fn create_refuses_a_decision_the_save_check_fails() {
         let tmp = tempdir().unwrap();
