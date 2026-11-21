@@ -489,7 +489,7 @@ pub(crate) struct ReviewedDecision<'a> {
 /// [`ADR_CREATED`] record describes it.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CreatedDecision<'a> {
-    /// `local` for `adr new`, `cloud` for `adr create`.
+    /// `local` for a signed-out `adr create`, `cloud` for a signed-in one.
     pub target: &'a str,
     /// `flags`, or `file` for `adr create --file`.
     pub source: &'a str,
@@ -498,8 +498,8 @@ pub(crate) struct CreatedDecision<'a> {
     pub policies: usize,
     /// A cloud save whose scope or publish step after it failed.
     pub partial: bool,
-    /// The saved decision's id: [`DECISION_ID`], sent empty by `adr new` and
-    /// by a run that saved nothing.
+    /// The saved decision's id: [`DECISION_ID`], sent empty signed out and by
+    /// a run that saved nothing.
     pub id: Option<&'a str>,
 }
 

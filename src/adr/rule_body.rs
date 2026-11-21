@@ -11,6 +11,7 @@
 //! and hide the rules after it.
 
 use crate::adr::header::{normalize_scope_root, REPOSITORY_ROOT};
+use crate::rules::types::RuleLevel;
 
 /// Include globs the sync reads as "the whole repository".
 const MATCH_ALL_PATTERNS: [&str; 3] = ["**/*", "**", "/"];
@@ -63,6 +64,17 @@ pub fn scope_line(root: &str, paths: &[String]) -> String {
         format!("; excludes {}", code_list(&exclude))
     };
     format!("Scope: {applies}{excludes}.")
+}
+
+/// A level as rule files spell it: `MUST NOT`, not `MUST_NOT`.
+pub fn rule_spelling(level: RuleLevel) -> &'static str {
+    match level {
+        RuleLevel::Must => "MUST",
+        RuleLevel::MustNot => "MUST NOT",
+        RuleLevel::Should => "SHOULD",
+        RuleLevel::ShouldNot => "SHOULD NOT",
+        RuleLevel::May => "MAY",
+    }
 }
 
 /// Rule IDs for a decision: `R-` and the first four hex digits of its id, uppercased (`R-0B6F`).
@@ -127,6 +139,21 @@ fn one_line(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::adr::header::{render_header, AdrHeader};
+
+    #[test]
+    fn rule_spelling_uses_spaces() {
+        let spelled: Vec<_> = [
+            RuleLevel::Must,
+            RuleLevel::MustNot,
+            RuleLevel::Should,
+            RuleLevel::ShouldNot,
+            RuleLevel::May,
+        ]
+        .into_iter()
+        .map(rule_spelling)
+        .collect();
+        assert_eq!(spelled, ["MUST", "MUST NOT", "SHOULD", "SHOULD NOT", "MAY"]);
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()

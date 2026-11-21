@@ -1,5 +1,5 @@
-//! `actual adr new` and `actual adr check`: decisions as files in this
-//! repository, with no sign-in needed.
+//! `actual adr create` signed out, also `adr new`, and `actual adr check`:
+//! decisions as files in this repository, with no sign-in needed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,48 +7,51 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::refresh::{record_dir, refresh_decision};
 use super::telemetry::{CheckCounts, Creation};
-use super::{
-    content_from_flags, interactive, json_text, pick_repo, rule_spelling, runtime, save_status,
-    session, today, RepoPick,
-};
+use super::{content_from_flags, json_text, pick_repo, runtime, session, today, RepoPick};
 use crate::adr::context_file::{self, ContextFile};
-use crate::adr::files::{self, DecisionFile, DECISION_DIR, RULES_DIR};
-use crate::adr::header::{description_for, render_header, AdrHeader};
-use crate::adr::names::{decision_doc_file_name, rule_file_name};
+use crate::adr::files::{self, DecisionFile, DECISION_DIR};
+use crate::adr::header::{description_for, render_header, AdrHeader, REPOSITORY_ROOT};
+use crate::adr::names::decision_doc_file_name;
 use crate::adr::overlap::{find_overlaps, ExistingDecision, Overlap};
-use crate::adr::rule_body::{render_rule_body, rule_id_prefix, scope_line};
+use crate::adr::refresh::Applied;
 use crate::adr::save_check::check_document;
 use crate::adr::save_check::check_markdown;
 use crate::api::adr_types::SaveStatus;
-use crate::cli::args::{AdrCheckArgs, AdrNewArgs};
+use crate::cli::args::{AdrCheckArgs, AdrCreateArgs};
 use crate::cli::commands::sync::resolve_cwd;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
 
-// ── new ────────────────────────────────────────────────────────────────────
+// ── create, signed out ─────────────────────────────────────────────────────
 
-/// What `adr new` wrote.
+/// What a signed-out `adr create` wrote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Written {
     pub(super) adr_id: String,
     pub(super) status: SaveStatus,
     pub(super) decision_file: PathBuf,
-    pub(super) rule_file: PathBuf,
+    /// The rule file the checks read, for an accepted decision.
+    pub(super) rule_file: Option<PathBuf>,
+    /// Why the refresh record couldn't be saved, when it couldn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) record_problem: Option<String>,
 }
 
-pub(super) fn exec_new(args: &AdrNewArgs) -> Result<(), ActualError> {
+pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
+    refuse_signed_in_flags(args)?;
     let run = super::telemetry::Run::start();
     let mut creation = Creation::local();
-    let result = new_and_print(args, &mut creation);
+    let result = create_and_print(args, &mut creation);
     super::telemetry::report_create(&run, &creation, &result);
     result
 }
 
-fn new_and_print(args: &AdrNewArgs, creation: &mut Creation) -> Result<(), ActualError> {
+fn create_and_print(args: &AdrCreateArgs, creation: &mut Creation) -> Result<(), ActualError> {
     let root = args.root.clone().unwrap_or_else(resolve_cwd);
-    let written = write_new_noting(args, &root, interactive(), &today(), creation)?;
-    if args.json {
+    let written = write_new_noting(args, &root, &today(), record_dir().as_deref(), creation)?;
+    if args.api.json {
         println!("{}", json_text(&written));
     } else {
         print!("{}", render_written(&written));
@@ -56,89 +59,107 @@ fn new_and_print(args: &AdrNewArgs, creation: &mut Creation) -> Result<(), Actua
     Ok(())
 }
 
+/// Refuse the flags only a signed-in `create` can use, each with what to
+/// do instead. A draft lives in Actual AI, so every file a signed-out
+/// `create` writes is accepted.
+fn refuse_signed_in_flags(args: &AdrCreateArgs) -> Result<(), ActualError> {
+    let refusal = if args.file.is_some() {
+        "`--file` sends a decision file to Actual AI, which needs `actual login`. Signed out, \
+         a file under docs/adr/ needs no sending: `actual adr check` checks it, and once it's \
+         normalized `actual adr refresh` (which the plugin's hooks run) writes its rule file."
+    } else if args.all {
+        "`--all` sends every decision file under docs/adr/ that Actual AI doesn't have yet, \
+         which needs `actual login`. Signed out, the files need no sending: `actual adr check` \
+         checks them, and `actual adr refresh` (which the plugin's hooks run) writes the rule \
+         file of each normalized one."
+    } else if args.status == Some(SaveStatus::Draft) {
+        "`--status draft` saves a draft, and a draft lives in Actual AI, which needs \
+         `actual login`. Signed out, every decision `create` writes under docs/adr/ is \
+         accepted, so leave `--status` out."
+    } else if args.repo.is_some() {
+        "`--repo` picks a connected repository in Actual AI, which needs `actual login`. \
+         Signed out, `create` writes into docs/adr/ under `--root`."
+    } else if args.allow_duplicate {
+        "`--allow-duplicate` lets Actual AI save a decision that looks like one it holds, \
+         which needs `actual login`. Signed out, `create` compares with nothing; \
+         `actual adr check` lists likely duplicates."
+    } else {
+        return Ok(());
+    };
+    Err(ActualError::AdrPathway(refusal.to_string()))
+}
+
 /// [`write_new_noting`], for a test with no creation to note.
 #[cfg(test)]
 pub(super) fn write_new(
-    args: &AdrNewArgs,
+    args: &AdrCreateArgs,
     root: &Path,
-    interactive: bool,
     today: &str,
+    record: Option<&Path>,
 ) -> Result<Written, ActualError> {
-    write_new_noting(args, root, interactive, today, &mut Creation::local())
+    write_new_noting(args, root, today, record, &mut Creation::local())
 }
 
-/// Check the decision the flags describe, then write its decision doc and
-/// rule file under a new local id, as the repository sync lays them out.
-/// `creation` notes the status and policy count as they're known.
+/// Check the decision the flags describe, then write its file under
+/// `docs/adr/` with a new local id, as the repository sync lays it out, and
+/// bring its rule file in step. The decision is accepted, as every file the
+/// CLI writes there is. Nothing is left behind when the rule file can't be
+/// written. `creation` notes the status and policy count as they're known.
 fn write_new_noting(
-    args: &AdrNewArgs,
+    args: &AdrCreateArgs,
     root: &Path,
-    interactive: bool,
     today: &str,
+    record: Option<&Path>,
     creation: &mut Creation,
 ) -> Result<Written, ActualError> {
-    let status = save_status(args.status, interactive);
+    let status = SaveStatus::Accepted;
     creation.status = status.as_str().to_string();
     let doc = ContextFile {
         deciders: args.deciders.clone().unwrap_or_default(),
-        ..content_from_flags(&args.title, &args.content)?
+        ..content_from_flags(args.title().unwrap_or_default(), &args.content)?
     };
     creation.policies = doc.policies.len();
-    let doc = check_document(&doc, status == SaveStatus::Draft, today)
+    let doc = check_document(&doc, false, today)
         .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let adr_id = Uuid::new_v4().to_string();
-    let [(doc_name, doc_text), (rule_name, rule_text)] =
-        render_pair(&doc, &adr_id, status, &args.scope);
+    let (doc_name, doc_text) = render_decision_doc(&doc, &adr_id, status, &args.scope);
     let decision_file = root.join(DECISION_DIR).join(doc_name);
-    let rule_file = root.join(RULES_DIR).join(rule_name);
     write_new_file(&decision_file, &doc_text)?;
-    if let Err(e) = write_new_file(&rule_file, &rule_text) {
-        // Never leave half a pair behind.
+    let applied = refresh_decision(root, &adr_id, today, record, true);
+    if let Some(problem) = applied.problems.first() {
+        // Never leave a decision behind without the rule file it should have.
         let _ = std::fs::remove_file(&decision_file);
-        return Err(e);
+        return Err(ActualError::ConfigError(format!(
+            "Couldn't write the decision's rule file, so nothing was written: {problem}"
+        )));
     }
     Ok(Written {
         adr_id,
         status,
         decision_file,
-        rule_file,
+        rule_file: applied.written.first().map(|path| root.join(path)),
+        record_problem: applied.record_problem,
     })
 }
 
-/// The decision doc and the rule file for `doc` under `adr_id`, each as a
-/// file name and its text.
-fn render_pair(
+/// The decision file for `doc` under `adr_id`: its name and its text.
+pub(super) fn render_decision_doc(
     doc: &ContextFile,
     adr_id: &str,
     status: SaveStatus,
     scope: &[String],
-) -> [(String, String); 2] {
-    let header = |file_name: &str| {
-        render_header(&AdrHeader {
-            name: file_name.trim_end_matches(".md").to_string(),
-            description: description_for(&doc.title),
-            adr_id: adr_id.to_string(),
-            status: status.as_str().to_string(),
-            scope_root: ".".to_string(),
-            scope_paths: scope.to_vec(),
-        })
-    };
-    let doc_name = decision_doc_file_name(adr_id, &doc.title);
-    let doc_text = format!("{}\n{}", header(&doc_name), context_file::render(doc));
-    let rules: Vec<(&str, &str)> = doc
-        .policies
-        .iter()
-        .map(|policy| (rule_spelling(policy.level), policy.statement.as_str()))
-        .collect();
-    let body = render_rule_body(
-        &doc.title,
-        &scope_line(".", scope),
-        &rule_id_prefix(adr_id),
-        &rules,
-    );
-    let rule_name = rule_file_name(adr_id, &doc.title);
-    let rule_text = format!("{}\n{body}", header(&rule_name));
-    [(doc_name, doc_text), (rule_name, rule_text)]
+) -> (String, String) {
+    let name = decision_doc_file_name(adr_id, &doc.title);
+    let header = render_header(&AdrHeader {
+        name: name.trim_end_matches(".md").to_string(),
+        description: description_for(&doc.title),
+        adr_id: adr_id.to_string(),
+        status: status.as_str().to_string(),
+        scope_root: REPOSITORY_ROOT.to_string(),
+        scope_paths: scope.to_vec(),
+    });
+    let text = format!("{header}\n{}", context_file::render(doc));
+    (name, text)
 }
 
 /// Write `text` to a new file at `path`, creating its directory; an
@@ -154,19 +175,48 @@ fn write_new_file(path: &Path, text: &str) -> Result<(), ActualError> {
 }
 
 fn render_written(written: &Written) -> String {
-    let governs = match written.status {
-        SaveStatus::Accepted => "accepted, so plan-check and impl-check enforce it now",
-        SaveStatus::Draft => "a draft, which no check reads until its status is accepted",
-    };
-    format!(
-        "{} Wrote decision {}\n  {}\n  {}\nIt is {governs}.\nNext: `actual adr check`, then \
-         `actual adr create --file {}` to save it to Actual AI.\n",
+    let mut out = format!(
+        "{} Wrote decision {}\n  {}\n",
         theme::success(&theme::SUCCESS),
         written.adr_id,
         written.decision_file.display(),
-        written.rule_file.display(),
-        written.decision_file.display(),
-    )
+    );
+    if let Some(rule_file) = &written.rule_file {
+        out.push_str(&format!("  {}\n", rule_file.display()));
+    }
+    out.push_str("It is accepted, so plan-check and impl-check enforce it now.\n");
+    out.push_str("Next: `actual adr check` checks it with Actual AI's save rules.\n");
+    out.push_str(&record_warning(written.record_problem.as_deref()));
+    out
+}
+
+/// One line per rule file a signed-out change wrote, rewrote or removed.
+pub(super) fn render_applied(applied: &Applied) -> String {
+    let mut out = String::new();
+    for (verb, paths) in [
+        ("Wrote", &applied.written),
+        ("Rewrote", &applied.rewritten),
+        ("Removed", &applied.removed),
+    ] {
+        for path in paths {
+            out.push_str(&format!("  {verb} rule file {path}\n"));
+        }
+    }
+    for problem in &applied.problems {
+        out.push_str(&format!(
+            "{} Couldn't update a rule file ({problem}); `actual adr refresh` tries again.\n",
+            theme::warning("warning:")
+        ));
+    }
+    out.push_str(&record_warning(applied.record_problem.as_deref()));
+    out
+}
+
+/// The warning line for a refresh record that couldn't be saved, if any.
+fn record_warning(problem: Option<&str>) -> String {
+    problem.map_or_else(String::new, |problem| {
+        format!("{} {problem}\n", theme::warning("warning:"))
+    })
 }
 
 // ── check ──────────────────────────────────────────────────────────────────
@@ -536,18 +586,16 @@ mod tests {
 
     const TODAY: &str = "2026-11-11";
 
-    fn new_args(title: &str, policies: &[&str], scope: &[&str]) -> AdrNewArgs {
-        AdrNewArgs {
-            title: title.to_string(),
+    fn new_args(title: &str, policies: &[&str], scope: &[&str]) -> AdrCreateArgs {
+        AdrCreateArgs {
+            title: Some(title.to_string()),
             content: AdrContentArgs {
                 context: vec!["We need one relational store.".to_string()],
                 policies: policies.iter().map(|p| p.to_string()).collect(),
             },
             deciders: Some("Ana".to_string()),
             scope: scope.iter().map(|s| s.to_string()).collect(),
-            status: None,
-            root: None,
-            json: false,
+            ..AdrCreateArgs::default()
         }
     }
 
@@ -566,8 +614,9 @@ mod tests {
     }
 
     #[test]
-    fn new_writes_a_pair_the_checks_enforce() {
+    fn create_writes_an_accepted_file_and_the_rule_file_the_checks_enforce() {
         let tmp = tempdir().unwrap();
+        let records = tempdir().unwrap();
         let args = new_args(
             "Use Postgres for storage",
             &[
@@ -576,7 +625,9 @@ mod tests {
             ],
             &["src/**"],
         );
-        let written = write_new(&args, tmp.path(), true, TODAY).unwrap();
+        // The tests run with no person at the terminal: signed out, a new
+        // decision is accepted all the same.
+        let written = write_new(&args, tmp.path(), TODAY, Some(records.path())).unwrap();
         assert_eq!(written.status, SaveStatus::Accepted);
         assert!(written
             .decision_file
@@ -590,12 +641,16 @@ mod tests {
         let doc = files::read_decision_file(&written.decision_file).unwrap();
         assert_eq!(doc.adr_id(), Some(written.adr_id.as_str()));
         assert_eq!(doc.meta.as_ref().unwrap().paths, ["src/**"]);
+        assert_eq!(doc.meta.as_ref().unwrap().version.as_deref(), Some("2"));
         let parsed = context_file::parse(&doc.body).unwrap().doc;
         assert_eq!(parsed.title, "Use Postgres for storage");
+        assert_eq!(parsed.deciders, "Ana");
         assert_eq!(parsed.policies.len(), 2);
 
-        let rule_text = std::fs::read_to_string(&written.rule_file).unwrap();
-        let rules = parse_rule_document(&written.rule_file, &rule_text).unwrap();
+        let rule_file = written.rule_file.clone().unwrap();
+        assert!(rule_file.starts_with(tmp.path().join(".actual/rules")));
+        let rule_text = std::fs::read_to_string(&rule_file).unwrap();
+        let rules = parse_rule_document(&rule_file, &rule_text).unwrap();
         assert!(rules.is_active());
         assert_eq!(rules.rules.len(), 2, "{rule_text}");
         assert_eq!(rules.rules[1].level, RuleLevel::MustNot);
@@ -604,27 +659,39 @@ mod tests {
             rules.meta.as_ref().unwrap().adr_id.as_deref(),
             Some(written.adr_id.as_str())
         );
-        assert!(render_written(&written).contains("enforce it now"));
+        let text = render_written(&written);
+        assert!(text.contains("enforce it now"), "{text}");
+        assert!(text.contains(&rule_file.display().to_string()), "{text}");
+        assert!(!text.contains("warning:"), "{text}");
+        assert!(!json_text(&written).contains("record_problem"));
+        // The refresh recorded the rule file it wrote.
+        let record = super::super::refresh::load(records.path(), tmp.path());
+        assert!(record.rules.contains_key(&written.adr_id));
     }
 
     #[test]
-    fn new_without_a_person_at_the_terminal_writes_a_draft() {
+    fn create_with_nowhere_to_keep_the_record_writes_and_says_so() {
         let tmp = tempdir().unwrap();
         let args = new_args("Page every list read", &["MUST: Bound each read."], &[]);
-        let written = write_new(&args, tmp.path(), false, TODAY).unwrap();
-        assert_eq!(written.status, SaveStatus::Draft);
-        let rule_text = std::fs::read_to_string(&written.rule_file).unwrap();
-        let rules = parse_rule_document(&written.rule_file, &rule_text).unwrap();
-        assert!(!rules.is_active(), "a draft is enforced by no check");
-        assert!(render_written(&written).contains("a draft"));
+        let written = write_new(&args, tmp.path(), TODAY, None).unwrap();
+        assert_eq!(written.status, SaveStatus::Accepted);
+        assert!(written.rule_file.is_some());
+        let text = render_written(&written);
+        // With nowhere to keep the refresh record, the decision is written
+        // all the same, and both outputs say what that costs.
+        assert!(
+            text.contains("warning: Couldn't save the refresh record (there's no config directory"),
+            "{text}"
+        );
+        assert!(json_text(&written).contains("\"record_problem\": \"Couldn't save"));
     }
 
     #[test]
-    fn new_refuses_a_decision_the_save_check_fails() {
+    fn create_refuses_a_decision_the_save_check_fails() {
         let tmp = tempdir().unwrap();
         let mut args = new_args("  ", &[], &[]);
         args.content.context.clear();
-        let err = write_new(&args, tmp.path(), true, TODAY).err();
+        let err = write_new(&args, tmp.path(), TODAY, None).err();
         assert!(
             matches!(&err, Some(ActualError::AdrInvalid { reasons })
                 if reasons == &["Add a title.", "Add at least one policy."]),
@@ -632,29 +699,33 @@ mod tests {
         );
         let bad = new_args("Use Postgres", &["Use it."], &[]);
         assert!(matches!(
-            write_new(&bad, tmp.path(), true, TODAY),
+            write_new(&bad, tmp.path(), TODAY, None),
             Err(ActualError::AdrInvalid { .. })
         ));
         assert!(!tmp.path().join(DECISION_DIR).exists());
     }
 
     #[test]
-    fn new_leaves_no_half_pair_behind() {
+    fn create_leaves_nothing_behind_when_the_rule_file_fails() {
         let tmp = tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".actual")).unwrap();
         // A file where the rules directory should be.
-        std::fs::write(tmp.path().join(RULES_DIR), "").unwrap();
+        std::fs::write(tmp.path().join(".actual/rules"), "").unwrap();
         let args = new_args("Use Postgres", &["MUST: Use it."], &[]);
-        assert!(write_new(&args, tmp.path(), true, TODAY).is_err());
+        let err = write_new(&args, tmp.path(), TODAY, None).err();
+        assert!(
+            matches!(&err, Some(ActualError::ConfigError(m)) if m.contains("nothing was written")),
+            "{err:?}"
+        );
         let docs: Vec<_> = std::fs::read_dir(tmp.path().join(DECISION_DIR))
             .unwrap()
             .collect();
-        assert!(docs.is_empty(), "the decision doc was removed again");
+        assert!(docs.is_empty(), "the decision file was removed again");
 
         let blocked = tempdir().unwrap();
         std::fs::create_dir_all(blocked.path().join("docs")).unwrap();
         std::fs::write(blocked.path().join(DECISION_DIR), "").unwrap();
-        assert!(write_new(&args, blocked.path(), true, TODAY).is_err());
+        assert!(write_new(&args, blocked.path(), TODAY, None).is_err());
     }
 
     #[test]
@@ -667,19 +738,67 @@ mod tests {
     }
 
     #[test]
-    fn exec_new_prints_text_or_json() {
+    fn exec_create_prints_text_or_json() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", config.path().to_str().unwrap());
         let tmp = tempdir().unwrap();
         let mut args = new_args("Use Postgres", &["MUST: Use it."], &[]);
         args.root = Some(tmp.path().to_path_buf());
-        exec_new(&args).unwrap();
-        args.json = true;
-        args.title = "Use Redis for caching".to_string();
-        exec_new(&args).unwrap();
+        exec_create(&args).unwrap();
+        args.api.json = true;
+        args.title = None;
+        args.title_flag = Some("Use Redis for caching".to_string());
+        exec_create(&args).unwrap();
         let docs: Vec<_> = std::fs::read_dir(tmp.path().join(DECISION_DIR))
             .unwrap()
             .collect();
         assert_eq!(docs.len(), 2);
-        assert!(exec_new(&new_args("", &[], &[])).is_err());
+        assert!(exec_create(&new_args("", &[], &[])).is_err());
+    }
+
+    #[test]
+    fn signed_out_create_refuses_each_flag_only_actual_ai_takes() {
+        let file = AdrCreateArgs {
+            file: Some(PathBuf::from("docs/adr/a.md")),
+            ..AdrCreateArgs::default()
+        };
+        let repo = AdrCreateArgs {
+            repo: Some("web".to_string()),
+            ..new_args("T", &["MUST: x"], &[])
+        };
+        let duplicate = AdrCreateArgs {
+            allow_duplicate: true,
+            ..new_args("T", &["MUST: x"], &[])
+        };
+        let tmp = tempdir().unwrap();
+        let all = AdrCreateArgs {
+            all: true,
+            root: Some(tmp.path().to_path_buf()),
+            ..AdrCreateArgs::default()
+        };
+        let draft = AdrCreateArgs {
+            status: Some(SaveStatus::Draft),
+            root: Some(tmp.path().to_path_buf()),
+            ..new_args("T", &["MUST: x"], &[])
+        };
+        for (args, flag) in [
+            (file, "`--file`"),
+            (all, "`--all`"),
+            (draft, "`--status draft`"),
+            (repo, "`--repo`"),
+            (duplicate, "`--allow-duplicate`"),
+        ] {
+            let err = exec_create(&args).unwrap_err();
+            assert!(
+                matches!(&err, ActualError::AdrPathway(m) if m.starts_with(flag) && m.contains("actual login")),
+                "{err:?}"
+            );
+            assert_eq!(err.exit_code(), 2);
+        }
+        // Refused before anything is written.
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     /// A repository with a good pair, a decision file that fails the check,
@@ -692,8 +811,8 @@ mod tests {
                 &[],
             ),
             root,
-            true,
             TODAY,
+            None,
         )
         .unwrap();
         let bad = root.join(DECISION_DIR).join("bad.md");
@@ -765,8 +884,8 @@ mod tests {
                     &[],
                 ),
                 tmp.path(),
-                true,
                 TODAY,
+                None,
             )
             .unwrap();
         }
@@ -819,8 +938,8 @@ mod tests {
                 &[],
             ),
             tmp.path(),
-            true,
             TODAY,
+            None,
         )
         .unwrap();
         let decision = |id: &str, title: &str, status: &str| {
@@ -1005,8 +1124,8 @@ mod tests {
             write_new(
                 &new_args("Zeta title", &["MUST: Zeta policy."], &["zeta/**"]),
                 tmp.path(),
-                true,
                 TODAY,
+                None,
             )
             .unwrap();
         }
@@ -1029,7 +1148,7 @@ mod tests {
                 "actual.adr.check.duplicates": 1,
                 "actual.adr.command.outcome": "failed",
                 "actual.adr.command.exit_code": 1,
-                "actual.adr.command.stdin_is_terminal": interactive(),
+                "actual.adr.command.stdin_is_terminal": super::super::interactive(),
             })
         );
         let sent = records[0].to_string().to_lowercase();
@@ -1038,12 +1157,13 @@ mod tests {
         }
     }
 
-    /// An `adr new` run sends one event saying it wrote locally from flags,
-    /// with the status and policy count, and none of the decision's text or
-    /// paths. A run the save rules refuse says so.
+    /// A signed-out `adr create` run sends one event saying it wrote locally
+    /// from flags, with the status and policy count, and none of the
+    /// decision's text or paths. A run the save rules refuse says so, and a
+    /// flag only a sign-in takes is refused before the run, which sends none.
     #[cfg(feature = "telemetry")]
     #[test]
-    fn new_sends_one_event_with_counts_and_no_content() {
+    fn create_sends_one_local_event_with_counts_and_no_content() {
         use super::super::telemetry::tests::{own, sending_to_a_file};
         use crate::cli::commands::brief_telemetry::tests::take_captured;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -1057,11 +1177,16 @@ mod tests {
             &["zeta/**"],
         );
         args.root = Some(tmp.path().to_path_buf());
-        args.status = Some(SaveStatus::Draft);
+        args.status = Some(SaveStatus::Accepted);
 
-        exec_new(&args).unwrap();
-        args.title = String::new();
-        assert!(exec_new(&args).is_err());
+        exec_create(&args).unwrap();
+        args.title = None;
+        assert!(exec_create(&args).is_err());
+        args.file = Some(PathBuf::from("docs/adr/zeta.md"));
+        assert!(matches!(
+            exec_create(&args),
+            Err(ActualError::AdrPathway(_))
+        ));
 
         let records = take_captured();
         assert_eq!(records.len(), 2);
@@ -1073,13 +1198,13 @@ mod tests {
                 serde_json::json!({
                     "actual.adr.create.target": "local",
                     "actual.adr.create.source": "flags",
-                    "actual.adr.create.status": "draft",
+                    "actual.adr.create.status": "accepted",
                     "actual.adr.create.policies": 2,
                     "actual.adr.create.partial": false,
                     "actual.adr.decision_id": "",
                     "actual.adr.command.outcome": outcome,
                     "actual.adr.command.exit_code": code,
-                    "actual.adr.command.stdin_is_terminal": interactive(),
+                    "actual.adr.command.stdin_is_terminal": super::super::interactive(),
                 })
             );
             let sent = record.to_string().to_lowercase();
@@ -1087,5 +1212,34 @@ mod tests {
                 assert!(!sent.contains(content), "{content} in {sent}");
             }
         }
+    }
+
+    #[test]
+    fn render_applied_lists_each_change_and_warns_about_a_rule_file_it_could_not_update() {
+        let applied = Applied {
+            written: vec![".actual/rules/a.md".to_string()],
+            problems: vec!["disk full".to_string()],
+            ..Applied::default()
+        };
+        let text = render_applied(&applied);
+        assert!(
+            text.contains("  Wrote rule file .actual/rules/a.md\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Couldn't update a rule file (disk full); `actual adr refresh` tries again."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("refresh record"), "{text}");
+        let unrecorded = Applied {
+            record_problem: Some("Couldn't save the refresh record (x).".to_string()),
+            ..Applied::default()
+        };
+        assert_eq!(
+            render_applied(&unrecorded),
+            "warning: Couldn't save the refresh record (x).\n"
+        );
     }
 }
