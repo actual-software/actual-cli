@@ -3390,6 +3390,21 @@ fn test_adr_commands_work_on_docs_adr_signed_out() {
         String::from_utf8(output).unwrap()
     };
     let count = |sub: &str| std::fs::read_dir(dir.path().join(sub)).unwrap().count();
+    // A refused command exits with `code` and leaves every file as it was.
+    let refused = |args: &[&str], code: i32| -> String {
+        let before = tree(dir.path());
+        let output = home_cmd(home.path())
+            .current_dir(dir.path())
+            .arg("adr")
+            .args(args)
+            .assert()
+            .code(code)
+            .get_output()
+            .stderr
+            .clone();
+        assert_eq!(tree(dir.path()), before, "{args:?} changed a file");
+        String::from_utf8(output).unwrap()
+    };
     let created: serde_json::Value = serde_json::from_str(&run(&[
         "create",
         "Use Postgres for storage",
@@ -3402,12 +3417,60 @@ fn test_adr_commands_work_on_docs_adr_signed_out() {
     assert!(run(&["list"]).contains("Use Postgres for storage"));
     assert!(run(&["show", &id]).contains("Services store relational data in Postgres."));
     assert!(run(&["update", &id, "--title", "Use Postgres 16"]).contains("Updated"));
-    run(&["unpublish", &id]);
-    assert_eq!(count(".actual/rules"), 0);
+    assert_eq!(count(".actual/rules"), 1);
+
+    // No command leaves a file under docs/adr/ in a status other than accepted.
+    assert!(refused(&["unpublish", &id], 2).contains("actual adr delete"));
+    let draft = refused(
+        &[
+            "create",
+            "Use Redis",
+            "--policy",
+            "MUST: Use Redis.",
+            "--status",
+            "draft",
+        ],
+        2,
+    );
+    assert!(draft.contains("actual login"), "{draft}");
+    assert!(refused(&["create", "--all"], 2).contains("actual login"));
+    let file = std::fs::read_dir(dir.path().join("docs/adr"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replacen("status: accepted", "status: draft", 1)).unwrap();
+    let update = refused(&["update", &id, "--title", "Use Postgres 17"], 3);
+    // The error box wraps its lines, so the command and its id may part.
+    assert!(
+        update.contains("`actual adr publish") && update.contains("to accept it first"),
+        "{update}"
+    );
+
+    // `publish` accepts a file in another status, and `delete` removes one.
     run(&["publish", &id]);
     assert_eq!(count(".actual/rules"), 1);
     run(&["delete", &id]);
     assert_eq!((count("docs/adr"), count(".actual/rules")), (0, 0));
+}
+
+/// Every file under `root` with its bytes, by path.
+fn tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
 }
 
 /// The refresh the plugin's hooks run: signed out it follows docs/adr, says
