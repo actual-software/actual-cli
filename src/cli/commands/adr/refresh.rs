@@ -1,7 +1,7 @@
 //! `actual adr refresh`: bring `.actual/rules/` in step with the
 //! repository's decisions, as the plugin's hooks do before each call, and
-//! report the files under `docs/adr/` that aren't normalized when that list
-//! changes.
+//! report the files under `docs/adr/` that aren't normalized, and signed in
+//! the files `create --all` would send, when either list changes.
 //!
 //! Signed out it reads `docs/adr/`. Signed in it reads the repository's
 //! decisions in Actual AI within `--timeout-ms`, and leaves every rule file
@@ -67,8 +67,7 @@ pub(super) enum Mode {
 }
 
 /// What a refresh did, for `--json`. `message` is set when a person should
-/// hear about it: rule files changed, the unnormalized list did, or no
-/// decision governs.
+/// hear about it: rule files changed, a list did, or no decision governs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Report {
     pub(super) mode: Mode,
@@ -80,6 +79,11 @@ pub(super) struct Report {
     pub(super) kept: bool,
     pub(super) unnormalized: Vec<Unnormalized>,
     pub(super) unnormalized_changed: bool,
+    /// Signed in, when Actual AI was read: the files under `docs/adr/` that
+    /// `create --all` would send.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) create_all: Option<Vec<String>>,
+    pub(super) create_all_changed: bool,
     /// The skill to draft the repository's first decisions with, when the
     /// refresh read its decisions, none governs, and that's news.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +117,7 @@ pub(super) fn refresh(
     let on_disk = rule_files_by_id(root);
     let mut problems = Vec::new();
     let mut repo = record.connected_repo.clone();
+    let mut create_all = None;
     let (mode, plan, governing) = match store::load() {
         Ok(None) => (
             Mode::SignedOut,
@@ -137,6 +142,14 @@ pub(super) fn refresh(
         Ok(Some(creds)) => {
             match read_cloud(root, &creds, &args.api, args.timeout_ms, repo.as_ref()) {
                 Ok((decisions, connected)) => {
+                    create_all = Some(super::batch::unsent_paths(
+                        root,
+                        &decisions,
+                        &connected.org_id,
+                        &connected.remote,
+                        today,
+                        None,
+                    ));
                     repo = Some(connected);
                     let sources = rule_sources(&decisions);
                     (
@@ -169,6 +182,12 @@ pub(super) fn refresh(
         Some(last) => *last != list,
         None => !scan.unnormalized.is_empty(),
     };
+    let create_all_print = create_all.as_deref().map(core::paths_fingerprint);
+    let create_all_changed = match (&create_all, &record.create_all) {
+        (Some(_), Some(last)) => create_all_print.as_ref() != Some(last),
+        (Some(list), None) => !list.is_empty(),
+        (None, _) => false,
+    };
     let recommendation = governing
         .is_some_and(|found| found.none_is_news(record.governing))
         .then_some(BOOTSTRAP_SKILL);
@@ -177,6 +196,9 @@ pub(super) fn refresh(
         record.unnormalized = Some(list);
         record.connected_repo = repo;
         record.governing = governing.or(record.governing);
+        if create_all_print.is_some() {
+            record.create_all = create_all_print;
+        }
     });
     problems.extend(applied.problems.iter().cloned());
     problems.extend(unrecorded);
@@ -184,6 +206,7 @@ pub(super) fn refresh(
         mode,
         &applied,
         unnormalized_changed.then_some(scan.unnormalized.as_slice()),
+        create_all.as_deref().filter(|_| create_all_changed),
         recommendation.is_some(),
     );
     Report {
@@ -194,6 +217,8 @@ pub(super) fn refresh(
         kept,
         unnormalized: scan.unnormalized,
         unnormalized_changed,
+        create_all,
+        create_all_changed,
         recommendation,
         message,
         problems,
@@ -443,12 +468,14 @@ fn save(dir: &Path, root: &Path, change: impl FnOnce(&mut Record)) -> Result<(),
 // ── output ─────────────────────────────────────────────────────────────────
 
 /// What a person should hear about a refresh: the rule files it changed;
-/// when the list changed, the files that aren't normalized; and, when
-/// `recommend`, that no decision governs and which skill drafts the first.
+/// the files that aren't normalized and the files `create --all` would send,
+/// each list when it changed; and, when `recommend`, that no decision
+/// governs and which skill drafts the first.
 fn message(
     mode: Mode,
     applied: &Applied,
     unnormalized: Option<&[Unnormalized]>,
+    create_all: Option<&[String]>,
     recommend: bool,
 ) -> Option<String> {
     let mut lines = Vec::new();
@@ -501,6 +528,28 @@ fn message(
                  passes `actual adr check`, as `actual adr create` writes."
                     .to_string(),
             );
+        }
+        None => {}
+    }
+    match create_all {
+        Some([]) => lines.push(format!(
+            "`actual adr create --all` has no file under {DECISION_DIR}/ to send now."
+        )),
+        Some(paths) => {
+            let one = paths.len() == 1;
+            lines.push(format!(
+                "{} {} under {DECISION_DIR}/ {} in Actual AI yet:",
+                paths.len(),
+                if one { "file" } else { "files" },
+                if one { "isn't" } else { "aren't" },
+            ));
+            for path in paths {
+                lines.push(format!("  {path}"));
+            }
+            lines.push(format!(
+                "`actual adr create --all` sends {}.",
+                if one { "it" } else { "them" }
+            ));
         }
         None => {}
     }
@@ -819,6 +868,111 @@ mod tests {
         );
         repos.assert();
         list.assert();
+    }
+
+    #[test]
+    fn signed_in_refresh_lists_the_files_create_all_would_send_when_that_list_changes() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        git_repo(root, Some("git@github.com:actual-software/actual-cli.git"));
+        // One file Actual AI holds, one it doesn't, and one kept as a draft in progress.
+        let held = decision_file(
+            ID,
+            "accepted",
+            "Use Postgres",
+            "MUST NOT: Add a second database.",
+        );
+        write(root, "docs/adr/a.md", &held);
+        let new = decision_file(
+            OTHER,
+            "accepted",
+            "Use Redis",
+            "MUST: Cache sessions in Redis.",
+        );
+        let new = write(root, "docs/adr/b.md", &new);
+        write(
+            root,
+            "docs/adr/drafts/c.md",
+            &decision_file("c", "accepted", "C", "MUST: C."),
+        );
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(DECISIONS)
+            .create();
+        let records = config.path().join(DIR_NAME);
+
+        let first = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+        assert_eq!(first.create_all, Some(vec!["docs/adr/b.md".to_string()]));
+        assert!(first.create_all_changed);
+        let message = first.message.clone().unwrap();
+        assert!(
+            message.ends_with(
+                "1 file under docs/adr/ isn't in Actual AI yet:\n  docs/adr/b.md\n\
+                 `actual adr create --all` sends it."
+            ),
+            "{message}"
+        );
+
+        // The same list again: nothing to say.
+        let quiet = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+        assert!(
+            !quiet.create_all_changed && quiet.message.is_none(),
+            "{quiet:?}"
+        );
+
+        // A read that fails lists nothing and keeps the record's list.
+        let mut failing = mockito::Server::new();
+        failing
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .create();
+        let kept = refresh(root, &args(Some(&failing)), TODAY, Some(&records));
+        assert!(kept.create_all.is_none() && !kept.create_all_changed);
+        let json = json_text(&kept);
+        assert!(json.contains("\"create_all_changed\": false"), "{json}");
+        assert!(!json.contains("\"create_all\": "), "{json}");
+
+        // The list empties: said once.
+        std::fs::remove_file(new).unwrap();
+        let empty = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+        assert_eq!(empty.create_all, Some(Vec::new()));
+        assert_eq!(
+            empty.message.as_deref(),
+            Some("`actual adr create --all` has no file under docs/adr/ to send now.")
+        );
+        let files = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+        assert!(files.message.is_none(), "{files:?}");
+    }
+
+    #[test]
+    fn the_create_all_message_counts_its_files() {
+        let paths = ["docs/adr/a.md".to_string(), "docs/adr/b.md".to_string()];
+        let text = message(
+            Mode::SignedIn,
+            &Applied::default(),
+            None,
+            Some(&paths),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "2 files under docs/adr/ aren't in Actual AI yet:\n  docs/adr/a.md\n  docs/adr/b.md\n\
+             `actual adr create --all` sends them."
+        );
     }
 
     #[test]
@@ -1172,7 +1326,14 @@ mod tests {
             reasons: vec!["It has no ADR header.".to_string()],
         };
         let list = [file("docs/adr/a.md"), file("docs/adr/b.md")];
-        let text = message(Mode::SignedOut, &Applied::default(), Some(&list), false).unwrap();
+        let text = message(
+            Mode::SignedOut,
+            &Applied::default(),
+            Some(&list),
+            None,
+            false,
+        )
+        .unwrap();
         assert!(
             text.starts_with(
                 "2 files under docs/adr/ aren't normalized, so they get no rule file:"
