@@ -502,7 +502,8 @@ async fn scope_and_publish(
 
 /// Save a decision file as the web app's Import does, which keeps the whole
 /// document and always saves a draft; then finish the save as
-/// [`finish_file_save`] does, renaming the pair.
+/// [`finish_file_save`] does. Only an accepted save renames the pair, so a
+/// draft leaves both files as they were.
 async fn create_from_file(
     session: &Session,
     repo: &Repo,
@@ -528,7 +529,7 @@ async fn create_from_file(
         doc,
         status,
         &imported.adr_id,
-        Rename::Always,
+        Rename::IfAccepted,
     )
     .await)
 }
@@ -537,10 +538,9 @@ async fn create_from_file(
 /// saved decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Rename {
-    /// Every save, as `create --file` does.
-    Always,
-    /// A save that ends accepted. A draft keeps its file's name, since the
-    /// sync deletes a merged file named for a draft.
+    /// A save that ends accepted. A draft keeps its files as they were: a
+    /// file under `docs/adr/` stays accepted, and the sync deletes a merged
+    /// file named for a draft.
     IfAccepted,
     /// None, because the sync replaces the file once the decision governs.
     Never,
@@ -575,12 +575,8 @@ pub(super) async fn finish_file_save(
     .await;
     let saved = finished.saved;
     let title = stored_title(doc);
-    let renames = match rename {
-        Rename::Always => true,
-        Rename::IfAccepted => saved == SaveStatus::Accepted,
-        Rename::Never => false,
-    };
-    let files = renames.then(|| files::rename_pair(root, file, adr_id, &title, saved.as_str()));
+    let files = (rename == Rename::IfAccepted && saved == SaveStatus::Accepted)
+        .then(|| files::rename_pair(root, file, adr_id, &title, saved.as_str()));
     let local_status_was = file
         .meta
         .as_ref()
@@ -1716,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn create_from_a_relative_file_with_no_terminal_saves_a_draft_and_the_files_follow() {
+    fn create_from_a_relative_file_with_no_terminal_saves_a_draft_and_leaves_the_files() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
         let _guards = sign_in(tmp.path());
@@ -1727,6 +1723,7 @@ mod tests {
         );
         let doc = new_pair(repo_dir.path(), &[]);
         let relative = doc.strip_prefix(repo_dir.path()).unwrap().to_path_buf();
+        let before = decision_and_rule_files(repo_dir.path());
         let mut server = mockito::Server::new();
         server
             .mock("GET", "/v1/connected-repos")
@@ -1763,28 +1760,31 @@ mod tests {
             text.contains("in actual-software/actual-cli as draft"),
             "{text}"
         );
+        // Both files stay as they were, accepted under their own names.
         assert!(
-            text.contains(
-                "The local files now say draft, as Actual AI saved it (they said accepted)."
-            ),
+            !text.contains("renamed") && !text.contains("now say"),
             "{text}"
         );
-        let rule = crate::adr::files::find_rule_file(repo_dir.path(), ADR).unwrap();
-        let doc = repo_dir
-            .path()
-            .join("docs/adr")
-            .join(crate::adr::names::decision_doc_file_name(
-                ADR,
-                "Use Postgres for storage",
-            ));
-        for moved in [doc, rule] {
-            let file = crate::adr::files::read_decision_file(&moved).unwrap();
-            assert_eq!(
-                file.meta.unwrap().status.as_deref(),
-                Some("draft"),
-                "{moved:?}"
-            );
+        assert_eq!(decision_and_rule_files(repo_dir.path()), before);
+    }
+
+    /// Every file under `root`'s `docs/adr/` and `.actual/`, with its bytes.
+    fn decision_and_rule_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut dirs = vec![root.join("docs/adr"), root.join(".actual")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
         }
+        files.sort();
+        assert!(files.len() >= 2, "{files:?}");
+        files
     }
 
     #[test]
@@ -1870,7 +1870,9 @@ mod tests {
                 .contains(&format!("Run `actual adr publish {ADR}`")),
             "{json}"
         );
-        assert!(value.get("local_status_was").is_some(), "{json}");
+        // A draft leaves both files as they were.
+        assert!(value.get("files").is_none(), "{json}");
+        assert!(value.get("local_status_was").is_none(), "{json}");
     }
 
     #[test]

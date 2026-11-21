@@ -60,7 +60,8 @@ fn create_and_print(args: &AdrCreateArgs, creation: &mut Creation) -> Result<(),
 }
 
 /// Refuse the flags only a signed-in `create` can use, each with what to
-/// do instead.
+/// do instead. A draft lives in Actual AI, so every file a signed-out
+/// `create` writes is accepted.
 fn refuse_signed_in_flags(args: &AdrCreateArgs) -> Result<(), ActualError> {
     let refusal = if args.file.is_some() {
         "`--file` sends a decision file to Actual AI, which needs `actual login`. Signed out, \
@@ -71,6 +72,10 @@ fn refuse_signed_in_flags(args: &AdrCreateArgs) -> Result<(), ActualError> {
          which needs `actual login`. Signed out, the files need no sending: `actual adr check` \
          checks them, and `actual adr refresh` (which the plugin's hooks run) writes the rule \
          file of each normalized one."
+    } else if args.status == Some(SaveStatus::Draft) {
+        "`--status draft` saves a draft, and a draft lives in Actual AI, which needs \
+         `actual login`. Signed out, every decision `create` writes under docs/adr/ is \
+         accepted, so leave `--status` out."
     } else if args.repo.is_some() {
         "`--repo` picks a connected repository in Actual AI, which needs `actual login`. \
          Signed out, `create` writes into docs/adr/ under `--root`."
@@ -97,9 +102,9 @@ pub(super) fn write_new(
 
 /// Check the decision the flags describe, then write its file under
 /// `docs/adr/` with a new local id, as the repository sync lays it out, and
-/// bring its rule file in step. The status is the flag's, else accepted.
-/// Nothing is left behind when the rule file can't be written. `creation`
-/// notes the status and policy count as they're known.
+/// bring its rule file in step. The decision is accepted, as every file the
+/// CLI writes there is. Nothing is left behind when the rule file can't be
+/// written. `creation` notes the status and policy count as they're known.
 fn write_new_noting(
     args: &AdrCreateArgs,
     root: &Path,
@@ -107,14 +112,14 @@ fn write_new_noting(
     record: Option<&Path>,
     creation: &mut Creation,
 ) -> Result<Written, ActualError> {
-    let status = args.status.unwrap_or(SaveStatus::Accepted);
+    let status = SaveStatus::Accepted;
     creation.status = status.as_str().to_string();
     let doc = ContextFile {
         deciders: args.deciders.clone().unwrap_or_default(),
         ..content_from_flags(args.title().unwrap_or_default(), &args.content)?
     };
     creation.policies = doc.policies.len();
-    let doc = check_document(&doc, status == SaveStatus::Draft, today)
+    let doc = check_document(&doc, false, today)
         .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let adr_id = Uuid::new_v4().to_string();
     let (doc_name, doc_text) = render_decision_doc(&doc, &adr_id, status, &args.scope);
@@ -180,12 +185,7 @@ fn render_written(written: &Written) -> String {
     if let Some(rule_file) = &written.rule_file {
         out.push_str(&format!("  {}\n", rule_file.display()));
     }
-    out.push_str(match written.status {
-        SaveStatus::Accepted => "It is accepted, so plan-check and impl-check enforce it now.\n",
-        SaveStatus::Draft => {
-            "It is a draft, which no check reads until `actual adr publish` accepts it.\n"
-        }
-    });
+    out.push_str("It is accepted, so plan-check and impl-check enforce it now.\n");
     out.push_str("Next: `actual adr check` checks it with Actual AI's save rules.\n");
     out.push_str(&record_warning(written.record_problem.as_deref()));
     out
@@ -679,16 +679,13 @@ mod tests {
     }
 
     #[test]
-    fn create_of_a_draft_writes_no_rule_file() {
+    fn create_with_nowhere_to_keep_the_record_writes_and_says_so() {
         let tmp = tempdir().unwrap();
-        let mut args = new_args("Page every list read", &["MUST: Bound each read."], &[]);
-        args.status = Some(SaveStatus::Draft);
+        let args = new_args("Page every list read", &["MUST: Bound each read."], &[]);
         let written = write_new(&args, tmp.path(), TODAY, None).unwrap();
-        assert_eq!(written.status, SaveStatus::Draft);
-        assert_eq!(written.rule_file, None);
-        assert!(!tmp.path().join(".actual").exists());
+        assert_eq!(written.status, SaveStatus::Accepted);
+        assert!(written.rule_file.is_some());
         let text = render_written(&written);
-        assert!(text.contains("a draft"), "{text}");
         // With nowhere to keep the refresh record, the decision is written
         // all the same, and both outputs say what that costs.
         assert!(
@@ -697,7 +694,6 @@ mod tests {
         );
         assert!(json_text(&written).contains("\"record_problem\": \"Couldn't save"));
     }
-
     #[test]
     fn create_refuses_a_decision_the_save_check_fails() {
         let tmp = tempdir().unwrap();
@@ -790,9 +786,15 @@ mod tests {
             root: Some(tmp.path().to_path_buf()),
             ..AdrCreateArgs::default()
         };
+        let draft = AdrCreateArgs {
+            status: Some(SaveStatus::Draft),
+            root: Some(tmp.path().to_path_buf()),
+            ..new_args("T", &["MUST: x"], &[])
+        };
         for (args, flag) in [
             (file, "`--file`"),
             (all, "`--all`"),
+            (draft, "`--status draft`"),
             (repo, "`--repo`"),
             (duplicate, "`--allow-duplicate`"),
         ] {
@@ -1183,7 +1185,7 @@ mod tests {
             &["zeta/**"],
         );
         args.root = Some(tmp.path().to_path_buf());
-        args.status = Some(SaveStatus::Draft);
+        args.status = Some(SaveStatus::Accepted);
 
         exec_create(&args).unwrap();
         args.title = None;
@@ -1204,7 +1206,7 @@ mod tests {
                 serde_json::json!({
                     "actual.adr.create.target": "local",
                     "actual.adr.create.source": "flags",
-                    "actual.adr.create.status": "draft",
+                    "actual.adr.create.status": "accepted",
                     "actual.adr.create.policies": 2,
                     "actual.adr.create.partial": false,
                     "actual.adr.decision_id": "",

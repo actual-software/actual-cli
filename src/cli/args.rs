@@ -1077,9 +1077,9 @@ pub struct AdrCreateArgs {
     #[arg(id = "title_flag", long = "title", value_name = "TITLE")]
     pub title_flag: Option<String>,
 
-    /// Signed in: a decision file to send, such as one under docs/adr/. Its
-    /// pair is renamed to the file names Actual AI's sync uses for the new
-    /// decision.
+    /// Signed in: a decision file to send, such as one under docs/adr/. An
+    /// accepted save renames its pair to the file names Actual AI's sync
+    /// uses for the new decision; a draft leaves both files as they are.
     #[arg(
         long,
         value_name = "PATH",
