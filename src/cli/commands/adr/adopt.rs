@@ -5,10 +5,12 @@
 //! Both work signed out. Signed in, `discover` also compares synced
 //! decisions with Actual AI, and `normalize --push` saves what it writes.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -385,7 +387,10 @@ pub(super) fn exec_normalize(args: &AdrNormalizeArgs) -> Result<(), ActualError>
                 .unwrap_or(Err(PROBE_FAILED.to_string()))
         })
     };
-    let report = runtime()?.block_on(run_normalize(args, &root, &today(), ask, resolve))?;
+    let progress = Progress::new(args.api.json);
+    let today = today();
+    let normalizing = run_normalize(args, &root, &today, ask, &progress, resolve);
+    let report = runtime()?.block_on(normalizing)?;
     if args.api.json {
         println!("{}", json_text(&report));
     } else {
@@ -408,6 +413,62 @@ fn unsaved_error(report: &NormalizeReport) -> Option<ActualError> {
             if unsaved == 1 { " was" } else { "s were" }
         ))
     })
+}
+
+/// What `normalize` shows on standard error while a model reads decisions
+/// written as prose, which can take minutes for many files: a spinner while
+/// it finds a runner, then a count and the file being read. Nothing is drawn
+/// under `--json`, or when standard error isn't a terminal, so agents and
+/// pipes see only the report.
+struct Progress(ProgressBar);
+
+impl Progress {
+    fn new(json: bool) -> Self {
+        let bar = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+        if json {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        Progress(bar)
+    }
+
+    /// Finding a runner for `count` docs.
+    fn finding_model(&self, count: usize) {
+        self.0.set_style(
+            ProgressStyle::with_template("{spinner} {msg} ({elapsed})").expect("valid template"),
+        );
+        self.0.set_message(format!(
+            "Finding a model to read {count} decision{} written as prose",
+            if count == 1 { "" } else { "s" }
+        ));
+        self.0.enable_steady_tick(Duration::from_millis(120));
+    }
+
+    /// Reading `count` docs with the runner `label`.
+    fn reading(&self, count: usize, label: &str) {
+        let label = label.replace('{', "{{").replace('}', "}}");
+        self.0.set_message("");
+        self.0.set_style(
+            ProgressStyle::with_template(&format!(
+                "{{spinner}} Reading with {label} [{{pos}}/{{len}}] {{msg}} ({{elapsed}})"
+            ))
+            .expect("valid template"),
+        );
+        self.0.set_length(count as u64);
+    }
+
+    /// The doc being read now.
+    fn file(&self, rel: &str) {
+        self.0.set_message(rel.to_string());
+    }
+
+    fn done_one(&self) {
+        self.0.inc(1);
+    }
+
+    /// Clear the line, before any question or the report.
+    fn finish(&self) {
+        self.0.finish_and_clear();
+    }
 }
 
 /// How long one extraction may run.
@@ -555,6 +616,7 @@ async fn run_normalize<R: StructuredRunner>(
     root: &Path,
     today: &str,
     ask: Option<&dyn TerminalIO>,
+    progress: &Progress,
     resolve: impl FnOnce() -> Result<Model<R>, String>,
 ) -> Result<NormalizeReport, ActualError> {
     let extracted = read_keyed(args.extracted.as_deref())?;
@@ -629,12 +691,16 @@ async fn run_normalize<R: StructuredRunner>(
     let wants_model =
         |p: &Prepared| !args.no_model && p.merged.needs_model() && !extracted.contains_key(&p.rel);
     let mut model_note = None;
-    if converting.iter().any(wants_model) {
+    let prose = converting.iter().filter(|p| wants_model(p)).count();
+    if prose > 0 {
+        progress.finding_model(prose);
         match resolve() {
             Ok(model) => {
                 model_note = Some(model.label.clone());
                 let dirs = repo_files.top_dirs();
+                progress.reading(prose, &model.label);
                 for prepared in converting.iter_mut().filter(|p| wants_model(p)) {
+                    progress.file(&prepared.rel);
                     let prompt = normalize::model_prompt(&prepared.rel, &prepared.text, &dirs);
                     let answer = model
                         .runner
@@ -658,17 +724,24 @@ async fn run_normalize<R: StructuredRunner>(
                                 Some(format!("{}; {}: {reason}", model.label, prepared.rel))
                         }
                     }
+                    progress.done_one();
                 }
             }
             Err(reason) => model_note = Some(format!("No model ran: {reason}")),
         }
+        progress.finish();
     }
 
+    let hinted = Cell::new(false);
     for mut prepared in converting {
         if let Some(answer) = keyed(&answers, &prepared.rel, &prepared.entry.path) {
             prepared.merged = prepared.merged.overlay(&answer);
         }
-        files.push(convert(args, root, today, ask, &repo_files, prepared).await?);
+        let asking = ask.map(|term| Asking {
+            term,
+            hinted: &hinted,
+        });
+        files.push(convert(args, root, today, asking, &repo_files, prepared).await?);
     }
     Ok(NormalizeReport {
         dry_run: args.dry_run,
@@ -734,13 +807,26 @@ fn write_file(path: &Path, text: &str) -> Result<(), ActualError> {
     Ok(())
 }
 
+/// A person to ask at the terminal, and whether they've been told about
+/// `--yes` yet this run.
+#[derive(Clone, Copy)]
+struct Asking<'a> {
+    term: &'a dyn TerminalIO,
+    hinted: &'a Cell<bool>,
+}
+
+/// Said once, before the first question of a run.
+const YES_HINT: &str = "Pass --yes to take the safe answers without being asked: a decision \
+                        you'd be asked about is written as a draft, and one with no policy is \
+                        left alone.";
+
 /// Settle and write one doc: plan it, asking a person when one is there,
 /// then write its pair.
 async fn convert(
     args: &AdrNormalizeArgs,
     root: &Path,
     today: &str,
-    ask: Option<&dyn TerminalIO>,
+    ask: Option<Asking<'_>>,
     repo_files: &RepoFiles<'_>,
     prepared: Prepared,
 ) -> Result<FileOutcome, ActualError> {
@@ -777,8 +863,11 @@ async fn convert(
                 Plan::Ready(ready) => break *ready,
                 Plan::Skip(reason) => return Ok(FileOutcome::skipped(rel, entry.state, reason)),
                 Plan::NeedsInput(questions) => match ask {
-                    Some(term) if rounds < 3 => {
+                    Some(Asking { term, hinted }) if rounds < 3 => {
                         rounds += 1;
+                        if !hinted.replace(true) {
+                            term.write_line(&format!("\n{}", theme::hint(YES_HINT)));
+                        }
                         term.write_line(&format!("\n{}", theme::heading(&rel)));
                         let answers = ask_questions(term, &questions)?;
                         merged = merged.overlay(&answers);
@@ -1157,6 +1246,7 @@ mod tests {
             root,
             TODAY,
             ask,
+            &Progress::new(true),
             move || match answer {
                 Some(answer) => Ok(Model {
                     runner: Fake {
@@ -1748,6 +1838,21 @@ mod tests {
             .with_select_one(vec![0, 0, 0]);
         let report = run(&args(&["docs/adr/0012-more.md"]), root, Some(&term), None).unwrap();
         assert_eq!(file(&report, "0012-more.md").outcome, Outcome::NeedsInput);
+        // The --yes tip comes once a run, before the first question.
+        let said = term.output_text();
+        assert_eq!(said.matches(YES_HINT).count(), 1, "{said}");
+        assert!(said.find(YES_HINT) < said.find("docs/adr/0012-more.md"));
+    }
+
+    #[test]
+    fn progress_takes_any_runner_label() {
+        let progress = Progress::new(true);
+        progress.finding_model(1);
+        progress.reading(2, "odd {runner}");
+        progress.file("docs/adr/a.md");
+        progress.done_one();
+        progress.finish();
+        assert!(progress.0.is_finished());
     }
 
     #[test]
