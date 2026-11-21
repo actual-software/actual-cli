@@ -366,7 +366,15 @@ The `actual adr` commands send one event per run:
 
 None of these events carries a decision's title, context, policy text or
 scope globs, a file path, or the text of `reject --reason`. `adr list`,
-`adr show` and `adr refresh` send none of them.
+`adr show`, `adr refresh` and `adr create --all` send none of them.
+
+`adr create --all` saves each decision file with its path in the repository,
+so a second save of the same file returns the decision the first one made. It
+keeps what it last did with each file (the path, a SHA-256 hash of the text,
+the outcome and the decision's id) in `adr-create-all/` under the user config
+directory, one file per organization and repository named by a hash of the
+two. Nothing sends that record; the next `create --all` and `adr refresh`
+read it.
 
 Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
 
@@ -755,7 +763,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, ADR, check and session-end events from release builds unless you set another OTLP endpoint, and the decision requests the signed-in `actual adr` commands send, including the read of the connected repository's decisions that `actual adr refresh` makes each time the plugin's hooks run it | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, ADR, check and session-end events from release builds unless you set another OTLP endpoint, and the decision requests the signed-in `actual adr` commands send, including the read of the connected repository's decisions that `actual adr refresh` makes each time the plugin's hooks run it and the path in the repository of each file `actual adr create --all` saves | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
