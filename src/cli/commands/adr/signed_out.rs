@@ -5,7 +5,10 @@
 //! policy goes by the rule id its rule file gives it, such as `R-0B6F-001`.
 //!
 //! `restore`, `accept` and `reject` act on what only Actual AI keeps (its
-//! archive and its suggestions), so they need a sign-in.
+//! archive and its suggestions), so they need a sign-in. So does
+//! `unpublish`: every file these commands write under `docs/adr/` is
+//! accepted, a draft lives in Actual AI, and `update` leaves a file that
+//! isn't accepted as it is until `publish` accepts it.
 
 use std::path::Path;
 
@@ -44,8 +47,8 @@ pub(super) fn exec(action: &AdrAction) -> Result<(), ActualError> {
         AdrAction::List(a) => run_list(a, &root),
         AdrAction::Show(a) => run_show(a, &root),
         AdrAction::Update(a) => run_update(a, &root, &today(), record),
-        AdrAction::Publish(a) => run_status(a, &root, &today(), record, true),
-        AdrAction::Unpublish(a) => run_status(a, &root, &today(), record, false),
+        AdrAction::Publish(a) => run_publish(a, &root, &today(), record),
+        AdrAction::Unpublish(_) => return needs_sign_in(LifecycleAction::Unpublish),
         AdrAction::Delete(a) => run_delete(a, &root, &today(), record),
         AdrAction::Restore(_) => return needs_sign_in(LifecycleAction::Restore),
         AdrAction::Accept(_) => return needs_sign_in(LifecycleAction::Accept),
@@ -65,6 +68,11 @@ fn needs_sign_in(action: LifecycleAction) -> Result<(), ActualError> {
              `actual login`. Signed out, `delete` removes the decision's file, so git brings \
              it back: `git restore <file>`, or `git checkout <commit>^ -- <file>` once the \
              deletion is committed."
+        }
+        LifecycleAction::Unpublish => {
+            "`unpublish` makes a decision a draft, and a draft lives in Actual AI, which \
+             needs `actual login`. Signed out, every decision file under docs/adr/ stays \
+             accepted; `actual adr delete <id>` removes one that shouldn't govern."
         }
         LifecycleAction::Accept => {
             "`accept` acts on a suggestion, and only Actual AI keeps suggestions. Sign in \
@@ -403,13 +411,23 @@ fn run_update(
     let edit = update_edit(args)?;
     let file = find(root, &args.id)?;
     let adr_id = file.adr_id().unwrap_or_default().to_string();
+    let meta = file.meta.clone().unwrap_or_default();
+    if !meta.is_active() {
+        let id = sanitize_server_text(&adr_id);
+        return Err(ActualError::AdrNotAllowed(format!(
+            "Decision {id} is {}, not accepted, and every file `actual adr` writes under \
+             {DECISION_DIR}/ is accepted, so `update` leaves it as it is. Run `actual adr \
+             publish {id}` to accept it first.",
+            sanitize_server_text(meta.status.as_deref().unwrap_or_default().trim())
+        )));
+    }
     let shown = relative(root, &file.path);
     let doc = rewritable(&file, &shown)?;
     let before = fingerprint(&rule_source(&file, &doc));
     let changed = edited(&doc, &edit, &adr_id)?;
     // The save check normalizes the text and stamps today's date and its own
     // status; the file keeps its own date and Status line.
-    let checked = check_document(&changed, file.is_draft(), today)
+    let checked = check_document(&changed, false, today)
         .map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let changed = ContextFile {
         date: doc.date.clone(),
@@ -506,47 +524,29 @@ fn with_status(text: &str, status: &str, line: &str) -> Option<String> {
     Some(format!("{header}\n{body}"))
 }
 
-/// `publish` (accepted) or `unpublish` (draft) a decision file.
-fn run_status(
+/// `publish` a decision file: accept it.
+fn run_publish(
     args: &AdrIdArgs,
     root: &Path,
     today: &str,
     record: Option<&Path>,
-    publish: bool,
 ) -> Result<String, ActualError> {
     let file = find(root, &args.id)?;
     let adr_id = file.adr_id().unwrap_or_default().to_string();
     let id = sanitize_server_text(&adr_id);
     let meta = file.meta.clone().unwrap_or_default();
-    let was = meta
-        .status
-        .clone()
-        .unwrap_or_else(|| "accepted".to_string());
-    let (status, line) = if publish {
-        if meta.is_active() {
-            return Err(ActualError::AdrNotAllowed(format!(
-                "Decision {id} is already {}, so there's nothing to publish.",
-                sanitize_server_text(&was)
-            )));
-        }
-        ("accepted", "accepted")
-    } else {
-        if !meta.is_active() {
-            return Err(ActualError::AdrNotAllowed(format!(
-                "Decision {id} is {}, not accepted, so there's nothing to unpublish.",
-                sanitize_server_text(&was)
-            )));
-        }
-        // The Status line a draft's Context File carries, as the save writes it.
-        ("draft", "proposed")
-    };
-    // The file has to read as a decision either way: an accepted one gets its
-    // rule file from it, and the refresh keeps the rule file of one that
-    // doesn't read, which an unpublish would then leave in place.
+    if meta.is_active() {
+        return Err(ActualError::AdrNotAllowed(format!(
+            "Decision {id} is already {}, so there's nothing to publish.",
+            sanitize_server_text(meta.status.as_deref().unwrap_or("accepted"))
+        )));
+    }
+    // An accepted file gets its rule file from what it says, so it has to
+    // read as a decision.
     read_normalized(&file, false, today).map_err(|reasons| ActualError::AdrInvalid { reasons })?;
     let text = std::fs::read_to_string(&file.path)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let rewritten = with_status(text, status, line).ok_or_else(|| {
+    let rewritten = with_status(text, "accepted", "accepted").ok_or_else(|| {
         ActualError::AdrNotAllowed(format!(
             "{}'s header has no status line to change.",
             relative(root, &file.path)
@@ -562,21 +562,14 @@ fn run_status(
                 success: true,
                 adr_id,
                 file: shown,
-                status: Some(status.to_string()),
+                status: Some("accepted".to_string()),
                 rule_files: applied,
             })
         ));
     }
-    let (verb, now) = if publish {
-        (
-            "Published",
-            "is accepted, so plan-check and impl-check enforce it now",
-        )
-    } else {
-        ("Unpublished", "is a draft, which no check reads")
-    };
     Ok(format!(
-        "{} {verb} {id}: {shown} {now}.\n{}",
+        "{} Published {id}: {shown} is accepted, so plan-check and impl-check enforce it \
+         now.\n{}",
         theme::success(&theme::SUCCESS),
         render_applied(&applied)
     ))
@@ -645,7 +638,9 @@ mod tests {
 
     const TODAY: &str = "2026-11-20";
 
-    /// Write a decision with `create`, as a person signed out would.
+    /// Write a decision with `create`, as a person signed out would. A
+    /// draft is that file with its status changed by hand, as files written
+    /// elsewhere can be, and no rule file.
     fn create(root: &Path, title: &str, policies: &[&str], status: SaveStatus) -> String {
         let args = AdrCreateArgs {
             title: Some(title.to_string()),
@@ -653,10 +648,33 @@ mod tests {
                 context: vec!["We need one relational store.".to_string()],
                 policies: policies.iter().map(|p| p.to_string()).collect(),
             },
-            status: Some(status),
             ..AdrCreateArgs::default()
         };
-        write_new(&args, root, TODAY, None).unwrap().adr_id
+        let written = write_new(&args, root, TODAY, None).unwrap();
+        if status == SaveStatus::Draft {
+            let text = std::fs::read_to_string(&written.decision_file).unwrap();
+            let draft = with_status(&text, "draft", "proposed").unwrap();
+            std::fs::write(&written.decision_file, draft).unwrap();
+            refresh_decision(root, &written.adr_id, TODAY, None, true);
+        }
+        written.adr_id
+    }
+
+    /// Every file under `root`, by its path, with its bytes.
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(dir: &Path, out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, &mut out);
+        out
     }
 
     fn list_args() -> AdrListArgs {
@@ -930,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_and_unpublish_move_the_status_and_the_rule_file() {
+    fn publish_moves_a_draft_to_accepted_with_its_rule_file() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
         let id = create(
@@ -941,7 +959,7 @@ mod tests {
         );
         assert_eq!(rule_text(root, &id), None);
 
-        let text = run_status(&id_args(&id, false), root, TODAY, None, true).unwrap();
+        let text = run_publish(&id_args(&id, false), root, TODAY, None).unwrap();
         assert!(
             text.contains("Published") && text.contains("Wrote rule file"),
             "{text}"
@@ -953,28 +971,24 @@ mod tests {
         );
         assert!(file.body.contains("Status: accepted"), "{}", file.body);
         assert!(rule_text(root, &id).unwrap().contains("SHOULD: Use Redis."));
-        let err = run_status(&id_args(&id, false), root, TODAY, None, true).unwrap_err();
+        let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("already accepted")),
             "{err:?}"
         );
 
-        let json: serde_json::Value = serde_json::from_str(
-            &run_status(&id_args(&id, true), root, TODAY, None, false).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(json["status"], "draft");
-        assert_eq!(json["rule_files"]["removed"].as_array().unwrap().len(), 1);
-        let file = find(root, &id).unwrap();
-        assert!(file.is_draft());
-        assert!(file.body.contains("Status: proposed"), "{}", file.body);
-        assert_eq!(rule_text(root, &id), None);
-        assert!(matches!(
-            run_status(&id_args(&id, false), root, TODAY, None, false),
-            Err(ActualError::AdrNotAllowed(_))
-        ));
+        let id = create(
+            root,
+            "Use Kafka",
+            &["MUST: Publish events to Kafka."],
+            SaveStatus::Draft,
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&run_publish(&id_args(&id, true), root, TODAY, None).unwrap())
+                .unwrap();
+        assert_eq!(json["status"], "accepted");
+        assert_eq!(json["rule_files"]["written"].as_array().unwrap().len(), 1);
     }
-
     #[test]
     fn publish_refuses_a_draft_that_would_get_no_rule_file() {
         let tmp = tempdir().unwrap();
@@ -988,7 +1002,7 @@ mod tests {
         let path = find(root, &id).unwrap().path;
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, text.replace("version: 2\n", "")).unwrap();
-        let err = run_status(&id_args(&id, false), root, TODAY, None, true).unwrap_err();
+        let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrInvalid { reasons } if reasons[0].contains("version: 2")),
             "{err:?}"
@@ -1071,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn unpublish_refuses_a_file_that_no_longer_reads_and_keeps_its_rule_file() {
+    fn unpublish_needs_a_sign_in_and_leaves_the_files_as_they_were() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
         let id = create(
@@ -1080,22 +1094,47 @@ mod tests {
             &["MUST: Use Postgres."],
             SaveStatus::Accepted,
         );
-        let rule = rule_text(root, &id).unwrap();
-        let path = find(root, &id).unwrap().path;
-        // The header still names the decision, but its one policy is gone.
-        let text = std::fs::read_to_string(&path).unwrap();
-        let broken: String = text
-            .lines()
-            .filter(|line| !line.contains("MUST: Use Postgres."))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        std::fs::write(&path, &broken).unwrap();
-        let err = run_status(&id_args(&id, false), root, TODAY, None, false).unwrap_err();
-        assert!(matches!(&err, ActualError::AdrInvalid { .. }), "{err:?}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
-        assert_eq!(rule_text(root, &id), Some(rule));
+        let before = snapshot(root);
+        let err = exec(&AdrAction::Unpublish(id_args(&id, false))).unwrap_err();
+        assert!(
+            matches!(&err, ActualError::AdrPathway(m)
+                if m.contains("`actual login`") && m.contains("`actual adr delete <id>`")),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(snapshot(root), before);
+        assert!(rule_text(root, &id).is_some());
     }
 
+    #[test]
+    fn update_refuses_a_file_that_isnt_accepted_and_leaves_it_as_it_was() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let id = create(
+            root,
+            "Use Redis",
+            &["SHOULD: Use Redis."],
+            SaveStatus::Draft,
+        );
+        let path = find(root, &id).unwrap().path;
+        let text = std::fs::read_to_string(&path).unwrap();
+        let superseded = text.replacen("    status: draft\n", "    status: Superseded\n", 1);
+        for (status, written) in [("draft", text.clone()), ("Superseded", superseded)] {
+            std::fs::write(&path, &written).unwrap();
+            let before = snapshot(root);
+            let mut retitle = update_args(&id);
+            retitle.title = Some("Use Redis 7".to_string());
+            let err = run_update(&retitle, root, TODAY, None).unwrap_err();
+            assert!(
+                matches!(&err, ActualError::AdrNotAllowed(m)
+                    if m.contains(&format!("is {status}, not accepted"))
+                        && m.contains(&format!("`actual adr publish {id}`"))),
+                "{err:?}"
+            );
+            assert_eq!(err.exit_code(), 3);
+            assert_eq!(snapshot(root), before);
+        }
+    }
     #[test]
     fn restore_accept_and_reject_need_a_sign_in() {
         for (action, word) in [
@@ -1198,21 +1237,22 @@ mod tests {
     }
 
     #[test]
-    fn unpublish_and_delete_say_what_they_did_and_unpublish_needs_a_status_line() {
+    fn publish_and_delete_say_what_they_did_and_publish_needs_a_status_line() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
         let id = create(
             root,
             "Use Postgres",
             &["MUST: Use Postgres."],
-            SaveStatus::Accepted,
+            SaveStatus::Draft,
         );
-        let text = run_status(&id_args(&id, false), root, TODAY, None, false).unwrap();
+        let text = run_publish(&id_args(&id, false), root, TODAY, None).unwrap();
         assert!(
-            text.contains("Unpublished") && text.contains("is a draft, which no check reads."),
+            text.contains(&format!("Published {id}: "))
+                && text.contains("is accepted, so plan-check and impl-check enforce it now."),
             "{text}"
         );
-        assert!(text.contains("Removed rule file"), "{text}");
+        assert!(text.contains("Wrote rule file"), "{text}");
 
         let json: serde_json::Value =
             serde_json::from_str(&run_delete(&id_args(&id, true), root, TODAY, None).unwrap())
@@ -1220,23 +1260,30 @@ mod tests {
         assert_eq!(json["adr_id"], id.as_str());
         assert!(json["status"].is_null(), "{json}");
 
-        // A header with no status reads as accepted, but has no line to change.
-        let id = create(
-            root,
-            "Use Redis",
-            &["MUST: Use Redis."],
-            SaveStatus::Accepted,
-        );
+        // A draft whose header lays its status out deeper has no line to
+        // change.
+        let id = create(root, "Use Redis", &["MUST: Use Redis."], SaveStatus::Draft);
         let path = find(root, &id).unwrap().path;
         let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, text.replacen("    status: accepted\n", "", 1)).unwrap();
-        let err = run_status(&id_args(&id, false), root, TODAY, None, false).unwrap_err();
+        let (header, body) = split_header(&text).unwrap();
+        let deeper: String = header
+            .split_inclusive('\n')
+            .map(|row| {
+                if row.starts_with("  ") {
+                    format!("  {row}")
+                } else {
+                    row.to_string()
+                }
+            })
+            .collect();
+        std::fs::write(&path, format!("{deeper}\n{body}")).unwrap();
+        assert!(find(root, &id).unwrap().is_draft());
+        let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("has no status line to change")),
             "{err:?}"
         );
     }
-
     #[test]
     fn a_file_under_drafts_is_left_out_and_a_copy_there_never_stands_in() {
         let tmp = tempdir().unwrap();
@@ -1285,7 +1332,7 @@ mod tests {
         retitle.title = Some("Use Redis 7".to_string());
         for err in [
             run_update(&retitle, root, TODAY, None).unwrap_err(),
-            run_status(&id_args(&moved, false), root, TODAY, None, true).unwrap_err(),
+            run_publish(&id_args(&moved, false), root, TODAY, None).unwrap_err(),
         ] {
             assert!(
                 matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("Move it into docs/adr/")),

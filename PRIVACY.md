@@ -351,9 +351,9 @@ The `actual adr` commands send one event per run:
   `publish`, `unpublish`, `delete`, `restore` and `update`: the command, the
   decision it acted on, whether that decision is AI-grouped and how many rows
   its group action covers, then the same outcome, exit code, terminal flag and
-  duration. Signed out, `accept`, `reject` and `restore` stop before they read
-  a decision and send the outcome `not_signed_in` with no decision, while
-  `publish`, `unpublish`, `delete` and `update` work on the files under
+  duration. Signed out, `accept`, `reject`, `restore` and `unpublish` stop
+  before they read a decision and send the outcome `not_signed_in` with no
+  decision, while `publish`, `delete` and `update` work on the files under
   `docs/adr/` and send no event.
 - `actual.adr.created` from each run of `adr create` (and its alias
   `adr new`): where the decision went (`local` files under `docs/adr/` signed
