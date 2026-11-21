@@ -851,7 +851,7 @@ pub enum AdrAction {
     /// Publish a decision so it governs
     Publish(AdrIdArgs),
 
-    /// Move a decision back to draft
+    /// Move a decision in Actual AI back to draft
     Unpublish(AdrIdArgs),
 
     /// Delete a decision: its file signed out; signed in, archive it as
@@ -995,8 +995,9 @@ pub struct AdrCreateArgs {
     pub scope: Vec<String>,
 
     /// `accepted` governs at once; `draft` is read by no check until it's
-    /// published. Signed out it defaults to accepted. Signed in it defaults
-    /// to accepted at a terminal and draft when no person is at one.
+    /// published. Signed out only `accepted` is taken, since a draft lives
+    /// in Actual AI. Signed in it defaults to accepted at a terminal and
+    /// draft when no person is at one.
     #[arg(long, value_enum)]
     pub status: Option<crate::api::adr_types::SaveStatus>,
 
