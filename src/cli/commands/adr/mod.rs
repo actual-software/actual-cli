@@ -5,14 +5,17 @@
 //! pathways. Signed out it works on the files under `docs/adr/`
 //! ([`signed_out`], with `create` in [`local`]), and each change brings the
 //! decision's rule file in step at once ([`refresh`]). Signed in it calls the
-//! decision routes with the session's token ([`cloud`]). `check`,
-//! `discover`, `normalize` and `refresh` read the files either way; for
-//! `discover` and `normalize` ([`adopt`]) a sign-in adds a comparison with
-//! Actual AI, and `normalize --push`.
+//! decision routes with the session's token ([`cloud`]), and `create --all`
+//! sends the files under `docs/adr/` that Actual AI doesn't have yet
+//! ([`batch`]). `check`, `discover`, `normalize` and `refresh` read the files
+//! either way; for `discover` and `normalize` ([`adopt`]) a sign-in adds a
+//! comparison with Actual AI, and `normalize --push`.
 
 mod adopt;
+mod batch;
 mod cloud;
 mod local;
+mod record;
 mod refresh;
 mod signed_out;
 mod telemetry;

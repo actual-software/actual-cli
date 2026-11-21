@@ -66,6 +66,11 @@ fn refuse_signed_in_flags(args: &AdrCreateArgs) -> Result<(), ActualError> {
         "`--file` sends a decision file to Actual AI, which needs `actual login`. Signed out, \
          a file under docs/adr/ needs no sending: `actual adr check` checks it, and once it's \
          normalized `actual adr refresh` (which the plugin's hooks run) writes its rule file."
+    } else if args.all {
+        "`--all` sends every decision file under docs/adr/ that Actual AI doesn't have yet, \
+         which needs `actual login`. Signed out, the files need no sending: `actual adr check` \
+         checks them, and `actual adr refresh` (which the plugin's hooks run) writes the rule \
+         file of each normalized one."
     } else if args.repo.is_some() {
         "`--repo` picks a connected repository in Actual AI, which needs `actual login`. \
          Signed out, `create` writes into docs/adr/ under `--root`."
@@ -779,8 +784,15 @@ mod tests {
             allow_duplicate: true,
             ..new_args("T", &["MUST: x"], &[])
         };
+        let tmp = tempdir().unwrap();
+        let all = AdrCreateArgs {
+            all: true,
+            root: Some(tmp.path().to_path_buf()),
+            ..AdrCreateArgs::default()
+        };
         for (args, flag) in [
             (file, "`--file`"),
+            (all, "`--all`"),
             (repo, "`--repo`"),
             (duplicate, "`--allow-duplicate`"),
         ] {
@@ -791,6 +803,8 @@ mod tests {
             );
             assert_eq!(err.exit_code(), 2);
         }
+        // Refused before anything is written.
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     /// A repository with a good pair, a decision file that fails the check,

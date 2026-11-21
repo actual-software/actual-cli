@@ -235,31 +235,34 @@ fn scope_text(decision: &Decision) -> String {
 
 /// The decision `create` saved.
 #[derive(Debug, Serialize)]
-struct Created {
-    adr_id: String,
+pub(super) struct Created {
+    pub(super) adr_id: String,
     /// `accepted` or `draft`, as it was saved.
-    status: String,
-    title: String,
-    repo_unique_id: String,
+    pub(super) status: String,
+    pub(super) title: String,
+    pub(super) repo_unique_id: String,
 }
 
 /// What `adr create` did, for `--json`.
 #[derive(Debug, Serialize)]
-struct CreateOutcome {
+pub(super) struct CreateOutcome {
     #[serde(flatten)]
-    created: Created,
+    pub(super) created: Created,
     #[serde(skip_serializing_if = "Option::is_none")]
-    files: Option<RenameOutcome>,
+    pub(super) files: Option<RenameOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    scope_problem: Option<String>,
+    pub(super) scope_problem: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    publish_problem: Option<String>,
-    /// The status the pushed files had, when the save gave them another.
+    pub(super) publish_problem: Option<String>,
+    /// The status the sent files had, when the save gave them another.
     #[serde(skip_serializing_if = "Option::is_none")]
-    local_status_was: Option<String>,
+    pub(super) local_status_was: Option<String>,
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
+    if args.all {
+        return super::batch::exec_create_all(args);
+    }
     if args.deciders.is_some() {
         return Err(ActualError::AdrPathway(
             "`--deciders` writes a decision file's Deciders line, and a decision in Actual AI \
@@ -498,10 +501,8 @@ async fn scope_and_publish(
 }
 
 /// Save a decision file as the web app's Import does, which keeps the whole
-/// document and always saves a draft; then set the scope its header names,
-/// and publish it for an accepted save. A step after the save that fails
-/// leaves a draft and says how to finish. The pair is then renamed to the
-/// names the repository sync gives the saved decision.
+/// document and always saves a draft; then finish the save as
+/// [`finish_file_save`] does, renaming the pair.
 async fn create_from_file(
     session: &Session,
     repo: &Repo,
@@ -510,14 +511,55 @@ async fn create_from_file(
     doc: &ContextFile,
     status: SaveStatus,
 ) -> Result<CreateOutcome, ActualError> {
-    let adr_id = session
+    let imported = session
         .client
         .import_decision(&ImportRequest {
             organization_id: session.org_id.clone(),
             repo_unique_id: repo.id.clone(),
             markdown: file.body.clone(),
+            source_path: None,
         })
         .await?;
+    Ok(finish_file_save(
+        session,
+        repo,
+        root,
+        file,
+        doc,
+        status,
+        &imported.adr_id,
+        Rename::Always,
+    )
+    .await)
+}
+
+/// Which saves give a file's pair the names the repository sync gives the
+/// saved decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rename {
+    /// Every save, as `create --file` does.
+    Always,
+    /// A save that ends accepted. A draft keeps its file's name, since the
+    /// sync deletes a merged file named for a draft.
+    IfAccepted,
+    /// None, because the sync replaces the file once the decision governs.
+    Never,
+}
+
+/// After a file's import as `adr_id`: set the scope its header names, and
+/// publish it for an accepted save. A step that fails leaves a draft and
+/// says how to finish. The pair is then renamed as `rename` says.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finish_file_save(
+    session: &Session,
+    repo: &Repo,
+    root: &Path,
+    file: &DecisionFile,
+    doc: &ContextFile,
+    status: SaveStatus,
+    adr_id: &str,
+    rename: Rename,
+) -> CreateOutcome {
     let paths = file
         .meta
         .as_ref()
@@ -526,31 +568,41 @@ async fn create_from_file(
     let finished = scope_and_publish(
         session,
         repo,
-        &adr_id,
+        adr_id,
         &paths,
         status == SaveStatus::Accepted,
     )
     .await;
     let saved = finished.saved;
     let title = stored_title(doc);
-    let files = files::rename_pair(root, file, &adr_id, &title, saved.as_str());
+    let renames = match rename {
+        Rename::Always => true,
+        Rename::IfAccepted => saved == SaveStatus::Accepted,
+        Rename::Never => false,
+    };
+    let files = renames.then(|| files::rename_pair(root, file, adr_id, &title, saved.as_str()));
     let local_status_was = file
         .meta
         .as_ref()
         .and_then(|meta| meta.status.clone())
-        .filter(|was| was != saved.as_str() && !files.renamed.is_empty());
-    Ok(CreateOutcome {
+        .filter(|was| {
+            was != saved.as_str()
+                && files
+                    .as_ref()
+                    .is_some_and(|files| !files.renamed.is_empty())
+        });
+    CreateOutcome {
         created: Created {
-            adr_id,
+            adr_id: adr_id.to_string(),
             status: saved.as_str().to_string(),
             title,
             repo_unique_id: repo.id.clone(),
         },
-        files: Some(files),
+        files,
         scope_problem: finished.scope_problem,
         publish_problem: finished.publish_problem,
         local_status_was,
-    })
+    }
 }
 
 /// Give a just-saved decision the scope `paths`, as the web app's Edit does:
