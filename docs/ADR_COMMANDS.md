@@ -13,7 +13,7 @@ actual adr create --all               # signed in, send every decision file Actu
 actual adr refresh                    # bring .actual/rules/ in step, as the plugin's hooks do
 ```
 
-This page describes the CLI on `main`. The signed-out pathways of `list`, `show`, `update`, `publish` and `delete`, `create` as one command with `new` as its alias, `create --all`, and `refresh` arrive in the first release after 0.16.0. In 0.16.0, as in 0.15.0, `new` and `check` are the commands that work signed out.
+This page describes the CLI on `main`. The signed-out pathways of `list`, `show`, `update`, `publish` and `delete`, `create` as one command with `new` as its alias, `create --all`, `refresh`, `discover` and `normalize` arrive in the first release after 0.16.0. In 0.16.0, as in 0.15.0, `new` and `check` are the commands that work signed out.
 
 ## The two pathways
 
