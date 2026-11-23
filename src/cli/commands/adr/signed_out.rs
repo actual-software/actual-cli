@@ -459,7 +459,7 @@ fn run_update(
         }
     }
     let rewritten = format!(
-        "{}\n{}",
+        "{}\n{}\n",
         render_header(&header),
         context_file::render(&changed)
     );
@@ -919,6 +919,32 @@ mod tests {
         args.context = vec!["Three engines run in production.".to_string()];
         let text = run_update(&args, root, TODAY, Some(records.path())).unwrap();
         assert!(!text.contains("rule file"), "{text}");
+    }
+
+    #[test]
+    fn update_writes_the_file_back_ending_with_one_newline() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let id = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use it."],
+            SaveStatus::Accepted,
+        );
+        let path = root
+            .join(DECISION_DIR)
+            .join(decision_doc_file_name(&id, "Use Postgres"));
+        let ends_once = |text: &str| text.ends_with('\n') && !text.ends_with("\n\n");
+        let mut args = update_args(&id);
+        args.context = vec!["One store.".to_string()];
+        run_update(&args, root, TODAY, None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(ends_once(&text), "{text:?}");
+        // A file written without one, as an earlier build did, gains it.
+        std::fs::write(&path, text.trim_end()).unwrap();
+        args.context = vec!["Still one store.".to_string()];
+        run_update(&args, root, TODAY, None).unwrap();
+        assert!(ends_once(&std::fs::read_to_string(&path).unwrap()));
     }
 
     #[test]
