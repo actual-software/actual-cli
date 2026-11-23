@@ -74,6 +74,8 @@ git diff HEAD | actual impl-check       # check a diff from stdin
 
 Each check reports one of four outcomes: `conforming`, `conflicting`, `requires_decision` (the plan deliberately supersedes a rule and needs human review) or `not_checked`. Only `conflicting` exits non-zero, so a CI job that has to tell "checked and clean" from "could not check" should read the `status` field from `--json`. To judge your rules, the checks need a runner: the Claude Code CLI by default, or any other that `actual runners` lists.
 
+`actual stats` shows how enforcement went on your machine: gate rounds from hooks and direct runs, how many blocked, and per ADR the checks, breaches and overrides, with overrides grouped by reason. It reads two local logs and needs no sign-in or network. `--since 24h`, `7d` (the default), `4w` or `all` sets the period, `--repo <path>` keeps one repository's rules, and `--json` prints the same report as JSON.
+
 ## Filtering rules
 
 `actual rules` shows which of your rules apply where:

@@ -459,6 +459,10 @@ pub enum Command {
     /// Report what Actual AI did in a coding session
     Session(SessionArgs),
 
+    /// How ADR enforcement went on this machine: gate rounds, blocks,
+    /// breaches and overrides per ADR, read from local logs only
+    Stats(StatsArgs),
+
     /// Internal: drain the scope-telemetry spool once, then exit.
     ///
     /// Spawned as a detached child process by `rules select`, `plan-check`,
@@ -1410,6 +1414,52 @@ pub struct RulesBriefArgs {
     /// brief carried. The brief itself is unchanged.
     #[arg(long, requires = "codex_hook")]
     pub no_brief_notice: bool,
+}
+
+/// Arguments for the `stats` command
+#[derive(Parser, Debug)]
+pub struct StatsArgs {
+    /// How far back to look: a count of hours, days or weeks such as `24h`,
+    /// `7d` or `4w`, or `all` for everything the logs still hold
+    #[arg(long, value_name = "PERIOD", default_value = "7d", value_parser = parse_since)]
+    pub since: Since,
+
+    /// Count only rounds and overrides for the rules directory inside this
+    /// repository
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Print the report as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The period `actual stats` reports on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Since {
+    All,
+    Last(chrono::TimeDelta),
+}
+
+fn parse_since(value: &str) -> Result<Since, String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "all" {
+        return Ok(Since::All);
+    }
+    let invalid = || format!("expected a period such as 24h, 7d or 4w, or all; got `{value}`");
+    let split = value.len().saturating_sub(1);
+    let count: i64 = value[..split]
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(invalid)?;
+    let delta = match &value[split..] {
+        "h" => chrono::TimeDelta::try_hours(count),
+        "d" => chrono::TimeDelta::try_days(count),
+        "w" => chrono::TimeDelta::try_weeks(count),
+        _ => None,
+    };
+    delta.map(Since::Last).ok_or_else(invalid)
 }
 
 /// Arguments for the `session` command
@@ -3810,6 +3860,44 @@ mod parse_tests {
     }
 
     // ---- SessionSummaryArgs / `session summary` parsing tests ----
+
+    fn stats_args_from(argv: &[&str]) -> Result<StatsArgs, clap::Error> {
+        let argv = [&["actual", "stats"], argv].concat();
+        StatsArgs::try_parse_from(&argv[1..])
+    }
+
+    #[test]
+    fn test_stats_defaults_to_the_last_seven_days() {
+        let args = stats_args_from(&[]).unwrap();
+        assert_eq!(args.since, Since::Last(chrono::TimeDelta::days(7)));
+        assert_eq!((args.repo, args.json), (None, false));
+    }
+
+    #[test]
+    fn test_stats_since_takes_hours_days_weeks_or_all() {
+        let since = |value: &str| {
+            stats_args_from(&["--since", value])
+                .map(|args| args.since)
+                .ok()
+        };
+        assert_eq!(
+            since("24h"),
+            Some(Since::Last(chrono::TimeDelta::hours(24)))
+        );
+        assert_eq!(since("30D"), Some(Since::Last(chrono::TimeDelta::days(30))));
+        assert_eq!(since("4w"), Some(Since::Last(chrono::TimeDelta::weeks(4))));
+        assert_eq!(since("all"), Some(Since::All));
+        for bad in ["", "d", "0d", "-1d", "7", "7y", "1.5d", "99999999999999w"] {
+            assert_eq!(since(bad), None, "{bad:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn test_stats_takes_repo_and_json() {
+        let args = stats_args_from(&["--repo", "/repo", "--json"]).unwrap();
+        assert_eq!(args.repo.as_deref(), Some(std::path::Path::new("/repo")));
+        assert!(args.json);
+    }
 
     /// Extract `session summary` arguments, or `None` when the command line
     /// does not parse to one.
