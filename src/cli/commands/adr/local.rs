@@ -676,6 +676,15 @@ mod tests {
         // The refresh recorded the rule file it wrote.
         let record = super::super::refresh::load(records.path(), tmp.path());
         assert!(record.rules.contains_key(&written.adr_id));
+
+        // The rule file records the doc it came from, so `discover` tells
+        // the pair from a synced one and sees it current.
+        let rule = files::read_decision_file(&rule_file).unwrap();
+        let source = rule.source.unwrap();
+        assert_eq!(source.path, format!("{DECISION_DIR}/{name}"));
+        let entries = crate::adr::discovery::discover(tmp.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].state, crate::adr::discovery::State::Managed);
     }
 
     #[test]

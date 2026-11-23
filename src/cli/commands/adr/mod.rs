@@ -442,10 +442,19 @@ mod tests {
             "Ana",
         ]));
         assert!(matches!(err, Err(ActualError::AdrPathway(_))), "{err:?}");
-        // `check` and `refresh` read the files signed in too.
+        // `check`, `discover`, `normalize` and `refresh` read the files signed
+        // in too.
         let repo = tempdir().unwrap();
         let root = repo.path().to_str().unwrap();
         exec(&parse(&["check", "--root", root, "--no-cloud"])).unwrap();
+        exec(&parse(&["discover", "--root", root, "--no-cloud"])).unwrap();
+        let _ = exec(&parse(&[
+            "normalize",
+            "--all",
+            "--root",
+            root,
+            "--no-model",
+        ]));
         exec(&parse(&["refresh", "--root", root, "--json"])).unwrap();
     }
 
