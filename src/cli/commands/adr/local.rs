@@ -103,9 +103,9 @@ pub(super) fn write_new(
 
 /// Check the decision the flags describe, then write its file under
 /// `docs/adr/` with a new local id, as the repository sync lays it out, and
-/// bring its rule file in step. The decision is accepted, as every file the
-/// CLI writes there is. Nothing is left behind when the rule file can't be
-/// written. `creation` notes the status and policy count as they're known.
+/// bring its rule file in step. The decision is accepted, as every file
+/// `create` writes there is. Nothing is left behind when the rule file can't
+/// be written. `creation` notes the status and policy count as they're known.
 fn write_new_noting(
     args: &AdrCreateArgs,
     root: &Path,

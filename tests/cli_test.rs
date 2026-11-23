@@ -3419,7 +3419,7 @@ fn test_adr_commands_work_on_docs_adr_signed_out() {
     assert!(run(&["update", &id, "--title", "Use Postgres 16"]).contains("Updated"));
     assert_eq!(count(".actual/rules"), 1);
 
-    // No command leaves a file under docs/adr/ in a status other than accepted.
+    // None of these leaves a file under docs/adr/ in a status other than accepted.
     assert!(refused(&["unpublish", &id], 2).contains("actual adr delete"));
     let draft = refused(
         &[
