@@ -765,7 +765,7 @@ there it can reach the provider running the agent.
 | `session_id`, `round` | The agent session's id and that gate's round count in the session, on hook rounds inside a session only |
 | `rules_dir` | The absolute path of the rules directory the check read |
 | `decision` | `allow`, `warn` or `block` |
-| `adrs` | Each ADR the round judged, by its rule file's document slug, with the strongest verdict any of its rules got: `followed`, `not_applicable`, `conflicting` or `requires_decision` |
+| `adrs` | Each ADR the round judged, by its rule file's document slug, with the strongest verdict any of its rules got: `followed`, `not_applicable`, `conflicting` or `requires_decision`. Empty on a hook call whose applicable rules were all already cleared or overridden in the session |
 
 The log holds no plan, diff, rule text or judge's reasoning, and no override reason. It and its lock file, `enforcement.lock`, are readable only by you (`0600`). It keeps at most 90 days and 10 MB of rounds: when a new line would pass either limit, the oldest lines are dropped until about 89 days and 9 MB remain.
 
