@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -185,6 +186,25 @@ pub struct ConnectedRepo {
     pub repo_id: String,
 }
 
+/// A signed-in refresh's lookup that found no connected repository for the
+/// organization and origin remote, and why, which a later refresh repeats
+/// only once it's old enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unresolved {
+    pub org_id: String,
+    pub remote: String,
+    pub reason: String,
+    pub at: DateTime<Utc>,
+}
+
+impl Unresolved {
+    /// Whether `self` found what `last` did, for the same organization and
+    /// remote, so a person has heard about it already.
+    pub fn repeats(&self, last: &Unresolved) -> bool {
+        self.org_id == last.org_id && self.remote == last.remote && self.reason == last.reason
+    }
+}
+
 /// What the refresh remembers about one checkout.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
@@ -198,6 +218,8 @@ pub struct Record {
     pub unnormalized: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connected_repo: Option<ConnectedRepo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<Unresolved>,
     /// [`paths_fingerprint`] of the files `create --all` would send, as a
     /// signed-in refresh last listed them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
