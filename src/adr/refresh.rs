@@ -283,8 +283,8 @@ pub fn in_drafts(path: &Path) -> bool {
     path.starts_with(Path::new(DECISION_DIR).join("drafts"))
 }
 
-/// Whether a file is an index, a README or a template by its name, as
-/// `adr discover` reads names. Only a file with no ADR header is judged so.
+/// Whether a file is an index, a README or a template by its name. Only a
+/// file with no ADR header is judged so.
 fn listed_apart(path: &Path) -> bool {
     let stem = path
         .file_stem()
