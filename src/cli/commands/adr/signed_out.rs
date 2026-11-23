@@ -20,6 +20,7 @@ use super::local::{exec_check, exec_create, render_applied};
 use super::refresh::{exec_refresh, record_dir, refresh_decision};
 use super::{json_text, telemetry, today};
 use crate::adr::context_file::{self, js_trim, ContextFile, Policy};
+use crate::adr::discovery;
 use crate::adr::files::{self, split_header, write_atomic, DecisionFile, DECISION_DIR};
 use crate::adr::header::{description_for, render_header, AdrHeader, REPOSITORY_ROOT};
 use crate::adr::names::decision_doc_file_name;
@@ -284,9 +285,9 @@ struct Changed {
     rule_files: Applied,
 }
 
-/// What the rule file of `file`'s decision is written from, while the file
-/// reads as a decision.
-fn rule_source(file: &DecisionFile, doc: &ContextFile) -> RuleSource {
+/// What the rule file of `file`'s decision, under `root`, is written from,
+/// while the file reads as a decision.
+fn rule_source(root: &Path, file: &DecisionFile, doc: &ContextFile) -> RuleSource {
     let meta = file.meta.clone().unwrap_or_default();
     RuleSource {
         adr_id: file.adr_id().unwrap_or_default().to_string(),
@@ -295,6 +296,7 @@ fn rule_source(file: &DecisionFile, doc: &ContextFile) -> RuleSource {
         scope_root: meta.root.unwrap_or_else(|| REPOSITORY_ROOT.to_string()),
         scope_paths: meta.paths,
         policies: doc.policies.clone(),
+        doc: Some(discovery::relative(root, &file.path)),
     }
 }
 
@@ -427,7 +429,7 @@ fn run_update(
     }
     let shown = relative(root, &file.path);
     let doc = rewritable(&file, &shown)?;
-    let before = fingerprint(&rule_source(&file, &doc));
+    let before = fingerprint(&rule_source(root, &file, &doc));
     let changed = edited(&doc, &edit, &adr_id)?;
     // The save check normalizes the text and stamps today's date and its own
     // status; the file keeps its own date and Status line.
@@ -466,7 +468,7 @@ fn run_update(
         std::fs::remove_file(&file.path)?;
     }
     let file = files::read_decision_file(&path)?;
-    let after = fingerprint(&rule_source(&file, &changed));
+    let after = fingerprint(&rule_source(root, &file, &changed));
     let applied = refresh_decision(root, &adr_id, today, record, before != after);
     let shown = relative(root, &path);
     if args.api.json {
@@ -681,6 +683,13 @@ mod tests {
         out
     }
 
+    /// Whether `adr discover` reads decision `id` as this CLI's and current.
+    fn managed(root: &Path, id: &str) -> bool {
+        discovery::discover(root).into_iter().any(|entry| {
+            entry.adr_id.as_deref() == Some(id) && entry.state == discovery::State::Managed
+        })
+    }
+
     fn list_args() -> AdrListArgs {
         AdrListArgs {
             repo: None,
@@ -879,6 +888,12 @@ mod tests {
         let rule = rule_text(root, &id).unwrap();
         assert!(rule.contains("SHOULD: Use SQLite in tests."), "{rule}");
         assert!(rule.contains("`services/**`"), "{rule}");
+        // The rule file names the renamed file, so `adr discover` reads the
+        // pair as this CLI's and current.
+        let rule_file = files::find_rule_file(root, &id).unwrap();
+        let source = files::read_decision_file(&rule_file).unwrap().source;
+        assert_eq!(source.unwrap().path, discovery::relative(root, &renamed));
+        assert!(managed(root, &id));
 
         // The whole policy list, one kept by id and one new; context cleared.
         let mut args = update_args(&id);
@@ -975,6 +990,7 @@ mod tests {
         );
         assert!(file.body.contains("Status: accepted"), "{}", file.body);
         assert!(rule_text(root, &id).unwrap().contains("SHOULD: Use Redis."));
+        assert!(managed(root, &id));
         let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("already accepted")),

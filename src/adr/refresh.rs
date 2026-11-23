@@ -14,6 +14,12 @@
 //! its rule file or first met it, and a fingerprint that moved means the
 //! decision changed. A rule file the record doesn't know is recorded as it
 //! stands.
+//!
+//! A rule file written from a decision file under `docs/adr/` records that
+//! file as its source ([`crate::adr::provenance`]), as `actual adr new` and
+//! `actual adr normalize` write one, so `actual adr discover` reads the pair
+//! as this CLI's. One written from Actual AI has no record, as the sync's
+//! have none.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,11 +27,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::adr::context_file::Policy;
+use crate::adr::context_file::{ContextFile, Policy};
+use crate::adr::discovery;
 use crate::adr::files::{self, DecisionFile, DECISION_DIR, RULES_DIR};
 use crate::adr::header::{description_for, render_header, AdrHeader, REPOSITORY_ROOT};
 use crate::adr::names::rule_file_name;
 use crate::adr::pair::rule_spelling;
+use crate::adr::provenance::{digest, Source};
 use crate::adr::rule_body::{render_rule_body, rule_id_prefix, scope_line};
 use crate::adr::save_check::check_markdown;
 
@@ -52,6 +60,9 @@ pub struct RuleSource {
     /// Globs relative to `scope_root`; a `!` prefix excludes.
     pub scope_paths: Vec<String>,
     pub policies: Vec<Policy>,
+    /// The decision file's path from the repository root, for a decision
+    /// read from `docs/adr/`; `None` for one from Actual AI.
+    pub doc: Option<String>,
 }
 
 /// `source`'s rule file: its name under `.actual/rules/` and its text. `name`
@@ -69,7 +80,10 @@ pub fn render_rule_file(source: &RuleSource, name: Option<&str>) -> (String, Str
         status: source.status.clone(),
         scope_root: source.scope_root.clone(),
         scope_paths: source.scope_paths.clone(),
-        source: None,
+        source: source
+            .doc
+            .as_deref()
+            .map(|path| Source::local(path, source_digest(source))),
     });
     let rules: Vec<(&str, &str)> = source
         .policies
@@ -85,8 +99,24 @@ pub fn render_rule_file(source: &RuleSource, name: Option<&str>) -> (String, Str
     (name, format!("{header}\n{body}"))
 }
 
+/// The [`digest`] a rule file records of what `source` governs.
+fn source_digest(source: &RuleSource) -> String {
+    let doc = ContextFile {
+        title: source.title.clone(),
+        policies: source.policies.clone(),
+        ..ContextFile::default()
+    };
+    digest(
+        &doc,
+        &source.status,
+        &source.scope_root,
+        &source.scope_paths,
+    )
+}
+
 /// What the record keeps for `source`: the SHA-256 of its rule file under
-/// the sync's name, which moves with anything the file would say.
+/// the sync's name, which moves with anything the file would say, a move of
+/// its decision file included.
 pub fn fingerprint(source: &RuleSource) -> String {
     sha256_hex(render_rule_file(source, None).1.as_bytes())
 }
@@ -269,8 +299,11 @@ pub fn scan_docs(root: &Path, today: &str) -> DocScan {
         match read_normalized(&file, file.is_draft(), today) {
             Ok(source) => scan.decisions.push(DocDecision {
                 governs: file.meta.as_ref().is_some_and(|meta| meta.is_active()),
+                source: RuleSource {
+                    doc: Some(discovery::relative(root, &path)),
+                    ..source
+                },
                 path,
-                source,
             }),
             Err(reasons) => scan.unnormalized.push(Unnormalized {
                 path: shown,
@@ -339,6 +372,7 @@ pub fn read_normalized(
                 .unwrap_or_else(|| REPOSITORY_ROOT.to_string()),
             scope_paths: meta.paths.clone(),
             policies: doc.policies,
+            doc: None,
         }),
         Ok(_) => Err(reasons),
         Err(problems) => {
@@ -679,6 +713,7 @@ mod tests {
                 level: RuleLevel::MustNot,
                 statement: statement.to_string(),
             }],
+            doc: None,
         }
     }
 
@@ -720,6 +755,44 @@ mod tests {
             fingerprint(&src),
             fingerprint(&source("Use Postgres", "Add a cache."))
         );
+    }
+
+    #[test]
+    fn a_rule_file_from_a_decision_file_records_it_as_adr_new_does() {
+        // Written from Actual AI: no record, as the sync writes none.
+        let cloud = source("Use Postgres", "Add a second database.");
+        let (name, text) = render_rule_file(&cloud, None);
+        let read = files::decision_file_from_text(Path::new(&name), &text);
+        assert_eq!(read.source, None);
+
+        // Written from docs/adr/: the rule file `adr new` and `adr normalize`
+        // write for the same decision, byte for byte.
+        let local = RuleSource {
+            doc: Some("docs/adr/a.md".to_string()),
+            ..cloud
+        };
+        let (name, text) = render_rule_file(&local, None);
+        let doc = ContextFile {
+            title: local.title.clone(),
+            policies: local.policies.clone(),
+            ..ContextFile::default()
+        };
+        let decision = crate::adr::pair::Decision {
+            doc: &doc,
+            adr_id: ID,
+            status: "accepted",
+            root: REPOSITORY_ROOT,
+            scope: &[],
+        };
+        assert_eq!(text, decision.rule_text(&name, "docs/adr/a.md"));
+        let read = files::decision_file_from_text(Path::new(&name), &text);
+        assert_eq!(read.source.unwrap().path, "docs/adr/a.md");
+        // A decision file that moves moves the fingerprint.
+        let moved = RuleSource {
+            doc: Some("docs/adr/b.md".to_string()),
+            ..local.clone()
+        };
+        assert_ne!(fingerprint(&local), fingerprint(&moved));
     }
 
     #[test]
@@ -869,6 +942,14 @@ mod tests {
         assert_eq!(record.rules[ID].origin, Origin::DocsAdr);
         // Nothing changed, so nothing is written again.
         assert_eq!(run(root, &mut record), Applied::default());
+        // The rule file records its decision file, so `adr discover` reads
+        // the pair as this CLI's and current.
+        let managed = |root: &Path| {
+            discovery::discover(root).into_iter().any(|entry| {
+                entry.adr_id.as_deref() == Some(ID) && entry.state == discovery::State::Managed
+            })
+        };
+        assert!(managed(root));
 
         // An edit to the decision rewrites its rule file.
         std::fs::write(
@@ -885,9 +966,21 @@ mod tests {
         assert_eq!(edited.rewritten, [format!("{RULES_DIR}/{name}")]);
         let text = std::fs::read_to_string(root.join(RULES_DIR).join(&name)).unwrap();
         assert!(text.contains("MUST NOT: Add a second database."), "{text}");
+        assert!(managed(root));
+
+        // A decision file that moves has its rule file written again, naming
+        // the file where it is now.
+        let moved = root.join("docs/adr/c.md");
+        std::fs::rename(&doc, &moved).unwrap();
+        assert_eq!(
+            run(root, &mut record).rewritten,
+            [format!("{RULES_DIR}/{name}")]
+        );
+        assert_eq!(record.rules[ID].path.as_deref(), Some("docs/adr/c.md"));
+        assert!(managed(root));
 
         // A deleted decision file takes its rule file with it.
-        std::fs::remove_file(&doc).unwrap();
+        std::fs::remove_file(&moved).unwrap();
         let gone = run(root, &mut record);
         assert_eq!(gone.removed, [format!("{RULES_DIR}/{name}")]);
         assert!(record.rules.is_empty());

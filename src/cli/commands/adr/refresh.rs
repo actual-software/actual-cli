@@ -401,6 +401,7 @@ fn rule_sources(decisions: &[Decision]) -> Vec<(String, Option<RuleSource>)> {
                         statement: policy.statement.clone(),
                     })
                     .collect(),
+                doc: None,
             });
             (decision.id.clone(), source)
         })
