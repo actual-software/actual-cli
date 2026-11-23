@@ -9,7 +9,9 @@
 //! opened under.
 //!
 //! A signed-in end adds the session's token totals per model, read from the
-//! transcript the envelope names; see [`super::session_usage`].
+//! transcript the envelope names; see [`super::session_usage`]. A repeated
+//! end is suppressed before the scan, so the totals are those at the last end
+//! reported, which lags a resumed session that completes no hook check.
 
 use crate::error::ActualError;
 
@@ -370,6 +372,61 @@ mod tests {
         for record in [&signed_out, &no_transcript, &signed_in] {
             assert!(!record.to_string().contains("private"), "{record}");
         }
+    }
+
+    /// An end repeated with no hook check between is suppressed before the
+    /// scan, so tokens added after the first end go unreported until a hook
+    /// check reopens the session.
+    #[test]
+    fn a_repeated_end_keeps_the_totals_of_the_last_reported_end() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::remove("ACTUAL_OTLP_FILE");
+        let _api = EnvGuard::set("ACTUAL_API_URL", "https://api.example.test");
+        let _endpoint = EnvGuard::set(
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "https://api.example.test/v1/logs",
+        );
+        crate::auth::store::save(&crate::telemetry::sign_in::tests::signed_in(
+            "org-a",
+            "token-a",
+            chrono::Duration::hours(1),
+            None,
+        ))
+        .unwrap();
+        let transcript = home.path().join("transcript.jsonl");
+        let message = |id: &str, input: u64| {
+            serde_json::json!({"type": "assistant", "message": {
+                "id": id, "model": "claude-opus", "usage": {"input_tokens": input}}})
+            .to_string()
+                + "\n"
+        };
+        let end = || {
+            let mut raw: serde_json::Value =
+                serde_json::from_str(&envelope("resumed", "resume")).unwrap();
+            raw["transcript_path"] = serde_json::json!(transcript);
+            report(&raw.to_string());
+            take_captured()
+        };
+        let input_tokens = |records: Vec<serde_json::Value>| {
+            assert_eq!(records.len(), 1, "{records:?}");
+            attributes(&records[0])["actual.usage.input_tokens"]["arrayValue"]["values"].clone()
+        };
+        take_captured();
+
+        std::fs::write(&transcript, message("m1", 3)).unwrap();
+        assert_eq!(input_tokens(end()), serde_json::json!([{"intValue": "3"}]));
+
+        let grown = message("m1", 3) + &message("m2", 5);
+        std::fs::write(&transcript, grown).unwrap();
+        assert!(end().is_empty());
+
+        record_check("resumed", false);
+        assert_eq!(input_tokens(end()), serde_json::json!([{"intValue": "8"}]));
     }
 
     #[test]
