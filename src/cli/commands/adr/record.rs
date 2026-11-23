@@ -49,9 +49,10 @@ pub(super) enum Outcome {
     WaitsForMerge,
     /// Accepted, so Actual AI owns the decision now.
     Accepted,
-    /// Left alone for a reason that holds until the file changes: its id or
-    /// a look-alike in Actual AI, a status that doesn't govern, the check, or
-    /// a refusal.
+    /// Left alone this time: its id or a look-alike in Actual AI, a status
+    /// that doesn't govern, the check, or a refusal. Any of those can lapse
+    /// with the file unchanged, so a skip holds nothing back from the next
+    /// run.
     Skipped,
 }
 
@@ -75,6 +76,12 @@ impl Entry {
             adr_id: adr_id.map(str::to_string),
             at: Utc::now(),
         }
+    }
+
+    /// Whether `text` went up when this entry was recorded: the same text,
+    /// saved as a draft or accepted rather than skipped.
+    pub(super) fn sent(&self, text: &str) -> bool {
+        self.outcome != Outcome::Skipped && self.text == text_hash(text)
     }
 }
 
