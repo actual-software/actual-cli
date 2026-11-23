@@ -819,9 +819,9 @@ pub enum CacheAction {
 #[derive(Parser, Debug)]
 #[command(
     after_help = "Signed out, the commands work on the decision files in docs/adr/. After \
-    `actual login` they work on your organization's decisions in Actual AI; restore, accept \
-    and reject need it. check, discover, normalize and refresh read the files either way. See \
-    docs/ADR_COMMANDS.md."
+    `actual login` they work on your organization's decisions in Actual AI; unpublish, \
+    restore, accept, reject, create --file and create --all need it. check, discover, normalize \
+    and refresh read the files either way. See docs/ADR_COMMANDS.md."
 )]
 pub struct AdrArgs {
     #[command(subcommand)]
