@@ -28,7 +28,12 @@ const NO_REASON: &str = "none";
 
 #[derive(Debug, Default, PartialEq, Serialize)]
 struct Rounds {
+    /// Rounds the judge ran in; every count below except `settled` is a
+    /// share of these.
     total: usize,
+    /// Lines with no ADR judged: a hook call with every applicable rule
+    /// already cleared or overridden, or a run where no rule applied.
+    settled: usize,
     plan: usize,
     #[serde(rename = "impl")]
     impl_: usize,
@@ -115,6 +120,10 @@ fn build(
     let mut totals = Rounds::default();
     let mut adrs: BTreeMap<String, AdrStats> = BTreeMap::new();
     for round in &rounds {
+        if round.adrs.is_empty() {
+            totals.settled += 1;
+            continue;
+        }
         totals.total += 1;
         *match round.gate {
             Gate::Plan => &mut totals.plan,
@@ -223,12 +232,12 @@ fn render(report: &Report, json: bool) -> String {
         ));
     }
     let r = &report.rounds;
-    if r.total == 0 && report.adrs.is_empty() && report.partial_coverage == 0 {
+    if r.total == 0 && r.settled == 0 && report.adrs.is_empty() && report.partial_coverage == 0 {
         out.push("No gate rounds or overrides recorded in this period.".to_string());
         return out.join("\n");
     }
     if r.total == 0 {
-        out.push("No gate rounds recorded in this period.".to_string());
+        out.push("No gate rounds judged in this period.".to_string());
     } else {
         out.push(format!(
             "Gate rounds: {} ({} plan, {} impl · {} from hooks, {} direct)",
@@ -268,6 +277,12 @@ fn render(report: &Report, json: bool) -> String {
         }
     }
     let mut notes = Vec::new();
+    if r.settled > 0 {
+        notes.push(format!(
+            "Checks with nothing to judge: {} (no rule applied, or every one was already cleared)",
+            r.settled
+        ));
+    }
     if report.overrides.total > 0 {
         let reasons: Vec<String> = report
             .overrides
@@ -395,6 +410,7 @@ mod tests {
             report.rounds,
             Rounds {
                 total: 4,
+                settled: 0,
                 plan: 2,
                 impl_: 2,
                 hook: 3,
@@ -640,7 +656,7 @@ mod tests {
 
         let expected = [
             "ADR enforcement, everything recorded",
-            "No gate rounds recorded in this period.",
+            "No gate rounds judged in this period.",
             "",
             "ADR    Checks  Breaches  Decisions  Overrides  Passed",
             "adr-a       0         0          0          1       -",
@@ -650,19 +666,67 @@ mod tests {
         assert_eq!(text, expected.join("\n"));
     }
 
+    /// A line with no ADR judged is a settled check: it stays out of the
+    /// round counts and the pass rate, and gets its own line.
     #[test]
-    fn test_render_rounds_without_adrs_has_no_table() {
+    fn test_settled_checks_stay_out_of_rounds_and_pass_rate() {
+        let dir = Path::new("/r");
+        let rounds = [
+            round(
+                Gate::Plan,
+                Mode::Hook,
+                dir,
+                Decision::Block,
+                &[("adr-a", Verdict::Conflicting)],
+            ),
+            round(Gate::Plan, Mode::Hook, dir, Decision::Allow, &[]),
+            round(Gate::Impl, Mode::Direct, dir, Decision::Warn, &[]),
+        ];
+        let report = build(&rounds, &[], None, None, true);
+
+        assert_eq!(
+            (
+                report.rounds.total,
+                report.rounds.settled,
+                report.rounds.hook
+            ),
+            (1, 2, 1)
+        );
+        assert_eq!(
+            (
+                report.rounds.allowed,
+                report.rounds.warned,
+                report.rounds.direct
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(report.rounds.pass_rate, Some(0.0));
+        let text = render(&report, false);
+        assert!(text.contains("Gate rounds: 1 (1 plan, 0 impl"), "{text}");
+        assert!(
+            text.ends_with("Checks with nothing to judge: 2 (no rule applied, or every one was already cleared)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_render_only_settled_checks() {
         let rounds = [round(
             Gate::Plan,
-            Mode::Direct,
+            Mode::Hook,
             Path::new("/r"),
             Decision::Allow,
             &[],
         )];
         let text = render(&build(&rounds, &[], None, None, true), false);
 
-        assert!(!text.contains("Checks"), "{text}");
-        assert!(text.ends_with("100% passed"), "{text}");
+        let expected = [
+            "ADR enforcement, everything recorded",
+            "No gate rounds judged in this period.",
+            "",
+            "Checks with nothing to judge: 1 (no rule applied, or every one was already cleared)",
+        ];
+        assert_eq!(text, expected.join("\n"));
     }
 
     #[test]
