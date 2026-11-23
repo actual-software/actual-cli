@@ -974,21 +974,21 @@ pub enum AuditKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AuditEntry {
-    at: DateTime<Utc>,
+pub(crate) struct AuditEntry {
+    pub(crate) at: DateTime<Utc>,
     session_id: String,
     /// The rules directory this event applies to — part of the session's
     /// identity (see the module doc), and included here so a human reading
     /// the log can tell two same-named rules in different repos apart.
-    rules_dir: String,
+    pub(crate) rules_dir: String,
     /// `"{doc_slug}::{rule_id}"` for [`AuditKind::Override`] and
     /// [`AuditKind::RoundLimit`]. Empty for [`AuditKind::PartialCoverage`],
     /// which is not about any one rule — see `judged`/`total` instead.
-    key: String,
+    pub(crate) key: String,
     /// `None` for an [`AuditKind::Override`] issued without a reason.
-    reason: Option<String>,
+    pub(crate) reason: Option<String>,
     round: u32,
-    kind: AuditKind,
+    pub(crate) kind: AuditKind,
     /// Provenance of an [`AuditKind::Override`]; absent for other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<OverrideSource>,
@@ -997,7 +997,7 @@ struct AuditEntry {
     gate: Option<OverrideGate>,
     /// The reason code of an [`AuditKind::Override`]; see [`Override::reason_code`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reason_code: Option<OverrideReasonCode>,
+    pub(crate) reason_code: Option<OverrideReasonCode>,
     /// How many candidate rules were actually judged this round. Present
     /// only for [`AuditKind::PartialCoverage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1015,6 +1015,18 @@ pub(crate) fn audit_log_path() -> Option<PathBuf> {
     crate::config::paths::config_dir()
         .ok()
         .map(|dir| dir.join(AUDIT_LOG_NAME))
+}
+
+/// Every readable audit-log entry at or after `since`, oldest first, for
+/// `actual stats`. Lines that don't parse are skipped.
+pub(crate) fn read_audit(since: Option<DateTime<Utc>>) -> Vec<AuditEntry> {
+    audit_log_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<AuditEntry>(line).ok())
+        .filter(|entry| since.is_none_or(|since| entry.at >= since))
+        .collect()
 }
 
 /// Append one line to the durable, never-pruned audit log. Best-effort: this

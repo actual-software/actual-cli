@@ -198,6 +198,7 @@ pub fn applies_to(command: &Command) -> bool {
         Command::Session(session) => match &session.action {
             SessionAction::Summary(args) => !(args.claude_hook || args.codex_hook || args.json),
         },
+        Command::Stats(args) => !args.json,
         Command::Adr(adr) => match &adr.action {
             AdrAction::Check(args) => !args.api.json,
             AdrAction::Discover(args) => !args.api.json,
@@ -738,6 +739,7 @@ mod tests {
             &["rules", "eval", "--golden", "golden.json"],
             &["rules", "brief", "--file", "src/lib.rs"],
             &["session", "summary", "--session", "s1"],
+            &["stats"],
             &["adr", "new", "T"],
             &["adr", "check"],
             &["adr", "discover"],
@@ -785,6 +787,7 @@ mod tests {
             ],
             &["session", "summary", "--claude-hook"],
             &["session", "summary", "--session", "s1", "--json"],
+            &["stats", "--json"],
             &["adr", "new", "T", "--json"],
             &["adr", "check", "--json"],
             &["adr", "discover", "--json"],

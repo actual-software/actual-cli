@@ -2418,6 +2418,39 @@ fn test_session_summary_hook_reports_the_areas_with_no_adr() {
     );
 }
 
+/// With nothing recorded, `stats` says so; `--json` carries zero counts; a
+/// period it can't read is a usage error.
+#[test]
+fn test_stats_reports_an_empty_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let output = actual_in(dir.path(), config_dir.path(), &["stats", "--since", "all"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "ADR enforcement, everything recorded\nNo gate rounds or overrides recorded in this period.\n"
+    );
+
+    let output = actual_in(dir.path(), config_dir.path(), &["stats", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["rounds"]["total"], 0);
+    assert_eq!(value["rounds"]["pass_rate"], serde_json::Value::Null);
+
+    actual_in(dir.path(), config_dir.path(), &["stats", "--since", "7y"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
 #[test]
 fn test_session_summary_needs_a_session_or_the_hook() {
     cmd()
