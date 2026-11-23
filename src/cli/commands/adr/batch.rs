@@ -610,9 +610,8 @@ impl Publishing<'_> {
 
     /// The draft `item` was saved as, when the record shows its current text
     /// went up and the read at the start shows that decision as a draft or
-    /// not at all, so a draft deleted in Actual AI isn't sent back while its
-    /// file is unchanged. A file waiting for the default branch counts only
-    /// with no person at the terminal, since a person's run accepts it.
+    /// not at all. A file waiting for the default branch counts only with no
+    /// person at the terminal, since a person's run accepts it.
     fn unchanged_draft(&self, item: &Pending<'_>) -> Option<String> {
         let entry = self.book.entry(&item.name)?;
         let waits = entry.outcome == Outcome::WaitsForMerge && !self.run.interactive;
