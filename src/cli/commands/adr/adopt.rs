@@ -19,6 +19,7 @@ use super::{interactive, json_text, runtime, today};
 use crate::adr::context_file::{js_trim, ContextFile};
 use crate::adr::discovery::{self, relative, Entry, State};
 use crate::adr::files::{self, DECISION_DIR, RULES_DIR};
+use crate::adr::header::{normalize_scope_root, REPOSITORY_ROOT};
 use crate::adr::names::{decision_doc_file_name, rule_file_name};
 use crate::adr::normalize::{self, Extraction, Plan, Question, Read, Settings};
 use crate::adr::overlap::ExistingDecision;
@@ -32,6 +33,7 @@ use crate::cli::ui::real_terminal::RealTerminal;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
+use crate::rules::scope::signals::PathGlob;
 use crate::runner::structured::StructuredRunner;
 
 // ── discover ───────────────────────────────────────────────────────────────
@@ -549,40 +551,53 @@ fn targets(
 /// The repository's files, listed once, for checking scope globs.
 struct RepoFiles<'a> {
     root: &'a Path,
+    /// The most files listed; past it a glob is taken to match.
+    limit: usize,
     files: OnceCell<Vec<String>>,
 }
 
 /// The most files listed for scope checks.
 const MAX_REPO_FILES: usize = 50_000;
 
-impl RepoFiles<'_> {
+impl<'a> RepoFiles<'a> {
+    fn new(root: &'a Path) -> Self {
+        RepoFiles {
+            root,
+            limit: MAX_REPO_FILES,
+            files: OnceCell::new(),
+        }
+    }
+
+    /// Every file git doesn't ignore, hidden ones included (a scope such as
+    /// `.github/workflows/**` is real), less git's own.
     fn list(&self) -> &[String] {
         self.files.get_or_init(|| {
             ignore::WalkBuilder::new(self.root)
+                .hidden(false)
+                .filter_entry(|entry| entry.file_name() != ".git")
                 .build()
                 .flatten()
                 .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
                 .map(|entry| relative(self.root, entry.path()))
-                .take(MAX_REPO_FILES)
+                .take(self.limit)
                 .collect()
         })
     }
 
-    /// Whether `glob` matches a file, or names a directory that holds one.
+    /// Whether `glob` matches a file, or names a directory that holds one,
+    /// by the scope index's rules (brace lists expand). A listing cut short
+    /// can't say no, so it says yes.
     fn matches(&self, glob: &str) -> bool {
         let glob = glob.trim_start_matches("./");
-        let pattern = glob::Pattern::new(glob).ok();
-        let options = glob::MatchOptions {
-            require_literal_separator: true,
-            ..glob::MatchOptions::new()
+        let pattern = PathGlob {
+            pattern: glob.to_string(),
         };
         let dir = format!("{}/", glob.trim_end_matches("/**").trim_end_matches('/'));
-        self.list().iter().any(|file| {
-            pattern
-                .as_ref()
-                .is_some_and(|p| p.matches_with(file, options))
-                || file.starts_with(&dir)
-        })
+        let files = self.list();
+        files.len() >= self.limit
+            || files
+                .iter()
+                .any(|file| pattern.matches_path(file) == Some(true) || file.starts_with(&dir))
     }
 
     /// The top-level directories, for a model to name a scope with.
@@ -591,6 +606,7 @@ impl RepoFiles<'_> {
             .list()
             .iter()
             .filter_map(|file| file.split_once('/').map(|(dir, _)| dir.to_string()))
+            .filter(|dir| !dir.starts_with('.'))
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
@@ -626,10 +642,7 @@ async fn run_normalize<R: StructuredRunner>(
             .or_else(|| map.get(&abs.display().to_string()))
             .cloned()
     };
-    let repo_files = RepoFiles {
-        root,
-        files: OnceCell::new(),
-    };
+    let repo_files = RepoFiles::new(root);
 
     let mut files: Vec<FileOutcome> = Vec::new();
     let mut converting: Vec<Prepared> = Vec::new();
@@ -672,7 +685,8 @@ async fn run_normalize<R: StructuredRunner>(
             _ => {}
         }
         let text = std::fs::read_to_string(&entry.path)?;
-        let read = normalize::read(&text);
+        let mut read = normalize::read(&text);
+        keep_declared_scope(&entry, &mut read.found);
         let mut merged = read.found.clone();
         if let Some(extraction) = keyed(&extracted, &rel, &entry.path) {
             merged = extraction.overlay(&read.found);
@@ -715,7 +729,12 @@ async fn run_normalize<R: StructuredRunner>(
                         .map_err(|e| e.to_string())
                         .and_then(normalize::from_model);
                     match answer {
-                        Ok(extraction) => {
+                        Ok(mut extraction) => {
+                            let found = &prepared.read.found;
+                            if found.scope.is_some() || found.is_uncertain("scope") {
+                                extraction.scope = None;
+                                extraction.uncertain.retain(|field| field != "scope");
+                            }
                             prepared.merged = extraction.overlay(&prepared.read.found);
                             prepared.by_model = true;
                         }
@@ -750,6 +769,51 @@ async fn run_normalize<R: StructuredRunner>(
     })
 }
 
+/// A decision written again keeps the scope it declares, and is asked about
+/// when that can't be read, rather than governing everything.
+fn keep_declared_scope(entry: &Entry, found: &mut Extraction) {
+    if !matches!(entry.state, State::Broken | State::MissingRule) {
+        return;
+    }
+    match declared_scope(entry) {
+        Some(scope) => found.scope = Some(scope),
+        None => found.uncertain.push("scope".to_string()),
+    }
+}
+
+/// The scope a decision already declares, as globs from the repository
+/// root: its doc's header's, or failing that its rule file's. `None` when
+/// neither has a header to read.
+fn declared_scope(entry: &Entry) -> Option<Vec<String>> {
+    let meta = |path: &Path| files::read_decision_file(path).ok()?.meta;
+    let meta = meta(&entry.path).or_else(|| meta(entry.rule_file.as_deref()?))?;
+    Some(repo_globs(
+        meta.root.as_deref().unwrap_or(REPOSITORY_ROOT),
+        &meta.paths,
+    ))
+}
+
+/// A header's `paths`, relative to its `root`, as globs from the repository
+/// root. A root with no paths, or only exclusions, covers all of the root.
+fn repo_globs(root: &str, paths: &[String]) -> Vec<String> {
+    let root = normalize_scope_root(root);
+    if root == REPOSITORY_ROOT {
+        return paths.to_vec();
+    }
+    let to_repo = |glob: &str| format!("{root}/{}", glob.trim_start_matches("./"));
+    let mut globs: Vec<String> = paths
+        .iter()
+        .map(|path| match path.strip_prefix('!') {
+            Some(excluded) => format!("!{}", to_repo(excluded)),
+            None => to_repo(path),
+        })
+        .collect();
+    if paths.iter().all(|path| path.starts_with('!')) {
+        globs.insert(0, format!("{root}/**"));
+    }
+    globs
+}
+
 /// Write a doc's rule file again from `doc`, the decision it reads as now.
 fn reindex(
     args: &AdrNormalizeArgs,
@@ -775,6 +839,7 @@ fn reindex(
         doc: &doc,
         adr_id: &adr_id,
         status: &status,
+        root: meta.root.as_deref().unwrap_or(REPOSITORY_ROOT),
         scope: &meta.paths,
     };
     let rule_path = entry.rule_file.clone().unwrap_or_else(|| {
@@ -893,6 +958,7 @@ async fn convert(
         doc: &ready.doc,
         adr_id: &adr_id,
         status: &ready.status,
+        root: REPOSITORY_ROOT,
         scope: &ready.scope,
     };
     let (doc_path, doc_name) = if args.rename {
@@ -1288,6 +1354,7 @@ mod tests {
             doc,
             adr_id: id,
             status: "accepted",
+            root: REPOSITORY_ROOT,
             scope: &[],
         };
         let path = adr(root, name, &decision.doc_text(name, &[]));
@@ -2025,22 +2092,174 @@ mod tests {
         assert!(unsaved_error(&clean).is_none());
     }
 
+    /// A pair whose header declares `paths` from `scope_root`.
+    fn scoped_pair(root: &Path, name: &str, id: &str, scope_root: &str, paths: &[&str]) -> PathBuf {
+        let doc = doc("Charge cards", "Charge cards through Stripe.");
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        let decision = Decision {
+            doc: &doc,
+            adr_id: id,
+            status: "accepted",
+            root: scope_root,
+            scope: &paths,
+        };
+        let path = adr(root, name, &decision.doc_text(name, &[]));
+        write(
+            &root.join(RULES_DIR).join(format!("rule-{name}")),
+            &decision.rule_text(&format!("rule-{name}"), &format!("docs/adr/{name}")),
+        );
+        path
+    }
+
+    #[test]
+    fn a_decision_written_again_keeps_the_scope_it_declares() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("services/payments/charge.rs"), "");
+        write(&root.join("services/api/src/main.rs"), "");
+        // Its body lost its policy; its header still names its scope.
+        let kept = scoped_pair(root, "a.md", ID, ".", &["services/payments/**"]);
+        let text = std::fs::read_to_string(&kept).unwrap();
+        write(&kept, &text.replace("Charge cards through Stripe.", ""));
+        // Its header is gone; its rule file still names its scope.
+        let gone = scoped_pair(root, "b.md", OTHER, "services/api", &["src/**"]);
+        write(&gone, "# Serve the API\n\nWe serve it from one binary.\n");
+        let states: Vec<State> = discovery::discover(root).iter().map(|e| e.state).collect();
+        assert_eq!(states, [State::Broken, State::Broken]);
+
+        let answers = root.join("answers.json");
+        write(
+            &answers,
+            r#"{"docs/adr/a.md": {"policies": ["MUST: Charge cards through Stripe."]},
+                "docs/adr/b.md": {"policies": ["MUST: Serve the API from one binary."],
+                                  "status": "accepted"}}"#,
+        );
+        let mut a = args(&[]);
+        a.answers = Some(answers);
+        let report = run(&a, root, None, None).unwrap();
+        for (name, scope) in [
+            ("a.md", "services/payments/**"),
+            ("b.md", "services/api/src/**"),
+        ] {
+            let written = file(&report, name);
+            assert_eq!(written.outcome, Outcome::Written, "{written:#?}");
+            assert_eq!(written.status.as_deref(), Some("accepted"));
+            let rule =
+                std::fs::read_to_string(root.join(written.rule_file.as_deref().unwrap())).unwrap();
+            assert!(rule.contains(&format!("- {scope}")), "{rule}");
+        }
+        let entries = discovery::discover(root);
+        assert!(
+            entries.iter().all(|e| e.state == State::Managed),
+            "{entries:#?}"
+        );
+    }
+
+    #[test]
+    fn a_model_does_not_replace_a_declared_scope() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("services/payments/charge.rs"), "");
+        write(&root.join("src/lib.rs"), "");
+        let kept = scoped_pair(root, "a.md", ID, ".", &["services/payments/**"]);
+        let text = std::fs::read_to_string(&kept).unwrap();
+        write(
+            &kept,
+            &text.replace("1. MUST: Charge cards through Stripe.\n", ""),
+        );
+        let report = run(&args(&[]), root, None, Some(Ok(model_answer()))).unwrap();
+        let written = file(&report, "a.md");
+        assert_eq!(written.outcome, Outcome::Written, "{written:#?}");
+        let rule =
+            std::fs::read_to_string(root.join(written.rule_file.as_deref().unwrap())).unwrap();
+        assert!(rule.contains("- services/payments/**"), "{rule}");
+        assert!(!rule.contains("- src/**"), "{rule}");
+    }
+
+    #[test]
+    fn a_scope_that_cannot_be_read_is_asked_about() {
+        let dir = tempdir().unwrap();
+        let mut found = Extraction::default();
+        let mut entry = Entry::new(dir.path().join("gone.md"), State::Broken, "");
+        keep_declared_scope(&entry, &mut found);
+        assert_eq!(found.scope, None);
+        assert!(found.is_uncertain("scope"));
+        let mut unmanaged = Extraction::default();
+        entry.state = State::Unmanaged;
+        keep_declared_scope(&entry, &mut unmanaged);
+        assert_eq!(unmanaged, Extraction::default());
+    }
+
+    #[test]
+    fn a_reindex_keeps_a_package_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("services/api/src/main.rs"), "");
+        scoped_pair(root, "a.md", ID, "services/api", &["src/**"]);
+        std::fs::remove_file(root.join(RULES_DIR).join("rule-a.md")).unwrap();
+        assert_eq!(discovery::discover(root)[0].state, State::MissingRule);
+
+        let report = run(&args(&[]), root, None, None).unwrap();
+        let reindexed = file(&report, "a.md");
+        assert_eq!(reindexed.outcome, Outcome::Reindexed, "{reindexed:#?}");
+        let rule =
+            std::fs::read_to_string(root.join(reindexed.rule_file.as_deref().unwrap())).unwrap();
+        assert!(rule.contains("root: services/api"), "{rule}");
+        assert!(rule.contains("services/api/src/**"), "{rule}");
+        assert_eq!(discovery::discover(root)[0].state, State::Managed);
+    }
+
+    #[test]
+    fn repo_globs_join_a_header_root() {
+        let globs = |root: &str, paths: &[&str]| {
+            let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+            repo_globs(root, &paths)
+        };
+        assert_eq!(globs("./", &["src/**"]), ["src/**"]);
+        assert_eq!(globs(".", &[]), Vec::<String>::new());
+        assert_eq!(globs("pkg/", &[]), ["pkg/**"]);
+        assert_eq!(
+            globs("pkg", &["./src/**", "!src/gen/**"]),
+            ["pkg/src/**", "!pkg/src/gen/**"]
+        );
+        assert_eq!(globs("pkg", &["!gen/**"]), ["pkg/**", "!pkg/gen/**"]);
+    }
+
     #[test]
     fn repo_files_match_globs_and_directories() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         write(&root.join("src/api/main.rs"), "");
         write(&root.join("docs/x.md"), "");
-        let files = RepoFiles {
-            root,
-            files: OnceCell::new(),
-        };
+        let files = RepoFiles::new(root);
         assert!(files.matches("src/**/*.rs"));
         assert!(files.matches("./src/api"));
         assert!(files.matches("src/**"));
         assert!(!files.matches("lib/**"));
         assert!(!files.matches("[")); // not a pattern, and no such directory
         assert_eq!(files.top_dirs(), ["docs", "src"]);
+    }
+
+    #[test]
+    fn repo_files_match_brace_lists_and_hidden_files() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("src/web/app.tsx"), "");
+        write(&root.join(".github/workflows/ci.yml"), "");
+        write(&root.join(".git/config"), "");
+        let files = RepoFiles::new(root);
+        assert!(files.matches("src/**/*.{ts,tsx}"));
+        assert!(files.matches(".github/workflows/**"));
+        assert!(!files.matches(".git/**"));
+        assert!(!files.matches("src/**/*.{rs,go}"));
+        assert_eq!(files.top_dirs(), ["src"]);
+
+        // A listing cut short can't say a glob matches nothing.
+        let cut = RepoFiles {
+            limit: 1,
+            ..RepoFiles::new(root)
+        };
+        assert!(cut.matches("lib/**"));
     }
 
     #[test]

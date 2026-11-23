@@ -5,7 +5,7 @@
 //! rules).
 
 use crate::adr::context_file::{self, ContextFile};
-use crate::adr::header::{description_for, render_header, AdrHeader, REPOSITORY_ROOT};
+use crate::adr::header::{description_for, render_header, AdrHeader};
 use crate::adr::provenance::{digest, Source};
 use crate::adr::rule_body::{render_rule_body, rule_id_prefix, scope_line};
 use crate::rules::types::RuleLevel;
@@ -29,8 +29,12 @@ pub struct Decision<'a> {
     pub adr_id: &'a str,
     /// The header status, such as `accepted` or `draft`.
     pub status: &'a str,
-    /// Globs from the repository root; `!` excludes. Empty for the whole
-    /// repository.
+    /// The directory `scope` is relative to: [`REPOSITORY_ROOT`], or a
+    /// package such as `services/api`.
+    ///
+    /// [`REPOSITORY_ROOT`]: crate::adr::header::REPOSITORY_ROOT
+    pub root: &'a str,
+    /// Globs from `root`; `!` excludes. Empty for all of `root`.
     pub scope: &'a [String],
 }
 
@@ -41,7 +45,7 @@ impl Decision<'_> {
             description: description_for(&self.doc.title),
             adr_id: self.adr_id.to_string(),
             status: self.status.to_string(),
-            scope_root: REPOSITORY_ROOT.to_string(),
+            scope_root: self.root.to_string(),
             scope_paths: self.scope.to_vec(),
             source,
         })
@@ -49,7 +53,7 @@ impl Decision<'_> {
 
     /// The [`digest`] a rule file records for this decision.
     pub fn digest(&self) -> String {
-        digest(self.doc, self.status, REPOSITORY_ROOT, self.scope)
+        digest(self.doc, self.status, self.root, self.scope)
     }
 
     /// The decision doc named `file_name`: the header, the Context File, and
@@ -81,7 +85,7 @@ impl Decision<'_> {
             .collect();
         let body = render_rule_body(
             &self.doc.title,
-            &scope_line(REPOSITORY_ROOT, self.scope),
+            &scope_line(self.root, self.scope),
             &rule_id_prefix(self.adr_id),
             &rules,
         );
@@ -94,6 +98,7 @@ impl Decision<'_> {
 mod tests {
     use super::*;
     use crate::adr::context_file::Policy;
+    use crate::adr::header::REPOSITORY_ROOT;
 
     fn doc() -> ContextFile {
         ContextFile {
@@ -117,6 +122,7 @@ mod tests {
             doc: &doc,
             adr_id: "0b6f2a1e-1111-2222-3333-444455556666",
             status: "accepted",
+            root: REPOSITORY_ROOT,
             scope: &scope,
         };
         let text = decision.doc_text(
@@ -139,6 +145,7 @@ mod tests {
             doc: &doc,
             adr_id: "0b6f2a1e-1111-2222-3333-444455556666",
             status: "draft",
+            root: REPOSITORY_ROOT,
             scope: &[],
         };
         let text = decision.rule_text("cross-cutting-use-postgres-0b6f.md", "docs/adr/a.md");

@@ -198,7 +198,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn new(path: PathBuf, state: State, reason: impl Into<String>) -> Self {
+    pub(crate) fn new(path: PathBuf, state: State, reason: impl Into<String>) -> Self {
         Entry {
             path,
             state,
@@ -503,7 +503,7 @@ pub fn counts(entries: &[Entry]) -> Vec<(State, usize)> {
 mod tests {
     use super::*;
     use crate::adr::context_file::Policy;
-    use crate::adr::header::{render_header, AdrHeader};
+    use crate::adr::header::{render_header, AdrHeader, REPOSITORY_ROOT};
     use crate::adr::pair::Decision;
     use crate::rules::types::RuleLevel;
     use tempfile::tempdir;
@@ -536,6 +536,7 @@ mod tests {
             doc,
             adr_id: id,
             status: "accepted",
+            root: REPOSITORY_ROOT,
             scope: &[],
         };
         let doc_path = root.join(DECISION_DIR).join(name);

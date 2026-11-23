@@ -14,6 +14,7 @@ use super::{
 };
 use crate::adr::context_file::{self, ContextFile};
 use crate::adr::files::{self, DecisionFile, DECISION_DIR, RULES_DIR};
+use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::names::{decision_doc_file_name, rule_file_name};
 use crate::adr::overlap::{find_overlaps, ExistingDecision, Overlap};
 use crate::adr::pair::Decision;
@@ -116,6 +117,7 @@ fn render_pair(
         doc,
         adr_id,
         status: status.as_str(),
+        root: REPOSITORY_ROOT,
         scope,
     };
     let doc_name = decision_doc_file_name(adr_id, &doc.title);
