@@ -12,9 +12,10 @@ use super::telemetry::{CheckCounts, Creation};
 use super::{content_from_flags, json_text, pick_repo, runtime, session, today, RepoPick};
 use crate::adr::context_file::{self, ContextFile};
 use crate::adr::files::{self, DecisionFile, DECISION_DIR};
-use crate::adr::header::{description_for, render_header, AdrHeader, REPOSITORY_ROOT};
+use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::names::decision_doc_file_name;
 use crate::adr::overlap::{find_overlaps, ExistingDecision, Overlap};
+use crate::adr::pair::Decision;
 use crate::adr::refresh::Applied;
 use crate::adr::save_check::check_document;
 use crate::adr::save_check::check_markdown;
@@ -142,7 +143,8 @@ fn write_new_noting(
     })
 }
 
-/// The decision file for `doc` under `adr_id`: its name and its text.
+/// The decision file for `doc` under `adr_id`, as `normalize` writes one:
+/// its name and its text.
 pub(super) fn render_decision_doc(
     doc: &ContextFile,
     adr_id: &str,
@@ -150,16 +152,14 @@ pub(super) fn render_decision_doc(
     scope: &[String],
 ) -> (String, String) {
     let name = decision_doc_file_name(adr_id, &doc.title);
-    let header = render_header(&AdrHeader {
-        name: name.trim_end_matches(".md").to_string(),
-        description: description_for(&doc.title),
-        adr_id: adr_id.to_string(),
-        status: status.as_str().to_string(),
-        scope_root: REPOSITORY_ROOT.to_string(),
-        scope_paths: scope.to_vec(),
-        source: None,
-    });
-    let text = format!("{header}\n{}", context_file::render(doc));
+    let decision = Decision {
+        doc,
+        adr_id,
+        status: status.as_str(),
+        root: REPOSITORY_ROOT,
+        scope,
+    };
+    let text = decision.doc_text(&name, &[]);
     (name, text)
 }
 
@@ -647,6 +647,9 @@ mod tests {
             decision_doc_file_name(&written.adr_id, "Use Postgres for storage")
         );
 
+        // Ending with one newline, as `normalize` writes one.
+        let text = std::fs::read_to_string(&written.decision_file).unwrap();
+        assert!(text.ends_with('\n') && !text.ends_with("\n\n"), "{text:?}");
         let doc = files::read_decision_file(&written.decision_file).unwrap();
         assert_eq!(doc.adr_id(), Some(written.adr_id.as_str()));
         assert_eq!(doc.meta.as_ref().unwrap().paths, ["src/**"]);
