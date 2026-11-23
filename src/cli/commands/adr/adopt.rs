@@ -109,42 +109,65 @@ async fn run_discover(
     }
 }
 
-/// The paths among `paths` that git reports as changed and not committed.
-/// Outside a git checkout, or when git fails, none.
+/// The files at or under `paths` that git reports as changed and not
+/// committed. Outside a git checkout, or when git fails, none.
 fn uncommitted(root: &Path, paths: &[&Path]) -> HashSet<PathBuf> {
     if paths.is_empty() {
         return HashSet::new();
     }
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["status", "--porcelain", "-z", "--"])
-        .args(paths)
-        .output();
-    let Ok(output) =
-        output
-            .map_err(|_| ())
-            .and_then(|o| if o.status.success() { Ok(o) } else { Err(()) })
-    else {
-        return HashSet::new();
+    changed_in_git(root, paths).unwrap_or_default()
+}
+
+fn changed_in_git(root: &Path, paths: &[&Path]) -> Option<HashSet<PathBuf>> {
+    let git = |args: &[&std::ffi::OsStr]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    String::from_utf8_lossy(&output.stdout)
-        .split('\0')
-        .filter_map(|record| record.get(3..))
-        .filter(|path| !path.is_empty())
-        .map(|path| root.join(path))
-        .collect()
+    // git names paths from the checkout's top level, which `root` may be
+    // below: `pkg/` when it is `<top>/pkg`.
+    let prefix = git(&["rev-parse".as_ref(), "--show-prefix".as_ref()])?;
+    let prefix = prefix.trim_end_matches('\n');
+    let mut args: Vec<&std::ffi::OsStr> = ["status", "--porcelain", "-z", "--"]
+        .iter()
+        .map(|arg| arg.as_ref())
+        .collect();
+    args.extend(paths.iter().map(|path| path.as_os_str()));
+    let status = git(&args)?;
+    let mut changed = HashSet::new();
+    let mut records = status.split('\0');
+    while let Some(record) = records.next() {
+        let (Some(code), Some(path)) = (record.get(..2), record.get(3..)) else {
+            continue;
+        };
+        // A rename or copy is followed by the path it came from.
+        if code.starts_with(['R', 'C']) {
+            records.next();
+        }
+        if let Some(path) = path.strip_prefix(prefix).filter(|path| !path.is_empty()) {
+            changed.insert(root.join(path));
+        }
+    }
+    Some(changed)
 }
 
 /// A synced doc with uncommitted changes has been edited here; the next
 /// sync overwrites the edit.
 fn mark_uncommitted(root: &Path, entries: &mut [Entry]) {
-    let synced: Vec<&Path> = entries
+    // Their folders, not the files, so git can pair a rename's two paths.
+    let folders: Vec<&Path> = entries
         .iter()
         .filter(|entry| entry.state == State::Synced)
-        .map(|entry| entry.path.as_path())
+        .filter_map(|entry| entry.path.parent())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
-    let changed = uncommitted(root, &synced);
+    let changed = uncommitted(root, &folders);
     for entry in entries.iter_mut() {
         if entry.state == State::Synced && changed.contains(&entry.path) {
             entry.set_state(
@@ -482,6 +505,7 @@ fn model_from(resolved: rules_rank::ResolvedRunner) -> Model<rules_rank::Selecti
     Model {
         label: resolved.label(),
         model: resolved.model.clone(),
+        max_budget_usd: resolved.max_budget_usd,
         runner: resolved.runner,
     }
 }
@@ -490,6 +514,8 @@ fn model_from(resolved: rules_rank::ResolvedRunner) -> Model<rules_rank::Selecti
 struct Model<R> {
     runner: R,
     model: Option<String>,
+    /// The configured cap on each call, which only the Claude CLI enforces.
+    max_budget_usd: Option<f64>,
     label: String,
 }
 
@@ -722,7 +748,7 @@ async fn run_normalize<R: StructuredRunner>(
                             &prompt,
                             normalize::MODEL_SCHEMA,
                             model.model.as_deref(),
-                            None,
+                            model.max_budget_usd,
                             None,
                         )
                         .await
@@ -1230,12 +1256,15 @@ mod tests {
     const TODAY: &str = "2026-11-19";
     const ID: &str = "0b6f2a1e-1111-4222-8333-444455556666";
     const OTHER: &str = "c357aaaa-bbbb-4ccc-8ddd-eeeeffff0000";
+    const THIRD: &str = "d468bbbb-cccc-4ddd-8eee-ffff00001111";
 
     const NYGARD: &str =
         "# 7. Use Postgres\n\n## Status\n\nAccepted\n\n## Context\n\nOne store.\n\n\
                           ## Decision\n\n- Services MUST store relational data in Postgres.\n";
     const PROSE: &str =
         "# Cache sessions\n\n## Status\n\nAccepted\n\n## Decision\n\nWe cache sessions in Redis.\n";
+
+    const BUDGET: f64 = 0.25;
 
     struct Fake {
         answer: Result<serde_json::Value, String>,
@@ -1248,9 +1277,10 @@ mod tests {
             _prompt: &str,
             _schema: &str,
             _model: Option<&str>,
-            _budget: Option<f64>,
+            budget: Option<f64>,
             _effort: Option<&str>,
         ) -> Result<serde_json::Value, ActualError> {
+            assert_eq!(budget, Some(BUDGET), "the configured cap reaches each call");
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.answer.clone().map_err(ActualError::InternalError)
         }
@@ -1320,6 +1350,7 @@ mod tests {
                         calls: AtomicUsize::new(0),
                     },
                     model: None,
+                    max_budget_usd: Some(BUDGET),
                     label: "fake".to_string(),
                 }),
                 None => Err("no runner here".to_string()),
@@ -1508,6 +1539,37 @@ mod tests {
             Some("Skipped with --no-cloud.")
         );
         assert!(uncommitted(root, &[]).is_empty());
+    }
+
+    #[test]
+    fn discover_marks_uncommitted_edits_below_the_git_top_level() {
+        let dir = tempdir().unwrap();
+        let top = dir.path();
+        git_repo(top, None);
+        let root = top.join("pkg");
+        let edited = synced_pair(&root, ID, "Use Postgres");
+        let moved = synced_pair(&root, OTHER, "Logging");
+        synced_pair(&root, THIRD, "Tracing");
+        git(top, &["add", "-A"]);
+        git(top, &["commit", "-qm", "sync"]);
+        let text = std::fs::read_to_string(&edited).unwrap();
+        write(&edited, &text.replace("- Why.", "- Edited here."));
+        // A rename's record is followed by the path it came from.
+        let to = moved.with_file_name(format!("{OTHER}-moved.md"));
+        git(top, &["mv", moved.to_str().unwrap(), to.to_str().unwrap()]);
+
+        let report = block(run_discover(true, None, &AdrApiOptions::default(), &root));
+        let state = |id: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.adr_id.as_deref() == Some(id))
+                .map(|e| e.state)
+                .unwrap()
+        };
+        assert_eq!(state(ID), State::SyncedEdited);
+        assert_eq!(state(OTHER), State::SyncedEdited);
+        assert_eq!(state(THIRD), State::Synced);
     }
 
     #[test]

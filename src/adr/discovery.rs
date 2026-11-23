@@ -267,7 +267,9 @@ fn ignored(file: &DecisionFile) -> bool {
         .map(|name| name.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     IGNORED_NAMES.contains(&name.as_str())
-        || name.starts_with("0000")
+        || name
+            .strip_prefix("0000")
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
         || file.body.contains(IGNORE_MARKER)
 }
 
@@ -798,16 +800,25 @@ mod tests {
     fn furniture_and_marked_files_are_ignored() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        for name in ["README.md", "0000-template.md", "index.md"] {
+        for name in ["README.md", "0000-template.md", "0000.md", "index.md"] {
             write(&root.join(DECISION_DIR).join(name), "# Index\n");
         }
         write(
             &root.join(DECISION_DIR).join("skip.md"),
             &format!("# Skip\n{IGNORE_MARKER}\n"),
         );
+        // Five-digit numbering's first decisions are decisions.
+        write(
+            &root.join(DECISION_DIR).join("00001-use-postgres.md"),
+            "# Use Postgres\n",
+        );
         let entries = discover(root);
-        assert_eq!(entries.len(), 4);
-        assert!(entries.iter().all(|entry| entry.state == State::Ignored));
+        assert_eq!(entries.len(), 6);
+        let (decisions, ignored): (Vec<&Entry>, Vec<&Entry>) = entries
+            .iter()
+            .partition(|entry| entry.path.ends_with("00001-use-postgres.md"));
+        assert!(ignored.iter().all(|entry| entry.state == State::Ignored));
+        assert_eq!(decisions[0].state, State::Unmanaged);
         assert_eq!(State::Ignored.action(), Action::None);
     }
 

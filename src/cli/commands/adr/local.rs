@@ -599,6 +599,15 @@ mod tests {
             Some(written.adr_id.as_str())
         );
         assert!(render_written(&written).contains("enforce it now"));
+
+        // The rule file records the doc it came from, so `discover` tells
+        // the pair from a synced one and sees it current.
+        let rule = files::read_decision_file(&written.rule_file).unwrap();
+        let source = rule.source.unwrap();
+        assert_eq!(source.path, format!("{DECISION_DIR}/{name}"));
+        let entries = crate::adr::discovery::discover(tmp.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].state, crate::adr::discovery::State::Managed);
     }
 
     #[test]
