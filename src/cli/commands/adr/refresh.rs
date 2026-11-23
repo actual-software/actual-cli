@@ -26,6 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::Utc;
 use serde::Serialize;
 
 use super::{json_text, pick_repo, runtime, today, RepoPick, Session};
@@ -34,7 +35,7 @@ use crate::adr::files::{rule_files_by_id, DECISION_DIR, RULES_DIR};
 use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::refresh::{
     self as core, Applied, CloudRule, ConnectedRepo, Governing, Origin, Planner, Record,
-    RuleSource, Unnormalized, RECORD_FORMAT,
+    RuleSource, Unnormalized, Unresolved, RECORD_FORMAT,
 };
 use crate::api::adr_types::Decision;
 use crate::api::{resolve_api_url, ActualApiClient};
@@ -117,6 +118,7 @@ pub(super) fn refresh(
     let on_disk = rule_files_by_id(root);
     let mut problems = Vec::new();
     let mut repo = record.connected_repo.clone();
+    let mut unresolved = record.unresolved.clone();
     let mut create_all = None;
     let (mode, plan, governing) = match store::load() {
         Ok(None) => (
@@ -144,7 +146,11 @@ pub(super) fn refresh(
             (Mode::SignedIn, None, None)
         }
         Ok(Some(creds)) => {
-            match read_cloud(root, &creds, &args.api, args.timeout_ms, repo.as_ref()) {
+            let cached = Cached {
+                repo: repo.as_ref(),
+                unresolved: unresolved.as_ref(),
+            };
+            match read_cloud(root, &creds, &args.api, args.timeout_ms, cached) {
                 Ok((decisions, connected)) => {
                     create_all = Some(super::batch::unsent_paths(
                         root,
@@ -155,6 +161,7 @@ pub(super) fn refresh(
                         None,
                     ));
                     repo = Some(connected);
+                    unresolved = None;
                     let sources = rule_sources(&decisions);
                     (
                         Mode::SignedIn,
@@ -167,9 +174,25 @@ pub(super) fn refresh(
                         }),
                     )
                 }
-                Err(problem) => {
-                    problems.push(problem);
+                Err(Unread::NoRepo(lookup)) => {
+                    // Said once, and again only when the lookup finds
+                    // something else.
+                    if !unresolved.as_ref().is_some_and(|last| lookup.repeats(last)) {
+                        problems.push(format!(
+                            "No connected repository to read decisions for: {}, {KEPT}.",
+                            lookup.reason
+                        ));
+                    }
                     repo = None;
+                    unresolved = Some(lookup);
+                    (Mode::SignedIn, None, None)
+                }
+                Err(Unread::Failed { problem, found }) => {
+                    problems.push(problem);
+                    if found.is_some() {
+                        repo = found;
+                        unresolved = None;
+                    }
                     (Mode::SignedIn, None, None)
                 }
             }
@@ -201,6 +224,7 @@ pub(super) fn refresh(
         record.apply_edits(&set, &drop);
         record.unnormalized = Some(list);
         record.connected_repo = repo;
+        record.unresolved = unresolved;
         record.governing = governing.or(record.governing);
         if create_all_print.is_some() {
             record.create_all = create_all_print;
@@ -275,6 +299,43 @@ pub(super) fn refresh_decision(
 
 // ── Actual AI ──────────────────────────────────────────────────────────────
 
+/// What a refresh that couldn't read Actual AI leaves the rule files as.
+const KEPT: &str = "so the rule files were left as they are";
+
+/// How long a lookup that found no connected repository holds, for the same
+/// organization and origin remote, before a refresh looks again.
+const RECHECK_UNRESOLVED: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
+
+/// What the record remembers of the last signed-in read.
+#[derive(Clone, Copy)]
+struct Cached<'a> {
+    repo: Option<&'a ConnectedRepo>,
+    unresolved: Option<&'a Unresolved>,
+}
+
+/// Why a signed-in refresh read no decisions.
+#[derive(Debug)]
+enum Unread {
+    /// No connected repository is the checkout's: found now, or by a lookup
+    /// recent enough to stand for one.
+    NoRepo(Unresolved),
+    /// Actual AI couldn't be read, with the connected repository found
+    /// before the read failed, if any.
+    Failed {
+        problem: String,
+        found: Option<ConnectedRepo>,
+    },
+}
+
+impl Unread {
+    fn failed(problem: String) -> Self {
+        Self::Failed {
+            problem,
+            found: None,
+        }
+    }
+}
+
 /// The repository's decisions in Actual AI, read within `timeout_ms`, and
 /// the connected repository they came from; or why they couldn't be read.
 fn read_cloud(
@@ -282,16 +343,20 @@ fn read_cloud(
     creds: &StoredCredentials,
     api: &AdrApiOptions,
     timeout_ms: u64,
-    cached: Option<&ConnectedRepo>,
-) -> Result<(Vec<Decision>, ConnectedRepo), String> {
-    let kept = "so the rule files were left as they are";
-    let rt = runtime().map_err(|e| format!("Couldn't read Actual AI ({e}), {kept}."))?;
+    cached: Cached<'_>,
+) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
+    let rt =
+        runtime().map_err(|e| Unread::failed(format!("Couldn't read Actual AI ({e}), {KEPT}.")))?;
     match within(rt, timeout_ms, read_decisions(root, creds, api, cached)) {
         Some(Ok(read)) => Ok(read),
-        Some(Err(reason)) => Err(format!("{reason}, {kept}.")),
-        None => Err(format!(
-            "Actual AI didn't answer within {timeout_ms} ms, {kept}."
-        )),
+        Some(Err(Unread::Failed { problem, found })) => Err(Unread::Failed {
+            problem: format!("{problem}, {KEPT}."),
+            found,
+        }),
+        Some(Err(no_repo)) => Err(no_repo),
+        None => Err(Unread::failed(format!(
+            "Actual AI didn't answer within {timeout_ms} ms, {KEPT}."
+        ))),
     }
 }
 
@@ -309,45 +374,65 @@ fn within<T>(
     done.ok()
 }
 
+/// The decisions of the connected repository the cached one names while the
+/// organization and origin remote are the same, else of the one a lookup
+/// finds; a recent lookup that found none stands in for a new one.
 async fn read_decisions(
     root: &Path,
     creds: &StoredCredentials,
     api: &AdrApiOptions,
-    cached: Option<&ConnectedRepo>,
-) -> Result<(Vec<Decision>, ConnectedRepo), String> {
+    cached: Cached<'_>,
+) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
     let unread = |e: ActualError| format!("Couldn't read your decisions in Actual AI ({e})");
     let session = Session {
         client: ActualApiClient::new(&resolve_api_url(api.api_url.as_deref()))
-            .map_err(unread)?
+            .map_err(|e| Unread::failed(unread(e)))?
             .with_bearer(&creds.access_token),
         org_id: creds.organization_id.clone(),
     };
     let remote = origin_remote_url(root).await.unwrap_or_default();
-    let reuse = cached.filter(|repo| {
+    let reuse = cached.repo.filter(|repo| {
         !remote.is_empty() && repo.remote == remote && repo.org_id == session.org_id
     });
     let repo_id = match reuse {
         Some(repo) => repo.repo_id.clone(),
-        None => match pick_repo(&session, None, root).await.map_err(unread)? {
-            RepoPick::Chosen(repo) => repo.id,
-            RepoPick::Unresolved(reason) => {
-                return Err(format!(
-                    "No connected repository to read decisions for: {reason}"
-                ))
+        None => {
+            let now = Utc::now();
+            if let Some(last) = cached.unresolved.filter(|last| {
+                last.org_id == session.org_id
+                    && last.remote == remote
+                    && now - last.at < RECHECK_UNRESOLVED
+            }) {
+                return Err(Unread::NoRepo(last.clone()));
             }
-        },
+            match pick_repo(&session, None, root)
+                .await
+                .map_err(|e| Unread::failed(unread(e)))?
+            {
+                RepoPick::Chosen(repo) => repo.id,
+                RepoPick::Unresolved(reason) => {
+                    return Err(Unread::NoRepo(Unresolved {
+                        org_id: session.org_id,
+                        remote,
+                        reason,
+                        at: now,
+                    }))
+                }
+            }
+        }
     };
-    let decisions = super::cloud::decisions(&session, Some(&repo_id))
-        .await
-        .map_err(unread)?;
-    Ok((
-        decisions,
-        ConnectedRepo {
-            org_id: session.org_id,
-            remote,
-            repo_id,
-        },
-    ))
+    let connected = ConnectedRepo {
+        org_id: session.org_id.clone(),
+        remote,
+        repo_id,
+    };
+    match super::cloud::decisions(&session, Some(&connected.repo_id)).await {
+        Ok(decisions) => Ok((decisions, connected)),
+        Err(e) => Err(Unread::Failed {
+            problem: unread(e),
+            found: Some(connected),
+        }),
+    }
 }
 
 /// Renew the stored sign-in in a detached `actual whoami --check`, in its own
@@ -1083,16 +1168,29 @@ mod tests {
             "{report:?}"
         );
         assert!(kept.exists());
+        // The repository the lookup found stays for the next refresh.
+        let found = load(&records, root).connected_repo.unwrap();
+        assert_eq!(found.repo_id, REPO);
+        assert!(load(&records, root).unresolved.is_none());
 
         // A server that answers after the time box.
         let mut slow = mockito::Server::new();
-        slow.mock("GET", "/v1/connected-repos")
+        let decisions = |server: &mut mockito::Server| {
+            server
+                .mock("GET", "/v1/gcp/product/decisions")
+                .match_query(Matcher::Any)
+                .with_status(200)
+                .with_chunked_body(|w| {
+                    std::thread::sleep(Duration::from_millis(400));
+                    w.write_all(DECISIONS.as_bytes())
+                })
+                .create()
+        };
+        decisions(&mut slow);
+        let no_lookup = slow
+            .mock("GET", "/v1/connected-repos")
             .match_query(Matcher::Any)
-            .with_status(200)
-            .with_chunked_body(|w| {
-                std::thread::sleep(Duration::from_millis(400));
-                w.write_all(CONNECTED.as_bytes())
-            })
+            .expect(0)
             .create();
         let mut hurried = args(Some(&slow));
         hurried.timeout_ms = 50;
@@ -1103,6 +1201,86 @@ mod tests {
             ["Actual AI didn't answer within 50 ms, so the rule files were left as they are."]
         );
         assert!(kept.exists());
+        // A refresh cut off by the time box keeps the repository too.
+        assert_eq!(load(&records, root).connected_repo, Some(found));
+        no_lookup.assert();
+    }
+
+    #[test]
+    fn a_checkout_with_no_connected_repository_is_looked_up_again_only_when_that_can_change() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        git_repo(root, Some("git@github.com:someone/elsewhere.git"));
+        let mut server = mockito::Server::new();
+        let lookups = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .expect(3)
+            .create();
+        let reads = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .expect(0)
+            .create();
+        let records = config.path().join(DIR_NAME);
+        let dir = Some(records.as_path());
+        let mut text = args(Some(&server));
+        text.api.json = false;
+
+        let first = refresh(root, &text, TODAY, dir);
+        assert!(first.kept);
+        assert_eq!(
+            first.problems,
+            [
+                "No connected repository to read decisions for: someone/elsewhere is not a \
+              connected repository, so the rule files were left as they are."
+            ]
+        );
+        let lookup = load(&records, root).unresolved.unwrap();
+        assert_eq!(lookup.org_id, ORG);
+
+        // Right after, the lookup stands, so nothing is asked or said.
+        let second = refresh(root, &text, TODAY, dir);
+        assert!(second.kept && second.problems.is_empty(), "{second:?}");
+        assert_eq!(render(&second), "");
+        assert_eq!(load(&records, root).unresolved, Some(lookup.clone()));
+
+        // Once it's old, the refresh looks again, and finding the same says
+        // nothing new.
+        save(&records, root, |record| {
+            record.unresolved.as_mut().unwrap().at -= chrono::TimeDelta::minutes(11);
+        })
+        .unwrap();
+        let third = refresh(root, &text, TODAY, dir);
+        assert!(third.problems.is_empty(), "{third:?}");
+        assert!(load(&records, root).unresolved.unwrap().at >= lookup.at);
+
+        // Another remote is looked up at once, and said.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap()
+        };
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:someone/other.git",
+        ]);
+        let fourth = refresh(root, &text, TODAY, dir);
+        assert!(
+            fourth.problems[0].contains("someone/other is not a connected repository"),
+            "{fourth:?}"
+        );
+        lookups.assert();
+        reads.assert();
     }
 
     /// A sign-in whose access token expires within the renewal leeway.
