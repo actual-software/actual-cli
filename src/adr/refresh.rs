@@ -125,6 +125,11 @@ pub struct Entry {
     /// file or first met it.
     pub fingerprint: String,
     pub origin: Origin,
+    /// The decision file's path from the repository root, for a decision
+    /// from `docs/adr/`, so a refresh that finds that file unreadable knows
+    /// whose it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// The connected repository a signed-in refresh last read, which the next
@@ -454,8 +459,29 @@ impl<'a> Planner<'a> {
             Entry {
                 fingerprint,
                 origin,
+                path: None,
             },
         );
+    }
+
+    /// Record that governing decision `adr_id`'s file is at `path`, from the
+    /// repository root, when the plan or the record doesn't say so already.
+    fn locate(&mut self, adr_id: &str, path: &str) {
+        let path = Some(path.to_string());
+        if let Some(entry) = self.plan.set.get_mut(adr_id) {
+            entry.path = path;
+        } else if let Some(entry) = self
+            .record
+            .rules
+            .get(adr_id)
+            .filter(|entry| entry.origin == Origin::DocsAdr && entry.path != path)
+        {
+            let entry = Entry {
+                path,
+                ..entry.clone()
+            };
+            self.plan.set.insert(adr_id.to_string(), entry);
+        }
     }
 
     /// A decision `origin` no longer has. Its rule file goes only when the
@@ -496,12 +522,27 @@ pub fn plan_from_docs(
             Origin::DocsAdr,
             false,
         );
+        if doc.governs {
+            planner.locate(&doc.source.adr_id, &relative(root, &doc.path));
+        }
     }
+    // A followed decision whose file is still there but can't be read, or
+    // lost its header, keeps its rule file until the file reads again.
+    let unread: HashSet<&str> = scan
+        .unnormalized
+        .iter()
+        .filter(|u| u.adr_id.is_none())
+        .map(|u| u.path.as_str())
+        .collect();
     let present: HashSet<&str> = scan
         .decisions
         .iter()
         .map(|doc| doc.source.adr_id.as_str())
         .chain(scan.unnormalized.iter().filter_map(|u| u.adr_id.as_deref()))
+        .chain(record.rules.iter().filter_map(|(id, entry)| {
+            let path = entry.path.as_deref()?;
+            unread.contains(path).then_some(id.as_str())
+        }))
         .collect();
     for id in record.rules.keys() {
         if !present.contains(id.as_str()) {
@@ -892,6 +933,49 @@ mod tests {
     }
 
     #[test]
+    fn docs_refresh_keeps_the_rule_file_of_a_decision_file_it_can_no_longer_read() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let text = decision_file(ID, "accepted", "Use Postgres", "MUST: Use Postgres.");
+        let doc = write(root, "docs/adr/a.md", &text);
+        // A header-less ADR nobody followed, as a repository keeps from
+        // before it normalized its files.
+        write(
+            root,
+            "docs/adr/0001-old.md",
+            "# Use MySQL\n\nWe chose MySQL.\n",
+        );
+        let mut record = Record::default();
+        assert_eq!(run(root, &mut record).written.len(), 1);
+        assert_eq!(record.rules[ID].path.as_deref(), Some("docs/adr/a.md"));
+        let rule = root
+            .join(RULES_DIR)
+            .join(rule_file_name(ID, "Use Postgres"));
+        let before = std::fs::read(&rule).unwrap();
+
+        // Saved as UTF-16, conflicted inside its header, then readable again:
+        // the rule file stays as it is throughout.
+        let broken_header = text.replacen("---\n", "---\n<<<<<<< ours\n", 1);
+        for broken in [vec![0xff, 0xfe, 0x23, 0x00], broken_header.into_bytes()] {
+            std::fs::write(&doc, broken).unwrap();
+            assert_eq!(run(root, &mut record), Applied::default());
+            assert_eq!(std::fs::read(&rule).unwrap(), before);
+        }
+        std::fs::write(&doc, &text).unwrap();
+        assert_eq!(run(root, &mut record), Applied::default());
+        assert_eq!(std::fs::read(&rule).unwrap(), before);
+
+        // A record from before paths learns this one with no file change, and
+        // a deleted file still takes its rule file with it.
+        record.rules.get_mut(ID).unwrap().path = None;
+        assert_eq!(run(root, &mut record), Applied::default());
+        assert_eq!(record.rules[ID].path.as_deref(), Some("docs/adr/a.md"));
+        std::fs::remove_file(&doc).unwrap();
+        assert_eq!(run(root, &mut record).removed.len(), 1);
+        assert!(!rule.exists());
+    }
+
+    #[test]
     fn docs_refresh_leaves_rule_files_from_elsewhere_and_an_unnormalized_decisions_file() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
@@ -1017,6 +1101,7 @@ mod tests {
             Entry {
                 fingerprint: "stale".to_string(),
                 origin: Origin::DocsAdr,
+                path: None,
             },
         );
         let plan = plan_from_cloud(
@@ -1062,6 +1147,7 @@ mod tests {
         let entry = Entry {
             fingerprint: "f".to_string(),
             origin: Origin::ActualAi,
+            path: None,
         };
         record.apply_edits(&BTreeMap::from([("a".to_string(), entry.clone())]), &[]);
         record.unnormalized = Some("u".to_string());
@@ -1087,6 +1173,7 @@ mod tests {
         let entry = |origin| Entry {
             fingerprint: "f".to_string(),
             origin,
+            path: None,
         };
         // Written while signed in; signed out, with no file under docs/adr/.
         let mut record = Record::default();
