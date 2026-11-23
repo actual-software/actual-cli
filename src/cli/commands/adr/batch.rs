@@ -506,6 +506,20 @@ impl Publishing<'_> {
             // out to be one no longer.
             return Ok(());
         }
+        if let Some(id) = self.unchanged_draft(item) {
+            // The draft holds this text already, and a person may have edited
+            // it in Actual AI since, so the file stays where it is.
+            let reason = format!(
+                "unchanged since it was saved as draft {}",
+                sanitize_server_text(&id)
+            );
+            let _ = writeln!(self.progress, "{step}: skipped, {reason}");
+            self.report.skipped.push(FileNote {
+                file: item.name.clone(),
+                reason,
+            });
+            return Ok(());
+        }
         let own = self.book.own_id(&item.name);
         let planned = plan(
             item.file,
@@ -583,6 +597,20 @@ impl Publishing<'_> {
             outcome,
         });
         Ok(())
+    }
+
+    /// The draft `item` was saved as, when the record shows its current text
+    /// went up and the read at the start shows that decision still a draft. A
+    /// file waiting for the default branch counts only with no person at the
+    /// terminal, since a person's run accepts it.
+    fn unchanged_draft(&self, item: &Pending<'_>) -> Option<String> {
+        let entry = self.book.entry(&item.name)?;
+        let waits = entry.outcome == Outcome::WaitsForMerge && !self.run.interactive;
+        let id = entry.adr_id.as_deref()?;
+        ((entry.outcome == Outcome::Draft || waits)
+            && entry.sent(&item.text)
+            && self.cloud.known.owned(id).is_none())
+        .then(|| id.to_string())
     }
 
     /// The reason Actual AI refused a file, so the run goes on to the next;
@@ -1629,6 +1657,170 @@ mod tests {
     }
 
     #[test]
+    fn create_all_leaves_an_unchanged_draft_to_actual_ai() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres for storage",
+            "MUST: Store data in Postgres.",
+            &[],
+            true,
+        );
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        let first_read = read(&mut server, &[]);
+        let first = import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        first.assert();
+        first_read.remove();
+
+        // The file is as it went up and its decision still a draft, which a
+        // person may have edited since: nothing is sent.
+        read(
+            &mut server,
+            &[web_json(
+                NEW_A,
+                "Use Postgres for storage",
+                "draft",
+                "Store data in Postgres.",
+            )],
+        );
+        let never = server.mock("POST", IMPORT).expect(0).create();
+        let mut progress = Vec::new();
+        let (report, stop) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut progress,
+        )
+        .unwrap();
+        never.assert();
+        never.remove();
+        assert!(stop.is_none());
+        assert!(report.saved.is_empty(), "{report:?}");
+        let reason = format!("unchanged since it was saved as draft {NEW_A}");
+        assert_eq!(
+            report.skipped,
+            [FileNote {
+                file: "docs/adr/a.md".to_string(),
+                reason: reason.clone(),
+            }]
+        );
+        assert_eq!(
+            String::from_utf8(progress).unwrap(),
+            format!("[1/1] docs/adr/a.md: skipped, {reason}\n")
+        );
+        let entry = &recorded(tmp.path())["docs/adr/a.md"];
+        assert_eq!(
+            (entry.outcome, entry.adr_id.as_deref()),
+            (Outcome::Draft, Some(NEW_A))
+        );
+
+        // Edited since: the file goes up again, and its draft takes the text.
+        let text = std::fs::read_to_string(&a).unwrap();
+        std::fs::write(&a, text.replacen("Why.", "Why, now.", 1)).unwrap();
+        let again = import(&mut server, root, &a, 200, &saved(NEW_A, true));
+        let (report, _) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        again.assert();
+        assert_eq!(report.saved.len(), 1, "{report:?}");
+        assert!(report.saved[0].already_saved);
+    }
+
+    #[test]
+    fn create_all_still_accepts_an_unchanged_waiting_draft_at_a_terminal() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres for storage",
+            "MUST: Store data in Postgres.",
+            &[],
+            false,
+        );
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        let first_read = read(&mut server, &[]);
+        let first = import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        first.assert();
+        first_read.remove();
+        assert_eq!(
+            recorded(tmp.path())["docs/adr/a.md"].outcome,
+            Outcome::WaitsForMerge
+        );
+        read(
+            &mut server,
+            &[web_json(
+                NEW_A,
+                "Use Postgres for storage",
+                "draft",
+                "Store data in Postgres.",
+            )],
+        );
+
+        // With no person at the terminal the unchanged file waits on.
+        let never = server.mock("POST", IMPORT).expect(0).create();
+        let (report, _) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        never.assert();
+        never.remove();
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+
+        // A person's run accepts it at once, unchanged as it is.
+        let resent = import(&mut server, root, &a, 200, &saved(NEW_A, true));
+        let accept = published(&mut server, NEW_A);
+        let (report, _) = publish(
+            &all_args(&server),
+            root,
+            create_all(true, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        resent.assert();
+        accept.assert();
+        assert_eq!(report.saved.len(), 1, "{report:?}");
+        assert_eq!(report.saved[0].outcome.created.status, "accepted");
+        assert_eq!(
+            recorded(tmp.path())["docs/adr/a.md"].outcome,
+            Outcome::Accepted
+        );
+    }
+
+    #[test]
     fn create_all_stops_at_an_unknown_outcome_and_names_what_it_never_sent() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().unwrap();
@@ -1746,6 +1938,9 @@ mod tests {
             &[],
             true,
         );
+        // An edit since its save, so the run weighs a.md again.
+        let text = std::fs::read_to_string(&a).unwrap();
+        std::fs::write(&a, text.replacen("Why.", "Why, again.", 1)).unwrap();
         read(
             &mut server,
             &[
