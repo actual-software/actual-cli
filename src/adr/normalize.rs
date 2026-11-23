@@ -30,7 +30,10 @@
 //! under `Decision Outcome`) map as their own sections would, front matter
 //! keys nothing reads (MADR's `consulted`, `informed`) are carried as a
 //! `Front Matter` section, and neutral consequences, which the Context File
-//! has no list for, as `Neutral Consequences`.
+//! has no list for, as `Neutral Consequences`. A section a list would
+//! flatten (a code block, a table, a sub-heading) is carried whole, and so
+//! are a status that says more than its word (`Original Status`) and a date
+//! that can't be read as one (`Original Date`).
 
 use std::sync::LazyLock;
 
@@ -125,7 +128,7 @@ impl Extraction {
         }
     }
 
-    fn is_uncertain(&self, field: &str) -> bool {
+    pub fn is_uncertain(&self, field: &str) -> bool {
         self.uncertain.iter().any(|f| f == field)
     }
 
@@ -237,14 +240,65 @@ fn policy_line(line: &str) -> Option<String> {
     Some(format!("{}: {statement}", rule_spelling(level)))
 }
 
-/// A section's items: each non-empty line without its list marker, less
-/// sub-headings.
+/// A section's items: each non-empty line without its list marker. A
+/// section with [`structure`] is carried instead, since items would lose it.
 fn items(body: &str) -> Vec<String> {
     split_lines(body)
         .map(|line| unmarked(line).0)
-        .filter(|text| !text.is_empty() && !text.starts_with('#'))
+        .filter(|text| !text.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// A Markdown heading: one to six `#`, then a space or the line's end. A
+/// line such as `#482 timed out` is not one.
+fn is_heading(line: &str) -> bool {
+    static HEADING: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^#{1,6}(?:\s|$)").expect("valid regex"));
+    HEADING.is_match(js_trim(line))
+}
+
+/// Whether `body` holds what a list of items can't keep: a fenced block, a
+/// table or a sub-heading.
+fn structure(body: &str) -> bool {
+    split_lines(body).any(|line| {
+        let line = js_trim(line);
+        line.starts_with("```")
+            || line.starts_with("~~~")
+            || line.starts_with('|')
+            || is_heading(line)
+    })
+}
+
+/// Whether a status says more than its one word, such as `Superseded by
+/// ADR-0009` or `Accepted on 2019-03-02`, so the words would be lost.
+fn says_more(status: &str) -> bool {
+    let (text, _) = unmarked(status);
+    js_trim(text)
+        .trim_end_matches('.')
+        .contains(char::is_whitespace)
+}
+
+/// A date as `YYYY-MM-DD`, from the spellings ADRs use: `2019-03-02`,
+/// `2019/03/02`, `March 2, 2019`, `2 March 2019` and their short months.
+/// `None` for anything else, which is carried as written.
+pub fn iso_date(text: &str) -> Option<String> {
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d %Y",
+        "%b %d %Y",
+        "%d %B %Y",
+        "%d %b %Y",
+    ];
+    let text = js_trim(text);
+    FORMATS
+        .iter()
+        .find_map(|format| chrono::NaiveDate::parse_from_str(text, format).ok())
+        .map(|date| date.format("%Y-%m-%d").to_string())
 }
 
 /// A bullet under a policy-list heading with no keyword, at MUST.
@@ -408,9 +462,10 @@ pub fn read(text: &str) -> Read {
         found.title = Some(title_without_number(title));
     }
     let mut context: Vec<String> = Vec::new();
+    let mut prose: Vec<&str> = Vec::new();
     for line in &preamble {
         let trimmed = js_trim(line);
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("---") {
+        if h1_title(trimmed).is_some() || trimmed.starts_with("---") {
             continue;
         }
         if let Some(value) = preamble_label(line, "Status") {
@@ -420,13 +475,20 @@ pub fn read(text: &str) -> Read {
         } else if let Some(value) = preamble_label(line, "Deciders") {
             found.deciders.get_or_insert_with(|| value.to_string());
         } else {
-            context.extend(items(trimmed));
+            prose.push(line);
         }
+    }
+    let prose = js_trim(&prose.join("\n")).to_string();
+    if structure(&prose) {
+        out.carried.push(("Original Context".to_string(), prose));
+    } else {
+        context.extend(items(&prose));
     }
 
     let mut policies: Vec<String> = Vec::new();
     let mut rationale: Vec<String> = Vec::new();
     let mut neutral: Vec<String> = Vec::new();
+    let mut status_carried = false;
     for (heading, lines) in sections {
         let key = heading_key(heading);
         let body = js_trim(&lines.join("\n")).to_string();
@@ -439,10 +501,22 @@ pub fn read(text: &str) -> Read {
             out.carried.push((renamed, kept));
         };
         let k = key.as_str();
+        let structured = structure(&body);
         if k == "status" {
-            if let Some(line) = lines.iter().map(|l| js_trim(l)).find(|l| !l.is_empty()) {
+            let mut said = lines.iter().map(|l| js_trim(l)).filter(|l| !l.is_empty());
+            if let Some(line) = said.next() {
                 found.status = Some(line.to_string());
+                if says_more(line) || said.next().is_some() {
+                    status_carried = true;
+                    out.carried.push(("Original Status".to_string(), body));
+                }
             }
+        } else if structured
+            && (CONTEXT_KEYS.contains(&k)
+                || RATIONALE_KEYS.contains(&k)
+                || REFERENCE_KEYS.contains(&k))
+        {
+            carry_as(&mut out, body);
         } else if CONTEXT_KEYS.contains(&k) {
             context.extend(items(&body));
         } else if DECISION_KEYS.contains(&k) {
@@ -468,6 +542,23 @@ pub fn read(text: &str) -> Read {
             out.references.extend(items(&body));
         } else {
             carry_as(&mut out, body);
+        }
+    }
+    // A status or date the header can't hold all of is kept as written.
+    if let Some(status) = found
+        .status
+        .as_deref()
+        .filter(|s| !status_carried && says_more(s))
+    {
+        out.carried
+            .push(("Original Status".to_string(), js_trim(status).to_string()));
+    }
+    if let Some(date) = found.date.clone() {
+        match iso_date(&date) {
+            Some(iso) => found.date = Some(iso),
+            None => out
+                .carried
+                .push(("Original Date".to_string(), js_trim(&date).to_string())),
         }
     }
     if !neutral.is_empty() {
@@ -536,8 +627,12 @@ fn read_decision(lines: &[&str], policy_list: bool) -> DecisionSection {
                     continue;
                 }
             }
-            (_, Some(k)) if RATIONALE_KEYS.contains(&k) => {
-                out.rationale.extend(items(&body));
+            (Some(heading), Some(k)) if RATIONALE_KEYS.contains(&k) => {
+                if structure(&body) {
+                    out.own_sections.push((format!("Original {heading}"), body));
+                } else {
+                    out.rationale.extend(items(&body));
+                }
                 continue;
             }
             (Some(heading), Some("confirmation")) => {
@@ -719,13 +814,6 @@ pub struct Settings<'a> {
     pub fallback_title: &'a str,
     /// Whether a glob matches a file in the repository.
     pub matches: &'a dyn Fn(&str) -> bool,
-}
-
-/// A date the Context File keeps: `YYYY-MM-DD`.
-fn is_date(text: &str) -> bool {
-    static DATE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^\d{4}-\d{2}-\d{2}$").expect("valid regex"));
-    DATE.is_match(text)
 }
 
 /// Settle a file: the decision to write, the questions still open, or why
@@ -914,8 +1002,8 @@ pub fn plan(read: &Read, merged: &Extraction, settings: &Settings) -> Plan {
         Ok(doc) => doc,
         Err(reasons) => return Plan::Skip(reasons.join(" ")),
     };
-    if let Some(date) = merged.date.as_deref().map(js_trim).filter(|d| is_date(d)) {
-        doc.date = date.to_string();
+    if let Some(date) = merged.date.as_deref().and_then(iso_date) {
+        doc.date = date;
     }
     Plan::Ready(Box::new(Ready {
         doc,
@@ -1667,5 +1755,103 @@ It should be modular.
             Some(&["MUST: x".to_string()][..])
         );
         assert!(from_model(serde_json::json!({"surprise": 1})).is_err());
+    }
+
+    #[test]
+    fn a_status_or_date_the_header_cannot_hold_is_carried() {
+        let carried = |read: &Read, heading: &str| {
+            read.carried
+                .iter()
+                .find(|(h, _)| h == heading)
+                .map(|(_, body)| body.clone())
+        };
+        let superseded = read(
+            "# Use Postgres\n\nDate: March 2, 2019\n\n## Status\n\nSuperseded by ADR-0009\n\n\
+             ## Decision\n\nServices MUST use Postgres.\n",
+        );
+        assert_eq!(superseded.found.date.as_deref(), Some("2019-03-02"));
+        assert_eq!(
+            carried(&superseded, "Original Status").as_deref(),
+            Some("Superseded by ADR-0009")
+        );
+        assert_eq!(carried(&superseded, "Original Date"), None);
+        let planned = ready(plan(&superseded, &superseded.found, &settings(&any)));
+        assert_eq!(planned.status, "superseded");
+        assert_eq!(planned.doc.date, "2019-03-02");
+
+        // Two lines of status, a prose date and a MADR front matter status.
+        let amended = read(
+            "# Cache\n\nDate: sometime in 2019\n\n## Status\n\nAccepted\n\nAmended by ADR-0012\n",
+        );
+        assert_eq!(
+            carried(&amended, "Original Status").as_deref(),
+            Some("Accepted\n\nAmended by ADR-0012")
+        );
+        assert_eq!(
+            carried(&amended, "Original Date").as_deref(),
+            Some("sometime in 2019")
+        );
+        let madr = read("---\nstatus: superseded by ADR-0123\n---\n# Cache\n");
+        assert_eq!(
+            carried(&madr, "Original Status").as_deref(),
+            Some("superseded by ADR-0123")
+        );
+        let bare = read("# Cache\n\n* Status: Accepted.\n");
+        assert_eq!(carried(&bare, "Original Status"), None);
+
+        // An answer's date in another spelling is taken too.
+        let answered = Extraction {
+            date: Some("2 Mar 2019".to_string()),
+            ..superseded.found.clone()
+        };
+        let planned = ready(plan(&superseded, &answered, &settings(&any)));
+        assert_eq!(planned.doc.date, "2019-03-02");
+    }
+
+    #[test]
+    fn iso_date_reads_the_spellings_adrs_use() {
+        for said in [
+            "2019-03-02",
+            "2019/03/02",
+            "2019.03.02",
+            "March 2, 2019",
+            "Mar 2, 2019",
+            "March 2 2019",
+            "Mar 2 2019",
+            "2 March 2019",
+            "2 Mar 2019",
+        ] {
+            assert_eq!(iso_date(said).as_deref(), Some("2019-03-02"), "{said}");
+        }
+        assert_eq!(iso_date("02/03/2019"), None);
+        assert_eq!(iso_date("Q1 2019"), None);
+    }
+
+    #[test]
+    fn sections_a_list_would_lose_are_carried_whole() {
+        let read = read(
+            "# Deploy with scripts\n\nSee the runbook.\n\n### Note\n\nWritten after #482.\n\n\
+             ## Context\n\nWe deploy by hand:\n\n```sh\n# build first\nmake deploy\n```\n\n\
+             ## Decision Outcome\n\nDeploys MUST run from CI.\n\n### Rationale\n\n\
+             | Option | Cost |\n|---|---|\n| CI | low |\n\n\
+             ## References\n\n- #482 reported the timeout\n",
+        );
+        let headings: Vec<&str> = read.carried.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(
+            headings,
+            ["Original Context", "Original Context", "Original Rationale"]
+        );
+        assert!(read.carried[0]
+            .1
+            .contains("### Note\n\nWritten after #482."));
+        assert!(read.carried[1]
+            .1
+            .contains("```sh\n# build first\nmake deploy\n```"));
+        assert!(read.carried[2].1.starts_with("| Option | Cost |"));
+        assert_eq!(read.found.context, None);
+        assert_eq!(read.found.rationale, None);
+        assert_eq!(read.references, ["#482 reported the timeout"]);
+        assert!(!is_heading("#482 reported"));
+        assert!(is_heading("###"));
     }
 }
