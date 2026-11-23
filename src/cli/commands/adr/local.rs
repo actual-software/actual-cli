@@ -130,9 +130,9 @@ fn write_new_noting(
     if let Some(problem) = applied.problems.first() {
         // Never leave a decision behind without the rule file it should have.
         let _ = std::fs::remove_file(&decision_file);
-        return Err(ActualError::ConfigError(format!(
+        return Err(ActualError::IoError(std::io::Error::other(format!(
             "Couldn't write the decision's rule file, so nothing was written: {problem}"
-        )));
+        ))));
     }
     Ok(Written {
         adr_id,
@@ -733,11 +733,14 @@ mod tests {
         // A file where the rules directory should be.
         std::fs::write(tmp.path().join(".actual/rules"), "").unwrap();
         let args = new_args("Use Postgres", &["MUST: Use it."], &[]);
-        let err = write_new(&args, tmp.path(), TODAY, None).err();
+        let err = write_new(&args, tmp.path(), TODAY, None).unwrap_err();
+        // A local file that couldn't be written, with no config hint.
         assert!(
-            matches!(&err, Some(ActualError::ConfigError(m)) if m.contains("nothing was written")),
+            matches!(&err, ActualError::IoError(e) if e.to_string().contains("nothing was written")),
             "{err:?}"
         );
+        assert_eq!(err.exit_code(), 5);
+        assert!(err.hint().is_none(), "{:?}", err.hint());
         let docs: Vec<_> = std::fs::read_dir(tmp.path().join(DECISION_DIR))
             .unwrap()
             .collect();
