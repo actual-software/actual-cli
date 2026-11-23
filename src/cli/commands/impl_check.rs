@@ -74,8 +74,9 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
-    self, capped_read, deny_summary, emit, emit_status, finish_hook, render_json, render_panel,
-    run_pipeline, run_pipeline_filtered, HookRun, Outcome,
+    self, capped_read, deny_summary, direct_decision, emit, emit_status, finish_hook,
+    record_direct_round, render_json, render_panel, run_pipeline, run_pipeline_filtered, HookRun,
+    Outcome,
 };
 use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession, TurnStart};
@@ -167,48 +168,49 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
     // Same reasoning as `plan_check::exec_direct`'s identical block: only
     // `Outcome::Verdicts` is a real governance decision, and
     // `RequiresDecision` maps to `warn` here via `verdict.blocks()`.
-    #[cfg(feature = "telemetry")]
     if let Outcome::Verdicts {
         verdicts, partial, ..
     } = &outcome
     {
-        let warn_reasons = super::check_telemetry::direct_warn_reasons(verdicts, partial.is_some());
-        let decision = if verdicts.iter().any(|v| v.verdict.blocks()) {
-            crate::api::types::PlanGovernanceDecision::Block
-        } else if !warn_reasons.is_empty() {
-            crate::api::types::PlanGovernanceDecision::Warn
-        } else {
-            crate::api::types::PlanGovernanceDecision::Allow
-        };
-        let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
-        let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
-            .iter()
-            .filter(|v| !v.verdict.passes())
-            .map(|v| {
-                (
-                    v.rule_id.as_str(),
-                    v.doc_slug.as_str(),
-                    crate::telemetry::plan_governance::rule_decision(v.verdict, v.verdict.blocks()),
-                )
-            })
-            .collect();
-        let action = super::check_telemetry::Action {
-            kind: ArtifactKind::Diff,
-            hook: false,
-            session_id: None,
-            agent_id: None,
-            started,
-        };
-        super::check_telemetry::report(&action, decision, &warn_reasons, Vec::new());
-        send_governance_events(
-            "impl-check",
-            &root,
-            started.instant,
-            decision,
-            exit_code,
-            &violations,
-            None,
-        );
+        let decision = direct_decision(verdicts, partial.is_some());
+        record_direct_round(ArtifactKind::Diff, &rules_dir, decision, verdicts);
+        #[cfg(feature = "telemetry")]
+        {
+            let warn_reasons =
+                super::check_telemetry::direct_warn_reasons(verdicts, partial.is_some());
+            let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
+            let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
+                .iter()
+                .filter(|v| !v.verdict.passes())
+                .map(|v| {
+                    (
+                        v.rule_id.as_str(),
+                        v.doc_slug.as_str(),
+                        crate::telemetry::plan_governance::rule_decision(
+                            v.verdict,
+                            v.verdict.blocks(),
+                        ),
+                    )
+                })
+                .collect();
+            let action = super::check_telemetry::Action {
+                kind: ArtifactKind::Diff,
+                hook: false,
+                session_id: None,
+                agent_id: None,
+                started,
+            };
+            super::check_telemetry::report(&action, decision, &warn_reasons, Vec::new());
+            send_governance_events(
+                "impl-check",
+                &root,
+                started.instant,
+                decision,
+                exit_code,
+                &violations,
+                None,
+            );
+        }
     }
 
     result
@@ -780,6 +782,9 @@ mod tests {
     use std::path::{Path as StdPath, PathBuf};
     use tempfile::{tempdir, TempDir};
 
+    use crate::cli::commands::check_engine::tests::assert_one_direct_round;
+    use crate::cli::commands::enforcement_log::{self, Decision, Gate};
+    use crate::rules::check::Verdict;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     #[cfg(feature = "telemetry")]
@@ -1332,6 +1337,9 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
+        // The log is local, so it's written with telemetry off too.
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
@@ -1359,6 +1367,12 @@ mod tests {
 
         let err = exec(&args).unwrap_err();
         assert!(matches!(err, ActualError::ImplNotConforming(_)));
+        assert_one_direct_round(
+            Gate::Impl,
+            &crate::rules::rules_dir(root.path()),
+            Decision::Block,
+            Verdict::Conflicting,
+        );
     }
 
     /// `--json` on an empty diff is the same clean, exit-0 "not checked"
@@ -1391,6 +1405,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
@@ -1458,6 +1473,12 @@ mod tests {
         }
         #[cfg(not(feature = "telemetry"))]
         assert!(exec(&args).is_ok());
+        assert_one_direct_round(
+            Gate::Impl,
+            &crate::rules::rules_dir(root.path()),
+            Decision::Warn,
+            Verdict::RequiresDecision,
+        );
     }
 
     #[test]

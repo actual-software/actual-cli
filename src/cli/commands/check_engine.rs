@@ -18,9 +18,11 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::api::types::PlanGovernanceDecision;
 use crate::cli::args::{
     OverrideGateArg, OverrideVia, PlanCheckArgs, PlanCheckOverrideArgs, RunnerChoice,
 };
+use crate::cli::commands::enforcement_log::{self, Mode, Round};
 use crate::cli::commands::governance_session::{
     self, GovernanceSession, Pending, PickerAsk, PickerStage,
 };
@@ -2569,6 +2571,64 @@ pub(super) struct HookRun<'a> {
     pub filter: Option<&'a FilterTally>,
 }
 
+/// A direct run's decision: `block` on a conflict, `warn` when a rule needs a
+/// decision or the judge saw only part of what applies, `allow` otherwise.
+pub(super) fn direct_decision(verdicts: &[CheckedRule], partial: bool) -> PlanGovernanceDecision {
+    if verdicts.iter().any(|v| v.verdict.blocks()) {
+        PlanGovernanceDecision::Block
+    } else if partial
+        || verdicts
+            .iter()
+            .any(|v| v.verdict == Verdict::RequiresDecision)
+    {
+        PlanGovernanceDecision::Warn
+    } else {
+        PlanGovernanceDecision::Allow
+    }
+}
+
+/// Record a direct run's round in the local enforcement log.
+pub(super) fn record_direct_round(
+    kind: check::ArtifactKind,
+    rules_dir: &Path,
+    decision: PlanGovernanceDecision,
+    verdicts: &[CheckedRule],
+) {
+    enforcement_log::record(&Round::new(
+        kind.into(),
+        Mode::Direct,
+        &absolute(rules_dir),
+        decision.into(),
+        verdicts,
+    ));
+}
+
+/// Record a hook round in the local enforcement log, with the session's
+/// round counter for the gate when there is a session.
+fn record_hook_round(
+    run: &HookRun<'_>,
+    session: &GovernanceSession,
+    decision: PlanGovernanceDecision,
+    verdicts: &[CheckedRule],
+) {
+    let round = Round::new(
+        run.kind.into(),
+        Mode::Hook,
+        &absolute(run.rules_dir),
+        decision.into(),
+        verdicts,
+    );
+    let round = match run.session_id {
+        Some(id) => round.in_session(id, session.loop_state(run.kind).rounds),
+        None => round,
+    };
+    enforcement_log::record(&round);
+}
+
+fn absolute(path: &Path) -> std::path::PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Turn the pipeline's [`Outcome`] into the hook's one line of output and the
 /// session state that goes with it: fail-open notices, session bookkeeping,
 /// the deny / round-limit / partial-coverage / override-reminder decision, and
@@ -2782,6 +2842,7 @@ fn finish_verdicts(
                 // Every rule here is `blocked: false` -- the round limit let
                 // the call through this round -- so this is `warn`, not
                 // `block`, distinct from a clean pass.
+                record_hook_round(run, session, PlanGovernanceDecision::Warn, &verdicts);
                 #[cfg(feature = "telemetry")]
                 super::check_telemetry::report_round(
                     run,
@@ -2852,6 +2913,7 @@ fn finish_verdicts(
                 Reply::Deny(with_override_reminder(deny_reason, session)),
             );
         }
+        record_hook_round(run, session, PlanGovernanceDecision::Block, &verdicts);
         #[cfg(feature = "telemetry")]
         super::check_telemetry::report_round(
             run,
@@ -2914,7 +2976,6 @@ fn finish_verdicts(
     // exists to preserve. `verdicts` this round holds only passing entries
     // ([`Verdict::passes`]) by construction (any such rule would already be in `blocking`,
     // handled above), so no violation events are emitted here regardless.
-    #[cfg(feature = "telemetry")]
     let has_override_reminder = reminder.is_some();
     if let Some(reminder) = reminder {
         notes.push(reminder);
@@ -2924,6 +2985,12 @@ fn finish_verdicts(
     } else {
         reply(run, Reply::Notice(notes.join("\n")));
     }
+    let decision = if partial.is_some() || has_override_reminder {
+        PlanGovernanceDecision::Warn
+    } else {
+        PlanGovernanceDecision::Allow
+    };
+    record_hook_round(run, session, decision, &verdicts);
     #[cfg(feature = "telemetry")]
     {
         use super::check_telemetry::WarnReason;
@@ -2934,11 +3001,6 @@ fn finish_verdicts(
         .into_iter()
         .flatten()
         .collect();
-        let decision = if warn_reasons.is_empty() {
-            crate::api::types::PlanGovernanceDecision::Allow
-        } else {
-            crate::api::types::PlanGovernanceDecision::Warn
-        };
         super::check_telemetry::report_round(run, decision, &warn_reasons, records);
         send_hook_governance_events(
             run.command,
@@ -3151,6 +3213,33 @@ pub(crate) mod tests {
     pub(crate) fn take_captured_plan_governance_events(
     ) -> Vec<crate::api::types::PlanGovernanceEvent> {
         CAPTURED_PLAN_GOVERNANCE_EVENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
+
+    /// Assert the enforcement log holds exactly one round, a direct run of
+    /// `gate` over `rules_dir` that came to `decision` with the token-signing
+    /// ADR's strongest verdict `verdict`.
+    pub(crate) fn assert_one_direct_round(
+        gate: enforcement_log::Gate,
+        rules_dir: &Path,
+        decision: enforcement_log::Decision,
+        verdict: Verdict,
+    ) {
+        let rounds = enforcement_log::read(None);
+        assert_eq!(rounds.len(), 1, "{rounds:?}");
+        let round = &rounds[0];
+        assert_eq!(
+            (round.gate, round.mode, round.decision),
+            (gate, Mode::Direct, decision)
+        );
+        assert_eq!(round.rules_dir, rules_dir.display().to_string());
+        assert_eq!((round.session_id.as_deref(), round.round), (None, None));
+        assert_eq!(
+            round.adrs,
+            vec![enforcement_log::AdrVerdict {
+                adr: "cross-cutting-token-signing-1c57".to_string(),
+                verdict,
+            }]
+        );
     }
 
     #[cfg(feature = "telemetry")]
@@ -5397,6 +5486,165 @@ pub(crate) mod tests {
             log.contains("Actual implementation governance hit its round limit"),
             "{log}"
         );
+    }
+
+    /// Each of a hook round's three exits writes one line to the enforcement
+    /// log, with the decision telemetry reports for it and the session's round.
+    #[test]
+    fn test_finish_hook_records_each_exit_in_the_enforcement_log() {
+        use enforcement_log::{AdrVerdict, Decision, Gate};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
+        let rules = tempdir().unwrap();
+        let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+        let conflict = || vec![checked("R-A-002", Verdict::Conflicting, "span", "no")];
+        let conforming = || vec![checked("R-A-001", Verdict::Followed, "span", "ok")];
+
+        let cases = [
+            (check::ArtifactKind::Diff, 2, 2, conflict(), Decision::Warn),
+            (check::ArtifactKind::Plan, 3, 0, conflict(), Decision::Block),
+            (
+                check::ArtifactKind::Plan,
+                3,
+                0,
+                conforming(),
+                Decision::Allow,
+            ),
+        ];
+        for (kind, max_rounds, earlier_denials, verdicts, _) in cases.clone() {
+            let mut session = GovernanceSession::default();
+            session
+                .loop_state_mut(kind)
+                .deny_counts
+                .insert(key.clone(), earlier_denials);
+            finish_hook(
+                &hook_run(kind, Some("s-log"), rules.path(), max_rounds),
+                &mut session,
+                verdicts_outcome(verdicts),
+            );
+        }
+
+        let rounds = enforcement_log::read(None);
+        assert_eq!(rounds.len(), cases.len(), "{rounds:?}");
+        for (round, (kind, _, _, verdicts, decision)) in rounds.iter().zip(cases) {
+            assert_eq!(
+                (round.gate, round.mode, round.decision),
+                (Gate::from(kind), Mode::Hook, decision)
+            );
+            assert_eq!(round.session_id.as_deref(), Some("s-log"));
+            assert_eq!(round.round, Some(1));
+            assert_eq!(round.rules_dir, rules.path().display().to_string());
+            assert_eq!(
+                round.adrs,
+                vec![AdrVerdict {
+                    adr: "cross-cutting-token-signing-1c57".to_string(),
+                    verdict: verdicts[0].verdict,
+                }]
+            );
+        }
+    }
+
+    /// A clean round that judged only part of what applies is `warn`, and a
+    /// round outside a session records neither a session nor a round.
+    #[test]
+    fn test_finish_hook_logs_partial_coverage_as_warn_without_a_session() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
+        let rules = tempdir().unwrap();
+        let mut outcome = verdicts_outcome(vec![checked("R-A-001", Verdict::Followed, "", "ok")]);
+        if let Outcome::Verdicts { partial, .. } = &mut outcome {
+            *partial = Some((1, 2));
+        }
+
+        finish_hook(
+            &hook_run(check::ArtifactKind::Plan, None, rules.path(), 3),
+            &mut GovernanceSession::default(),
+            outcome,
+        );
+
+        let rounds = enforcement_log::read(None);
+        assert_eq!(rounds.len(), 1, "{rounds:?}");
+        assert_eq!(rounds[0].decision, enforcement_log::Decision::Warn);
+        assert_eq!(
+            (rounds[0].session_id.as_deref(), rounds[0].round),
+            (None, None)
+        );
+    }
+
+    /// Outcomes that reach no verdict are not rounds, so they write nothing.
+    #[test]
+    fn test_finish_hook_logs_nothing_without_a_verdict() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
+        let rules = tempdir().unwrap();
+        let run = hook_run(check::ArtifactKind::Plan, Some("s-none"), rules.path(), 3);
+        for outcome in [
+            Outcome::NothingApplies,
+            Outcome::NoRunner {
+                documents_selected: 1,
+                reason: "none".into(),
+            },
+            Outcome::CheckFailed {
+                documents_selected: 1,
+                reason: "boom".into(),
+            },
+        ] {
+            finish_hook(&run, &mut GovernanceSession::default(), outcome);
+        }
+        assert!(enforcement_log::read(None).is_empty());
+    }
+
+    /// A relative rules directory is recorded absolute, so `actual stats
+    /// --repo` can match it whatever directory the gate ran from.
+    #[test]
+    fn test_record_direct_round_makes_the_rules_dir_absolute() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
+        let relative = Path::new("repo").join(".actual").join("rules");
+
+        record_direct_round(
+            check::ArtifactKind::Diff,
+            &relative,
+            PlanGovernanceDecision::Allow,
+            &[],
+        );
+
+        let rounds = enforcement_log::read(None);
+        let recorded = Path::new(&rounds[0].rules_dir);
+        assert!(recorded.is_absolute(), "{recorded:?}");
+        assert!(recorded.ends_with(&relative), "{recorded:?}");
+    }
+
+    #[test]
+    fn test_direct_decision_blocks_then_warns_then_allows() {
+        let conflict = checked("R-A-002", Verdict::Conflicting, "span", "no");
+        let decide = checked("R-A-002", Verdict::RequiresDecision, "span", "maybe");
+        let followed = checked("R-A-001", Verdict::Followed, "span", "ok");
+        for (verdicts, partial, expected) in [
+            (
+                vec![decide.clone(), conflict],
+                false,
+                PlanGovernanceDecision::Block,
+            ),
+            (
+                vec![followed.clone(), decide],
+                false,
+                PlanGovernanceDecision::Warn,
+            ),
+            (vec![followed.clone()], true, PlanGovernanceDecision::Warn),
+            (vec![followed], false, PlanGovernanceDecision::Allow),
+        ] {
+            assert_eq!(direct_decision(&verdicts, partial), expected);
+        }
     }
 
     /// Each of a hook round's three exits, the round limit's pass, a deny and

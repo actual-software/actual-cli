@@ -145,8 +145,9 @@ use serde::Serialize;
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::{
-    self, capped_read, check_json, deny_summary, emit, finish_hook, render_panel, run_pipeline,
-    run_pipeline_filtered, CheckJson, HookRun, Outcome,
+    self, capped_read, check_json, deny_summary, direct_decision, emit, finish_hook,
+    record_direct_round, render_panel, run_pipeline, run_pipeline_filtered, CheckJson, HookRun,
+    Outcome,
 };
 use crate::cli::commands::codex_rollout;
 use crate::cli::commands::governance_session::{self, GovernanceSession};
@@ -235,55 +236,56 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         Ok(())
     };
 
-    // Only emitted when the pipeline actually reached a verdict -- the
+    // Only recorded and emitted when the pipeline actually reached a verdict -- the
     // other `Outcome` variants are "could not check" infra states, not
     // governance decisions, and forcing them into `allow`/`warn`/`block`
     // would misrepresent an infra failure as a verdict. Direct mode's
     // `RequiresDecision` only sets `--json`'s status field and never blocks
     // (see the module doc's "revision loop" section), so it maps to `warn`
     // here via `verdict.blocks()`, matching that documented behavior.
-    #[cfg(feature = "telemetry")]
     if let Outcome::Verdicts {
         verdicts, partial, ..
     } = &outcome
     {
-        let warn_reasons = super::check_telemetry::direct_warn_reasons(verdicts, partial.is_some());
-        let decision = if verdicts.iter().any(|v| v.verdict.blocks()) {
-            crate::api::types::PlanGovernanceDecision::Block
-        } else if !warn_reasons.is_empty() {
-            crate::api::types::PlanGovernanceDecision::Warn
-        } else {
-            crate::api::types::PlanGovernanceDecision::Allow
-        };
-        let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
-        let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
-            .iter()
-            .filter(|v| !v.verdict.passes())
-            .map(|v| {
-                (
-                    v.rule_id.as_str(),
-                    v.doc_slug.as_str(),
-                    crate::telemetry::plan_governance::rule_decision(v.verdict, v.verdict.blocks()),
-                )
-            })
-            .collect();
-        let action = super::check_telemetry::Action {
-            kind: ArtifactKind::Plan,
-            hook: false,
-            session_id: None,
-            agent_id: None,
-            started,
-        };
-        super::check_telemetry::report(&action, decision, &warn_reasons, Vec::new());
-        send_governance_events(
-            "plan-check",
-            &root,
-            started.instant,
-            decision,
-            exit_code,
-            &violations,
-            None,
-        );
+        let decision = direct_decision(verdicts, partial.is_some());
+        record_direct_round(ArtifactKind::Plan, &rules_dir, decision, verdicts);
+        #[cfg(feature = "telemetry")]
+        {
+            let warn_reasons =
+                super::check_telemetry::direct_warn_reasons(verdicts, partial.is_some());
+            let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
+            let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
+                .iter()
+                .filter(|v| !v.verdict.passes())
+                .map(|v| {
+                    (
+                        v.rule_id.as_str(),
+                        v.doc_slug.as_str(),
+                        crate::telemetry::plan_governance::rule_decision(
+                            v.verdict,
+                            v.verdict.blocks(),
+                        ),
+                    )
+                })
+                .collect();
+            let action = super::check_telemetry::Action {
+                kind: ArtifactKind::Plan,
+                hook: false,
+                session_id: None,
+                agent_id: None,
+                started,
+            };
+            super::check_telemetry::report(&action, decision, &warn_reasons, Vec::new());
+            send_governance_events(
+                "plan-check",
+                &root,
+                started.instant,
+                decision,
+                exit_code,
+                &violations,
+                None,
+            );
+        }
     }
 
     result
@@ -741,6 +743,9 @@ mod tests {
     use std::path::Path;
     use tempfile::{tempdir, TempDir};
 
+    use crate::cli::commands::check_engine::tests::assert_one_direct_round;
+    use crate::cli::commands::enforcement_log::{self, Decision, Gate};
+    use crate::rules::check::Verdict;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     #[cfg(feature = "telemetry")]
@@ -948,6 +953,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
@@ -993,6 +999,12 @@ mod tests {
             assert_eq!(props.exit_code, Some(0));
             assert_eq!(props.command.as_deref(), Some("plan-check"));
         }
+        assert_one_direct_round(
+            Gate::Plan,
+            &crate::rules::rules_dir(root.path()),
+            Decision::Allow,
+            Verdict::Followed,
+        );
     }
 
     /// A direct run sends the two action events as well, with no session or
@@ -1207,6 +1219,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
@@ -1275,6 +1288,12 @@ mod tests {
                 Some("R-A-002")
             );
         }
+        assert_one_direct_round(
+            Gate::Plan,
+            &crate::rules::rules_dir(root.path()),
+            Decision::Block,
+            Verdict::Conflicting,
+        );
     }
 
     /// Direct mode's counterpart to

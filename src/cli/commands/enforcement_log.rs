@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::api::types::PlanGovernanceDecision;
 use crate::config::paths::{append_secure, config_dir, write_secure};
 use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
 
@@ -84,6 +85,16 @@ pub enum Decision {
     Allow,
     Warn,
     Block,
+}
+
+impl From<PlanGovernanceDecision> for Decision {
+    fn from(decision: PlanGovernanceDecision) -> Self {
+        match decision {
+            PlanGovernanceDecision::Allow => Decision::Allow,
+            PlanGovernanceDecision::Warn => Decision::Warn,
+            PlanGovernanceDecision::Block => Decision::Block,
+        }
+    }
 }
 
 /// One ADR judged in a round: its rule file's `doc_slug` (the same key the
@@ -394,6 +405,17 @@ mod tests {
     fn test_gate_names_both_artifact_kinds() {
         assert_eq!(Gate::from(ArtifactKind::Plan), Gate::Plan);
         assert_eq!(Gate::from(ArtifactKind::Diff), Gate::Impl);
+    }
+
+    #[test]
+    fn test_decision_mirrors_the_governance_decision() {
+        for (governance, decision) in [
+            (PlanGovernanceDecision::Allow, Decision::Allow),
+            (PlanGovernanceDecision::Warn, Decision::Warn),
+            (PlanGovernanceDecision::Block, Decision::Block),
+        ] {
+            assert_eq!(Decision::from(governance), decision);
+        }
     }
 
     #[test]
