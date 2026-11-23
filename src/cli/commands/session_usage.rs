@@ -164,10 +164,7 @@ impl Scan {
 /// The subagent transcripts Claude Code keeps beside `transcript`, in
 /// `<session>/subagents/*.jsonl`, sorted.
 fn subagent_transcripts(transcript: &Path) -> Vec<PathBuf> {
-    let Some(stem) = transcript.file_stem() else {
-        return Vec::new();
-    };
-    let dir = transcript.with_file_name(stem).join("subagents");
+    let dir = transcript.with_extension("").join("subagents");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -272,6 +269,7 @@ mod tests {
                 assistant("s1", SYNTHETIC, 9, 9, 9, 9),
                 r#"{"type":"assistant","uuid":"u3","message":{"model":"claude-opus","usage":{"output_tokens":2}}}"#.to_string(),
                 r#"{"type":"assistant","message":{"model":"claude-opus","usage":{"output_tokens":1}}}"#.to_string(),
+                r#"{"type":"assistant","message":{"id":"m3","model":"claude-opus"}}"#.to_string(),
             ],
         );
         let subagents = dir.path().join("session-1/subagents");
@@ -359,21 +357,5 @@ mod tests {
         write(&full, &[assistant("m1", "claude-opus", 1, 1, 1, 1)]);
         assert!(read(&full, Instant::now()).is_none());
         assert!(read(&full, later()).is_some());
-    }
-
-    /// Times a scan of a real transcript, for the session-end hook's budget:
-    /// `ACTUAL_USAGE_TRANSCRIPT=<path> cargo test --release scan_time -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn scan_time() {
-        let path = PathBuf::from(std::env::var("ACTUAL_USAGE_TRANSCRIPT").unwrap());
-        let size = std::fs::metadata(&path).unwrap().len();
-        let start = Instant::now();
-        let usage = read(&path, later());
-        let elapsed = start.elapsed();
-        println!(
-            "scanned {size} bytes in {elapsed:?}: {:?}",
-            usage.map(|u| (u.source, summary(&u)))
-        );
     }
 }
