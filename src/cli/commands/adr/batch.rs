@@ -1007,7 +1007,7 @@ fn render(report: &BatchReport) -> String {
         let _ = writeln!(
             out,
             "\n{} under {DECISION_DIR}/ {} no ADR header, which `create --all` needs; \
-             `actual adr check` lists each one.",
+             `actual adr check --json` lists each one.",
             count(report.other_files.len(), "markdown file", "markdown files"),
             if report.other_files.len() == 1 {
                 "has"

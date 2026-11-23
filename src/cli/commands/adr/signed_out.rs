@@ -246,7 +246,7 @@ fn run_list(args: &AdrListArgs, root: &Path) -> Result<String, ActualError> {
     if unheaded > 0 {
         out.push_str(&format!(
             "\n{unheaded} {} under {DECISION_DIR}/ {} no ADR header, so `list` leaves {} out; \
-             `actual adr check` names {}.\n",
+             `actual adr check --json` names {}.\n",
             if unheaded == 1 { "file" } else { "files" },
             if unheaded == 1 { "has" } else { "have" },
             if unheaded == 1 { "it" } else { "them" },
