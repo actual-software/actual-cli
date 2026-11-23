@@ -16,8 +16,10 @@
 //! **Signed in or not, by the sender.** The records are spooled like every
 //! other OTLP record: under a sign-in they go with its token, and otherwise
 //! without it and without [`otlp`]'s signed-in-only attributes, the decision
-//! id among them. A review run while signed out stops at the sign-in, so it
-//! sends outcome `not_signed_in` and never had an id to send.
+//! id among them. A review event names its pathway: `local` for `publish`,
+//! `update` and `delete` on the files under `docs/adr/`, and for the
+//! commands that refuse there with outcome `not_signed_in`, or `cloud` for a
+//! run on Actual AI's decisions.
 //!
 //! **Counts and outcomes, never content.** No title, context, policy, scope,
 //! file path or `reject --reason` text is sent. A create event counts the
@@ -34,8 +36,9 @@ use std::time::Instant;
 
 #[cfg(feature = "telemetry")]
 use super::super::brief_telemetry;
-use crate::adr::workflow;
-use crate::api::adr_types::{LifecycleAction, WebDecision};
+use crate::adr::files::DecisionFile;
+use crate::adr::workflow::{self, Listed};
+use crate::api::adr_types::{DecisionState, LifecycleAction, WebDecision};
 use crate::error::ActualError;
 #[cfg(feature = "telemetry")]
 pub(super) use crate::telemetry::otlp::CheckCounts;
@@ -68,16 +71,24 @@ impl Run {
     }
 }
 
+/// The pathway of a review run on the files under `docs/adr/`.
+pub(super) const LOCAL: &str = "local";
+/// The pathway of a review run on Actual AI's decisions.
+pub(super) const CLOUD: &str = "cloud";
+
 /// The decision a review run found, which its event names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Reviewed {
     id: String,
     grouped: bool,
     group_rows: usize,
+    /// The state it was in before the run: one of [`DecisionState`]'s
+    /// names, or `other` for a file whose status none of them covers.
+    prior_status: &'static str,
 }
 
 impl Reviewed {
-    pub(super) fn of(decision: &WebDecision) -> Self {
+    fn of(decision: &WebDecision, state: DecisionState) -> Self {
         let grouped = workflow::is_group(decision);
         Self {
             id: decision.id.clone(),
@@ -87,6 +98,29 @@ impl Reviewed {
             } else {
                 0
             },
+            prior_status: state.as_str(),
+        }
+    }
+
+    /// A decision Actual AI keeps, in the list it was read in.
+    pub(super) fn listed(listed: &Listed) -> Self {
+        Self::of(&listed.decision, listed.state)
+    }
+
+    /// A decision file under `docs/adr/`. Like a signed-out `create`, it
+    /// sends no id.
+    pub(super) fn file(file: &DecisionFile) -> Self {
+        let meta = file.meta.clone().unwrap_or_default();
+        let state = if meta.is_active() {
+            Some(DecisionState::Active)
+        } else {
+            meta.status
+                .as_deref()
+                .and_then(|status| workflow::state_of(&status.trim().to_lowercase(), false))
+        };
+        Self {
+            prior_status: state.map_or("other", DecisionState::as_str),
+            ..Self::default()
         }
     }
 }
@@ -167,12 +201,14 @@ pub(super) fn report_check(run: &Run, counts: CheckCounts, result: &Result<(), A
     send(|origin| origin.adr_discovered(counts, run.ended(outcome, exit_code(result))));
 }
 
-/// Report one run of review command `action` that found `reviewed`, if it got
-/// that far: `succeeded`, `refused` when [`workflow`] turns the change down
-/// before anything is sent, `not_signed_in`, or `failed`.
+/// Report one run of review command `action` on `pathway` ([`LOCAL`] or
+/// [`CLOUD`]) that found `reviewed`, if it got that far: `succeeded`,
+/// `refused` when the decision's state or the edit turns the change down
+/// before anything is written, `not_signed_in`, or `failed`.
 #[cfg(feature = "telemetry")]
 pub(super) fn report_review<T>(
     run: &Run,
+    pathway: &str,
     action: &str,
     reviewed: Option<&Reviewed>,
     result: &Result<T, ActualError>,
@@ -183,11 +219,19 @@ pub(super) fn report_review<T>(
         Err(ActualError::NotLoggedIn | ActualError::AdrPathway(_)) => "not_signed_in",
         Err(_) => "failed",
     };
-    let decision = reviewed.map_or_else(ReviewedDecision::default, |r| ReviewedDecision {
-        id: Some(&r.id),
-        grouped: r.grouped,
-        group_rows: r.group_rows,
-    });
+    let decision = reviewed.map_or_else(
+        || ReviewedDecision {
+            pathway,
+            ..ReviewedDecision::default()
+        },
+        |r| ReviewedDecision {
+            pathway,
+            id: Some(&r.id),
+            prior_status: Some(r.prior_status),
+            grouped: r.grouped,
+            group_rows: r.group_rows,
+        },
+    );
     send(|origin| origin.adr_reviewed(action, decision, run.ended(outcome, exit_code(result))));
 }
 
@@ -226,7 +270,13 @@ fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
 pub(super) fn report_check(_: &Run, _: CheckCounts, _: &Result<(), ActualError>) {}
 
 #[cfg(not(feature = "telemetry"))]
-pub(super) fn report_review<T>(_: &Run, _: &str, _: Option<&Reviewed>, _: &Result<T, ActualError>) {
+pub(super) fn report_review<T>(
+    _: &Run,
+    _: &str,
+    _: &str,
+    _: Option<&Reviewed>,
+    _: &Result<T, ActualError>,
+) {
 }
 
 #[cfg(not(feature = "telemetry"))]
@@ -365,7 +415,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 9);
+                assert_eq!(all["actual.event.schema_version"], 10);
             }
         });
     }
@@ -373,7 +423,10 @@ pub(super) mod tests {
     #[test]
     fn review_reports_each_command_and_outcome() {
         with_config(WITH_FILE, |_| {
-            let person = Reviewed::of(&decision("d-1", Some("d-1"), &["d-1"]));
+            let person = Reviewed::listed(&Listed {
+                decision: decision("d-1", Some("d-1"), &["d-1"]),
+                state: DecisionState::Draft,
+            });
             let actions = [
                 command(LifecycleAction::Accept),
                 command(LifecycleAction::Reject),
@@ -406,7 +459,7 @@ pub(super) mod tests {
                     (Err(ActualError::ServiceUnavailable), "failed", 3),
                 ];
                 for (result, outcome, code) in cases {
-                    report_review(&run(false), action, Some(&person), &result);
+                    report_review(&run(false), CLOUD, action, Some(&person), &result);
                     let records = take_captured();
                     assert_eq!(records.len(), 1, "{action} {outcome}");
                     assert_eq!(records[0]["eventName"], otlp::ADR_REVIEWED);
@@ -414,6 +467,8 @@ pub(super) mod tests {
                         Value::Object(own(&records[0])),
                         json!({
                             "actual.adr.review.action": action,
+                            "actual.adr.review.pathway": "cloud",
+                            "actual.adr.review.prior_status": "draft",
                             "actual.adr.decision_id": "d-1",
                             "actual.adr.review.grouped": false,
                             "actual.adr.review.group_rows": 0,
@@ -432,17 +487,21 @@ pub(super) mod tests {
     /// event counts the rows that route covers.
     #[test]
     fn review_of_a_grouped_decision_counts_its_rows() {
-        let grouped = Reviewed::of(&decision("g-1", Some("g-1"), &["m-1", "m-2", "m-3"]));
+        let grouped = Reviewed::of(
+            &decision("g-1", Some("g-1"), &["m-1", "m-2", "m-3"]),
+            DecisionState::Suggested,
+        );
         assert_eq!(
             grouped,
             Reviewed {
                 id: "g-1".to_string(),
                 grouped: true,
-                group_rows: 3
+                group_rows: 3,
+                prior_status: "suggested",
             }
         );
         with_config(WITH_FILE, |_| {
-            report_review(&run(true), "accept", Some(&grouped), &Ok(()));
+            report_review(&run(true), CLOUD, "accept", Some(&grouped), &Ok(()));
             let records = take_captured();
             let own = own(&records[0]);
             assert_eq!(own["actual.adr.decision_id"], "g-1");
@@ -451,18 +510,21 @@ pub(super) mod tests {
         });
     }
 
-    /// Signed out, a review stops at the sign-in: no decision was found, so
-    /// none is named.
+    /// A review that stops before it finds a decision, such as `accept`
+    /// refused on the files, names its pathway and no decision.
     #[test]
-    fn review_signed_out_reports_not_signed_in_without_an_id() {
+    fn review_without_a_decision_names_only_its_pathway() {
         with_config(WITH_FILE, |_| {
-            let result: Result<(), ActualError> = Err(ActualError::NotLoggedIn);
-            report_review(&run(false), "publish", None, &result);
+            let result: Result<(), ActualError> =
+                Err(ActualError::AdrPathway("needs a sign-in".to_string()));
+            report_review(&run(false), LOCAL, "accept", None, &result);
             let records = take_captured();
             assert_eq!(
                 Value::Object(own(&records[0])),
                 json!({
-                    "actual.adr.review.action": "publish",
+                    "actual.adr.review.action": "accept",
+                    "actual.adr.review.pathway": "local",
+                    "actual.adr.review.prior_status": "",
                     "actual.adr.decision_id": "",
                     "actual.adr.review.grouped": false,
                     "actual.adr.review.group_rows": 0,
@@ -472,6 +534,44 @@ pub(super) mod tests {
                 })
             );
         });
+    }
+
+    /// A decision file's prior status is the state the CLI lists it in: a
+    /// file with no status, or any status that governs, is active.
+    #[test]
+    fn a_decision_files_prior_status_is_its_listed_state() {
+        let file = |status: Option<&str>| DecisionFile {
+            path: std::path::PathBuf::from("docs/adr/d-1.md"),
+            meta: Some(crate::rules::types::AdrMeta {
+                adr_id: Some("d-1".to_string()),
+                status: status.map(str::to_string),
+                ..Default::default()
+            }),
+            source: None,
+            body: String::new(),
+        };
+        let cases = [
+            (None, "active"),
+            (Some("accepted"), "active"),
+            (Some("created-from-user"), "active"),
+            (Some("Draft"), "draft"),
+            (Some("suggested"), "suggested"),
+            (Some(" archived-draft "), "archived"),
+            (Some("rejected"), "archived"),
+            (Some("deleted"), "archived"),
+            (Some("deferred"), "other"),
+            (Some("Superseded"), "other"),
+        ];
+        for (status, prior) in cases {
+            assert_eq!(
+                Reviewed::file(&file(status)),
+                Reviewed {
+                    prior_status: prior,
+                    ..Reviewed::default()
+                },
+                "{status:?}"
+            );
+        }
     }
 
     /// Each create outcome, for a local write and for a cloud save.
@@ -518,7 +618,7 @@ pub(super) mod tests {
                     }),
                     "{outcome}"
                 );
-                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 9);
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 10);
             }
 
             let saved = Creation {
@@ -570,10 +670,10 @@ pub(super) mod tests {
     /// Opted out by config or by env, no event is built.
     #[test]
     fn the_telemetry_off_switch_stops_every_event() {
-        let reviewed = Reviewed::of(&decision("d-1", None, &[]));
+        let reviewed = Reviewed::of(&decision("d-1", None, &[]), DecisionState::Active);
         let report_both = || {
             report_check(&run(true), COUNTS, &Ok(()));
-            report_review(&run(true), "accept", Some(&reviewed), &Ok(()));
+            report_review(&run(true), CLOUD, "accept", Some(&reviewed), &Ok(()));
             report_create(&run(true), &Creation::local(), &Ok(()));
             take_captured()
         };
@@ -596,11 +696,11 @@ pub(super) mod tests {
     /// sent, and nothing is sent.
     #[test]
     fn debug_mode_logs_the_events_as_not_sent_with_telemetry_off() {
-        let reviewed = Reviewed::of(&decision("d-1", None, &[]));
+        let reviewed = Reviewed::of(&decision("d-1", None, &[]), DecisionState::Active);
         with_config(&format!("{WITH_FILE}  enabled: false\n"), |home| {
             let _debug = crate::telemetry::debug::tests::debug_on(home, "adr-off");
             report_check(&run(true), COUNTS, &Ok(()));
-            report_review(&run(true), "accept", Some(&reviewed), &Ok(()));
+            report_review(&run(true), CLOUD, "accept", Some(&reviewed), &Ok(()));
             report_create(&run(true), &Creation::local(), &Ok(()));
             assert!(take_captured().is_empty());
             let lines = crate::telemetry::debug::tests::logged("adr-off");

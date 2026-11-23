@@ -46,7 +46,7 @@ pub fn listed(response: DecisionsResponse) -> Vec<Listed> {
 
 /// The list a decision read with `status` is in, from the web app's own
 /// derivation; `in_suggestions` says it was read in `suggestions`.
-fn state_of(status: &str, in_suggestions: bool) -> Option<DecisionState> {
+pub(crate) fn state_of(status: &str, in_suggestions: bool) -> Option<DecisionState> {
     match (status, in_suggestions) {
         ("suggested", _) => Some(DecisionState::Suggested),
         ("updated", _) => Some(DecisionState::Updated),
