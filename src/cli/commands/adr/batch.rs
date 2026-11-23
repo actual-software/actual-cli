@@ -278,8 +278,8 @@ fn slug(url: &str) -> Option<String> {
 /// the repository names them and in path order, judged with no request
 /// against `decisions`, the repository's decisions as the caller read them.
 /// A file is listed when it passes `create --all`'s own test of a file, its
-/// record doesn't hold this text already (sent, or left alone for a reason
-/// that holds until the file changes), and the decision it was saved as, if
+/// record doesn't show this text as sent already (a skip's reason can lapse,
+/// so a skipped file is weighed again), and the decision it was saved as, if
 /// any, is still a draft. The record is the one for organization `org_id`
 /// and the repository the remote URL `remote` names, under `record_dir`, or
 /// [`record::dir`] when that is `None`. A draft that waits for its file to
@@ -305,7 +305,7 @@ pub(super) fn unsent_paths(
         let text = std::fs::read_to_string(&file.path).unwrap_or_default();
         let entry = book.entry(&name);
         let own = entry.and_then(|entry| entry.adr_id.as_deref());
-        let held = entry.is_some_and(|entry| entry.text == record::text_hash(&text))
+        let held = entry.is_some_and(|entry| entry.sent(&text))
             || own.is_some_and(|id| known.owned(id).is_some());
         if !held && plan(&file, &known, own, false, today).is_ok() {
             paths.push(name);
@@ -2841,6 +2841,21 @@ mod tests {
         // f.md doesn't govern, and drafts/ is left out.
         assert_eq!(listed, ["docs/adr/a.md", "docs/adr/c.md"]);
         assert!(e.exists() && a.exists());
+
+        // A skip holds nothing back: once the decision e.md looked like is
+        // archived, e.md is listed with the very text a run skipped.
+        let text = std::fs::read_to_string(&e).unwrap();
+        let skipped = Entry::new(&text, Outcome::Skipped, None);
+        assert!(record::save(
+            records.path(),
+            &key(),
+            &source_path(root, &e),
+            skipped
+        ));
+        let mut lapsed = decisions.to_vec();
+        lapsed[4] = decision(NEW_A, "Keep a changelog", "archived");
+        let listed = unsent_paths(root, &lapsed, ORG, ORIGIN, TODAY, Some(records.path()));
+        assert_eq!(listed, ["docs/adr/a.md", "docs/adr/c.md", "docs/adr/e.md"]);
 
         // With no record, for a remote that names no repository or in an
         // empty config directory, each file sent before looks like the
