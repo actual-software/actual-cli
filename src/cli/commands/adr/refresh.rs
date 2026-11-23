@@ -195,6 +195,11 @@ pub(super) fn refresh(
                     }
                     (Mode::SignedIn, None, None)
                 }
+                Err(Unread::Refused(problem)) => {
+                    problems.push(problem);
+                    repo = None;
+                    (Mode::SignedIn, None, None)
+                }
             }
         }
         Err(e) => {
@@ -325,6 +330,9 @@ enum Unread {
         problem: String,
         found: Option<ConnectedRepo>,
     },
+    /// Actual AI turned the read down, as it would for a repository no
+    /// longer connected, so the next refresh looks the repository up again.
+    Refused(String),
 }
 
 impl Unread {
@@ -353,6 +361,7 @@ fn read_cloud(
             problem: format!("{problem}, {KEPT}."),
             found,
         }),
+        Some(Err(Unread::Refused(problem))) => Err(Unread::Refused(format!("{problem}, {KEPT}."))),
         Some(Err(no_repo)) => Err(no_repo),
         None => Err(Unread::failed(format!(
             "Actual AI didn't answer within {timeout_ms} ms, {KEPT}."
@@ -428,10 +437,23 @@ async fn read_decisions(
     };
     match super::cloud::decisions(&session, Some(&connected.repo_id)).await {
         Ok(decisions) => Ok((decisions, connected)),
+        Err(e) if refused(&e) => Err(Unread::Refused(unread(e))),
         Err(e) => Err(Unread::Failed {
             problem: unread(e),
             found: Some(connected),
         }),
+    }
+}
+
+/// Whether Actual AI answered the read by turning it down, rather than
+/// failing to answer it.
+fn refused(e: &ActualError) -> bool {
+    match e {
+        ActualError::NotLoggedIn
+        | ActualError::AdrAccessDenied { .. }
+        | ActualError::AdrInvalid { .. } => true,
+        ActualError::ApiError(message) => message.starts_with("HTTP 4"),
+        _ => false,
     }
 }
 
@@ -1204,6 +1226,45 @@ mod tests {
         // A refresh cut off by the time box keeps the repository too.
         assert_eq!(load(&records, root).connected_repo, Some(found));
         no_lookup.assert();
+
+        // A read Actual AI turns down, as for a repository no longer
+        // connected, lets the next refresh look the repository up again.
+        let mut gone = mockito::Server::new();
+        gone.mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .create();
+        let report = refresh(root, &args(Some(&gone)), TODAY, dir);
+        assert!(
+            report.kept && report.problems[0].contains("HTTP 404"),
+            "{report:?}"
+        );
+        assert!(load(&records, root).connected_repo.is_none());
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn a_read_turned_down_is_told_apart_from_one_that_failed() {
+        for turned_down in [
+            ActualError::NotLoggedIn,
+            ActualError::AdrAccessDenied {
+                message: "denied".to_string(),
+                hint: String::new(),
+            },
+            ActualError::AdrInvalid {
+                reasons: Vec::new(),
+            },
+            ActualError::ApiError("HTTP 404 Not Found".to_string()),
+        ] {
+            assert!(refused(&turned_down), "{turned_down:?}");
+        }
+        for failed in [
+            ActualError::ApiError("HTTP 502 Bad Gateway".to_string()),
+            ActualError::ApiError("error sending request".to_string()),
+            ActualError::ServiceUnavailable,
+        ] {
+            assert!(!refused(&failed), "{failed:?}");
+        }
     }
 
     #[test]
