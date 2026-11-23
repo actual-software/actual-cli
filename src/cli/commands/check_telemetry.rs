@@ -15,8 +15,9 @@
 //!
 //! When a block ends, one [`otlp::GATE_RESOLVED`] record per logical ADR says
 //! how: `fixed` or `not_rechecked` from the next round, `round_limit` from the
-//! round the limit lets through, `overridden` from `check-override`, and
-//! `still_open` from the session's end.
+//! round the limit lets through, `overridden` from an override (terminal
+//! `check-override`, the `/override` hook, or Codex's typed override and
+//! picker), and `still_open` from the session's end.
 //!
 //! # Design
 //!
@@ -61,9 +62,10 @@
 //! **A block is an episode, per ADR.** A logical ADR's block opens at the
 //! first round that denies one of its rules and ends when the last of them
 //! stops blocking, so blocked, fixed and blocked again sends two records. A
-//! rule ends `fixed` when a later round judges it passing, and `not_rechecked`
-//! when a later round decides without judging it, because the selection or the
-//! judged window left it out or nothing applied. When an ADR's rules end
+//! rule ends `fixed` when a later round judges it followed, and `not_rechecked`
+//! when a later round decides without that verdict: the selection or the
+//! judged window left it out, nothing applied, or the judge found it not
+//! applicable. When an ADR's rules end
 //! differently the record reports the least resolved of them, in the order
 //! of [`Resolution`](super::governance_session::Resolution). The open
 //! episodes live in the session file beside the deny counts. A killed session

@@ -177,12 +177,13 @@ pub struct LoopState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
-    /// A later round judged it passing.
+    /// A later round judged it followed.
     Fixed,
     /// A human overrode it.
     Overridden,
-    /// A later round decided without judging it: the selection or the judged
-    /// window left it out, or nothing applied.
+    /// A later round decided without judging it followed: the selection or
+    /// the judged window left it out, nothing applied, or the judge found it
+    /// not applicable.
     NotRechecked,
     /// The round limit let the call through over it.
     RoundLimit,
@@ -1038,7 +1039,7 @@ pub fn record_override(
     reason: &str,
 ) {
     let reason = Some(reason).filter(|r| !r.trim().is_empty());
-    let _ = record_override_with(
+    let _ = record_override_ending(
         session_id,
         rules_dir,
         keys,
@@ -1059,20 +1060,6 @@ pub fn denying_gate(session: &GovernanceSession, key: &str) -> Option<OverrideGa
         (false, true) => Some(OverrideGate::Impl),
         (false, false) => None,
     }
-}
-
-/// [`record_override_ending`]'s gates, without the episodes it ended. Test
-/// convenience.
-#[cfg(test)]
-pub fn record_override_with(
-    session_id: &str,
-    rules_dir: &std::path::Path,
-    keys: &[String],
-    reason: Option<&str>,
-    reason_code: Option<OverrideReasonCode>,
-    source: OverrideSource,
-) -> Vec<Option<OverrideGate>> {
-    record_override_ending(session_id, rules_dir, keys, reason, reason_code, source).0
 }
 
 /// Record an explicit, human-issued override: mark `keys` settled for
@@ -1914,7 +1901,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        record_override_with(
+        record_override_ending(
             "session-no-reason",
             &rd(),
             &[key("doc", "R-A")],
@@ -2035,11 +2022,11 @@ mod tests {
 
     /// The code lands on the session's override and on its audit-log line.
     #[test]
-    fn test_record_override_with_stores_the_reason_code() {
+    fn test_record_override_ending_stores_the_reason_code() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        record_override_with(
+        record_override_ending(
             "session-code",
             &rd(),
             &[key("doc", "R-A")],
