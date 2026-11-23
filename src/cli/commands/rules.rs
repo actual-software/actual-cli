@@ -539,7 +539,9 @@ mod tests {
 
         let root = seed(&[("a.md", DOC)]);
         let home = tempdir().unwrap();
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard =
             crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");

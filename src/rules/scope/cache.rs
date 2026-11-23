@@ -182,7 +182,7 @@ mod tests {
     /// the only cost is a rebuild.
     #[test]
     fn test_cache_is_inert_without_a_resolvable_config_directory() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // A relative `ACTUAL_CONFIG` is rejected by the config loader, so
         // `config_dir()` errors and every cache path resolves to `None`.
         let _guard = EnvGuard::set("ACTUAL_CONFIG", "relative/config.yaml");
@@ -207,7 +207,7 @@ mod tests {
     /// with it.
     #[test]
     fn test_cache_path_is_outside_the_repository() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_cache_path_differs_per_rules_directory() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_store_then_load_returns_the_same_index() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_store_then_load_keeps_the_v2_fields_and_the_inactive_count() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_load_misses_when_the_digest_no_longer_matches() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_load_misses_on_an_older_format_version() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_load_misses_on_a_previous_version_index_so_it_rebuilds() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -334,7 +334,7 @@ mod tests {
     /// with unchanged rule files must rebuild such an index, not serve it.
     #[test]
     fn test_load_misses_on_a_v10_index_that_read_16_hex_hashes_as_words() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_load_misses_on_an_absent_or_corrupt_entry() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_clear_removes_the_entry() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -388,7 +388,7 @@ mod tests {
     /// repositories accumulates stale entries. `clear_all` is the prune.
     #[test]
     fn test_clear_all_removes_every_entry() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -419,7 +419,7 @@ mod tests {
     /// so a mismatch there would only misreport, not under-clear.
     #[test]
     fn test_clear_all_removes_and_counts_a_staged_tmp_sibling() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -443,7 +443,7 @@ mod tests {
     /// a rebuild rather than failing the command.
     #[test]
     fn test_store_is_silent_when_the_cache_cannot_be_written() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let blocker = tempdir().unwrap();
         let file = blocker.path().join("not-a-dir");
         std::fs::write(&file, "x").unwrap();
@@ -462,7 +462,7 @@ mod tests {
     fn test_stored_cache_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
