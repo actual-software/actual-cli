@@ -102,6 +102,9 @@ struct BatchReport {
     /// Markdown under `docs/adr/` with no ADR header, which `create` can't
     /// send.
     other_files: Vec<String>,
+    /// Why the run's record wasn't kept, when an entry couldn't be saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record_problem: Option<String>,
 }
 
 pub(super) fn exec_create_all(args: &AdrCreateArgs) -> Result<(), ActualError> {
@@ -225,6 +228,8 @@ struct Cloud {
 struct Book {
     place: Option<(PathBuf, Key)>,
     record: Record,
+    /// Whether an entry couldn't be saved.
+    unsaved: bool,
 }
 
 impl Book {
@@ -239,7 +244,11 @@ impl Book {
             .as_ref()
             .map(|(dir, key)| record::load(dir, key))
             .unwrap_or_default();
-        Self { place, record }
+        Self {
+            place,
+            record,
+            unsaved: false,
+        }
     }
 
     /// The record of the repository a run sends to: the one `--repo` names,
@@ -263,7 +272,7 @@ impl Book {
 
     fn note(&mut self, name: &str, entry: Entry) {
         if let Some((dir, key)) = &self.place {
-            record::save(dir, key, name, entry.clone());
+            self.unsaved |= !record::save(dir, key, name, entry.clone());
         }
         self.record.files.insert(name.to_string(), entry);
     }
@@ -404,7 +413,7 @@ async fn run_publish(
             return Ok(publishing.stop(item.name.clone(), e, rest));
         }
     }
-    Ok((publishing.report, None))
+    Ok(publishing.finished(None))
 }
 
 /// A run past its sign-in, with the repository's decisions read.
@@ -666,8 +675,40 @@ impl Publishing<'_> {
             reason: e.to_string(),
         });
         self.report.not_sent = rest;
-        (self.report, Some(e))
+        self.finished(Some(e))
     }
+
+    /// The report the run leaves, saying so when its record wasn't kept.
+    fn finished(mut self, stop: Option<ActualError>) -> (BatchReport, Option<ActualError>) {
+        if self.book.unsaved {
+            let waits = self
+                .report
+                .saved
+                .iter()
+                .chain(&self.report.merged)
+                .any(|saved| saved.waits_for_merge);
+            self.report.record_problem = Some(unsaved_record(waits));
+        }
+        (self.report, stop)
+    }
+}
+
+/// Why a record the run couldn't keep matters: the next run reads it to tell
+/// a file's own draft from a look-alike and to find the drafts that wait for
+/// the default branch.
+fn unsaved_record(waits: bool) -> String {
+    let mut problem = String::from(
+        "Couldn't save the record under adr-create-all/ in the user config directory, so the \
+         next run can take a file saved now for its own draft's look-alike and skip it.",
+    );
+    if waits {
+        problem.push_str(
+            " A file marked accepted that waits for the default branch isn't accepted from \
+             here without it; once the record can be saved, `actual adr create --all \
+             --allow-duplicate` sends the file again.",
+        );
+    }
+    problem
 }
 
 /// Sign in, pick the repository and read its decisions.
@@ -1029,6 +1070,9 @@ fn render(report: &BatchReport) -> String {
         for problem in outcome.files.iter().flat_map(|files| &files.problems) {
             let _ = writeln!(out, "{} {}: {problem}", theme::warning("note:"), saved.file);
         }
+    }
+    if let Some(problem) = &report.record_problem {
+        let _ = writeln!(out, "{} {problem}", theme::warning("warning:"));
     }
     out.push_str(&render_stopped(report));
     if !report.other_files.is_empty() {
@@ -1818,6 +1862,51 @@ mod tests {
             recorded(tmp.path())["docs/adr/a.md"].outcome,
             Outcome::Accepted
         );
+    }
+
+    #[test]
+    fn create_all_says_when_its_record_wasnt_kept() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres for storage",
+            "MUST: Store data in Postgres.",
+            &[],
+            false,
+        );
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[]);
+        let sent = import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        // Another run holds the record's lock past the wait.
+        let dir = tmp.path().join("adr-create-all");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _held = crate::cli::commands::brief_ledger::lock(&dir, Duration::ZERO).unwrap();
+        let (report, stop) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        sent.assert();
+        assert!(stop.is_none());
+        assert!(report.saved[0].waits_for_merge, "{report:?}");
+        let problem = report.record_problem.clone().unwrap();
+        assert!(problem.starts_with("Couldn't save the record"), "{problem}");
+        assert!(problem.contains("--allow-duplicate"), "{problem}");
+        assert!(render(&report).contains(&format!("warning: {problem}")));
+        let json: serde_json::Value = serde_json::from_str(&json_text(&report)).unwrap();
+        assert_eq!(json["record_problem"], problem.as_str());
+        assert!(recorded(tmp.path()).is_empty());
+        // Kept, it says nothing.
+        assert!(!json_text(&BatchReport::default()).contains("record_problem"));
     }
 
     #[test]
