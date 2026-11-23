@@ -49,9 +49,11 @@ pub(super) enum Outcome {
     WaitsForMerge,
     /// Accepted, so Actual AI owns the decision now.
     Accepted,
-    /// Sent, with no answer back, so whether Actual AI saved a draft is
-    /// unknown. The next run sends the file again, with no look-alike check,
-    /// and the path key returns the draft this send made, if it made one.
+    /// Sent, and the run ended before it knew how the save finished: no
+    /// answer came back, or the run was cut off before the scope and publish
+    /// steps were done. The next run sends the file again, with no
+    /// look-alike check, and the path key returns the draft the earlier send
+    /// made, if it made one.
     Unconfirmed,
     /// Left alone this time: its id or a look-alike in Actual AI, a status
     /// that doesn't govern, the check, or a refusal. Any of those can lapse
@@ -89,8 +91,9 @@ impl Entry {
             && self.text == text_hash(text)
     }
 
-    /// Whether the last send of the file had no answer, so the next one
-    /// skips the look-alike check that its own draft would fail.
+    /// Whether the run that last sent the file ended before its save
+    /// finished, so the next send skips the look-alike check that its own
+    /// draft would fail.
     pub(super) fn unconfirmed(&self) -> bool {
         self.outcome == Outcome::Unconfirmed
     }

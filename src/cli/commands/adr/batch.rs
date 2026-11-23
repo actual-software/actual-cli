@@ -569,17 +569,11 @@ impl Publishing<'_> {
             self.skip(step, item, reason, outcome, Some(&imported.adr_id));
             return Ok(());
         }
-        // Noted before the scope and publish steps, so a run cut off during
-        // them still knows the draft as this file's own: a draft, or an
-        // accepted file's draft that a later run publishes.
-        let unfinished = if status == SaveStatus::Accepted {
-            Outcome::WaitsForMerge
-        } else {
-            Outcome::Draft
-        };
+        // Noted before the scope and publish steps, so the next run sends a
+        // file cut off during them again, knowing its draft as its own.
         self.book.note(
             &item.name,
-            Entry::new(&item.text, unfinished, Some(&imported.adr_id)),
+            Entry::new(&item.text, Outcome::Unconfirmed, Some(&imported.adr_id)),
         );
         let (save_as, rename) = match status {
             SaveStatus::Accepted if self.run.interactive => {
@@ -2117,7 +2111,7 @@ mod tests {
         let entry = &recorded(tmp.path())["docs/adr/a.md"];
         assert_eq!(
             (entry.outcome, entry.adr_id.as_deref()),
-            (Outcome::WaitsForMerge, Some(NEW_A))
+            (Outcome::Unconfirmed, Some(NEW_A))
         );
 
         // The next run with a person at the terminal sends it again and
@@ -2145,6 +2139,93 @@ mod tests {
         assert_eq!(
             recorded(tmp.path())["docs/adr/a.md"].outcome,
             Outcome::Accepted
+        );
+    }
+
+    #[test]
+    fn create_all_cut_off_before_a_drafts_scope_sends_it_again_and_sets_the_scope() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres for storage",
+            "MUST: Store data in Postgres.",
+            &["src/**"],
+            true,
+        );
+        let draft = web_json(
+            NEW_A,
+            "Use Postgres for storage",
+            "draft",
+            "Store data in Postgres.",
+        );
+        let scope = |server: &mut mockito::Server, slow: bool| {
+            let mock = server
+                .mock("POST", "/v1/gcp/product/adr-group-update")
+                .match_body(Matcher::PartialJson(json!({
+                    "group_id": NEW_A,
+                    "content": {"scope": {"root": ".", "paths": ["src/**"]}}
+                })));
+            let answer = format!(r#"{{"success":true,"members":[{{"adr_id":"{NEW_A}"}}]}}"#);
+            if slow {
+                mock.with_body_from_request(move |_| {
+                    std::thread::sleep(std::time::Duration::from_millis(2_000));
+                    answer.clone().into_bytes()
+                })
+                .create()
+            } else {
+                mock.with_body(answer).expect(1).create()
+            }
+        };
+        // The scope write answers too late, and the run is cut off waiting.
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[]);
+        read(&mut server, std::slice::from_ref(&draft));
+        import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        scope(&mut server, true);
+        let args = all_args(&server);
+        let target = Target {
+            repo: None,
+            api: &args.api,
+        };
+        let mut progress = Vec::new();
+        let run = run_publish(
+            &target,
+            root,
+            create_all(false, false),
+            TODAY,
+            &mut progress,
+        );
+        let cut = block(async {
+            tokio::time::timeout(std::time::Duration::from_millis(1_000), run).await
+        });
+        assert!(cut.is_err(), "the run should still wait for the scope");
+
+        // The next run sends the file again and sets the draft's scope.
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[draft]);
+        import(&mut server, root, &a, 200, &saved(NEW_A, true));
+        let scoped = scope(&mut server, false);
+        let (report, stop) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        scoped.assert();
+        assert!(stop.is_none() && report.skipped.is_empty(), "{report:?}");
+        let entry = &recorded(tmp.path())["docs/adr/a.md"];
+        assert_eq!(
+            (entry.outcome, entry.adr_id.as_deref()),
+            (Outcome::Draft, Some(NEW_A))
         );
     }
 
