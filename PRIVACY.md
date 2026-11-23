@@ -336,6 +336,8 @@ three sends nothing.
 
 The plugin's `SessionEnd` hook also sends `actual.session.ended` at session end, with Claude Code's session id, its coarse end reason (`clear`, `resume`, `logout`, `prompt_input_exit` or `other`), and a boolean saying whether the last completed hook check blocked. A session that hasn't completed a check reports `false`. A completed hook check after an end reopens that session, so its next end reports the updated verdict. Repeated ends without another hook check are suppressed, including a resume with no completed check. Direct checks don't change that state. A killed process can't run its end hook; missing events still need an inactivity fallback. Delivery uses the same best-effort spool and outputs as check events. The end also sends `actual.gate.resolved` with `still_open` for each block still open, once.
 
+Signed in to Actual's API, the end also carries the session's token totals per model: input, output, cache-read and cache-write tokens for each model Claude Code recorded, in the six `actual.usage.*` attributes below. The hook reads them on your machine from the transcript the `SessionEnd` hook names. It uses the last `cost-state` line Claude Code wrote, which also counts subagents and background calls, and otherwise adds up each assistant message's usage in the transcript and its `subagents/` folder. Signed out, the hook never opens the transcript. Only the counts and the model names are sent. A model name is sent exactly as Claude Code recorded it, so a deployment through a cloud provider sends that provider's model id, which can be a name your organization chose. The scan gives up after 500 ms, and an end that can't read the transcript, finds no usage or runs out of time carries no totals and says nothing about why. The totals are cumulative and come from the last end the CLI reported, which isn't always the session's last end: a later end is suppressed as a repeat until a hook check completes, so a session resumed for work that completes no check keeps the totals of its earlier end.
+
 While telemetry is on, or in debug mode, the gates keep each open block in the session's state under `plan-check-sessions/` in the user config directory: the ADR reference and file ids, the rules blocking, the `actual.action.id` of the check that opened it and its counts. A block's entry is removed when its event is sent, or by the next check of that gate once telemetry is off outside debug mode, which sends nothing for it, and the rest of that state is pruned after 7 days.
 
 While telemetry is on, at the end of each Claude Code turn that changed files, `impl-check --claude-hook` asks the agent which of the session's ADRs it used, and the agent answers with `actual rules report-use`, naming an ADR and a line for each claim, with the file's path relative to the repository root. Nothing on your machine reads the answer, so with telemetry off, or in a build without telemetry, the question isn't asked; debug mode still asks, and logs the events it would have sent. The CLI checks each claim on your machine: it holds when the ADR was one the question listed and the line is one the turn added or changed (or within three lines of one, in the same hunk), or a line of the plan `plan-check` judged that turn. For each listed ADR the answer names it sends `actual.adr.reported`, with the turn and the check's verdict on the claim. Every name the question never listed shares one more event, with an empty ADR reference, and the names themselves are never sent. Only a verified diff claim sends its file's repository path, and only in a signed-in request; an unverified claim sends no path. A path outside the repository, one that climbs with `..` and one longer than 1024 bytes name no file, so their claims are unverified and the session state keeps no path for them. The claims, the lines they point to and anything the agent wrote beside them stay in the session's state under `plan-check-sessions/` in the user config directory, which is pruned after 7 days like the rest of that state. So that a claim can point at a plan line, `plan-check` keeps the full text of the plan it judged in the same state until that turn's answer is recorded or the next prompt starts, and then only the plan's line count. A session that ends before either keeps the plan until the 7-day prune. With telemetry off, outside debug mode, no plan is kept. An answer of `--none` sends nothing.
@@ -380,13 +382,13 @@ directory, one file per organization and repository named by a hash of the
 two. Nothing sends that record; the next `create --all` and `adr refresh`
 read it.
 
-Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, the working directory, a rules directory or free-form end reasons.
+Local session state stores only that boolean, a duplicate-suppression flag and the rules directories a gate opened a block under, so the end can find those blocks, in `session-telemetry/` under the user config directory (by default `~/.actualai/actual/`), under a filename hashed from the session id. A file untouched for 7 days is deleted the next time any session's state is written. Telemetry opt-out prevents both recording and sending this state, except that debug mode still records the rules directories, so its end can log the blocks still open. The hook never sends the transcript, its path, its text, the working directory, a rules directory or free-form end reasons; signed in, it reads the transcript only for the token counts and model names described above.
 
 The events exist to evaluate the CLI: whoever receives them can see which ADRs
 each session's agents were given, which ones the gates checked work against and
 blocked on, which of them a human overrode and why (as a code, plus, from a
 signed-in run, the text typed for an `other` override), how each check came out
-and what made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked.
+and what made a check warn, how long it took, and when and how a session ended and whether its last completed hook check blocked, plus, from a signed-in session, how many tokens each model used in it.
 
 **Release builds send these events to Actual's API by default.** They go to
 `/v1/logs` on the address the CLI's other telemetry uses: the config file's
@@ -427,8 +429,9 @@ request Actual refuses with a 401 is sent once more without it. Any other
 endpoint, a custom one included, never gets the token. The default endpoint is
 at that address unless the config file's `api_url` or `ACTUAL_API_URL` names
 another one. Typed reason text, `actual.override.reason_text`, the decision a
-review or create command acted on, `actual.adr.decision_id`, and a reported claim's file
-path, `actual.report.file_path`, go only in a request that carries the token:
+review or create command acted on, `actual.adr.decision_id`, a reported claim's file
+path, `actual.report.file_path`, and a session end's token totals, the six
+`actual.usage.*` attributes, go only in a request that carries the token:
 every request without it, and the file sink's copy of that request, leaves
 those attributes out and keeps the rest, the reason code included.
 
@@ -443,7 +446,7 @@ gate, `actual.gate.outcome` on
 request that carries your sign-in's token. A check event adds
 `actual.action.type` and `actual.action.mode`, and the completed one
 `actual.action.outcome`, `actual.action.warn_reasons` and
-`actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`. An `actual adr` check
+`actual.action.duration_ms`. A session-end event adds `actual.session.end_reason` and `actual.session.last_check_blocked`, plus, in a request that carries your sign-in's token, `actual.usage.source`, `actual.usage.models`, `actual.usage.input_tokens`, `actual.usage.output_tokens`, `actual.usage.cache_read_tokens` and `actual.usage.cache_write_tokens` when the transcript gave totals. An `actual adr` check
 event adds `actual.adr.check.files`, `actual.adr.check.failed_files` and
 `actual.adr.check.duplicates`; a review event adds `actual.adr.review.action`,
 `actual.adr.review.pathway`, `actual.adr.review.prior_status`,
@@ -459,8 +462,9 @@ A filter event adds `actual.filter.selector`, `actual.filter.min_score`, `actual
 A resolution event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.gate.type`, `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`, `actual.gate.denials` and `actual.gate.block_action_id`.
 An unknown value is sent as an empty string. Apart from
 `actual.override.reason_text`, which holds whatever a person typed,
-`actual.adr.decision_id` and `actual.report.file_path`, all of which go only
-in a signed-in request, none of them names you, your organization, your
+`actual.adr.decision_id`, `actual.report.file_path` and the six
+`actual.usage.*` attributes, all of which go only in a signed-in request,
+none of them names you, your organization, your
 repository or this installation, so an event
 carries the same other fields signed in or out. Only the token on a signed-in request to Actual's API, described above,
 says whose events they are, and it makes every event in that request
@@ -471,7 +475,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `10` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, 9 added `actual.adr.created` and its attributes, and 10 added `actual.adr.review.pathway` and `actual.adr.review.prior_status`) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `11` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, 9 added `actual.adr.created` and its attributes, 10 added `actual.adr.review.pathway` and `actual.adr.review.prior_status`, and 11 added the `actual.usage.*` attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook. On `actual.gate.resolved` it names the agent whose check ended the block, which can differ from the one the block stopped, because a session's agents share each gate's blocks; it is empty for an override and at the session's end: random, generated by Claude Code | first-party identity-linked |
@@ -488,6 +492,12 @@ has only the classes its fields carry below:
 | `actual.override.reason_text` | The reason the human typed, sent only when its code is `other` (the text names no code) and only in a request that carries your sign-in's token. It's left out for every other code, when no reason was given, and from every request without the token. Before it's sent, anything that looks like a secret becomes `[redacted]` (see below), and the result is cut to 280 characters | first-party identity-linked: customer free text, shown only to your organization's admins |
 | `actual.session.end_reason` | The coarse reason Claude Code ended the session: `clear`, `resume`, `logout`, `prompt_input_exit` or `other` | anonymous |
 | `actual.session.last_check_blocked` | Whether the last completed hook check blocked; `false` when none completed | anonymous |
+| `actual.usage.source` | Where a signed-in end's token totals came from: `session_totals` for Claude Code's last `cost-state` line, `messages` for the sum of assistant messages. Sent only in a request that carries your sign-in's token, and only when the transcript gave totals | first-party identity-linked |
+| `actual.usage.models` | The models the session used, each once, sorted by name, as Claude Code recorded them (a cloud provider's model id or deployment name included). Sent only in a signed-in request | first-party identity-linked |
+| `actual.usage.input_tokens` | Each model's input tokens, in the order of `actual.usage.models`. A count past the largest signed 64-bit integer is sent as that integer. Sent only in a signed-in request | first-party identity-linked |
+| `actual.usage.output_tokens` | Each model's output tokens, in the same order. Sent only in a signed-in request | first-party identity-linked |
+| `actual.usage.cache_read_tokens` | Each model's tokens read from the prompt cache, in the same order. Sent only in a signed-in request | first-party identity-linked |
+| `actual.usage.cache_write_tokens` | Each model's tokens written to the prompt cache, in the same order. Sent only in a signed-in request | first-party identity-linked |
 | `actual.action.type` | The check: `plan-check` or `impl-check` | anonymous |
 | `actual.action.mode` | How the check ran: `hook` when Claude Code ran it as a hook, `direct` when someone ran the command | anonymous |
 | `actual.action.outcome` | What the check came to, as its plan-governance `check_completed` event records it: `allow`, `warn` or `block` | anonymous |
@@ -602,7 +612,9 @@ identity-linked data:
   backend systems and personnel. They don't go to PostHog or any other
   third-party analytics service.
 - **Purpose:** to tie these events to an organization so Actual can measure and
-  improve the CLI's ADR guidance and checks for each customer.
+  improve the CLI's ADR guidance and checks for each customer. The token
+  totals on a session end let Actual set that guidance against what the
+  session spent, per model.
 - **Retention & deletion:** they're kept for as long as needed to provide
   product analytics for the organization, and are deleted
   when the organization is deleted or on a verified deletion request for it.
@@ -617,8 +629,9 @@ renewed, when Actual refused the token, and when the endpoint isn't at the
 address `actual advisor` uses, as when the config file's `api_url` or
 `ACTUAL_API_URL` names another one. The events still carry the fields in the
 table above, with the classes given there, except `actual.override.reason_text`,
-`actual.adr.decision_id` and `actual.report.file_path`, which a request without
-your sign-in never carries:
+`actual.adr.decision_id`, `actual.report.file_path` and the six
+`actual.usage.*` attributes, which a request without your sign-in never
+carries:
 
 - **Who can attribute them:** Actual, as the first party, via its authorized
   backend systems and personnel. The ADR references lead to the repository the
