@@ -289,11 +289,11 @@ fn slug(url: &str) -> Option<String> {
 /// A file is listed when it passes `create --all`'s own test of a file, its
 /// record doesn't show this text as sent already (a skip's reason can lapse,
 /// so a skipped file is weighed again), and the decision it was saved as, if
-/// any, is still a draft. The record is the one for organization `org_id`
-/// and the repository the remote URL `remote` names, under `record_dir`, or
-/// [`record::dir`] when that is `None`. A draft that waits for its file to
-/// reach the default branch isn't listed: only a run's git read finds it
-/// there.
+/// any, is a draft in `decisions` or missing from it. The record is the one
+/// for organization `org_id` and the repository the remote URL `remote`
+/// names, under `record_dir`, or [`record::dir`] when that is `None`. A draft
+/// that waits for its file to reach the default branch isn't listed: only a
+/// run's git read finds it there.
 pub(super) fn unsent_paths(
     root: &Path,
     decisions: &[Decision],
@@ -609,9 +609,10 @@ impl Publishing<'_> {
     }
 
     /// The draft `item` was saved as, when the record shows its current text
-    /// went up and the read at the start shows that decision still a draft. A
-    /// file waiting for the default branch counts only with no person at the
-    /// terminal, since a person's run accepts it.
+    /// went up and the read at the start shows that decision as a draft or
+    /// not at all, so a draft deleted in Actual AI isn't sent back while its
+    /// file is unchanged. A file waiting for the default branch counts only
+    /// with no person at the terminal, since a person's run accepts it.
     fn unchanged_draft(&self, item: &Pending<'_>) -> Option<String> {
         let entry = self.book.entry(&item.name)?;
         let waits = entry.outcome == Outcome::WaitsForMerge && !self.run.interactive;
