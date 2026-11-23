@@ -15,10 +15,11 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::adopt::{exec_discover, exec_normalize};
-use super::cloud::{render_decision, render_list, update_edit};
+use super::cloud::{print_and_report, render_decision, render_list, update_edit};
 use super::local::{exec_check, exec_create, render_applied};
 use super::refresh::{exec_refresh, record_dir, refresh_decision};
-use super::{json_text, telemetry, today};
+use super::telemetry::{self, Reviewed};
+use super::{json_text, today};
 use crate::adr::context_file::{self, js_trim, ContextFile, Policy};
 use crate::adr::discovery;
 use crate::adr::files::{self, split_header, write_atomic, DecisionFile, DECISION_DIR};
@@ -50,16 +51,40 @@ pub(super) fn exec(action: &AdrAction) -> Result<(), ActualError> {
         AdrAction::Refresh(a) => return exec_refresh(a),
         AdrAction::List(a) => run_list(a, &root),
         AdrAction::Show(a) => run_show(a, &root),
-        AdrAction::Update(a) => run_update(a, &root, &today(), record),
-        AdrAction::Publish(a) => run_publish(a, &root, &today(), record),
+        AdrAction::Update(a) => {
+            return review("update", |found| {
+                run_update(a, &root, &today(), record, found)
+            })
+        }
+        AdrAction::Publish(a) => {
+            return review(telemetry::command(LifecycleAction::Publish), |found| {
+                run_publish(a, &root, &today(), record, found)
+            })
+        }
         AdrAction::Unpublish(_) => return needs_sign_in(LifecycleAction::Unpublish),
-        AdrAction::Delete(a) => run_delete(a, &root, &today(), record),
+        AdrAction::Delete(a) => {
+            return review(telemetry::command(LifecycleAction::Archive), |found| {
+                run_delete(a, &root, &today(), record, found)
+            })
+        }
         AdrAction::Restore(_) => return needs_sign_in(LifecycleAction::Restore),
         AdrAction::Accept(_) => return needs_sign_in(LifecycleAction::Accept),
         AdrAction::Reject(_) => return needs_sign_in(LifecycleAction::Reject),
     }?;
     print!("{text}");
     Ok(())
+}
+
+/// Run review command `action` on the files, setting the slot it is handed
+/// once it finds the decision, then print what it returned and report it.
+fn review(
+    action: &str,
+    body: impl FnOnce(&mut Option<Reviewed>) -> Result<String, ActualError>,
+) -> Result<(), ActualError> {
+    let run = telemetry::Run::start();
+    let mut found = None;
+    let result = body(&mut found);
+    print_and_report(&run, telemetry::LOCAL, action, found.as_ref(), result)
 }
 
 /// Refuse a command that acts on a record only Actual AI keeps, and report
@@ -88,7 +113,13 @@ fn needs_sign_in(action: LifecycleAction) -> Result<(), ActualError> {
         }
     };
     let result: Result<(), ActualError> = Err(ActualError::AdrPathway(reason.to_string()));
-    telemetry::report_review(&run, telemetry::command(action), None, &result);
+    telemetry::report_review(
+        &run,
+        telemetry::LOCAL,
+        telemetry::command(action),
+        None,
+        &result,
+    );
     result
 }
 
@@ -413,9 +444,11 @@ fn run_update(
     root: &Path,
     today: &str,
     record: Option<&Path>,
+    found: &mut Option<Reviewed>,
 ) -> Result<String, ActualError> {
     let edit = update_edit(args)?;
     let file = find(root, &args.id)?;
+    *found = Some(Reviewed::file(&file));
     let adr_id = file.adr_id().unwrap_or_default().to_string();
     let meta = file.meta.clone().unwrap_or_default();
     if !meta.is_active() {
@@ -536,8 +569,10 @@ fn run_publish(
     root: &Path,
     today: &str,
     record: Option<&Path>,
+    found: &mut Option<Reviewed>,
 ) -> Result<String, ActualError> {
     let file = find(root, &args.id)?;
+    *found = Some(Reviewed::file(&file));
     let adr_id = file.adr_id().unwrap_or_default().to_string();
     let id = sanitize_server_text(&adr_id);
     let meta = file.meta.clone().unwrap_or_default();
@@ -586,8 +621,10 @@ fn run_delete(
     root: &Path,
     today: &str,
     record: Option<&Path>,
+    found: &mut Option<Reviewed>,
 ) -> Result<String, ActualError> {
     let file = find(root, &args.id)?;
+    *found = Some(Reviewed::file(&file));
     let adr_id = file.adr_id().unwrap_or_default().to_string();
     let shown = relative(root, &file.path);
     let restorable = tracked(root, &shown);
@@ -871,7 +908,7 @@ mod tests {
         args.title = Some("Use Postgres for storage".to_string());
         args.levels = vec![format!("{}=SHOULD", policy_rule_id(&id, 2).to_lowercase())];
         args.scope = vec!["services/**".to_string()];
-        let text = run_update(&args, root, TODAY, Some(records.path())).unwrap();
+        let text = run_update(&args, root, TODAY, Some(records.path()), &mut None).unwrap();
         assert!(text.contains("Updated"), "{text}");
         assert!(text.contains("Rewrote rule file"), "{text}");
         let renamed = root
@@ -903,9 +940,10 @@ mod tests {
         ];
         args.context = vec![String::new()];
         args.api.json = true;
-        let json: serde_json::Value =
-            serde_json::from_str(&run_update(&args, root, TODAY, Some(records.path())).unwrap())
-                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &run_update(&args, root, TODAY, Some(records.path()), &mut None).unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["adr_id"], id.as_str());
         assert_eq!(json["rule_files"]["rewritten"].as_array().unwrap().len(), 1);
         let file = files::read_decision_file(&renamed).unwrap();
@@ -917,7 +955,7 @@ mod tests {
         // Only the context changes: the rule file says the same, and stays.
         let mut args = update_args(&id);
         args.context = vec!["Three engines run in production.".to_string()];
-        let text = run_update(&args, root, TODAY, Some(records.path())).unwrap();
+        let text = run_update(&args, root, TODAY, Some(records.path()), &mut None).unwrap();
         assert!(!text.contains("rule file"), "{text}");
     }
 
@@ -937,13 +975,13 @@ mod tests {
         let ends_once = |text: &str| text.ends_with('\n') && !text.ends_with("\n\n");
         let mut args = update_args(&id);
         args.context = vec!["One store.".to_string()];
-        run_update(&args, root, TODAY, None).unwrap();
+        run_update(&args, root, TODAY, None, &mut None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(ends_once(&text), "{text:?}");
         // A file written without one, as an earlier build did, gains it.
         std::fs::write(&path, text.trim_end()).unwrap();
         args.context = vec!["Still one store.".to_string()];
-        run_update(&args, root, TODAY, None).unwrap();
+        run_update(&args, root, TODAY, None, &mut None).unwrap();
         assert!(ends_once(&std::fs::read_to_string(&path).unwrap()));
     }
 
@@ -960,7 +998,7 @@ mod tests {
 
         let mut unknown = update_args(&id);
         unknown.levels = vec!["R-FFFF-009=MAY".to_string()];
-        let err = run_update(&unknown, root, TODAY, None).unwrap_err();
+        let err = run_update(&unknown, root, TODAY, None, &mut None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotFound(m) if m.contains("has no policy R-FFFF-009")),
             "{err:?}"
@@ -969,7 +1007,7 @@ mod tests {
         let mut blank = update_args(&id);
         blank.title = Some("  ".to_string());
         assert!(matches!(
-            run_update(&blank, root, TODAY, None),
+            run_update(&blank, root, TODAY, None, &mut None),
             Err(ActualError::AdrInvalid { .. })
         ));
 
@@ -984,7 +1022,7 @@ mod tests {
         std::fs::write(&path, &text).unwrap();
         let mut title = update_args(&id);
         title.title = Some("Use Postgres 16".to_string());
-        let err = run_update(&title, root, TODAY, None).unwrap_err();
+        let err = run_update(&title, root, TODAY, None, &mut None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("which `update` would drop")),
             "{err:?}"
@@ -1004,7 +1042,7 @@ mod tests {
         );
         assert_eq!(rule_text(root, &id), None);
 
-        let text = run_publish(&id_args(&id, false), root, TODAY, None).unwrap();
+        let text = run_publish(&id_args(&id, false), root, TODAY, None, &mut None).unwrap();
         assert!(
             text.contains("Published") && text.contains("Wrote rule file"),
             "{text}"
@@ -1017,7 +1055,7 @@ mod tests {
         assert!(file.body.contains("Status: accepted"), "{}", file.body);
         assert!(rule_text(root, &id).unwrap().contains("SHOULD: Use Redis."));
         assert!(managed(root, &id));
-        let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
+        let err = run_publish(&id_args(&id, false), root, TODAY, None, &mut None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("already accepted")),
             "{err:?}"
@@ -1029,9 +1067,10 @@ mod tests {
             &["MUST: Publish events to Kafka."],
             SaveStatus::Draft,
         );
-        let json: serde_json::Value =
-            serde_json::from_str(&run_publish(&id_args(&id, true), root, TODAY, None).unwrap())
-                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &run_publish(&id_args(&id, true), root, TODAY, None, &mut None).unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["status"], "accepted");
         assert_eq!(json["rule_files"]["written"].as_array().unwrap().len(), 1);
     }
@@ -1048,7 +1087,7 @@ mod tests {
         let path = find(root, &id).unwrap().path;
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, text.replace("version: 2\n", "")).unwrap();
-        let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
+        let err = run_publish(&id_args(&id, false), root, TODAY, None, &mut None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrInvalid { reasons } if reasons[0].contains("version: 2")),
             "{err:?}"
@@ -1071,7 +1110,7 @@ mod tests {
             .join(rule_file_name(&id, "Use Postgres"));
         assert!(rule.exists());
         // Not a git repository: nothing can bring the file back.
-        let text = run_delete(&id_args(&id, false), root, TODAY, None).unwrap();
+        let text = run_delete(&id_args(&id, false), root, TODAY, None, &mut None).unwrap();
         assert!(text.contains("Deleted"), "{text}");
         assert!(
             text.contains("so the deletion can't be undone.") && !text.contains("git restore"),
@@ -1081,7 +1120,7 @@ mod tests {
         assert!(!rule.exists());
         assert!(matches!(find(root, &id), Err(ActualError::AdrNotFound(_))));
         assert!(matches!(
-            run_delete(&id_args(&id, true), root, TODAY, None),
+            run_delete(&id_args(&id, true), root, TODAY, None, &mut None),
             Err(ActualError::AdrNotFound(_))
         ));
     }
@@ -1104,7 +1143,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(added.success());
-        let text = run_delete(&id_args(&kept, false), root, TODAY, None).unwrap();
+        let text = run_delete(&id_args(&kept, false), root, TODAY, None, &mut None).unwrap();
         assert!(
             text.contains(&format!("`git restore {shown}` brings it back.")),
             "{text}"
@@ -1123,11 +1162,105 @@ mod tests {
             &["MUST: Use Redis."],
             SaveStatus::Accepted,
         );
-        let text = run_delete(&id_args(&new, false), root, TODAY, None).unwrap();
+        let text = run_delete(&id_args(&new, false), root, TODAY, None, &mut None).unwrap();
         assert!(
             text.contains("Git wasn't tracking docs/adr/") && !text.contains("git restore"),
             "{text}"
         );
+    }
+
+    /// `publish`, `update` and `delete` on the files each send one review
+    /// event on the local pathway, with the state the decision was in before
+    /// the run, and no id, title, policy or path.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn file_reviews_send_one_local_event_each_with_the_prior_state() {
+        use super::super::telemetry::tests::{own, sending_to_a_file};
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _telemetry = sending_to_a_file(home.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let kept = create(
+            root,
+            "Use Postgres",
+            &["MUST: Use Postgres."],
+            SaveStatus::Accepted,
+        );
+        let draft = create(
+            root,
+            "Use Redis",
+            &["SHOULD: Use Redis."],
+            SaveStatus::Draft,
+        );
+        let mut retitle = update_args(&kept);
+        retitle.title = Some("Use Postgres 16".to_string());
+
+        let runs = [
+            review("publish", |found| {
+                run_publish(&id_args(&draft, false), root, TODAY, None, found)
+            }),
+            review("publish", |found| {
+                run_publish(&id_args(&kept, false), root, TODAY, None, found)
+            }),
+            review("update", |found| {
+                run_update(&retitle, root, TODAY, None, found)
+            }),
+            review("delete", |found| {
+                run_delete(&id_args(&draft, false), root, TODAY, None, found)
+            }),
+            review("delete", |found| {
+                run_delete(&id_args("no-such-id", false), root, TODAY, None, found)
+            }),
+        ];
+        let codes: Vec<i64> = runs
+            .iter()
+            .map(|r| r.as_ref().err().map_or(0, |e| i64::from(e.exit_code())))
+            .collect();
+
+        let records = take_captured();
+        assert_eq!(records.len(), 5);
+        let expected = [
+            ("publish", "draft", "succeeded"),
+            ("publish", "active", "refused"),
+            ("update", "active", "succeeded"),
+            ("delete", "active", "succeeded"),
+            ("delete", "", "failed"),
+        ];
+        for ((record, (action, prior, outcome)), code) in records.iter().zip(expected).zip(codes) {
+            assert_eq!(record["eventName"], crate::telemetry::otlp::ADR_REVIEWED);
+            assert_eq!(
+                serde_json::Value::Object(own(record)),
+                serde_json::json!({
+                    "actual.adr.review.action": action,
+                    "actual.adr.review.pathway": "local",
+                    "actual.adr.review.prior_status": prior,
+                    "actual.adr.decision_id": "",
+                    "actual.adr.review.grouped": false,
+                    "actual.adr.review.group_rows": 0,
+                    "actual.adr.command.outcome": outcome,
+                    "actual.adr.command.exit_code": code,
+                    "actual.adr.command.stdin_is_terminal": super::super::interactive(),
+                }),
+                "{action} {prior}"
+            );
+        }
+        let sent = serde_json::Value::Array(records).to_string().to_lowercase();
+        for content in [
+            kept.as_str(),
+            draft.as_str(),
+            "postgres",
+            "redis",
+            "docs/adr",
+        ] {
+            assert!(
+                !sent.contains(&content.to_lowercase()),
+                "{content} in {sent}"
+            );
+        }
     }
 
     #[test]
@@ -1170,7 +1303,7 @@ mod tests {
             let before = snapshot(root);
             let mut retitle = update_args(&id);
             retitle.title = Some("Use Redis 7".to_string());
-            let err = run_update(&retitle, root, TODAY, None).unwrap_err();
+            let err = run_update(&retitle, root, TODAY, None, &mut None).unwrap_err();
             assert!(
                 matches!(&err, ActualError::AdrNotAllowed(m)
                     if m.contains(&format!("is {status}, not accepted"))
@@ -1230,7 +1363,7 @@ mod tests {
 
         let owned = text.replacen("version: 2\n", "version: 2\nowner: platform\n", 1);
         std::fs::write(&path, &owned).unwrap();
-        let err = run_update(&title, root, TODAY, None).unwrap_err();
+        let err = run_update(&title, root, TODAY, None, &mut None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("has header fields outside")),
             "{err:?}"
@@ -1240,7 +1373,7 @@ mod tests {
         // No Decision section: no policy reads.
         let cut = text.split("## Decision").next().unwrap();
         std::fs::write(&path, cut).unwrap();
-        let err = run_update(&title, root, TODAY, None).unwrap_err();
+        let err = run_update(&title, root, TODAY, None, &mut None).unwrap_err();
         assert!(matches!(err, ActualError::AdrInvalid { .. }), "{err:?}");
     }
 
@@ -1251,7 +1384,7 @@ mod tests {
         let retitle = |id: &str, title: &str| {
             let mut args = update_args(id);
             args.title = Some(title.to_string());
-            run_update(&args, root, TODAY, None).unwrap()
+            run_update(&args, root, TODAY, None, &mut None).unwrap()
         };
 
         let id = create(
@@ -1292,7 +1425,7 @@ mod tests {
             &["MUST: Use Postgres."],
             SaveStatus::Draft,
         );
-        let text = run_publish(&id_args(&id, false), root, TODAY, None).unwrap();
+        let text = run_publish(&id_args(&id, false), root, TODAY, None, &mut None).unwrap();
         assert!(
             text.contains(&format!("Published {id}: "))
                 && text.contains("is accepted, so plan-check and impl-check enforce it now."),
@@ -1300,9 +1433,10 @@ mod tests {
         );
         assert!(text.contains("Wrote rule file"), "{text}");
 
-        let json: serde_json::Value =
-            serde_json::from_str(&run_delete(&id_args(&id, true), root, TODAY, None).unwrap())
-                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &run_delete(&id_args(&id, true), root, TODAY, None, &mut None).unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["adr_id"], id.as_str());
         assert!(json["status"].is_null(), "{json}");
 
@@ -1324,7 +1458,7 @@ mod tests {
             .collect();
         std::fs::write(&path, format!("{deeper}\n{body}")).unwrap();
         assert!(find(root, &id).unwrap().is_draft());
-        let err = run_publish(&id_args(&id, false), root, TODAY, None).unwrap_err();
+        let err = run_publish(&id_args(&id, false), root, TODAY, None, &mut None).unwrap_err();
         assert!(
             matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("has no status line to change")),
             "{err:?}"
@@ -1356,7 +1490,7 @@ mod tests {
         assert_eq!(json["total"], 1, "{json}");
         let mut retitle = update_args(&id);
         retitle.title = Some("Use Postgres 16".to_string());
-        run_update(&retitle, root, TODAY, None).unwrap();
+        run_update(&retitle, root, TODAY, None, &mut None).unwrap();
         assert!(std::fs::read_to_string(&own)
             .unwrap()
             .contains("# Use Postgres 16"));
@@ -1377,8 +1511,8 @@ mod tests {
         let mut retitle = update_args(&moved);
         retitle.title = Some("Use Redis 7".to_string());
         for err in [
-            run_update(&retitle, root, TODAY, None).unwrap_err(),
-            run_publish(&id_args(&moved, false), root, TODAY, None).unwrap_err(),
+            run_update(&retitle, root, TODAY, None, &mut None).unwrap_err(),
+            run_publish(&id_args(&moved, false), root, TODAY, None, &mut None).unwrap_err(),
         ] {
             assert!(
                 matches!(&err, ActualError::AdrNotAllowed(m) if m.contains("Move it into docs/adr/")),

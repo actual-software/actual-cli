@@ -135,8 +135,10 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// `actual.gate.mechanism`, `actual.gate.resolution`, `actual.gate.rounds`,
 /// `actual.gate.denials` and `actual.gate.block_action_id` attributes; 8 is
 /// the web app's `actual.adr.reviewed` attributes, which the CLI doesn't
-/// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes.
-const SCHEMA_VERSION: i64 = 9;
+/// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes; 10
+/// adds `actual.adr.review.pathway` and `actual.adr.review.prior_status` to
+/// [`ADR_REVIEWED`].
+const SCHEMA_VERSION: i64 = 10;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -476,9 +478,15 @@ pub(crate) struct CheckCounts {
 /// names it.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ReviewedDecision<'a> {
+    /// `local` for a run on the files under `docs/adr/`, signed out, or
+    /// `cloud` for one on Actual AI's decisions, signed in.
+    pub pathway: &'a str,
     /// The decision's id, once the run found it: [`DECISION_ID`], sent empty
     /// before then.
     pub id: Option<&'a str>,
+    /// The state the decision was in before the run changed anything, once
+    /// the run found it, sent empty before then.
+    pub prior_status: Option<&'a str>,
     /// Whether it is an AI-grouped decision, which takes the group routes.
     pub grouped: bool,
     /// For a grouped decision, the rows its group action covers, else 0.
@@ -695,6 +703,8 @@ impl Origin {
         let mut record = self.record(ADR_REVIEWED, "", None);
         record.attributes.extend([
             text("actual.adr.review.action", Some(action)),
+            text("actual.adr.review.pathway", Some(decision.pathway)),
+            text("actual.adr.review.prior_status", decision.prior_status),
             text(DECISION_ID, decision.id),
             boolean("actual.adr.review.grouped", decision.grouped),
             count("actual.adr.review.group_rows", decision.group_rows),
@@ -1678,7 +1688,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "9"})
+            serde_json::json!({"intValue": "10"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2263,7 +2273,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(9))
+            Some(&common::any_value::Value::IntValue(10))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2482,7 +2492,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"9"}"#, r#"{"intValue":"nine"}"#),
+            whole.replace(r#"{"intValue":"10"}"#, r#"{"intValue":"ten"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -4219,7 +4229,9 @@ mod tests {
             duration: Duration::from_millis(5),
         };
         let decision = ReviewedDecision {
+            pathway: "cloud",
             id: Some(id),
+            prior_status: Some("draft"),
             grouped: true,
             group_rows: 2,
         };

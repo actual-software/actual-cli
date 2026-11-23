@@ -769,12 +769,14 @@ pub(super) fn exec_update(args: &AdrUpdateArgs) -> Result<(), ActualError> {
     let run = telemetry::Run::start();
     let mut found = None;
     let result = runtime().and_then(|rt| rt.block_on(run_update(args, &mut found)));
-    print_and_report(&run, "update", found.as_ref(), result)
+    print_and_report(&run, telemetry::CLOUD, "update", found.as_ref(), result)
 }
 
-/// Print what a review command returned, then report the run.
-fn print_and_report(
+/// Print what a review command run on `pathway` returned, then report the
+/// run.
+pub(super) fn print_and_report(
     run: &telemetry::Run,
+    pathway: &str,
     action: &str,
     found: Option<&Reviewed>,
     result: Result<String, ActualError>,
@@ -782,7 +784,7 @@ fn print_and_report(
     if let Ok(text) = &result {
         print!("{text}");
     }
-    telemetry::report_review(run, action, found, &result);
+    telemetry::report_review(run, pathway, action, found, &result);
     result.map(drop)
 }
 
@@ -889,7 +891,7 @@ async fn run_update(
     let edit = update_edit(args)?;
     let session = session(&args.api).await?;
     let listed = find(&session, &args.id).await?;
-    *found = Some(Reviewed::of(&listed.decision));
+    *found = Some(Reviewed::listed(&listed));
     let write = workflow::edit_write(&listed, &edit, &session.org_id)
         .map_err(ActualError::AdrNotAllowed)?;
     session.client.write_decision(&write).await?;
@@ -935,7 +937,13 @@ pub(super) fn exec_lifecycle(args: &AdrIdArgs, action: LifecycleAction) -> Resul
     let run = telemetry::Run::start();
     let mut found = None;
     let result = runtime().and_then(|rt| rt.block_on(run_lifecycle(args, action, &mut found)));
-    print_and_report(&run, telemetry::command(action), found.as_ref(), result)
+    print_and_report(
+        &run,
+        telemetry::CLOUD,
+        telemetry::command(action),
+        found.as_ref(),
+        result,
+    )
 }
 
 /// Send `action`'s change for the decision, once its state allows it.
@@ -962,7 +970,7 @@ async fn run_lifecycle(
 ) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
     let listed = find(&session, &args.id).await?;
-    *found = Some(Reviewed::of(&listed.decision));
+    *found = Some(Reviewed::listed(&listed));
     let result = change(&session, &listed, action).await?;
     if args.api.json {
         return Ok(format!("{}\n", json_text(&result)));
@@ -988,7 +996,7 @@ pub(super) fn exec_reject(args: &AdrRejectArgs) -> Result<(), ActualError> {
     let run = telemetry::Run::start();
     let mut found = None;
     let result = runtime().and_then(|rt| rt.block_on(run_reject(args, &mut found)));
-    print_and_report(&run, "reject", found.as_ref(), result)
+    print_and_report(&run, telemetry::CLOUD, "reject", found.as_ref(), result)
 }
 
 /// Reject a suggestion, then save the reason with it, as the web app does,
@@ -999,7 +1007,7 @@ async fn run_reject(
 ) -> Result<String, ActualError> {
     let session = session(&args.api).await?;
     let listed = find(&session, &args.id).await?;
-    *found = Some(Reviewed::of(&listed.decision));
+    *found = Some(Reviewed::listed(&listed));
     let mut result = change(&session, &listed, LifecycleAction::Reject).await?;
     let feedback = workflow::rejection_feedback(&listed.decision, &session.org_id, &args.reason);
     result.reason_saved = Some(session.client.write_decision(&feedback).await.is_ok());
