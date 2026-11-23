@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Signed in to Actual's API, the `actual.session.ended` event the plugin's `SessionEnd` hook sends carries the session's token totals per model: `actual.usage.models`, with `actual.usage.input_tokens`, `actual.usage.output_tokens`, `actual.usage.cache_read_tokens` and `actual.usage.cache_write_tokens` in the same order, and `actual.usage.source` saying whether they came from Claude Code's last `cost-state` line (`session_totals`, which also counts subagents and background calls) or from adding up each assistant message in the transcript and its `subagents/` folder (`messages`). The hook reads the transcript on your machine and sends only the counts and the model names, as Claude Code recorded them. A signed-out end never opens the transcript, and every request without your sign-in's token leaves the six attributes out. The scan gives up after 500 ms and the end then carries no totals. The totals are those at the last end the CLI reported, so a session resumed for work that completes no hook check keeps its earlier end's totals. `actual.event.schema_version` is now `11`. See `PRIVACY.md`
+
 ## [0.17.0] - 2026-11-24
 
 ### Added
