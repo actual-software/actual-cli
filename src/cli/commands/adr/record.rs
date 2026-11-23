@@ -4,9 +4,9 @@
 //! One record per organization and repository lives under the user's config
 //! directory, so every checkout of the repository on this machine shares it.
 //! It keeps a file's own draft from reading as its duplicate, remembers the
-//! accepted files saved as drafts until they reach the default branch, and
-//! lets the signed-in refresh leave out of its list a file a run already
-//! sent.
+//! accepted files saved as drafts until they reach the default branch and
+//! the save that had no answer, and lets the signed-in refresh leave out of
+//! its list a file a run already sent.
 //!
 //! A missing, damaged or other-version record reads as empty, as a
 //! teammate's machine does: a file an earlier save made a draft from reads
@@ -49,6 +49,10 @@ pub(super) enum Outcome {
     WaitsForMerge,
     /// Accepted, so Actual AI owns the decision now.
     Accepted,
+    /// Sent, with no answer back, so whether Actual AI saved a draft is
+    /// unknown. The next run sends the file again, with no look-alike check,
+    /// and the path key returns the draft this send made, if it made one.
+    Unconfirmed,
     /// Left alone this time: its id or a look-alike in Actual AI, a status
     /// that doesn't govern, the check, or a refusal. Any of those can lapse
     /// with the file unchanged, so a skip holds nothing back from the next
@@ -79,9 +83,16 @@ impl Entry {
     }
 
     /// Whether `text` went up when this entry was recorded: the same text,
-    /// saved as a draft or accepted rather than skipped.
+    /// saved as a draft or accepted rather than skipped or unconfirmed.
     pub(super) fn sent(&self, text: &str) -> bool {
-        self.outcome != Outcome::Skipped && self.text == text_hash(text)
+        !matches!(self.outcome, Outcome::Skipped | Outcome::Unconfirmed)
+            && self.text == text_hash(text)
+    }
+
+    /// Whether the last send of the file had no answer, so the next one
+    /// skips the look-alike check that its own draft would fail.
+    pub(super) fn unconfirmed(&self) -> bool {
+        self.outcome == Outcome::Unconfirmed
     }
 }
 
