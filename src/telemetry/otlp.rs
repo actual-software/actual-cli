@@ -123,8 +123,28 @@ const DECISION_ID: &str = "actual.adr.decision_id";
 /// request carrying the sign-in's token holds.
 const REPORT_FILE_PATH: &str = "actual.report.file_path";
 
+/// Where a session's token totals came from, and the totals: one entry per
+/// model in each list, in the same order. Only a request carrying the
+/// sign-in's token holds them.
+const USAGE_SOURCE: &str = "actual.usage.source";
+const USAGE_MODELS: &str = "actual.usage.models";
+const USAGE_INPUT: &str = "actual.usage.input_tokens";
+const USAGE_OUTPUT: &str = "actual.usage.output_tokens";
+const USAGE_CACHE_READ: &str = "actual.usage.cache_read_tokens";
+const USAGE_CACHE_WRITE: &str = "actual.usage.cache_write_tokens";
+
 /// The attributes [`LogRecord::signed_out`] leaves out.
-const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
+const SIGNED_IN_ONLY: [&str; 9] = [
+    REASON_TEXT,
+    DECISION_ID,
+    REPORT_FILE_PATH,
+    USAGE_SOURCE,
+    USAGE_MODELS,
+    USAGE_INPUT,
+    USAGE_OUTPUT,
+    USAGE_CACHE_READ,
+    USAGE_CACHE_WRITE,
+];
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 /// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
@@ -137,8 +157,9 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// the web app's `actual.adr.reviewed` attributes, which the CLI doesn't
 /// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes; 10
 /// adds `actual.adr.review.pathway` and `actual.adr.review.prior_status` to
-/// [`ADR_REVIEWED`].
-const SCHEMA_VERSION: i64 = 10;
+/// [`ADR_REVIEWED`]; 11 adds the `actual.usage.*` token totals to
+/// [`SESSION_ENDED`].
+const SCHEMA_VERSION: i64 = 11;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -381,6 +402,18 @@ fn int(key: &'static str, value: i64) -> KeyValue {
     }
 }
 
+/// A list of integers, each past `i64::MAX` sent as `i64::MAX`.
+fn ints(key: &'static str, values: impl Iterator<Item = u64>) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::ArrayValue {
+            values: values
+                .map(|value| AnyValue::IntValue(i64::try_from(value).unwrap_or(i64::MAX)))
+                .collect(),
+        },
+    }
+}
+
 /// A double. NaN and the infinities, which JSON cannot hold and no score is,
 /// go as 0.
 fn double(key: &'static str, value: f64) -> KeyValue {
@@ -511,6 +544,24 @@ pub(crate) struct CreatedDecision<'a> {
     pub id: Option<&'a str>,
 }
 
+/// One model's token totals for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelTokens {
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+/// A session's token totals per model, as [`SESSION_ENDED`] sends them, and
+/// where they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionUsage {
+    pub source: &'static str,
+    pub models: Vec<ModelTokens>,
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -532,17 +583,35 @@ impl Origin {
         }
     }
 
+    /// The [`SESSION_ENDED`] record: how the session ended, whether its last
+    /// completed check blocked, and, when given, its token totals per model.
     pub(crate) fn session_ended(
         &self,
         session_id: &str,
         reason: &str,
         last_check_blocked: bool,
+        usage: Option<&SessionUsage>,
     ) -> LogRecord {
         let mut record = self.record(SESSION_ENDED, session_id, None);
         record.attributes.extend([
             text("actual.session.end_reason", Some(reason)),
             boolean("actual.session.last_check_blocked", last_check_blocked),
         ]);
+        if let Some(usage) = usage {
+            let column =
+                |key, value: fn(&ModelTokens) -> u64| ints(key, usage.models.iter().map(value));
+            record.attributes.extend([
+                text(USAGE_SOURCE, Some(usage.source)),
+                strings(
+                    USAGE_MODELS,
+                    &usage.models.iter().map(|m| &m.model).collect::<Vec<_>>(),
+                ),
+                column(USAGE_INPUT, |m| m.input),
+                column(USAGE_OUTPUT, |m| m.output),
+                column(USAGE_CACHE_READ, |m| m.cache_read),
+                column(USAGE_CACHE_WRITE, |m| m.cache_write),
+            ]);
+        }
         record
     }
 
@@ -1688,7 +1757,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "10"})
+            serde_json::json!({"intValue": "11"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2273,7 +2342,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(10))
+            Some(&common::any_value::Value::IntValue(11))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2492,7 +2561,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"10"}"#, r#"{"intValue":"ten"}"#),
+            whole.replace(r#"{"intValue":"11"}"#, r#"{"intValue":"eleven"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -3932,6 +4001,90 @@ mod tests {
         assert!(!signed_out.contains(REASON_TEXT), "{signed_out}");
         assert!(signed_out.contains("\"other\""), "{signed_out}");
         assert_eq!(both.matches(REASON_TEXT).count(), 1, "{both}");
+    }
+
+    /// A session end's token totals go out as lists in model order, and only
+    /// spooled under a sign-in; the rest of the end is spooled either way.
+    #[test]
+    fn test_session_usage_is_spooled_only_under_a_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let spool_file = home.path().join("otlp-logs-spool.jsonl");
+        let model = |model: &str, n: u64| ModelTokens {
+            model: model.to_string(),
+            input: n,
+            output: n + 1,
+            cache_read: n + 2,
+            cache_write: u64::MAX,
+        };
+        let usage = SessionUsage {
+            source: "messages",
+            models: vec![model("claude-haiku", 1), model("claude-opus", 10)],
+        };
+        let ended = origin(None).session_ended("session-1", "other", false, Some(&usage));
+        let attrs = record_json(&ended)["attributes"].clone();
+        let value = |key: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .unwrap()["value"]
+                .clone()
+        };
+        let ints = |key: &str| -> Vec<Value> {
+            value(key)["arrayValue"]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["intValue"].clone())
+                .collect()
+        };
+        assert_eq!(value(USAGE_SOURCE)["stringValue"], "messages");
+        assert_eq!(
+            value(USAGE_MODELS)["arrayValue"]["values"],
+            serde_json::json!([{"stringValue": "claude-haiku"}, {"stringValue": "claude-opus"}])
+        );
+        assert_eq!(ints(USAGE_INPUT), ["1", "10"]);
+        assert_eq!(ints(USAGE_OUTPUT), ["2", "11"]);
+        assert_eq!(ints(USAGE_CACHE_READ), ["3", "12"]);
+        assert_eq!(
+            ints(USAGE_CACHE_WRITE),
+            [i64::MAX.to_string(), i64::MAX.to_string()]
+        );
+        assert!(ended.to_proto().is_some());
+
+        spool(&outputs, std::slice::from_ref(&ended));
+        let signed_out = std::fs::read_to_string(&spool_file).unwrap();
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &[ended]);
+        let both = std::fs::read_to_string(&spool_file).unwrap();
+
+        assert!(!signed_out.contains("actual.usage."), "{signed_out}");
+        assert!(
+            signed_out.contains("actual.session.end_reason"),
+            "{signed_out}"
+        );
+        for key in [
+            USAGE_SOURCE,
+            USAGE_MODELS,
+            USAGE_INPUT,
+            USAGE_OUTPUT,
+            USAGE_CACHE_READ,
+            USAGE_CACHE_WRITE,
+        ] {
+            assert_eq!(both.matches(key).count(), 1, "{key}: {both}");
+        }
     }
 
     fn reported_record(file_path: Option<&str>) -> LogRecord {
