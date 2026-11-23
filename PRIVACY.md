@@ -752,6 +752,25 @@ return to Claude Code: a round that blocks puts it in the denial the agent
 reads, and a round that lets the plan or diff through shows it as a notice. From
 there it can reach the provider running the agent.
 
+### Local enforcement log (stays on your machine)
+
+`plan-check` and `impl-check` add one line to `enforcement.jsonl` in the user config directory (by default `~/.actualai/actual/`) for each round that reaches a verdict, whether a Claude Code or Codex hook ran the check or you ran the command. A round that reaches no verdict, because nothing applied, no runner was available or the judge call failed, adds nothing. `actual stats` reads this file, along with `plan-check-overrides.log`, to show how enforcement went on your machine. The CLI never uploads it and no telemetry event reads it.
+
+| Field | Contents |
+|-------|----------|
+| `v` | The line format's version, `1` |
+| `at` | When the round was recorded, in UTC |
+| `gate` | `plan` or `impl` |
+| `mode` | `hook` for a round an agent hook ran, `direct` for one you ran |
+| `session_id`, `round` | The agent session's id and that gate's round count in the session, on hook rounds inside a session only |
+| `rules_dir` | The absolute path of the rules directory the check read |
+| `decision` | `allow`, `warn` or `block` |
+| `adrs` | Each ADR the round judged, by its rule file's document slug, with the strongest verdict any of its rules got: `followed`, `not_applicable`, `conflicting` or `requires_decision` |
+
+The log holds no plan, diff, rule text or judge's reasoning, and no override reason. It and its lock file, `enforcement.lock`, are readable only by you (`0600`). It keeps at most 90 days and 10 MB of rounds: when a new line would pass either limit, the oldest lines are dropped until about 89 days and 9 MB remain.
+
+The telemetry setting doesn't change it. The log is written with telemetry off and in a build without telemetry. Set `ACTUAL_ENFORCEMENT_LOG=off` (in any case) in the environment the checks run in to stop new lines. The lines already written stay until you delete the file, and `actual stats` says the log is off.
+
 ### Update check (sent to the npm registry)
 
 At most once a day, after a command run at a terminal, the CLI asks the npm
@@ -814,7 +833,8 @@ already going still sends its counters, and the config it saves at the end can
 put the old value back, which leaves telemetry on.
 
 The setting covers telemetry, not every network request. The update check has
-its own switch (see "Update check" above). The requests that do the work you
+its own switch (see "Update check" above), and so does the local enforcement
+log, which is never sent (see "Local enforcement log" above). The requests that do the work you
 asked for still go out, such as `actual adr-bot`'s match request and
 `semgrep-core` download, `actual advisor` questions, sign-in, and prompts to your
 AI provider.
