@@ -116,7 +116,7 @@ impl Reviewed {
         } else {
             meta.status
                 .as_deref()
-                .and_then(|status| workflow::state_of(&status.trim().to_lowercase(), false))
+                .and_then(|status| workflow::state_of(&status.trim().to_ascii_lowercase(), false))
         };
         Self {
             prior_status: state.map_or("other", DecisionState::as_str),

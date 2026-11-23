@@ -369,7 +369,8 @@ The `actual adr` commands send one event per run:
 
 None of these events carries a decision's title, context, policy text or
 scope globs, a file path, or the text of `reject --reason`. `adr list`,
-`adr show`, `adr refresh` and `adr create --all` send none of them.
+`adr show`, `adr discover`, `adr normalize`, `adr refresh` and
+`adr create --all` send none of them.
 
 `adr create --all` saves each decision file with its path in the repository,
 so a second save of the same file returns the decision the first one made. It

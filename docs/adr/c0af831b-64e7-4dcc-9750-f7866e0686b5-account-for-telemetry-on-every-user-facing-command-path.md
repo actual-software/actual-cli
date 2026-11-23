@@ -29,7 +29,7 @@ Deciders: actual-cli maintainers
 
 ## Decision
 
-1. MUST: Every user-facing command path, signed in and signed out, sends its command family's telemetry event, or PRIVACY.md says why that path sends none.
+1. MUST: A change that adds or alters a user-facing command path makes that path send its command family's telemetry event, signed in and signed out, or adds to PRIVACY.md the reason that path sends none.
 2. MUST: A change that adds or alters a telemetry event or attribute updates PRIVACY.md in the same pull request, with each new attribute's row and privacy class.
 3. MUST: A change that adds or alters a telemetry attribute bumps SCHEMA_VERSION in src/telemetry/otlp.rs and records the new version in PRIVACY.md and CHANGELOG.md in the same pull request.
 4. MUST_NOT: A telemetry attribute carries decision titles, context, policy text, scope globs, file paths or other free text, apart from the identity-linked fields PRIVACY.md lists.
