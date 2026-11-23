@@ -30,6 +30,7 @@ use serde::Serialize;
 
 use super::index::{Match, Query, ScopeIndex};
 use super::rank::{self, Candidate, RankedVerdict, Verdict};
+use super::tally::FilterTally;
 use crate::runner::structured::StructuredRunner;
 
 /// How many candidates stage 1 hands to stage 2, by default.
@@ -188,6 +189,8 @@ pub struct Prefiltered {
     /// Per candidate, aligned with `candidates`: the document's verify globs
     /// and prose scope sentence, which stage 2 shows the ranker.
     evidence: Vec<(Vec<String>, Option<String>)>,
+    /// What stage 1 dropped before `candidates`, and why.
+    tally: FilterTally,
 }
 
 /// Run stage 1.
@@ -202,7 +205,7 @@ pub fn prefilter(
     limit: usize,
     candidate_cap: usize,
 ) -> Prefiltered {
-    let candidates = index.search(query, candidate_cap.max(limit));
+    let (candidates, tally) = index.search_tallied(query, candidate_cap.max(limit));
     let evidence = candidates
         .iter()
         .map(|hit| {
@@ -223,6 +226,7 @@ pub fn prefilter(
         limit,
         candidates,
         evidence,
+        tally,
     }
 }
 
@@ -257,6 +261,21 @@ impl Prefiltered {
 
     pub fn paths(&self) -> &[String] {
         &self.paths
+    }
+
+    /// The account of `selection`, which must be one this candidate set
+    /// produced: stage 1's drops, then the candidates stage 2 judged unrelated
+    /// and those the limit cut. The selected files are left for the caller to
+    /// count, since what keeps them is a later step's to say.
+    pub fn tally(&self, selection: &Selection) -> FilterTally {
+        let unrelated = match selection.stage2 {
+            Stage2::Applied { unrelated, .. } => unrelated,
+            _ => 0,
+        };
+        let mut tally = self.tally.clone();
+        tally.unrelated = unrelated;
+        tally.capped += self.candidates.len() - unrelated - selection.selected.len();
+        tally
     }
 
     /// The stage-1 answer, with `stage2` recording why no rank shaped it.

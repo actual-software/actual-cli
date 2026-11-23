@@ -42,8 +42,8 @@ It stays quiet when:
 
 - the command fails: the notice shows only after a successful command;
 - stdout or stderr isn't a terminal, as when output goes to a pager such as `less` or into a file, or `CI` is set;
-- the command runs in a mode a program reads: any `--json` output, the `--claude-hook` and `--claude-session-start` modes the actual skill's hooks use, and `mint-token`;
-- `actual` runs inside a `claude` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
+- the command runs in a mode a program reads: any `--json` output, the `--claude-hook`, `--claude-session-start`, `--codex-hook` and `--codex-session-start` modes the actual skill's hooks use, and `mint-token`;
+- `actual` runs inside a `claude` or `codex` subprocess it started itself (`ACTUAL_CLI_SUBPROCESS=1`);
 - the check is turned off, or the config file fails to load.
 
 A quiet run leaves the cache untouched, so it uses up neither the day's notice nor its lookup. The exception is `actual version --check`, which records the version it finds: that counts as the day's lookup, and the day's notice stays unspent. A lookup that fails or times out is silent, and the next one waits a day.

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::telemetry::{self, Reviewed};
+use super::telemetry::{self, Creation, Reviewed};
 use super::{
     content_from_flags, interactive, json_text, missing_level, pick_repo, rule_spelling, runtime,
     save_status, session, Repo, RepoPick, Session,
@@ -256,8 +256,18 @@ struct CreateOutcome {
 }
 
 pub(super) fn exec_create(args: &AdrCreateArgs) -> Result<(), ActualError> {
-    let text = runtime()?.block_on(run_create(args, &resolve_cwd(), interactive()))?;
-    print!("{text}");
+    let run = telemetry::Run::start();
+    let mut creation = Creation::cloud(args.file.is_some());
+    let result = runtime().and_then(|rt| {
+        rt.block_on(run_create_noting(
+            args,
+            &resolve_cwd(),
+            interactive(),
+            &mut creation,
+        ))
+    });
+    telemetry::report_create(&run, &creation, &result);
+    print!("{}", result?);
     Ok(())
 }
 
@@ -299,13 +309,27 @@ fn stored_title(doc: &ContextFile) -> String {
     if title.is_empty() { "Untitled" } else { title }.to_string()
 }
 
+#[cfg(test)]
 async fn run_create(
     args: &AdrCreateArgs,
     dir: &Path,
     interactive: bool,
 ) -> Result<String, ActualError> {
+    let mut creation = Creation::cloud(args.file.is_some());
+    run_create_noting(args, dir, interactive, &mut creation).await
+}
+
+/// Run `create`, noting in `creation` what it read and what it saved.
+async fn run_create_noting(
+    args: &AdrCreateArgs,
+    dir: &Path,
+    interactive: bool,
+    creation: &mut Creation,
+) -> Result<String, ActualError> {
     let status = save_status(args.status, interactive);
+    creation.status = status.as_str().to_string();
     let outgoing = outgoing(args, dir)?;
+    creation.policies = outgoing.doc.policies.len();
     // A pushed file names its own repository through the checkout it sits in.
     let root: PathBuf = match &outgoing.file {
         Some(file) => files::root_of(&file.path).unwrap_or_else(|| dir.to_path_buf()),
@@ -327,6 +351,9 @@ async fn run_create(
         None => create_from_flags(&session, &repo, &outgoing.doc, status).await?,
         Some(file) => create_from_file(&session, &repo, &root, file, &outgoing.doc, status).await?,
     };
+    creation.status.clone_from(&outcome.created.status);
+    creation.partial = outcome.scope_problem.is_some() || outcome.publish_problem.is_some();
+    creation.id = Some(outcome.created.adr_id.clone());
     Ok(if args.api.json {
         format!("{}\n", json_text(&outcome))
     } else {
@@ -2356,6 +2383,143 @@ mod tests {
             assert_eq!(got, expected, "{argv:?}");
             let sent = records[0].to_string().to_lowercase();
             assert!(!sent.contains("zeta"), "{argv:?} sent content: {sent}");
+        }
+    }
+
+    /// A `create` run sends one event naming the decision it saved and its
+    /// status and policy count. A run refused as a likely duplicate says so
+    /// and names no decision. Neither sends the decision's text.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn create_sends_one_event_and_none_of_the_content() {
+        use super::super::telemetry::tests::{own, sending_to_a_file};
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let _telemetry = sending_to_a_file(tmp.path());
+        let mut server = mockito::Server::new();
+        let list = server
+            .mock("GET", READ)
+            .match_query(repo_read())
+            .with_status(200)
+            .with_body(read_body(&[]))
+            .create();
+        server
+            .mock("POST", "/v1/gcp/product/adr-create")
+            .with_status(200)
+            .with_body(created_body())
+            .create();
+        let mut args = create_args(&server);
+        args.status = Some(SaveStatus::Draft);
+
+        exec_create(&args).unwrap();
+        list.remove();
+        server
+            .mock("GET", READ)
+            .match_query(repo_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(
+                "d1",
+                "Use Postgres for storage",
+                "accepted",
+                &[("MUST", "Store relational data in Postgres.")],
+            )]))
+            .create();
+        assert!(exec_create(&args).is_err());
+
+        let records = take_captured();
+        assert_eq!(records.len(), 2);
+        let expected = [
+            ("succeeded", 0, ADR),
+            (
+                "duplicate",
+                ActualError::AdrDuplicate {
+                    message: String::new(),
+                    hint: String::new(),
+                }
+                .exit_code(),
+                "",
+            ),
+        ];
+        for (record, (outcome, code, id)) in records.iter().zip(expected) {
+            assert_eq!(record["eventName"], crate::telemetry::otlp::ADR_CREATED);
+            let own = own(record);
+            assert_eq!(
+                serde_json::Value::Object(own),
+                json!({
+                    "actual.adr.create.target": "cloud",
+                    "actual.adr.create.source": "flags",
+                    "actual.adr.create.status": "draft",
+                    "actual.adr.create.policies": 1,
+                    "actual.adr.create.partial": false,
+                    "actual.adr.decision_id": id,
+                    "actual.adr.command.outcome": outcome,
+                    "actual.adr.command.exit_code": code,
+                    "actual.adr.command.stdin_is_terminal": interactive(),
+                })
+            );
+            let sent = record.to_string().to_lowercase();
+            assert!(!sent.contains("postgres"), "sent content: {sent}");
+        }
+    }
+
+    /// `create --file` sends the status the decision was saved with, whether
+    /// a step after the save failed, and the saved id: a publish that fails
+    /// leaves an accepted file a draft and the save partial, and one that
+    /// succeeds leaves it accepted and complete.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn create_from_a_file_sends_the_saved_status_partial_and_id() {
+        use super::super::telemetry::tests::{own, sending_to_a_file};
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let _telemetry = sending_to_a_file(tmp.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/v1/gcp/product/adr-import")
+            .with_status(200)
+            .with_body(imported_body())
+            .create();
+        let failing = server
+            .mock("POST", "/v1/gcp/product/adr-publish")
+            .with_status(500)
+            .with_body(r#"{"error":"internal_error","message":"failed to publish draft ADR"}"#)
+            .create();
+        let api = api(&server);
+        let args = |doc: PathBuf| AdrCreateArgs {
+            file: Some(doc),
+            title: None,
+            content: AdrContentArgs::default(),
+            status: Some(SaveStatus::Accepted),
+            repo: Some(REPO.to_string()),
+            allow_duplicate: true,
+            api: api.clone(),
+        };
+
+        exec_create(&args(new_pair(&tmp.path().join("first"), &[]))).unwrap();
+        failing.remove();
+        server
+            .mock("POST", "/v1/gcp/product/adr-publish")
+            .with_status(200)
+            .with_body(r#"{"success":true}"#)
+            .create();
+        exec_create(&args(new_pair(&tmp.path().join("second"), &[]))).unwrap();
+
+        let records = take_captured();
+        assert_eq!(records.len(), 2);
+        for (record, (status, partial)) in
+            records.iter().zip([("draft", true), ("accepted", false)])
+        {
+            assert_eq!(record["eventName"], crate::telemetry::otlp::ADR_CREATED);
+            let own = own(record);
+            assert_eq!(own["actual.adr.create.source"], "file");
+            assert_eq!(own["actual.adr.create.status"], status);
+            assert_eq!(own["actual.adr.create.partial"], partial);
+            assert_eq!(own["actual.adr.decision_id"], ADR);
+            assert_eq!(own["actual.adr.command.outcome"], "succeeded");
         }
     }
 }

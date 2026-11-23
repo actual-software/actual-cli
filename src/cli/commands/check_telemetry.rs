@@ -8,6 +8,17 @@
 //! [`otlp::GATE_EVALUATED`] record per logical ADR it blocked on, with the
 //! outcome `breached` and the gate.
 //!
+//! Every hook round, verdict or not, also sends one [`otlp::FILTER_EVALUATED`]
+//! record accounting for what its selection kept and dropped, with the gate as
+//! the selector. A round with a verdict sends it with the records above; one
+//! without sends it alone.
+//!
+//! When a block ends, one [`otlp::GATE_RESOLVED`] record per logical ADR says
+//! how: `fixed` or `not_rechecked` from the next round, `round_limit` from the
+//! round the limit lets through, `overridden` from an override (terminal
+//! `check-override`, the `/override` hook, or Codex's typed override and
+//! picker), and `still_open` from the session's end.
+//!
 //! # Design
 //!
 //! **Started is stamped at the start and sent at the end.** A run reads the
@@ -48,6 +59,19 @@
 //! session id, have nothing to count an ADR once against. Their action events
 //! still go, with the session id empty.
 //!
+//! **A block is an episode, per ADR.** A logical ADR's block opens at the
+//! first round that denies one of its rules and ends when the last of them
+//! stops blocking, so blocked, fixed and blocked again sends two records. A
+//! rule ends `fixed` when a later round judges it followed, and `not_rechecked`
+//! when a later round decides without that verdict: the selection or the
+//! judged window left it out, nothing applied, or the judge found it not
+//! applicable. When an ADR's rules end
+//! differently the record reports the least resolved of them, in the order
+//! of [`Resolution`](super::governance_session::Resolution). The open
+//! episodes live in the session file beside the deny counts. A killed session
+//! runs no end hook, so its open blocks send nothing, and a `breached` with no
+//! resolution reads as unknown.
+//!
 //! **What the hook pays.** The judge's prompt, output and call count are
 //! unchanged. With telemetry opted out, or no output resolved, a round reads
 //! the config and builds nothing. Otherwise, which a release build's default
@@ -61,8 +85,10 @@ use std::time::{Instant, SystemTime};
 use super::brief_ledger::{self, LedgerKey};
 use super::brief_telemetry::{self, BriefedAdr};
 use super::check_engine::HookRun;
+use super::governance_session::EndedEpisode;
 use crate::api::types::PlanGovernanceDecision;
 use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
+use crate::rules::scope::FilterTally;
 use crate::rules::types::AdrMeta;
 use crate::telemetry::otlp;
 
@@ -184,6 +210,89 @@ pub(super) fn report_round(
     report(&action, decision, warn_reasons, records);
 }
 
+/// The gate selector's [`otlp::FILTER_EVALUATED`] record for a hook round,
+/// with the gate as the selector, or `None` when the round has no account or
+/// nowhere to send it.
+pub(super) fn filter_record(run: &HookRun<'_>) -> Option<otlp::LogRecord> {
+    let tally = run.filter?;
+    brief_telemetry::Destination::resolve_quietly()?;
+    Some(filter_evaluated(run, tally))
+}
+
+/// Send a hook round's [`filter_record`] on its own, for a round that stops
+/// before a verdict and so sends no other record.
+pub(super) fn report_filter(run: &HookRun<'_>) {
+    let Some(tally) = run.filter else {
+        return;
+    };
+    let Some(destination) = brief_telemetry::Destination::resolve() else {
+        return;
+    };
+    destination.deliver(vec![filter_evaluated(run, tally)]);
+}
+
+fn filter_evaluated(run: &HookRun<'_>, tally: &FilterTally) -> otlp::LogRecord {
+    otlp::Origin::resolve().filter_evaluated(
+        run.session_id.unwrap_or_default(),
+        run.agent_id,
+        gate(run.kind),
+        tally,
+    )
+}
+
+/// The [`otlp::GATE_RESOLVED`] records for the blocks `ended` in `session_id`,
+/// each with the kind of the loop it was in, or none without a session or
+/// anywhere to send them. `agent_id` is the subagent whose round ended them,
+/// absent for an override or the session's end.
+pub(super) fn resolved_records(
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    ended: &[(ArtifactKind, EndedEpisode)],
+) -> Vec<otlp::LogRecord> {
+    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+        return Vec::new();
+    };
+    if ended.is_empty() || brief_telemetry::Destination::resolve_quietly().is_none() {
+        return Vec::new();
+    }
+    let origin = otlp::Origin::resolve();
+    ended
+        .iter()
+        .map(|(kind, episode)| {
+            origin.resolved(
+                session_id,
+                agent_id,
+                &otlp::GateResolution {
+                    adr_ref: &episode.adr_ref,
+                    adr_ids: &episode.adr_ids,
+                    gate: gate(*kind),
+                    mechanism: mechanism(*kind),
+                    resolution: episode.resolution.as_str(),
+                    rounds: episode.rounds,
+                    denials: episode.denials,
+                    block_action_id: &episode.action_id,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Send [`resolved_records`] on their own, for a run that sends no other
+/// record with them.
+pub(super) fn report_resolved(
+    session_id: Option<&str>,
+    agent_id: Option<&str>,
+    ended: &[(ArtifactKind, EndedEpisode)],
+) {
+    let records = resolved_records(session_id, agent_id, ended);
+    if records.is_empty() {
+        return;
+    }
+    if let Some(destination) = brief_telemetry::Destination::resolve() {
+        destination.deliver(records);
+    }
+}
+
 /// The records for the logical ADRs a hook round judged, and those it blocked
 /// on, that are new to this session at this stage. `headers` names each
 /// judged rule's ADR.
@@ -300,6 +409,15 @@ fn gate(kind: ArtifactKind) -> &'static str {
     }
 }
 
+/// How the gate that judges `kind` blocks: `plan-check` denies ExitPlanMode
+/// (in Codex it blocks a Plan-mode turn's Stop), and `impl-check` blocks the Stop.
+fn mechanism(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Plan => "plan_deny",
+        ArtifactKind::Diff => "stop_block",
+    }
+}
+
 /// The command that judges `kind`, as the action events name it.
 fn action_type(kind: ArtifactKind) -> &'static str {
     match kind {
@@ -412,6 +530,7 @@ pub(super) mod tests {
     fn round(home: &Path, kind: ArtifactKind, session: Option<&str>, verdicts: &[CheckedRule]) {
         let rules_dir = home.join("rules");
         let run = HookRun {
+            host: crate::cli::commands::hook_host::HookHost::Claude,
             kind,
             command: "test --claude-hook",
             session_id: session,
@@ -421,6 +540,9 @@ pub(super) mod tests {
             rules_dir: &rules_dir,
             max_rounds: 3,
             ask: None,
+            filter: None,
+            codex_ask: false,
+            picker: false,
             started: Started::now(),
         };
         let blocking: Vec<&CheckedRule> = verdicts
@@ -1041,6 +1163,7 @@ pub(super) mod tests {
         with_config(WITH_FILE, |home| {
             let rules_dir = home.join("rules");
             let run = HookRun {
+                host: crate::cli::commands::hook_host::HookHost::Claude,
                 kind: ArtifactKind::Diff,
                 command: "impl-check --claude-hook",
                 session_id: Some("s2"),
@@ -1050,6 +1173,9 @@ pub(super) mod tests {
                 rules_dir: &rules_dir,
                 max_rounds: 3,
                 ask: None,
+                filter: None,
+                codex_ask: false,
+                picker: false,
                 started: Started {
                     time: std::time::UNIX_EPOCH + std::time::Duration::from_secs(7),
                     instant: Instant::now(),
@@ -1162,6 +1288,110 @@ pub(super) mod tests {
             round(home, ArtifactKind::Plan, Some("s1"), &blocking);
             assert_eq!(reported("s1").len(), 2);
             assert!(!home.join("brief-ledger").exists());
+        });
+    }
+
+    fn filter_run<'a>(
+        home: &'a Path,
+        rules_dir: &'a Path,
+        filter: Option<&'a FilterTally>,
+    ) -> HookRun<'a> {
+        HookRun {
+            host: crate::cli::commands::hook_host::HookHost::Claude,
+            kind: ArtifactKind::Diff,
+            command: "impl-check --claude-hook",
+            session_id: Some("s1"),
+            agent_id: Some("agent-1"),
+            artifact_digest: "digest-1",
+            root: home,
+            rules_dir,
+            max_rounds: 3,
+            ask: None,
+            filter,
+            codex_ask: false,
+            picker: false,
+            started: Started::now(),
+        }
+    }
+
+    /// A round with an account and somewhere to send it has a filter record,
+    /// naming the gate as its selector; one without either has none.
+    #[test]
+    fn test_a_round_has_a_filter_record_only_with_an_account_and_an_output() {
+        let tally = FilterTally {
+            index_size: 1,
+            no_match: 1,
+            ..FilterTally::default()
+        };
+        with_config(WITH_FILE, |home| {
+            let rules_dir = home.join("rules");
+            let record =
+                filter_record(&filter_run(home, &rules_dir, Some(&tally))).expect("a record");
+            let record = serde_json::to_value(record).unwrap();
+            assert_eq!(record["eventName"], otlp::FILTER_EVALUATED);
+            assert_eq!(
+                attribute(&record, "actual.filter.selector"),
+                "implementation"
+            );
+            assert_eq!(attribute(&record, "actual.session.id"), "s1");
+            assert_eq!(attribute(&record, "actual.agent.id"), "agent-1");
+            assert!(filter_record(&filter_run(home, &rules_dir, None)).is_none());
+        });
+        with_config("", |home| {
+            let rules_dir = home.join("rules");
+            assert!(filter_record(&filter_run(home, &rules_dir, Some(&tally))).is_none());
+        });
+    }
+
+    /// A round that stops before a verdict sends its filter record alone, and
+    /// only when it has an account and an output.
+    #[test]
+    fn test_a_round_without_a_verdict_sends_its_filter_record_alone() {
+        let tally = FilterTally::default();
+        with_config(WITH_FILE, |home| {
+            let rules_dir = home.join("rules");
+            report_filter(&filter_run(home, &rules_dir, Some(&tally)));
+            let sent = take_captured();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0]["eventName"], otlp::FILTER_EVALUATED);
+
+            report_filter(&filter_run(home, &rules_dir, None));
+            assert!(take_captured().is_empty());
+        });
+        with_config("", |home| {
+            let rules_dir = home.join("rules");
+            report_filter(&filter_run(home, &rules_dir, Some(&tally)));
+            assert!(take_captured().is_empty());
+        });
+    }
+
+    /// Resolution records need a session and somewhere to send them, and
+    /// sending none dispatches nothing.
+    #[test]
+    fn test_resolution_records_need_a_session_and_an_output() {
+        use super::super::governance_session::{EndedEpisode, Resolution};
+        let ended = [(
+            ArtifactKind::Plan,
+            EndedEpisode {
+                adr_ref: "adr-1".to_string(),
+                adr_ids: vec!["adr-1".to_string()],
+                action_id: "action-0".to_string(),
+                resolution: Resolution::Fixed,
+                rounds: 2,
+                denials: 1,
+            },
+        )];
+        with_config(WITH_FILE, |_| {
+            assert_eq!(resolved_records(Some("s1"), None, &ended).len(), 1);
+            assert!(resolved_records(None, None, &ended).is_empty());
+            assert!(resolved_records(Some(""), None, &ended).is_empty());
+            report_resolved(Some("s1"), None, &[]);
+            assert!(take_captured().is_empty());
+            report_resolved(Some("s1"), None, &ended);
+            assert_eq!(take_captured().len(), 1);
+        });
+        with_config("", |_| {
+            assert!(resolved_records(Some("s1"), None, &ended).is_empty());
         });
     }
 }

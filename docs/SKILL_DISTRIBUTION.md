@@ -39,8 +39,9 @@ actual-skill/
 │   ├── plugin.json              # Claude Code plugin manifest; its version decides who gets updates
 │   └── marketplace.json         # Claude Code marketplace catalog
 ├── .codex-plugin/
-│   └── plugin.json              # Codex plugin manifest
-├── hooks/                       # Claude Code hooks: plan-check and impl-check gates, rule briefs
+│   └── plugin.json              # Codex plugin manifest; names hooks/codex-hooks.json
+├── hooks/                       # Claude Code hooks (hooks.json) and Codex hooks (codex-hooks.json):
+│                                #   plan-check and impl-check gates, rule briefs
 ├── skills/
 │   └── actual/
 │       ├── SKILL.md

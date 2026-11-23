@@ -1,6 +1,7 @@
 //! The OpenTelemetry event `rules brief --claude-hook` sends when an ADR
 //! first enters a session's context: one [`otlp::ADR_DETECTED`] record per
-//! logical ADR.
+//! logical ADR, after one [`otlp::FILTER_EVALUATED`] record accounting for
+//! the selection that brief made.
 //!
 //! # Design
 //!
@@ -29,6 +30,7 @@
 use std::path::Path;
 
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
+use crate::rules::scope::FilterTally;
 use crate::rules::types::{AdrMeta, RuleDocument};
 use crate::telemetry::debug::Stream;
 use crate::telemetry::opt_out::{self, Gate};
@@ -80,13 +82,16 @@ pub(super) fn group_headers<'a>(headers: impl IntoIterator<Item = &'a AdrMeta>) 
     adrs
 }
 
-/// Report the logical ADRs among `documents` that are new to this session.
+/// Report the logical ADRs among `documents` that are new to this session,
+/// after the brief's [`otlp::FILTER_EVALUATED`] record for the selection
+/// `filter` accounts for. A brief that adds no ADR sends neither.
 /// Best-effort and silent, like the brief itself.
 pub(super) fn report<'a>(
     ledger_dir: &Path,
     key: &LedgerKey<'_>,
     agent_id: Option<&str>,
     documents: impl IntoIterator<Item = &'a RuleDocument>,
+    filter: &FilterTally,
 ) {
     let Some(destination) = Destination::resolve() else {
         return;
@@ -105,10 +110,13 @@ pub(super) fn report<'a>(
         return;
     }
     let origin = otlp::Origin::resolve();
-    let records = adrs
-        .iter()
-        .filter(|adr| added.contains(&adr.key))
-        .map(|adr| origin.context_added(key.session_id, agent_id, &adr.key, &adr.adr_ids))
+    let filtered = origin.filter_evaluated(key.session_id, agent_id, "context", filter);
+    let records = std::iter::once(filtered)
+        .chain(
+            adrs.iter()
+                .filter(|adr| added.contains(&adr.key))
+                .map(|adr| origin.context_added(key.session_id, agent_id, &adr.key, &adr.adr_ids)),
+        )
         .collect();
     destination.deliver(records);
 }
@@ -206,7 +214,8 @@ pub(super) mod tests {
         })
     }
 
-    /// A record's string attribute, or a list attribute as a list.
+    /// A record's string or integer attribute (an OTLP integer is a JSON
+    /// string), or a list attribute as a list.
     pub(in crate::cli::commands) fn attribute(
         record: &serde_json::Value,
         key: &str,
@@ -225,7 +234,11 @@ pub(super) mod tests {
                 .iter()
                 .map(|v| v["stringValue"].clone())
                 .collect(),
-            None => value["stringValue"].clone(),
+            None => value
+                .get("stringValue")
+                .or_else(|| value.get("intValue"))
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
@@ -272,6 +285,29 @@ pub(super) mod tests {
         );
     }
 
+    /// [`super::report`] for a brief whose selection kept `documents`.
+    fn report<'a>(
+        ledger_dir: &Path,
+        key: &LedgerKey<'_>,
+        agent_id: Option<&str>,
+        documents: impl IntoIterator<Item = &'a RuleDocument>,
+    ) {
+        super::report(
+            ledger_dir,
+            key,
+            agent_id,
+            documents,
+            &FilterTally::default(),
+        );
+    }
+
+    /// The records after the brief's filter record, which leads any it sends.
+    fn detected(mut records: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        assert_eq!(records[0]["eventName"], otlp::FILTER_EVALUATED);
+        records.remove(0);
+        records
+    }
+
     fn ledger_key(session_id: &str) -> LedgerKey<'_> {
         LedgerKey {
             session_id,
@@ -314,7 +350,7 @@ pub(super) mod tests {
             ];
 
             report(&ledger, &ledger_key("s1"), Some("agent-1"), &documents);
-            let records = take_captured();
+            let records = detected(take_captured());
             assert_eq!(records.len(), 2);
             assert!(records.iter().all(|r| r["eventName"] == otlp::ADR_DETECTED));
             assert_eq!(attribute(&records[0], "actual.session.id"), "s1");
@@ -343,7 +379,7 @@ pub(super) mod tests {
                 document(Some("adr-5"), Some("grp-5")),
             ];
             report(&ledger, &ledger_key("s1"), None, &later);
-            let records = take_captured();
+            let records = detected(take_captured());
             assert_eq!(records.len(), 1);
             assert_eq!(attribute(&records[0], "actual.adr.ref"), "grp-5");
         });
@@ -430,12 +466,13 @@ pub(super) mod tests {
         );
     }
 
-    /// The positive control: a config that loads sends the ADR.
+    /// The positive control: a config that loads sends the selection and
+    /// the ADR.
     #[test]
     fn test_report_sends_when_the_config_loads() {
         assert_eq!(
             report_one_adr_under(crate::testutil::LOADABLE_TELEMETRY_ON),
-            (1, true)
+            (2, true)
         );
     }
 
@@ -477,17 +514,18 @@ pub(super) mod tests {
                 .reported_adrs
                 .is_empty());
             let lines = logged("brief-off");
-            assert_eq!(lines.len(), 1);
-            assert_eq!(lines[0]["stage"], "not_sent");
-            assert_eq!(lines[0]["reason"], "telemetry_off");
-            assert_eq!(lines[0]["auth"], "signed_out");
-            let held = &lines[0]["event"];
+            assert_eq!(lines.len(), 2);
+            assert!(lines.iter().all(|line| line["stage"] == "not_sent"
+                && line["reason"] == "telemetry_off"
+                && line["auth"] == "signed_out"));
+            assert_eq!(lines[0]["event"]["eventName"], otlp::FILTER_EVALUATED);
+            let held = &lines[1]["event"];
             assert_eq!(held["eventName"], otlp::ADR_DETECTED);
             assert_eq!(attribute(held, "actual.adr.ref"), "adr-9");
 
             std::fs::write(home.join("config.yaml"), WITH_FILE).unwrap();
             report(&ledger, &ledger_key("s1"), None, &documents);
-            let sent = take_captured();
+            let sent = detected(take_captured());
             assert_eq!(sent.len(), 1);
             let keys = |record: &serde_json::Value| -> Vec<serde_json::Value> {
                 record["attributes"]
