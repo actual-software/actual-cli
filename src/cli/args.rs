@@ -1447,7 +1447,7 @@ fn parse_since(value: &str) -> Result<Since, String> {
         return Ok(Since::All);
     }
     let invalid = || format!("expected a period such as 24h, 7d or 4w, or all; got `{value}`");
-    let split = value.len().saturating_sub(1);
+    let split = value.char_indices().next_back().map_or(0, |(i, _)| i);
     let count: i64 = value[..split]
         .parse()
         .ok()
@@ -3887,7 +3887,17 @@ mod parse_tests {
         assert_eq!(since("30D"), Some(Since::Last(chrono::TimeDelta::days(30))));
         assert_eq!(since("4w"), Some(Since::Last(chrono::TimeDelta::weeks(4))));
         assert_eq!(since("all"), Some(Since::All));
-        for bad in ["", "d", "0d", "-1d", "7", "7y", "1.5d", "99999999999999w"] {
+        for bad in [
+            "",
+            "d",
+            "0d",
+            "-1d",
+            "7",
+            "7y",
+            "1.5d",
+            "99999999999999w",
+            "7é",
+        ] {
             assert_eq!(since(bad), None, "{bad:?} should not parse");
         }
     }
