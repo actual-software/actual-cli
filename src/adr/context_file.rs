@@ -132,14 +132,14 @@ pub(crate) fn js_trim(text: &str) -> &str {
 
 /// The server's line split (`/\r?\n/`): each `\n` ends a line and takes one
 /// `\r` before it along, and a trailing newline leaves an empty last line.
-fn split_lines(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn split_lines(text: &str) -> impl Iterator<Item = &str> {
     text.split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 /// The text after the `##` of a `## ` heading line. The third character must
 /// be a space or a tab, so `### Rules` is body text of the section around it.
-fn h2_heading(line: &str) -> Option<&str> {
+pub(crate) fn h2_heading(line: &str) -> Option<&str> {
     line.strip_prefix("##")
         .filter(|rest| rest.starts_with([' ', '\t']))
 }
@@ -186,7 +186,7 @@ fn preamble_of(markdown: &str) -> String {
 }
 
 /// The first `#` (not `##`) line of the preamble with text after the `#`.
-fn h1_title(preamble: &str) -> Option<&str> {
+pub(crate) fn h1_title(preamble: &str) -> Option<&str> {
     split_lines(preamble)
         .filter_map(|line| line.strip_prefix('#'))
         .filter(|rest| !rest.starts_with('#'))

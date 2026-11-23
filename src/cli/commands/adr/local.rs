@@ -9,19 +9,19 @@ use uuid::Uuid;
 
 use super::telemetry::{CheckCounts, Creation};
 use super::{
-    content_from_flags, interactive, json_text, pick_repo, rule_spelling, runtime, save_status,
-    session, today, RepoPick,
+    content_from_flags, interactive, json_text, pick_repo, runtime, save_status, session, today,
+    RepoPick,
 };
 use crate::adr::context_file::{self, ContextFile};
 use crate::adr::files::{self, DecisionFile, DECISION_DIR, RULES_DIR};
-use crate::adr::header::{description_for, render_header, AdrHeader};
+use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::names::{decision_doc_file_name, rule_file_name};
 use crate::adr::overlap::{find_overlaps, ExistingDecision, Overlap};
-use crate::adr::rule_body::{render_rule_body, rule_id_prefix, scope_line};
+use crate::adr::pair::Decision;
 use crate::adr::save_check::check_document;
 use crate::adr::save_check::check_markdown;
 use crate::api::adr_types::SaveStatus;
-use crate::cli::args::{AdrCheckArgs, AdrNewArgs};
+use crate::cli::args::{AdrApiOptions, AdrCheckArgs, AdrNewArgs};
 use crate::cli::commands::sync::resolve_cwd;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
@@ -106,38 +106,24 @@ fn write_new_noting(
 }
 
 /// The decision doc and the rule file for `doc` under `adr_id`, each as a
-/// file name and its text.
+/// file name and its text. The rule file records the doc as its source.
 fn render_pair(
     doc: &ContextFile,
     adr_id: &str,
     status: SaveStatus,
     scope: &[String],
 ) -> [(String, String); 2] {
-    let header = |file_name: &str| {
-        render_header(&AdrHeader {
-            name: file_name.trim_end_matches(".md").to_string(),
-            description: description_for(&doc.title),
-            adr_id: adr_id.to_string(),
-            status: status.as_str().to_string(),
-            scope_root: ".".to_string(),
-            scope_paths: scope.to_vec(),
-        })
+    let decision = Decision {
+        doc,
+        adr_id,
+        status: status.as_str(),
+        root: REPOSITORY_ROOT,
+        scope,
     };
     let doc_name = decision_doc_file_name(adr_id, &doc.title);
-    let doc_text = format!("{}\n{}", header(&doc_name), context_file::render(doc));
-    let rules: Vec<(&str, &str)> = doc
-        .policies
-        .iter()
-        .map(|policy| (rule_spelling(policy.level), policy.statement.as_str()))
-        .collect();
-    let body = render_rule_body(
-        &doc.title,
-        &scope_line(".", scope),
-        &rule_id_prefix(adr_id),
-        &rules,
-    );
     let rule_name = rule_file_name(adr_id, &doc.title);
-    let rule_text = format!("{}\n{body}", header(&rule_name));
+    let doc_text = decision.doc_text(&doc_name, &[]);
+    let rule_text = decision.rule_text(&rule_name, &format!("{DECISION_DIR}/{doc_name}"));
     [(doc_name, doc_text), (rule_name, rule_text)]
 }
 
@@ -198,13 +184,13 @@ struct Duplicate {
 
 /// Whether the cloud comparison ran, against what, and why not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-struct CloudComparison {
-    compared: bool,
+pub(super) struct CloudComparison {
+    pub(super) compared: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
-    decisions: usize,
+    pub(super) scope: Option<String>,
+    pub(super) decisions: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<String>,
+    pub(super) note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -290,7 +276,8 @@ async fn run_check(args: &AdrCheckArgs, root: &Path, today: &str) -> CheckReport
         doc: None,
     }));
 
-    let (cloud, cloud_decisions) = cloud_decisions(args, root).await;
+    let (cloud, cloud_decisions) =
+        cloud_decisions(args.no_cloud, args.repo.as_deref(), &args.api, root).await;
     let duplicates = find_duplicates(&checked, &cloud_decisions);
     CheckReport {
         files: checked.into_iter().map(|c| c.result).collect(),
@@ -336,8 +323,10 @@ fn display_path(root: &Path, path: &Path) -> String {
 /// The organization's decisions to compare with, for the repository when
 /// one is known, and a note when the comparison was skipped or failed. Never
 /// an error: the local check stands on its own.
-async fn cloud_decisions(
-    args: &AdrCheckArgs,
+pub(super) async fn cloud_decisions(
+    no_cloud: bool,
+    repo_flag: Option<&str>,
+    api: &AdrApiOptions,
     root: &Path,
 ) -> (CloudComparison, Vec<ExistingDecision>) {
     let skipped = |note: String| {
@@ -349,10 +338,10 @@ async fn cloud_decisions(
             Vec::new(),
         )
     };
-    if args.no_cloud {
+    if no_cloud {
         return skipped("Skipped with --no-cloud.".to_string());
     }
-    let session = match session(&args.api).await {
+    let session = match session(api).await {
         Ok(session) => session,
         Err(ActualError::NotLoggedIn) => {
             return skipped(
@@ -363,7 +352,7 @@ async fn cloud_decisions(
         }
         Err(e) => return skipped(format!("Couldn't read your decisions in Actual AI: {e}")),
     };
-    let (repo, scope, note) = match pick_repo(&session, args.repo.as_deref(), root).await {
+    let (repo, scope, note) = match pick_repo(&session, repo_flag, root).await {
         Ok(RepoPick::Chosen(repo)) => (Some(repo.id), sanitize_server_text(&repo.label), None),
         Ok(RepoPick::Unresolved(reason)) => (
             None,
@@ -499,9 +488,14 @@ fn render_report(report: &CheckReport) -> String {
     }
     if !report.skipped.is_empty() {
         out.push_str(&format!(
-            "\nNot checked: {} {} under {DECISION_DIR}/ with no ADR header. Name a file to check it.\n",
+            "\nNot checked: {} {} under {DECISION_DIR}/ with no ADR header. Name a file to check \
+             it, or run `actual adr discover` to see which can be normalized.\n",
             report.skipped.len(),
-            if report.skipped.len() == 1 { "file" } else { "files" }
+            if report.skipped.len() == 1 {
+                "file"
+            } else {
+                "files"
+            }
         ));
     }
     let cloud = &report.cloud;
@@ -605,6 +599,15 @@ mod tests {
             Some(written.adr_id.as_str())
         );
         assert!(render_written(&written).contains("enforce it now"));
+
+        // The rule file records the doc it came from, so `discover` tells
+        // the pair from a synced one and sees it current.
+        let rule = files::read_decision_file(&written.rule_file).unwrap();
+        let source = rule.source.unwrap();
+        assert_eq!(source.path, format!("{DECISION_DIR}/{name}"));
+        let entries = crate::adr::discovery::discover(tmp.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].state, crate::adr::discovery::State::Managed);
     }
 
     #[test]
