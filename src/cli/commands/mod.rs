@@ -23,6 +23,7 @@ mod codex_paths;
 mod codex_rollout;
 pub mod config;
 pub mod create_token;
+pub mod enforcement_log;
 pub(crate) mod governance_session;
 mod hook_host;
 pub mod impl_check;
