@@ -316,7 +316,8 @@ pub(super) fn unsent_paths(
         let own = entry.and_then(|entry| entry.adr_id.as_deref());
         let held = entry.is_some_and(|entry| entry.sent(&text))
             || own.is_some_and(|id| known.owned(id).is_some());
-        if !held && plan(&file, &known, own, false, today).is_ok() {
+        let resend = entry.is_some_and(Entry::unconfirmed);
+        if !held && plan(&file, &known, own, resend, today).is_ok() {
             paths.push(name);
         }
     }
@@ -530,11 +531,12 @@ impl Publishing<'_> {
             return Ok(());
         }
         let own = self.book.own_id(&item.name);
+        let resend = self.book.entry(&item.name).is_some_and(Entry::unconfirmed);
         let planned = plan(
             item.file,
             &self.cloud.known,
             own.as_deref(),
-            self.run.allow_duplicate,
+            self.run.allow_duplicate || resend,
             self.today,
         );
         let (doc, status) = match planned {
@@ -551,6 +553,10 @@ impl Publishing<'_> {
         let imported = match import(&self.cloud, &item.name, &item.file.body).await {
             Ok(imported) => imported,
             Err(e) => {
+                if matches!(e, ActualError::AdrCreateUnconfirmed { .. }) {
+                    let entry = Entry::new(&item.text, Outcome::Unconfirmed, own.as_deref());
+                    self.book.note(&item.name, entry);
+                }
                 let reason = self.refused(step, e)?;
                 self.not_saved(step, item, reason, own.as_deref());
                 return Ok(());
@@ -563,6 +569,18 @@ impl Publishing<'_> {
             self.skip(step, item, reason, outcome, Some(&imported.adr_id));
             return Ok(());
         }
+        // Noted before the scope and publish steps, so a run cut off during
+        // them still knows the draft as this file's own: a draft, or an
+        // accepted file's draft that a later run publishes.
+        let unfinished = if status == SaveStatus::Accepted {
+            Outcome::WaitsForMerge
+        } else {
+            Outcome::Draft
+        };
+        self.book.note(
+            &item.name,
+            Entry::new(&item.text, unfinished, Some(&imported.adr_id)),
+        );
         let (save_as, rename) = match status {
             SaveStatus::Accepted if self.run.interactive => {
                 (SaveStatus::Accepted, Rename::IfAccepted)
@@ -1981,6 +1999,153 @@ mod tests {
             finished,
             Some(ActualError::AdrCreateUnconfirmed { .. })
         ));
+    }
+
+    #[test]
+    fn create_all_sends_a_file_whose_save_had_no_answer_again_for_its_own_draft() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres for storage",
+            "MUST: Store data in Postgres.",
+            &[],
+            true,
+        );
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[]);
+        let lost = import(&mut server, root, &a, 200, "not json");
+        let (_, stop) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        lost.assert();
+        assert!(
+            matches!(stop, Some(ActualError::AdrCreateUnconfirmed { .. })),
+            "{stop:?}"
+        );
+        let entry = &recorded(tmp.path())["docs/adr/a.md"];
+        assert_eq!(
+            (entry.outcome, entry.adr_id.as_deref()),
+            (Outcome::Unconfirmed, None)
+        );
+
+        // That save made a draft, which looks like the file. The refresh
+        // lists the file, and the next run sends it again, getting the
+        // draft back by its path.
+        let draft = web_json(
+            NEW_A,
+            "Use Postgres for storage",
+            "draft",
+            "Store data in Postgres.",
+        );
+        let records = tmp.path().join("adr-create-all");
+        let decisions = [decision(NEW_A, "Use Postgres for storage", "draft")];
+        let listed = unsent_paths(root, &decisions, ORG, ORIGIN, TODAY, Some(&records));
+        assert_eq!(listed, ["docs/adr/a.md"]);
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[draft]);
+        let again = import(&mut server, root, &a, 200, &saved(NEW_A, true));
+        let (report, stop) = publish(
+            &all_args(&server),
+            root,
+            create_all(false, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        again.assert();
+        assert!(stop.is_none(), "{stop:?}");
+        assert!(report.saved[0].already_saved, "{report:?}");
+        let entry = &recorded(tmp.path())["docs/adr/a.md"];
+        assert_eq!(
+            (entry.outcome, entry.adr_id.as_deref()),
+            (Outcome::Draft, Some(NEW_A))
+        );
+    }
+
+    #[test]
+    fn create_all_cut_off_after_a_save_still_knows_the_draft_as_the_files_own() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let repo = tempdir().unwrap();
+        let root = repo.path();
+        git_repo(root, Some(ORIGIN));
+        let a = pair(
+            root,
+            "a.md",
+            "Use Postgres for storage",
+            "MUST: Store data in Postgres.",
+            &[],
+            false,
+        );
+        // The publish answers too late: the run is cut off while it waits,
+        // as a person's Ctrl-C would cut it off.
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[]);
+        import(&mut server, root, &a, 200, &saved(NEW_A, false));
+        server
+            .mock("POST", PUBLISH)
+            .with_status(200)
+            .with_body_from_request(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(2_000));
+                br#"{"success":true}"#.to_vec()
+            })
+            .create();
+        let args = all_args(&server);
+        let target = Target {
+            repo: None,
+            api: &args.api,
+        };
+        let mut progress = Vec::new();
+        let run = run_publish(&target, root, create_all(true, false), TODAY, &mut progress);
+        let cut = block(async {
+            tokio::time::timeout(std::time::Duration::from_millis(1_000), run).await
+        });
+        assert!(cut.is_err(), "the run should still wait for the publish");
+        let entry = &recorded(tmp.path())["docs/adr/a.md"];
+        assert_eq!(
+            (entry.outcome, entry.adr_id.as_deref()),
+            (Outcome::WaitsForMerge, Some(NEW_A))
+        );
+
+        // The next run with a person at the terminal sends it again and
+        // publishes its draft, which doesn't count as its look-alike.
+        let draft = web_json(
+            NEW_A,
+            "Use Postgres for storage",
+            "draft",
+            "Store data in Postgres.",
+        );
+        let mut server = mockito::Server::new();
+        connected(&mut server);
+        read(&mut server, &[draft]);
+        import(&mut server, root, &a, 200, &saved(NEW_A, true));
+        let publish_it = published(&mut server, NEW_A);
+        let (report, stop) = publish(
+            &all_args(&server),
+            root,
+            create_all(true, false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        publish_it.assert();
+        assert!(stop.is_none() && report.skipped.is_empty(), "{report:?}");
+        assert_eq!(
+            recorded(tmp.path())["docs/adr/a.md"].outcome,
+            Outcome::Accepted
+        );
     }
 
     #[test]
