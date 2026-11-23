@@ -33,8 +33,8 @@ use crate::adr::context_file::Policy;
 use crate::adr::files::{rule_files_by_id, DECISION_DIR, RULES_DIR};
 use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::refresh::{
-    self as core, Applied, ConnectedRepo, Governing, Origin, Planner, Record, RuleSource,
-    Unnormalized, RECORD_FORMAT,
+    self as core, Applied, CloudRule, ConnectedRepo, Governing, Origin, Planner, Record,
+    RuleSource, Unnormalized, RECORD_FORMAT,
 };
 use crate::api::adr_types::Decision;
 use crate::api::{resolve_api_url, ActualApiClient};
@@ -161,7 +161,9 @@ pub(super) fn refresh(
                         Some(core::plan_from_cloud(root, &sources, &on_disk, &record)),
                         Some(Governing {
                             origin: Origin::ActualAi,
-                            any: sources.iter().any(|(_, source)| source.is_some()),
+                            any: sources
+                                .iter()
+                                .any(|(_, rule)| matches!(rule, CloudRule::Governs(_))),
                         }),
                     )
                 }
@@ -374,38 +376,49 @@ fn spawn_renewal() {
     tests::RENEWALS.with(|count| count.set(count.get() + 1));
 }
 
-/// Each decision's id, with what its rule file says while it is active.
-fn rule_sources(decisions: &[Decision]) -> Vec<(String, Option<RuleSource>)> {
+/// Each decision's id, with what it asks of its rule file: what the file
+/// says while the decision is active, to be left as it is while it is
+/// updated, and gone otherwise.
+fn rule_sources(decisions: &[Decision]) -> Vec<(String, CloudRule)> {
     decisions
         .iter()
         .map(|decision| {
-            let source = (decision.state == "active").then(|| RuleSource {
-                adr_id: decision.id.clone(),
-                title: decision.title.clone(),
-                status: decision.status.clone(),
-                scope_root: decision
-                    .scope
-                    .as_ref()
-                    .map_or(REPOSITORY_ROOT, |scope| scope.root.as_str())
-                    .to_string(),
-                scope_paths: decision
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.paths.clone())
-                    .unwrap_or_default(),
-                policies: decision
-                    .policies
-                    .iter()
-                    .map(|policy| Policy {
-                        level: policy.level,
-                        statement: policy.statement.clone(),
-                    })
-                    .collect(),
-                doc: None,
-            });
-            (decision.id.clone(), source)
+            let rule = match decision.state.as_str() {
+                "active" => CloudRule::Governs(rule_source(decision)),
+                "updated" => CloudRule::Pending,
+                _ => CloudRule::Retired,
+            };
+            (decision.id.clone(), rule)
         })
         .collect()
+}
+
+/// What an active decision's rule file says.
+fn rule_source(decision: &Decision) -> RuleSource {
+    RuleSource {
+        adr_id: decision.id.clone(),
+        title: decision.title.clone(),
+        status: decision.status.clone(),
+        scope_root: decision
+            .scope
+            .as_ref()
+            .map_or(REPOSITORY_ROOT, |scope| scope.root.as_str())
+            .to_string(),
+        scope_paths: decision
+            .scope
+            .as_ref()
+            .map(|scope| scope.paths.clone())
+            .unwrap_or_default(),
+        policies: decision
+            .policies
+            .iter()
+            .map(|policy| Policy {
+                level: policy.level,
+                statement: policy.statement.clone(),
+            })
+            .collect(),
+        doc: None,
+    }
 }
 
 // ── the record ─────────────────────────────────────────────────────────────
@@ -873,6 +886,50 @@ mod tests {
         );
         repos.assert();
         list.assert();
+    }
+
+    #[test]
+    fn signed_in_refresh_leaves_an_updated_decisions_rule_file_as_it_is() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        git_repo(root, Some("git@github.com:actual-software/actual-cli.git"));
+        // The sync's file for a decision it reads as updated.
+        let synced = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: updated-1\n    status: updated\n---\n# Use Redis\n";
+        let rule = write(root, ".actual/rules/use-redis.md", synced);
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{"adrs":[
+                {"id":"updated-1","title":"Use Redis","status":"updated","policyRules":[{"id":"r3","adrId":"updated-1","level":"MUST","statement":"Cache in Redis."}]}
+            ],"suggestions":[
+                {"id":"updated-2","title":"Use Kafka","status":"updated","policyRules":[{"id":"r4","adrId":"updated-2","level":"MUST","statement":"Publish to Kafka."}]}
+            ]}"#,
+            )
+            .create();
+        let records = config.path().join(DIR_NAME);
+        for _ in 0..2 {
+            let report = refresh(root, &args(Some(&server)), TODAY, Some(&records));
+            assert!(report.problems.is_empty(), "{report:?}");
+            assert!(
+                report.written.is_empty() && report.rewritten.is_empty(),
+                "{report:?}"
+            );
+            assert!(report.removed.is_empty(), "{report:?}");
+            assert_eq!(std::fs::read_to_string(&rule).unwrap(), synced);
+        }
+        assert_eq!(rule_files_by_id(root).len(), 1);
     }
 
     #[test]

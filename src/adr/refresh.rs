@@ -65,6 +65,20 @@ pub struct RuleSource {
     pub doc: Option<String>,
 }
 
+/// What a decision read from Actual AI asks of the rule file naming it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudRule {
+    /// Active: the rule file says this.
+    Governs(RuleSource),
+    /// A draft, a suggestion or archived: the rule file goes.
+    Retired,
+    /// Updated: a change a person accepts or rejects in Actual AI. The sync
+    /// enforces one it reads among the decisions and not one among the
+    /// suggestions, and the read doesn't say which, so its rule file stays
+    /// as it is and none is written for it.
+    Pending,
+}
+
 /// `source`'s rule file: its name under `.actual/rules/` and its text. `name`
 /// keeps an existing file's name, which its header repeats; `None` takes the
 /// name the sync gives the decision.
@@ -587,19 +601,26 @@ pub fn plan_from_docs(
 }
 
 /// The plan that brings `.actual/rules/` in step with the repository's
-/// decisions in Actual AI: each decision's id with its rule source while it
-/// is active. A decision listed twice counts once.
+/// decisions in Actual AI: each decision's id with what it asks of its rule
+/// file. A decision listed twice counts once.
 pub fn plan_from_cloud(
     root: &Path,
-    decisions: &[(String, Option<RuleSource>)],
+    decisions: &[(String, CloudRule)],
     on_disk: &BTreeMap<String, PathBuf>,
     record: &Record,
 ) -> Plan {
     let mut planner = Planner::new(root, on_disk, record);
     let mut listed = HashSet::new();
-    for (id, source) in decisions {
-        if listed.insert(id.as_str()) {
-            planner.decision(id, source.as_ref(), Origin::ActualAi, false);
+    for (id, rule) in decisions {
+        if !listed.insert(id.as_str()) {
+            continue;
+        }
+        match rule {
+            CloudRule::Governs(source) => {
+                planner.decision(id, Some(source), Origin::ActualAi, false)
+            }
+            CloudRule::Retired => planner.decision(id, None, Origin::ActualAi, false),
+            CloudRule::Pending => {}
         }
     }
     for id in record.rules.keys() {
@@ -1149,8 +1170,8 @@ mod tests {
         let active = source("Use Postgres", "Add a second database.");
         let mut record = Record::default();
         let decisions = vec![
-            (ID.to_string(), Some(active.clone())),
-            ("archived-1".to_string(), None),
+            (ID.to_string(), CloudRule::Governs(active.clone())),
+            ("archived-1".to_string(), CloudRule::Retired),
         ];
         let archived_rule = write(
             root,
@@ -1167,8 +1188,8 @@ mod tests {
 
         // Unchanged: nothing. Listed twice: once.
         let twice = vec![
-            (ID.to_string(), Some(active.clone())),
-            (ID.to_string(), Some(active.clone())),
+            (ID.to_string(), CloudRule::Governs(active.clone())),
+            (ID.to_string(), CloudRule::Governs(active.clone())),
         ];
         let plan = plan_from_cloud(root, &twice, &on_disk(root), &record);
         assert!(plan.changes.is_empty() && plan.set.is_empty());
@@ -1179,6 +1200,39 @@ mod tests {
         record.apply_edits(&set, &drop);
         assert_eq!(applied.removed.len(), 1);
         assert!(record.rules.is_empty());
+    }
+
+    #[test]
+    fn cloud_plan_leaves_the_rule_file_of_a_pending_decision_as_it_is() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let synced = "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: updated-1\n    status: updated\n---\n# Synced\n";
+        let rule = write(root, ".actual/rules/synced.md", synced);
+        let pending = || vec![("updated-1".to_string(), CloudRule::Pending)];
+        // A file from the sync, which the record doesn't know: none is
+        // written, removed or recorded.
+        let mut record = Record::default();
+        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record);
+        assert_eq!(plan, Plan::default());
+        // One the refresh followed while its decision was active: still
+        // listed, so it isn't gone either.
+        record.rules.insert(
+            "updated-1".to_string(),
+            Entry {
+                fingerprint: "f".to_string(),
+                origin: Origin::ActualAi,
+                path: None,
+            },
+        );
+        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record);
+        assert_eq!(plan, Plan::default());
+        let (applied, ..) = apply(root, plan);
+        assert_eq!(applied.changed(), 0);
+        assert_eq!(std::fs::read_to_string(&rule).unwrap(), synced);
+        // With no rule file, none is written.
+        std::fs::remove_file(&rule).unwrap();
+        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record);
+        assert!(plan.changes.is_empty(), "{:?}", plan.changes);
     }
 
     #[test]
@@ -1199,7 +1253,7 @@ mod tests {
         );
         let plan = plan_from_cloud(
             root,
-            &[(ID.to_string(), Some(active.clone()))],
+            &[(ID.to_string(), CloudRule::Governs(active.clone()))],
             &on_disk(root),
             &record,
         );
@@ -1221,7 +1275,7 @@ mod tests {
         std::fs::write(root.join(RULES_DIR), "").unwrap();
         let plan = plan_from_cloud(
             root,
-            &[(ID.to_string(), Some(source("T", "Do it.")))],
+            &[(ID.to_string(), CloudRule::Governs(source("T", "Do it.")))],
             &BTreeMap::new(),
             &Record::default(),
         );
