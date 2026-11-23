@@ -147,9 +147,11 @@ impl PathGlob {
     /// `{ts,tsx}` is one author-facing glob and two patterns: `glob::Pattern`
     /// does not expand a brace list, so matching has to. No `{` yields the
     /// original. An unbalanced `{` yields nothing, the same as a pattern that
-    /// would not compile.
+    /// would not compile. A pattern that expands past [`MAX_BRACE_DEPTH`] or
+    /// [`MAX_BRACE_ALTERNATIVES`] yields nothing for the same reason: the
+    /// expansion is not an answer this can stand on.
     pub(crate) fn alternatives(&self) -> Vec<String> {
-        expand_braces(&self.pattern)
+        expand_braces_bounded(&self.pattern).unwrap_or_default()
     }
 
     /// Whether this glob matches `path`, after expanding brace lists.
@@ -171,25 +173,43 @@ impl PathGlob {
     }
 }
 
-/// Expand the first balanced brace list and recurse, so
-/// `app/{lib,hooks}/*.{ts,tsx}` becomes four glob-crate patterns.
+/// How deep a brace list may nest, and how many alternatives one pattern may
+/// expand to.
 ///
-/// Unbalanced `{` returns nothing: there is no well-formed expansion, and
-/// treating the `{` as a literal would compile and then decline every real
-/// file — the same wrong answer that made prefix-matching necessary.
-fn expand_braces(pattern: &str) -> Vec<String> {
+/// A `{a,b}` repeated n times is 2^n strings from n×5 bytes: 20 pairs (100
+/// bytes) is 1 048 576 and 30 pairs is over a billion. Both limits sit far
+/// above any author-facing glob — a real one has two or three pairs — and both
+/// stop the expansion instead of letting it grow without bound.
+const MAX_BRACE_DEPTH: usize = 8;
+const MAX_BRACE_ALTERNATIVES: usize = 4096;
+
+/// [`expand_braces`] with those limits applied.
+///
+/// `None` means the pattern expanded past them, which the caller treats the
+/// same as a pattern that would not compile: there is no answer to stand on.
+fn expand_braces_bounded(pattern: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    expand_braces_into(pattern, 0, &mut out)?;
+    Some(out)
+}
+
+fn expand_braces_into(pattern: &str, depth: usize, out: &mut Vec<String>) -> Option<()> {
     let Some(open) = pattern.find('{') else {
-        return vec![pattern.to_string()];
+        out.push(pattern.to_string());
+        return (out.len() <= MAX_BRACE_ALTERNATIVES).then_some(());
     };
-    let mut depth = 0i32;
+    if depth >= MAX_BRACE_DEPTH {
+        return None;
+    }
+    let mut braces = 0i32;
     let mut close = None;
     for (at, c) in pattern[open..].char_indices() {
         let at = open + at;
         match c {
-            '{' => depth += 1,
+            '{' => braces += 1,
             '}' => {
-                depth -= 1;
-                if depth == 0 {
+                braces -= 1;
+                if braces == 0 {
                     close = Some(at);
                     break;
                 }
@@ -198,16 +218,18 @@ fn expand_braces(pattern: &str) -> Vec<String> {
         }
     }
     let Some(close) = close else {
-        return Vec::new();
+        return Some(());
     };
     let prefix = &pattern[..open];
     let inside = &pattern[open + '{'.len_utf8()..close];
     let suffix = &pattern[close + '}'.len_utf8()..];
-    let mut out = Vec::new();
     for choice in split_brace_choices(inside) {
-        out.extend(expand_braces(&format!("{prefix}{choice}{suffix}")));
+        expand_braces_into(&format!("{prefix}{choice}{suffix}"), depth + 1, out)?;
+        if out.len() > MAX_BRACE_ALTERNATIVES {
+            return None;
+        }
     }
-    out
+    Some(())
 }
 
 /// Split a brace list's inside on commas that are not themselves inside a
@@ -1584,5 +1606,74 @@ grep -r "jwt.sign" services/auth/jwks/ --include="*.ts"
         let found = globs_from_prose("Applies to `src/a/**` excluding `!src/a/gen/**`.");
         let patterns: Vec<&str> = found.iter().map(|g| g.pattern.as_str()).collect();
         assert_eq!(patterns, vec!["src/a/**"]);
+    }
+
+    /// A brace list that would expand to 2^n alternatives is refused rather
+    /// than built. Twenty `{a,b}` pairs is 100 bytes of input and 1 048 576
+    /// strings if nothing stops it; a rule file is untrusted input.
+    #[test]
+    fn test_expand_braces_refuses_an_exponential_pattern() {
+        let pattern = "{a,b}".repeat(20);
+        assert_eq!(pattern.len(), 100);
+        assert!(
+            expand_braces_bounded(&pattern).is_none(),
+            "a 2^20 expansion must be refused, not built"
+        );
+    }
+
+    /// Nesting past the depth limit is refused for the same reason.
+    #[test]
+    fn test_expand_braces_refuses_deep_nesting() {
+        let mut pattern = String::new();
+        for _ in 0..(MAX_BRACE_DEPTH + 2) {
+            pattern.push_str("{a,");
+        }
+        pattern.push('a');
+        for _ in 0..(MAX_BRACE_DEPTH + 2) {
+            pattern.push('}');
+        }
+        assert!(expand_braces_bounded(&pattern).is_none());
+    }
+
+    /// An ordinary author-facing glob still expands, and expands to what it did
+    /// before the limits existed.
+    #[test]
+    fn test_expand_braces_keeps_ordinary_patterns() {
+        let expanded = expand_braces_bounded("app/{lib,hooks}/*.{ts,tsx}").expect("expands");
+        assert_eq!(
+            expanded,
+            vec![
+                "app/lib/*.ts",
+                "app/lib/*.tsx",
+                "app/hooks/*.ts",
+                "app/hooks/*.tsx",
+            ]
+        );
+    }
+
+    /// A pattern at exactly the alternative ceiling still expands: the limit is
+    /// a ceiling, not an off-by-one.
+    ///
+    /// Four choices over six pairs is 4^6 = 4096 alternatives at depth 6, so it
+    /// exercises the alternative limit without touching the depth limit. A
+    /// `{a,b}` pair cannot reach 4096 inside the depth limit at all — twelve of
+    /// them would be depth 12 — which is why this uses four choices.
+    #[test]
+    fn test_expand_braces_allows_the_ceiling() {
+        let pattern = "{a,b,c,d}".repeat(6);
+        let expanded = expand_braces_bounded(&pattern).expect("4096 fits");
+        assert_eq!(expanded.len(), MAX_BRACE_ALTERNATIVES);
+    }
+
+    /// One alternative past the ceiling is refused. Four choices over seven
+    /// pairs is 4^7 = 16384, still inside the depth limit, so this is the
+    /// alternative limit firing and not the depth limit.
+    #[test]
+    fn test_expand_braces_refuses_past_the_ceiling() {
+        let pattern = "{a,b,c,d}".repeat(7);
+        assert!(
+            expand_braces_bounded(&pattern).is_none(),
+            "4^7 = 16384 must be refused"
+        );
     }
 }
