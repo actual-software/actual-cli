@@ -421,9 +421,9 @@ fn run_update(
     if !meta.is_active() {
         let id = sanitize_server_text(&adr_id);
         return Err(ActualError::AdrNotAllowed(format!(
-            "Decision {id} is {}, not accepted, and every file `actual adr` writes under \
-             {DECISION_DIR}/ is accepted, so `update` leaves it as it is. Run `actual adr \
-             publish {id}` to accept it first.",
+            "Decision {id} is {}, not accepted, and `update` changes only an accepted file \
+             under {DECISION_DIR}/, so it leaves this one as it is. Run `actual adr publish \
+             {id}` to accept it first.",
             sanitize_server_text(meta.status.as_deref().unwrap_or_default().trim())
         )));
     }
