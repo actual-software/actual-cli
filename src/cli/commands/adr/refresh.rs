@@ -132,7 +132,11 @@ pub(super) fn refresh(
                 "Actual AI turned down your sign-in's renewal, so the rule files were left as \
                  they are. Sign in again with `actual login`."
             } else {
-                spawn_renewal();
+                // A renewal holding the sign-in's lock is left to finish, so an
+                // outage can't queue renewers at the rate the refresh is called.
+                if !matches!(store::try_lock(), Ok(None)) {
+                    spawn_renewal();
+                }
                 "Your sign-in is being renewed in the background, so the rule files were left \
                  as they are until the next refresh."
             };
@@ -1043,12 +1047,9 @@ mod tests {
         assert!(kept.exists());
     }
 
-    #[test]
-    fn an_access_token_about_to_expire_is_renewed_apart_and_the_files_kept() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let config = tempdir().unwrap();
-        let _guards = signed_out(config.path());
-        let creds = StoredCredentials {
+    /// A sign-in whose access token expires within the renewal leeway.
+    fn expiring_sign_in() -> StoredCredentials {
+        StoredCredentials {
             access_token: "tok".to_string(),
             refresh_token: "refresh".to_string(),
             token_type: "Bearer".to_string(),
@@ -1059,7 +1060,15 @@ mod tests {
             email: None,
             subject: None,
             auth_url: None,
-        };
+        }
+    }
+
+    #[test]
+    fn an_access_token_about_to_expire_is_renewed_apart_and_the_files_kept() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = signed_out(config.path());
+        let creds = expiring_sign_in();
         store::save(&creds).unwrap();
         let tmp = tempdir().unwrap();
         let before = RENEWALS.with(std::cell::Cell::get);
@@ -1084,6 +1093,34 @@ mod tests {
                  they are. Sign in again with `actual login`."
             );
         }
+        assert_eq!(RENEWALS.with(std::cell::Cell::get), before + 1);
+    }
+
+    #[test]
+    fn a_renewal_holding_the_sign_in_lock_gets_no_second_one() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = signed_out(config.path());
+        store::save(&expiring_sign_in()).unwrap();
+        let tmp = tempdir().unwrap();
+        let before = RENEWALS.with(std::cell::Cell::get);
+
+        // Another process's renewal holds the lock, as one waiting out an
+        // outage does: each refresh reports the renewal and starts none.
+        let held = store::lock().unwrap();
+        for _ in 0..3 {
+            let report = refresh(tmp.path(), &args(None), TODAY, None);
+            assert!(report.kept);
+            assert!(
+                report.problems[0].starts_with("Your sign-in is being renewed in the background"),
+                "{report:?}"
+            );
+        }
+        assert_eq!(RENEWALS.with(std::cell::Cell::get), before);
+
+        // Once the lock is free, the next refresh starts exactly one.
+        drop(held);
+        refresh(tmp.path(), &args(None), TODAY, None);
         assert_eq!(RENEWALS.with(std::cell::Cell::get), before + 1);
     }
 
