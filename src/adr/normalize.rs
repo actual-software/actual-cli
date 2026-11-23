@@ -327,7 +327,8 @@ pub fn header_status(said: &str) -> Option<&'static str> {
         | "created-from-suggestion"
         | "updated" => "accepted",
         "proposed" | "draft" | "pending" | "review" | "open" | "wip" => "draft",
-        "superseded" => "superseded",
+        // adr-tools spells it `Superceded`.
+        "superseded" | "superceded" => "superseded",
         "deprecated" | "retired" | "obsolete" => "deprecated",
         "rejected" | "declined" | "abandoned" => "rejected",
         _ => return None,
@@ -1562,6 +1563,10 @@ It should be modular.
             ("In review", None),
             ("review", Some("draft")),
             ("Superseded by ADR-0009", Some("superseded")),
+            (
+                "Superceded by [2. Use MySQL](0002-use-mysql.md)",
+                Some("superseded"),
+            ),
             ("Deprecated", Some("deprecated")),
             ("Rejected", Some("rejected")),
             ("created-from-user", Some("accepted")),

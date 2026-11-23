@@ -994,7 +994,8 @@ pub struct AdrNormalizeArgs {
     #[arg(long)]
     pub all: bool,
 
-    /// Show what would be written, and write nothing.
+    /// Show what would be written, and write nothing: each converted doc as a
+    /// diff, and which rule files would be written or re-indexed.
     #[arg(long)]
     pub dry_run: bool,
 
