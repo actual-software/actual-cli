@@ -24,7 +24,7 @@ shasum -a 256 --check --ignore-missing SHA256SUMS
 
 If the signature's good, `minisign` prints `Signature and comment signature verified` and then the trusted comment. Make sure the comment names the tag you downloaded. An older release's signature still verifies. And if `minisign` reports a different key id, the spare key signed the release, so check against `spare.pub` instead.
 
-[`actual self-update`](SELF_UPDATE.md) makes these same checks, against both keys, before it replaces a binary you downloaded by hand.
+[`actual self-update`](https://docs.actual.ai/cli/self-update) makes these same checks, against both keys, before it replaces a binary you downloaded by hand.
 
 ## The trusted comment
 

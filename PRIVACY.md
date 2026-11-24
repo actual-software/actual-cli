@@ -798,7 +798,7 @@ telemetry data; like any web request, it shows npm your IP address.
 you run them. The answer is kept in `~/.actualai/actual/update-check.yaml`.
 
 `ACTUAL_NO_UPDATE_CHECK=1`, or `update_check.enabled: false` in the config
-file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
+file, stops the request entirely. See [the update notice](https://docs.actual.ai/install-cli#the-update-notice).
 
 ## Where data is sent
 

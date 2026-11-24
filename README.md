@@ -20,6 +20,8 @@
 
 The Actual CLI checks your coding agent's plans and changes against your team's architecture decisions. In Claude Code, the [Actual.AI Plugin](https://github.com/actual-software/actual-skill) runs the checks for you: a plan that conflicts with a decision goes back to the agent before you approve it, and so does a change at the end of a turn. The same checks run from your terminal and in CI.
 
+Documentation for the Actual CLI and the plugin is at [docs.actual.ai](https://docs.actual.ai).
+
 ## Installation
 
 Install the Actual.AI Plugin for Claude Code. Run each command on its own, in a Claude Code session:
@@ -42,7 +44,7 @@ The first time you run `/actual`, the plugin offers to install the CLI. To insta
 npm install -g @actualai/actual
 ```
 
-It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installation) covers Homebrew, prebuilt binaries and building from source. [`actual self-update`](docs/SELF_UPDATE.md) upgrades a prebuilt binary you downloaded by hand.
+It runs on macOS and Linux. [Install the CLI](https://docs.actual.ai/install-cli) covers Homebrew, prebuilt binaries and building from source. [`actual self-update`](https://docs.actual.ai/cli/self-update) upgrades a prebuilt binary you downloaded by hand.
 
 ## Signing in (optional)
 
@@ -58,11 +60,11 @@ actual adr new "Use Postgres for storage" --policy "MUST: Services store relatio
 
 From a coding agent's shell, it writes a draft instead, which no check reads until its status is accepted. To accept a draft, change `status: draft` to `status: accepted` in the header of both files `adr new` wrote, and the decision file's `Status: proposed` line to `Status: accepted`. An agent that passes `--status accepted` writes an accepted decision to begin with. You can also manage your decisions at [app.actual.ai](https://app.actual.ai) and merge the pull request it opens. Either way, each decision lands in `docs/adr/`, with the rule file the checks read beside it under `.actual/rules/`. `actual rules ls` lists what the CLI read and warns about anything it couldn't.
 
-`actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. Signed in, `actual adr create` saves a decision to your Actual AI account, where `list`, `show`, `update`, `publish` and the other `actual adr` commands manage it. [ADR commands](docs/ADR_COMMANDS.md) covers each one.
+`actual adr new` writes a decision and its rule file from the terminal, and `actual adr check` runs Actual AI's save check on the decision files under `docs/adr/` before you commit them. Signed in, `actual adr create` saves a decision to your Actual AI account, where `list`, `show`, `update`, `publish` and the other `actual adr` commands manage it. The [`actual adr` reference](https://docs.actual.ai/cli/adr) covers each one.
 
 ## Checking plans and changes
 
-In Claude Code, the plugin runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [code] [reason]` in the session (CLI 0.13.0 or later, and 0.14.0 or later to record the code); [Governance](docs/HOW_IT_WORKS.md#governance) has the details.
+In Claude Code, the plugin runs `actual plan-check` on your agent's plan when it leaves plan mode, before you see the approval dialog, and `actual impl-check` on its changes at the end of every turn. A conflict goes back to the agent with the rule and the reason. The turn continues until it's fixed. To clear a denied rule for the rest of the session, type `/actual-cli:override <rule-id> [code] [reason]` in the session (CLI 0.13.0 or later, and 0.14.0 or later to record the code); [Overrides](https://docs.actual.ai/guides/overrides) has the details.
 
 From a terminal or in CI:
 
@@ -90,16 +92,18 @@ actual rules brief --file src/api/users.ts
 
 ## Documentation
 
-- [Actual.AI Plugin in depth](docs/HOW_IT_WORKS.md): governance, rules in context, sign-in and troubleshooting.
-- [Getting Started](docs/GETTING_STARTED.md): installation, runners, commands and configuration.
-- [ADR commands](docs/ADR_COMMANDS.md): writing and checking ADRs in your repository, and managing your organization's decisions from the terminal.
-- [adr-bot and the Advisor](docs/ADR_BOT_AND_ADVISOR.md): ADR guidance written into your agent's context file, and architecture questions answered from your ADRs.
+- [Quickstart](https://docs.actual.ai/quickstart): install the plugin and the CLI, add one decision and watch a check run.
+- [How it works](https://docs.actual.ai/concepts/how-it-works): how the CLI and the plugin turn your decisions into checks on your agent's plans and changes.
+- [Write and draft decisions](https://docs.actual.ai/guides/write-and-draft-decisions): writing and checking ADRs in your repository, and saving decisions to Actual AI.
+- [Context files with adr-bot](https://docs.actual.ai/guides/context-files-with-adr-bot) and [Ask the Advisor](https://docs.actual.ai/guides/ask-the-advisor): ADR guidance written into your agent's context file, and architecture questions answered from your organization's decisions.
+- [CLI reference](https://docs.actual.ai/cli/overview): every command and its options, and the configuration keys and environment variables the CLI reads.
+- [Troubleshooting](https://docs.actual.ai/resources/troubleshooting): causes and fixes for the problems people meet most often.
 
 ## Privacy & Telemetry
 
 The CLI collects minimal telemetry to improve the product, whether the plugin manages it for you or you run it directly. No event carries raw ids, source code, or file paths, apart from the reason someone types for an `other` override, which a signed-in run sends with secret-looking values stripped. Your sign-in's access token, which names your account, goes with the OpenTelemetry events sent to Actual. Events sent while you're signed in carry identity-linked one-way hashes; signed-out events are pseudonymous, not anonymous. Turn telemetry off with `actual config set telemetry.enabled false` while no `actual adr-bot` run is in progress, since a run that's already going can save the old value back. That one setting stops every telemetry event, including the plan-governance events that reach PostHog; `ACTUAL_NO_TELEMETRY=1` does the same for CI and one-off runs. See [PRIVACY.md](PRIVACY.md) for what the setting leaves running, who can attribute the data and how long it's kept.
 
-Once a day the CLI also asks the npm registry whether a newer version is out, and names the upgrade command for how you installed it. `ACTUAL_NO_UPDATE_CHECK=1` turns that off; see [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
+Once a day the CLI also asks the npm registry whether a newer version is out, and names the upgrade command for how you installed it. `ACTUAL_NO_UPDATE_CHECK=1` turns that off; see [the update notice](https://docs.actual.ai/install-cli#the-update-notice).
 
 ## Contributing
 
