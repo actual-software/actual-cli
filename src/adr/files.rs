@@ -20,7 +20,7 @@ pub const RULES_DIR: &str = ".actual/rules";
 pub const MAX_FILE_SIZE: u64 = 1024 * 1024;
 
 /// How deep under `docs/adr/` discovery looks, `docs/adr/drafts/` included.
-const MAX_DEPTH: usize = 3;
+pub const MAX_DEPTH: usize = 3;
 
 /// A decision doc read from disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +94,7 @@ pub fn split_header(text: &str) -> Option<(&str, &str)> {
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct RawHeader {
+    version: Option<serde_yaml::Value>,
     name: Option<String>,
     description: Option<String>,
     metadata: RawMetadata,
@@ -151,7 +152,13 @@ fn header_meta(header: &str) -> Option<(AdrMeta, Option<Source>)> {
             digest: source.digest?,
         })
     });
+    let version = match raw.version {
+        Some(serde_yaml::Value::Number(n)) => Some(n.to_string()),
+        Some(serde_yaml::Value::String(s)) => Some(s),
+        _ => None,
+    };
     let meta = AdrMeta {
+        version,
         name: raw.name,
         description: raw.description,
         adr_id: raw.metadata.actual.adr_id,
@@ -166,8 +173,13 @@ fn header_meta(header: &str) -> Option<(AdrMeta, Option<Source>)> {
 
 /// Read a decision doc, refusing one over [`MAX_FILE_SIZE`].
 pub fn read_decision_file(path: &Path) -> Result<DecisionFile, ActualError> {
-    let text = read_text(path)?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    Ok(decision_file_from_text(path, &read_text(path)?))
+}
+
+/// A decision doc whose text is `text`, as [`read_decision_file`] reads one
+/// at `path`.
+pub fn decision_file_from_text(path: &Path, text: &str) -> DecisionFile {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let ((meta, source), body) = match split_header(text) {
         Some((header, body)) => (
             header_meta(header).map_or((None, None), |(meta, source)| (Some(meta), source)),
@@ -175,12 +187,12 @@ pub fn read_decision_file(path: &Path) -> Result<DecisionFile, ActualError> {
         ),
         None => ((None, None), text),
     };
-    Ok(DecisionFile {
+    DecisionFile {
         path: path.to_path_buf(),
         meta,
         source,
         body: body.to_string(),
-    })
+    }
 }
 
 fn read_text(path: &Path) -> Result<String, ActualError> {
@@ -236,7 +248,7 @@ pub fn rule_files(root: &Path) -> Vec<DecisionFile> {
 /// Push every `.md` file under `dir` onto `out`, `depth` levels down. A
 /// directory that can't be listed contributes nothing; symlinks are not
 /// followed.
-fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+pub fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -250,6 +262,48 @@ fn collect_markdown(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// The rule files under `<root>/.actual/rules/` by the decision id their
+/// header names, the first by path where two name one id.
+pub fn rule_files_by_id(root: &Path) -> std::collections::BTreeMap<String, PathBuf> {
+    let mut paths = Vec::new();
+    collect_markdown(&root.join(RULES_DIR), 1, &mut paths);
+    paths.sort();
+    let mut by_id = std::collections::BTreeMap::new();
+    for path in paths {
+        let id = read_decision_file(&path)
+            .ok()
+            .and_then(|file| file.adr_id().map(str::to_string));
+        if let Some(id) = id {
+            by_id.entry(id).or_insert(path);
+        }
+    }
+    by_id
+}
+
+/// Write `text` to `path` whole: into a temporary file beside it that is then
+/// renamed over it, so a check reading the folder never sees half a file.
+/// Creates the directory.
+pub fn write_atomic(path: &Path, text: &str) -> Result<(), ActualError> {
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let temp = dir.join(format!(".{name}.{}-{nanos}.tmp", std::process::id()));
+    std::fs::write(&temp, text)?;
+    std::fs::rename(&temp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })?;
+    Ok(())
 }
 
 /// The rule file under `<root>/.actual/rules/` whose header names `adr_id`.
@@ -558,6 +612,61 @@ mod tests {
         );
         assert_eq!(find_rule_file(tmp.path(), OLD), Some(rule));
         assert_eq!(find_rule_file(tmp.path(), "nope"), None);
+    }
+
+    #[test]
+    fn rule_files_by_id_reads_each_header_once_and_keeps_the_first_of_two() {
+        let tmp = tempdir().unwrap();
+        let rules = tmp.path().join(RULES_DIR);
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("b.md"), header("b", OLD, "accepted", &[])).unwrap();
+        std::fs::write(rules.join("a.md"), header("a", OLD, "accepted", &[])).unwrap();
+        std::fs::write(rules.join("c.md"), header("c", NEW, "accepted", &[])).unwrap();
+        std::fs::write(rules.join("plain.md"), "# Our rules\n").unwrap();
+        let by_id = rule_files_by_id(tmp.path());
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(by_id[OLD], rules.join("a.md"));
+        assert_eq!(by_id[NEW], rules.join("c.md"));
+        assert!(rule_files_by_id(&tmp.path().join("nowhere")).is_empty());
+    }
+
+    #[test]
+    fn write_atomic_replaces_a_file_whole_and_leaves_no_temporary_file() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join(".actual/rules/a.md");
+        write_atomic(&path, "one").unwrap();
+        write_atomic(&path, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["a.md"]);
+        // A directory where the file should be: the error leaves nothing behind.
+        std::fs::create_dir_all(tmp.path().join("dir.md")).unwrap();
+        assert!(write_atomic(&tmp.path().join("dir.md"), "x").is_err());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn the_header_version_is_read_as_text() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("a.md");
+        std::fs::write(&path, header("a", OLD, "accepted", &[])).unwrap();
+        let meta = read_decision_file(&path).unwrap().meta.unwrap();
+        assert_eq!(meta.version.as_deref(), Some("2"));
+        std::fs::write(
+            &path,
+            "---\nversion: \"3\"\nmetadata:\n  actual:\n    adr_id: x\n---\n",
+        )
+        .unwrap();
+        let meta = read_decision_file(&path).unwrap().meta.unwrap();
+        assert_eq!(meta.version.as_deref(), Some("3"));
+        std::fs::write(&path, "---\nversion: [2]\n---\n").unwrap();
+        assert_eq!(
+            read_decision_file(&path).unwrap().meta.unwrap().version,
+            None
+        );
     }
 
     #[test]

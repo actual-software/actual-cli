@@ -3332,10 +3332,23 @@ fn test_session_end_skips_a_held_lock_without_consuming_the_end() {
         }));
 }
 
+/// `cmd()` with a config directory of its own, so a sign-in stored on the
+/// machine running the tests can't reach it.
+fn home_cmd(home: &std::path::Path) -> Command {
+    let mut command = cmd();
+    command
+        .env_remove("ACTUAL_CONFIG")
+        .env("ACTUAL_CONFIG_DIR", home)
+        .env("ACTUAL_NO_TELEMETRY", "1")
+        .env("ACTUAL_NO_UPDATE_CHECK", "1");
+    command
+}
+
 #[test]
 fn test_adr_new_then_check_work_signed_out() {
+    let home = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    cmd()
+    home_cmd(home.path())
         .args(["adr", "new", "Use Postgres for storage"])
         .args(["--context", "Services need one relational store."])
         .args([
@@ -3345,16 +3358,218 @@ fn test_adr_new_then_check_work_signed_out() {
         .arg("--root")
         .arg(dir.path())
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("It is accepted"));
     for sub in ["docs/adr", ".actual/rules"] {
         let written: Vec<_> = std::fs::read_dir(dir.path().join(sub)).unwrap().collect();
         assert_eq!(written.len(), 1, "{sub}");
     }
-    cmd()
+    home_cmd(home.path())
         .args(["adr", "check", "--no-cloud", "--root"])
         .arg(dir.path())
         .assert()
         .success();
+}
+
+/// Signed out, the commands that take an id work on the files under
+/// docs/adr in the directory they run in, and keep the rule files in step.
+#[test]
+fn test_adr_commands_work_on_docs_adr_signed_out() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| -> String {
+        let output = home_cmd(home.path())
+            .current_dir(dir.path())
+            .arg("adr")
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let count = |sub: &str| std::fs::read_dir(dir.path().join(sub)).unwrap().count();
+    // A refused command exits with `code` and leaves every file as it was.
+    let refused = |args: &[&str], code: i32| -> String {
+        let before = tree(dir.path());
+        let output = home_cmd(home.path())
+            .current_dir(dir.path())
+            .arg("adr")
+            .args(args)
+            .assert()
+            .code(code)
+            .get_output()
+            .stderr
+            .clone();
+        assert_eq!(tree(dir.path()), before, "{args:?} changed a file");
+        String::from_utf8(output).unwrap()
+    };
+    let created: serde_json::Value = serde_json::from_str(&run(&[
+        "create",
+        "Use Postgres for storage",
+        "--policy",
+        "MUST: Services store relational data in Postgres.",
+        "--json",
+    ]))
+    .unwrap();
+    let id = created["adr_id"].as_str().unwrap().to_string();
+    assert!(run(&["list"]).contains("Use Postgres for storage"));
+    assert!(run(&["show", &id]).contains("Services store relational data in Postgres."));
+    assert!(run(&["update", &id, "--title", "Use Postgres 16"]).contains("Updated"));
+    assert_eq!(count(".actual/rules"), 1);
+
+    // None of these leaves a file under docs/adr/ in a status other than accepted.
+    assert!(refused(&["unpublish", &id], 2).contains("actual adr delete"));
+    let draft = refused(
+        &[
+            "create",
+            "Use Redis",
+            "--policy",
+            "MUST: Use Redis.",
+            "--status",
+            "draft",
+        ],
+        2,
+    );
+    assert!(draft.contains("actual login"), "{draft}");
+    assert!(refused(&["create", "--all"], 2).contains("actual login"));
+    let file = std::fs::read_dir(dir.path().join("docs/adr"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replacen("status: accepted", "status: draft", 1)).unwrap();
+    let update = refused(&["update", &id, "--title", "Use Postgres 17"], 3);
+    // The error box wraps its lines, so the command and its id may part.
+    assert!(
+        update.contains("`actual adr publish") && update.contains("to accept it first"),
+        "{update}"
+    );
+
+    // `publish` accepts a file in another status, and `delete` removes one.
+    run(&["publish", &id]);
+    assert_eq!(count(".actual/rules"), 1);
+    run(&["delete", &id]);
+    assert_eq!((count("docs/adr"), count(".actual/rules")), (0, 0));
+}
+
+/// Every file under `root` with its bytes, by path.
+fn tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// The refresh the plugin's hooks run: signed out it follows docs/adr, says
+/// nothing once the rule files match, and exits 0 even for a file it can't
+/// read as a decision.
+#[test]
+fn test_adr_refresh_follows_docs_adr_signed_out() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    home_cmd(home.path())
+        .args(["adr", "create", "Use Postgres for storage"])
+        .args([
+            "--policy",
+            "MUST: Services store relational data in Postgres.",
+        ])
+        .arg("--root")
+        .arg(dir.path())
+        .assert()
+        .success();
+    std::fs::write(dir.path().join("docs/adr/0002-kafka.md"), "# Use Kafka\n").unwrap();
+    let refresh = || {
+        let output = home_cmd(home.path())
+            .args(["adr", "refresh", "--json", "--root"])
+            .arg(dir.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let first = refresh();
+    assert_eq!(first["mode"], "signed-out");
+    assert_eq!(first["written"].as_array().unwrap().len(), 0, "{first}");
+    assert_eq!(first["unnormalized"][0]["path"], "docs/adr/0002-kafka.md");
+    assert!(first["message"]
+        .as_str()
+        .unwrap()
+        .contains("It has no ADR header."));
+    let second = refresh();
+    assert_eq!(second["unnormalized_changed"], false);
+    assert!(second["message"].is_null(), "{second}");
+}
+
+/// A repository with no decision that governs hears once which skill drafts
+/// its first decisions, and the next refresh says only that nothing changed.
+#[test]
+fn test_adr_refresh_recommends_the_bootstrap_skill_once_for_a_repository_with_no_decisions() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let refresh = || {
+        let output = home_cmd(home.path())
+            .args(["adr", "refresh", "--root"])
+            .arg(dir.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let first = refresh();
+    assert!(
+        first.starts_with("No decision under docs/adr/ governs yet."),
+        "{first}"
+    );
+    assert!(first.contains("`adr-bootstrap` skill"), "{first}");
+    assert_eq!(refresh(), ".actual/rules/ already matches docs/adr/.\n");
+}
+
+/// Signed in with an access token about to expire, the refresh leaves the
+/// rule files alone and starts the renewal in the background. This sign-in
+/// names no auth server, so the background `whoami --check` renews nothing
+/// and sends nothing.
+#[test]
+fn test_adr_refresh_leaves_an_expiring_sign_in_to_a_background_renewal() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("credentials.yaml"),
+        "access_token: tok\nrefresh_token: refresh\ntoken_type: Bearer\n\
+         expires_at: \"2020-01-01T00:00:00Z\"\norganization_id: org\nmember_id: member\n",
+    )
+    .unwrap();
+    let output = home_cmd(home.path())
+        .args(["adr", "refresh", "--json", "--root"])
+        .arg(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["mode"], "signed-in", "{report}");
+    assert_eq!(report["kept"], true);
+    assert!(report["problems"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("Your sign-in is being renewed in the background"));
 }
 
 /// `rules report-use` with no question open refuses and records nothing,

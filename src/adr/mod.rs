@@ -14,6 +14,9 @@
 //!   into a state: synced, managed, stale, unmanaged and the rest.
 //! * [`normalize`] turns a decision doc written in another format into a
 //!   Context File, without a model where its layout allows.
+//! * [`refresh`] keeps each decision's rule file in step with its decision,
+//!   from `docs/adr/` or from Actual AI, and lists the decision files it
+//!   can't read.
 //! * [`workflow`] runs the web app's decision workflow around the decision
 //!   routes: its lists, state rules and the route each change takes.
 
@@ -26,6 +29,7 @@ pub mod normalize;
 pub mod overlap;
 pub mod pair;
 pub mod provenance;
+pub mod refresh;
 pub mod rule_body;
 pub mod save_check;
 pub mod workflow;
