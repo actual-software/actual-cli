@@ -114,16 +114,50 @@ impl FakeRunner {
         self.prompts.lock().unwrap().last().cloned().unwrap()
     }
 
-    /// Every slug the prompt listed as a candidate, in the order shown.
+    /// Every candidate the prompt listed, as its number and its slug.
     ///
     /// Read back out of the prompt text rather than taken from the caller, so
-    /// the oracle judges exactly what the model would have seen.
-    fn candidate_slugs(&self) -> Vec<String> {
-        self.last_prompt()
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("- slug: ").map(str::to_string))
+    /// the oracle judges exactly what the model would have seen. The prompt
+    /// names each candidate by its title, which the fixture's own rule files
+    /// map back to a slug.
+    fn numbered_candidates(&self) -> Vec<(String, String)> {
+        let slugs = slugs_by_title();
+        let prompt = self.last_prompt();
+        let list = prompt
+            .split("=== candidate rules ===")
+            .nth(1)
+            .and_then(|rest| rest.split("=== task ===").next())
+            .expect("the prompt lists its candidates");
+        list.lines()
+            .filter_map(|line| {
+                let (number, title) = line.split_once(". ")?;
+                number.parse::<usize>().ok()?;
+                let slug = slugs
+                    .get(title)
+                    .cloned()
+                    .unwrap_or_else(|| title.to_string());
+                Some((number.to_string(), slug))
+            })
             .collect()
     }
+}
+
+/// Each fixture rule file's slug, keyed by the title a prompt shows for it.
+fn slugs_by_title() -> std::collections::HashMap<String, String> {
+    load_rule_set(&corpus_root())
+        .expect("fixture corpus loads")
+        .documents
+        .into_iter()
+        .map(|doc| {
+            let slug = doc
+                .source_path
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            (doc.title.unwrap_or_else(|| slug.clone()), slug)
+        })
+        .collect()
 }
 
 impl StructuredRunner for FakeRunner {
@@ -133,7 +167,7 @@ impl StructuredRunner for FakeRunner {
         _schema: &str,
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
-        _effort: Option<&str>,
+        _tuning: actual_cli::runner::structured::Tuning,
     ) -> Result<serde_json::Value, ActualError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         match &self.answer {
@@ -143,23 +177,19 @@ impl StructuredRunner for FakeRunner {
                 stderr: String::new(),
             }),
             Answer::Oracle(expected) => {
-                let verdicts: Vec<serde_json::Value> = self
-                    .candidate_slugs()
+                let scores: serde_json::Map<String, serde_json::Value> = self
+                    .numbered_candidates()
                     .into_iter()
-                    .map(|slug| {
-                        let governs = expected.contains(&slug);
-                        serde_json::json!({
-                            "slug": slug,
-                            "verdict": if governs { "governs" } else { "unrelated" },
-                            "reason": if governs {
-                                "constrains this change"
-                            } else {
-                                "does not apply here"
-                            },
-                        })
+                    .map(|(number, slug)| {
+                        let score = if expected.contains(&slug) {
+                            rank::MAX_SCORE
+                        } else {
+                            0
+                        };
+                        (number, score.into())
                     })
                     .collect();
-                Ok(serde_json::json!({ "verdicts": verdicts }))
+                Ok(serde_json::json!({ "scores": scores }))
             }
         }
     }
@@ -300,12 +330,10 @@ fn a_failing_runner_degrades_to_the_prefilter_rather_than_to_an_error() {
         FakeRunner::down(),
         // Reachable, and answering with the wrong shape.
         FakeRunner::verbatim(serde_json::json!({"answer": "yes"})),
-        // Reachable, and naming only rules that were never candidates.
-        FakeRunner::verbatim(serde_json::json!({"verdicts": [
-            {"slug": "invented", "verdict": "governs", "reason": "made up"}
-        ]})),
+        // Reachable, and scoring only a number no candidate was given.
+        FakeRunner::verbatim(serde_json::json!({"scores": {"99": 9}})),
         // Reachable, and rejecting everything.
-        FakeRunner::verbatim(serde_json::json!({"verdicts": []})),
+        FakeRunner::verbatim(serde_json::json!({"scores": {}})),
     ] {
         let selection = run(&index, &case, 5, &runner);
         assert_eq!(runner.calls(), 1, "the runner should be asked exactly once");
@@ -362,23 +390,19 @@ fn the_ranker_may_only_partition_the_candidates_it_was_given() {
     assert!(candidates.len() > 5, "this plan should leave a surplus");
 
     // Everything judged alike: the deterministic stage-1 order survives intact.
-    let all_governs: Vec<serde_json::Value> = candidates
-        .iter()
-        .map(|c| serde_json::json!({"slug": c.slug, "verdict": "governs", "reason": "yes"}))
+    let all_governs: serde_json::Map<String, serde_json::Value> = (1..=candidates.len())
+        .map(|number| (number.to_string(), rank::MAX_SCORE.into()))
         .collect();
     let verdicts =
-        rank::parse_verdicts(&serde_json::json!({ "verdicts": all_governs }), &candidates).unwrap();
+        rank::parse_verdicts(&serde_json::json!({ "scores": all_governs }), &candidates).unwrap();
     let selection = prefiltered.apply(&verdicts);
     let selected: Vec<&String> = selection.selected.iter().map(|r| &r.slug).collect();
     let expected: Vec<&String> = candidates.iter().take(5).map(|c| &c.slug).collect();
     assert_eq!(selected, expected);
 
-    // An invented slug never reaches the result.
+    // A number the prompt never gave never reaches the result.
     let mixed = rank::parse_verdicts(
-        &serde_json::json!({"verdicts": [
-            {"slug": "cross-cutting-not-a-real-rule-0000", "verdict": "governs", "reason": "no"},
-            {"slug": candidates[0].slug, "verdict": "governs", "reason": "yes"},
-        ]}),
+        &serde_json::json!({"scores": {"0": 9, "999": 9, "1": 9}}),
         &candidates,
     )
     .unwrap();
@@ -415,7 +439,13 @@ fn the_prompt_lists_exactly_the_prefiltered_candidates_in_order() {
         .iter()
         .map(|c| c.slug.clone())
         .collect();
-    assert_eq!(runner.candidate_slugs(), expected);
+    let listed = runner.numbered_candidates();
+    let numbers: Vec<String> = listed.iter().map(|(number, _)| number.clone()).collect();
+    let slugs: Vec<String> = listed.into_iter().map(|(_, slug)| slug).collect();
+    assert_eq!(slugs, expected);
+    // Numbered from one, in that order, which is what the answer is keyed by.
+    let one_to_n: Vec<String> = (1..=expected.len()).map(|n| n.to_string()).collect();
+    assert_eq!(numbers, one_to_n);
     // The path the plan names reaches the prompt too.
     assert!(runner
         .last_prompt()

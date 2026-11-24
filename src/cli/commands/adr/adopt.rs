@@ -749,7 +749,7 @@ async fn run_normalize<R: StructuredRunner>(
                             normalize::MODEL_SCHEMA,
                             model.model.as_deref(),
                             model.max_budget_usd,
-                            None,
+                            crate::runner::structured::Tuning::default(),
                         )
                         .await
                         .map_err(|e| e.to_string())
@@ -1283,7 +1283,7 @@ mod tests {
             _schema: &str,
             _model: Option<&str>,
             budget: Option<f64>,
-            _effort: Option<&str>,
+            _tuning: crate::runner::structured::Tuning,
         ) -> Result<serde_json::Value, ActualError> {
             assert_eq!(budget, Some(BUDGET), "the configured cap reaches each call");
             self.calls.fetch_add(1, Ordering::SeqCst);

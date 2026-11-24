@@ -31,7 +31,7 @@ use crate::runner::probe::{
     is_anthropic_available, is_claude_available, is_codex_available, is_cursor_available,
     is_openai_available,
 };
-use crate::runner::structured::StructuredRunner;
+use crate::runner::structured::{StructuredRunner, Tuning};
 use crate::runner::subprocess::CliClaudeRunner;
 
 /// How long a runner may stay **silent** during a rank before it is abandoned.
@@ -50,6 +50,45 @@ use crate::runner::subprocess::CliClaudeRunner;
 /// prefilter rather than hold the turn open.
 pub const RANK_TIMEOUT_SECS: u64 = 60;
 
+/// The model a stage-2 rank uses on `claude-cli` and `anthropic-api` when
+/// neither `--model` nor the config names one.
+///
+/// Measured on stage-2 ranks over 25 merged pull requests: this model scored
+/// the 30 candidates in about 4 seconds, and picked governing rules as well as
+/// any model tried.
+pub const RANK_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
+
+/// The model a stage-2 rank uses on `codex-cli` when neither `--model` nor the
+/// config names one.
+///
+/// Without it Codex uses the model in the user's own config, whatever its
+/// speed. On the same measurement this model, at low effort, took about 6.5
+/// seconds and picked governing rules as well as the Claude default.
+pub const RANK_CODEX_MODEL: &str = "gpt-6.2-sol";
+
+/// The model each backend falls back to when neither the caller nor the
+/// config names one. Only the backends a call has its own default for are
+/// listed; the others keep theirs.
+#[derive(Debug, Clone, Copy)]
+struct ModelDefaults {
+    /// For `claude-cli` and `anthropic-api`.
+    claude: &'static str,
+    /// For `codex-cli`. `None` lets Codex choose.
+    codex: Option<&'static str>,
+}
+
+/// What every call but a rank falls back to.
+const GENERAL_MODELS: ModelDefaults = ModelDefaults {
+    claude: DEFAULT_MODEL,
+    codex: None,
+};
+
+/// What a stage-2 rank falls back to.
+const RANK_MODELS: ModelDefaults = ModelDefaults {
+    claude: RANK_CLAUDE_MODEL,
+    codex: Some(RANK_CODEX_MODEL),
+};
+
 /// One of the five backends, chosen at run time.
 pub enum SelectionRunner {
     ClaudeCli(CliClaudeRunner),
@@ -66,27 +105,27 @@ impl StructuredRunner for SelectionRunner {
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
-        effort: Option<&str>,
+        tuning: Tuning,
     ) -> Result<serde_json::Value, ActualError> {
         match self {
             SelectionRunner::ClaudeCli(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, tuning)
                     .await
             }
             SelectionRunner::AnthropicApi(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, tuning)
                     .await
             }
             SelectionRunner::OpenAiApi(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, tuning)
                     .await
             }
             SelectionRunner::CodexCli(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, tuning)
                     .await
             }
             SelectionRunner::CursorCli(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, tuning)
                     .await
             }
         }
@@ -225,6 +264,7 @@ fn build(
     model: Option<&str>,
     cfg: &Config,
     timeout: Duration,
+    defaults: &ModelDefaults,
 ) -> Result<ResolvedRunner, String> {
     let configured = model.or(cfg.model.as_deref());
     let make = |runner, model: Option<String>| ResolvedRunner {
@@ -237,7 +277,7 @@ fn build(
     match choice {
         RunnerChoice::ClaudeCli => {
             let binary = find_claude_binary().map_err(|e| e.to_string())?;
-            let model = configured.unwrap_or(DEFAULT_MODEL).to_string();
+            let model = configured.unwrap_or(defaults.claude).to_string();
             Ok(make(
                 SelectionRunner::ClaudeCli(CliClaudeRunner::new(binary, timeout)),
                 Some(model),
@@ -245,7 +285,7 @@ fn build(
         }
         RunnerChoice::AnthropicApi => {
             let key = api_key("ANTHROPIC_API_KEY", cfg.anthropic_api_key.as_deref())?;
-            let model = configured.unwrap_or(DEFAULT_MODEL).to_string();
+            let model = configured.unwrap_or(defaults.claude).to_string();
             let runner = AnthropicApiRunner::with_max_tokens(
                 key,
                 model.clone(),
@@ -264,7 +304,7 @@ fn build(
         }
         RunnerChoice::CodexCli => {
             let binary = find_codex_binary().map_err(|e| e.to_string())?;
-            let model = configured.map(str::to_string);
+            let model = configured.or(defaults.codex).map(str::to_string);
             let mut runner = CodexCliRunner::new(binary, model.clone(), timeout);
             if let Some(key) = std::env::var("OPENAI_API_KEY")
                 .ok()
@@ -337,6 +377,47 @@ pub fn resolve_with_defaults(
     timeout_cap_secs: u64,
     defaults: &[RunnerChoice],
 ) -> Result<ResolvedRunner, String> {
+    resolve_inner(
+        explicit,
+        model,
+        cfg,
+        timeout_cap_secs,
+        defaults,
+        &GENERAL_MODELS,
+    )
+}
+
+/// [`resolve_with_defaults`] for a stage-2 rank: capped at
+/// [`RANK_TIMEOUT_SECS`], and falling back to [`RANK_CLAUDE_MODEL`] and
+/// [`RANK_CODEX_MODEL`] when neither `model` nor the config names one.
+///
+/// Its own entry point, rather than a model default inside `resolve`, because
+/// the conformance judge and `adr adopt` resolve through `resolve` too and
+/// keep their own defaults.
+pub fn resolve_for_rank(
+    explicit: Option<&RunnerChoice>,
+    model: Option<&str>,
+    cfg: &Config,
+    defaults: &[RunnerChoice],
+) -> Result<ResolvedRunner, String> {
+    resolve_inner(
+        explicit,
+        model,
+        cfg,
+        RANK_TIMEOUT_SECS,
+        defaults,
+        &RANK_MODELS,
+    )
+}
+
+fn resolve_inner(
+    explicit: Option<&RunnerChoice>,
+    model: Option<&str>,
+    cfg: &Config,
+    timeout_cap_secs: u64,
+    defaults: &[RunnerChoice],
+    models: &ModelDefaults,
+) -> Result<ResolvedRunner, String> {
     let timeout = Duration::from_secs(
         cfg.invocation_timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
@@ -346,7 +427,7 @@ pub fn resolve_with_defaults(
     let (choices, origin) = candidates(explicit, model.or(cfg.model.as_deref()), cfg, defaults);
     let mut tried: Vec<String> = Vec::new();
     for choice in choices {
-        match probe(&choice, cfg).and_then(|()| build(&choice, model, cfg, timeout)) {
+        match probe(&choice, cfg).and_then(|()| build(&choice, model, cfg, timeout, models)) {
             Ok(resolved) => return Ok(resolved),
             Err(reason) => tried.push(reason),
         }
@@ -478,7 +559,7 @@ mod tests {
             r#"{"type":"object"}"#,
             None,
             None,
-            None,
+            crate::runner::structured::Tuning::default(),
         ))
         .expect("the fake backend answers");
         assert_eq!(value, rank_payload());
@@ -519,7 +600,7 @@ mod tests {
             r#"{"type":"object"}"#,
             None,
             None,
-            None,
+            crate::runner::structured::Tuning::default(),
         ))
         .is_err());
 
@@ -531,7 +612,7 @@ mod tests {
             r#"{"type":"object"}"#,
             None,
             None,
-            None,
+            crate::runner::structured::Tuning::default(),
         ))
         .is_ok());
     }
@@ -567,7 +648,7 @@ mod tests {
             r#"{"type":"object"}"#,
             None,
             None,
-            None,
+            crate::runner::structured::Tuning::default(),
         ))
         .is_err());
     }
@@ -604,7 +685,7 @@ mod tests {
             r#"{"type":"object"}"#,
             None,
             None,
-            None,
+            crate::runner::structured::Tuning::default(),
         ))
         .expect("the fake backend answers");
         assert_eq!(value, rank_payload());
@@ -664,7 +745,13 @@ mod tests {
         );
         assert_eq!(
             anthropic_runner
-                .run_structured_json("rank", r#"{"type":"object"}"#, None, None, None)
+                .run_structured_json(
+                    "rank",
+                    r#"{"type":"object"}"#,
+                    None,
+                    None,
+                    crate::runner::structured::Tuning::default()
+                )
                 .await
                 .unwrap(),
             serde_json::json!({"verdicts": []})
@@ -677,7 +764,13 @@ mod tests {
         );
         assert_eq!(
             openai_runner
-                .run_structured_json("rank", r#"{"type":"object"}"#, None, None, None)
+                .run_structured_json(
+                    "rank",
+                    r#"{"type":"object"}"#,
+                    None,
+                    None,
+                    crate::runner::structured::Tuning::default()
+                )
                 .await
                 .unwrap(),
             serde_json::json!({"verdicts": []})
@@ -821,6 +914,7 @@ mod tests {
             None,
             &config(),
             Duration::from_secs(1),
+            &GENERAL_MODELS,
         )
         .unwrap_err();
         assert!(err.contains("ANTHROPIC_API_KEY"));
@@ -837,6 +931,7 @@ mod tests {
             Some("claude-from-flag"),
             &cfg,
             Duration::from_secs(1),
+            &GENERAL_MODELS,
         )
         .unwrap();
         assert_eq!(resolved.model.as_deref(), Some("claude-from-flag"));
@@ -849,8 +944,116 @@ mod tests {
         let _key = EnvGuard::set("OPENAI_API_KEY", "test-key");
         let mut cfg = config();
         cfg.model = Some("gpt-from-config".to_string());
-        let resolved = build(&RunnerChoice::OpenAiApi, None, &cfg, Duration::from_secs(1)).unwrap();
+        let resolved = build(
+            &RunnerChoice::OpenAiApi,
+            None,
+            &cfg,
+            Duration::from_secs(1),
+            &GENERAL_MODELS,
+        )
+        .unwrap();
         assert_eq!(resolved.model.as_deref(), Some("gpt-from-config"));
+    }
+
+    /// A rank falls back to its own models; every other call keeps the general
+    /// defaults, including Codex choosing its own model.
+    #[test]
+    #[cfg(unix)]
+    fn test_a_rank_falls_back_to_the_rank_models_and_nothing_else_does() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake_backend(dir.path(), "claude", "{}");
+        let codex = fake_backend(dir.path(), "codex", "{}");
+        let _claude = EnvGuard::set("CLAUDE_BINARY", claude.to_str().unwrap());
+        let _codex = EnvGuard::set("CODEX_BINARY", codex.to_str().unwrap());
+        let timeout = Duration::from_secs(1);
+
+        let rank_claude = build(
+            &RunnerChoice::ClaudeCli,
+            None,
+            &config(),
+            timeout,
+            &RANK_MODELS,
+        );
+        assert_eq!(
+            rank_claude.unwrap().model.as_deref(),
+            Some(RANK_CLAUDE_MODEL)
+        );
+        let rank_codex = build(
+            &RunnerChoice::CodexCli,
+            None,
+            &config(),
+            timeout,
+            &RANK_MODELS,
+        );
+        assert_eq!(rank_codex.unwrap().model.as_deref(), Some(RANK_CODEX_MODEL));
+
+        let claude = build(
+            &RunnerChoice::ClaudeCli,
+            None,
+            &config(),
+            timeout,
+            &GENERAL_MODELS,
+        );
+        assert_eq!(claude.unwrap().model.as_deref(), Some(DEFAULT_MODEL));
+        let codex = build(
+            &RunnerChoice::CodexCli,
+            None,
+            &config(),
+            timeout,
+            &GENERAL_MODELS,
+        );
+        assert_eq!(codex.unwrap().model, None);
+    }
+
+    /// A model the caller or the config names still wins over a rank default.
+    #[test]
+    #[cfg(unix)]
+    fn test_a_named_model_overrides_the_rank_models() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let codex = fake_backend(dir.path(), "codex", "{}");
+        let _codex = EnvGuard::set("CODEX_BINARY", codex.to_str().unwrap());
+        let mut cfg = config();
+        cfg.model = Some("gpt-from-config".to_string());
+        let timeout = Duration::from_secs(1);
+
+        let from_config = build(&RunnerChoice::CodexCli, None, &cfg, timeout, &RANK_MODELS);
+        assert_eq!(
+            from_config.unwrap().model.as_deref(),
+            Some("gpt-from-config")
+        );
+        let from_flag = build(
+            &RunnerChoice::CodexCli,
+            Some("gpt-from-flag"),
+            &cfg,
+            timeout,
+            &RANK_MODELS,
+        );
+        assert_eq!(from_flag.unwrap().model.as_deref(), Some("gpt-from-flag"));
+    }
+
+    /// `resolve_for_rank` uses the rank models end to end.
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_for_rank_uses_the_rank_models() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake_backend(dir.path(), "claude", "{}");
+        let _claude = EnvGuard::set("CLAUDE_BINARY", claude.to_str().unwrap());
+
+        let resolved = resolve_for_rank(
+            Some(&RunnerChoice::ClaudeCli),
+            None,
+            &config(),
+            DEFAULT_RUNNERS,
+        )
+        .unwrap();
+        assert_eq!(resolved.model.as_deref(), Some(RANK_CLAUDE_MODEL));
+        assert_eq!(
+            resolved.label(),
+            format!("claude-cli ({RANK_CLAUDE_MODEL})")
+        );
     }
 
     /// A backend that picks its own model has no model to display, and the
@@ -864,6 +1067,7 @@ mod tests {
             None,
             &config(),
             Duration::from_secs(1),
+            &GENERAL_MODELS,
         )
         .unwrap();
         let unlabelled = ResolvedRunner {
@@ -945,6 +1149,7 @@ mod tests {
             None,
             &config(),
             Duration::from_secs(1),
+            &GENERAL_MODELS,
         )
         .unwrap();
         let rendered = format!("{resolved:?}");
@@ -965,6 +1170,7 @@ mod tests {
             None,
             &cfg,
             Duration::from_secs(1),
+            &GENERAL_MODELS,
         )
         .unwrap();
         assert_eq!(resolved.max_budget_usd, Some(0.25));
@@ -979,6 +1185,7 @@ mod tests {
             None,
             &config(),
             Duration::from_secs(1),
+            &GENERAL_MODELS,
         )
         .unwrap();
         assert_eq!(resolved.max_budget_usd, None);

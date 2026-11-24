@@ -735,12 +735,13 @@ impl crate::runner::structured::StructuredRunner for CliClaudeRunner {
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
-        effort: Option<&str>,
+        tuning: crate::runner::structured::Tuning,
     ) -> Result<serde_json::Value, ActualError> {
         use crate::runner::options::InvocationOptions;
 
         let mut opts = InvocationOptions::for_selection(model_override);
-        opts.effort = effort.map(str::to_string);
+        opts.effort = tuning.effort.map(str::to_string);
+        opts.disable_thinking = tuning.disable_thinking;
 
         self.run_structured(opts, prompt, schema, max_budget_usd)
             .await
@@ -915,7 +916,13 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let value = CliClaudeRunner::new(script, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object"}"#,
+                None,
+                None,
+                crate::runner::structured::Tuning::default(),
+            )
             .await
             .unwrap();
         assert_eq!(value, payload);
@@ -934,14 +941,15 @@ mod tests {
         assert!(!args.contains(&"--effort"));
     }
 
-    /// An effort override reaches the subprocess as `--effort`. This is the
-    /// exact mechanism `rules::check`'s judge call relies on to stay inside
-    /// `CHECK_BUDGET`: a 60-rule batch measured at over 90 seconds of
-    /// extended-thinking tokens alone under the CLI's own default effort,
-    /// against a real judge call, before this override existed.
+    /// An effort override reaches the subprocess as `--effort`, and a request
+    /// to turn thinking off as `alwaysThinkingEnabled: false`. The first is
+    /// what `rules::check`'s judge call relies on to stay inside
+    /// `CHECK_BUDGET` (a 60-rule batch measured at over 90 seconds of
+    /// extended-thinking tokens alone under the CLI's own default effort); the
+    /// second is what keeps a stage-2 rank inside its deadline.
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_cli_runner_run_structured_json_passes_an_effort_override() {
+    async fn test_cli_runner_run_structured_json_passes_effort_and_thinking() {
         use crate::runner::structured::StructuredRunner;
         use std::os::unix::fs::PermissionsExt;
 
@@ -962,7 +970,10 @@ mod tests {
                 r#"{"type":"object"}"#,
                 None,
                 None,
-                Some("low"),
+                crate::runner::structured::Tuning {
+                    effort: Some("low"),
+                    disable_thinking: true,
+                },
             )
             .await
             .unwrap();
@@ -971,6 +982,11 @@ mod tests {
         let args: Vec<&str> = captured.lines().collect();
         let effort = args.iter().position(|a| *a == "--effort").unwrap();
         assert_eq!(args[effort + 1], "low");
+        // Effort alone does not stop extended thinking, so the setting has to
+        // reach the subprocess too.
+        let settings = args.iter().position(|a| *a == "--settings").unwrap();
+        let settings: serde_json::Value = serde_json::from_str(args[settings + 1]).unwrap();
+        assert_eq!(settings["alwaysThinkingEnabled"], false);
     }
 
     /// A budget reaches the subprocess. This is the one backend that enforces
@@ -998,7 +1014,7 @@ mod tests {
                 r#"{"type":"object"}"#,
                 Some("haiku"),
                 Some(0.25),
-                None,
+                crate::runner::structured::Tuning::default(),
             )
             .await
             .unwrap();
@@ -1023,7 +1039,13 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(CliClaudeRunner::new(script, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object"}"#,
+                None,
+                None,
+                crate::runner::structured::Tuning::default()
+            )
             .await
             .is_err());
     }

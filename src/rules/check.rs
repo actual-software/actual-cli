@@ -65,7 +65,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ActualError;
 use crate::rules::prompt_fence::fenced_plan_block;
 use crate::rules::types::RuleLevel;
-use crate::runner::structured::StructuredRunner;
+use crate::runner::structured::{StructuredRunner, Tuning};
 
 /// What kind of artifact the judge is being asked to look at.
 ///
@@ -595,7 +595,10 @@ pub async fn check<R: StructuredRunner>(
         CHECK_OUTPUT_SCHEMA,
         model_override,
         max_budget_usd,
-        Some(JUDGE_EFFORT),
+        Tuning {
+            effort: Some(JUDGE_EFFORT),
+            ..Tuning::default()
+        },
     );
     let value = tokio::time::timeout(CHECK_BUDGET, call)
         .await
@@ -1099,7 +1102,7 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
-            _effort: Option<&str>,
+            _tuning: crate::runner::structured::Tuning,
         ) -> Result<serde_json::Value, ActualError> {
             Ok(self.response.clone())
         }
@@ -1120,9 +1123,9 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
-            effort: Option<&str>,
+            tuning: crate::runner::structured::Tuning,
         ) -> Result<serde_json::Value, ActualError> {
-            *self.seen_effort.lock().unwrap() = Some(effort.map(str::to_string));
+            *self.seen_effort.lock().unwrap() = Some(tuning.effort.map(str::to_string));
             Ok(self.response.clone())
         }
     }
@@ -1191,7 +1194,7 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
-            _effort: Option<&str>,
+            _tuning: crate::runner::structured::Tuning,
         ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> {
             std::future::pending()
         }
