@@ -466,6 +466,12 @@ fn update_within(
 /// file locks, or the wait runs out. The lock is released when the returned
 /// file is dropped.
 pub(super) fn lock(dir: &Path, wait: Duration) -> Option<File> {
+    lock_file(dir, LOCK_FILE_NAME, wait)
+}
+
+/// [`lock`] on the lock file `name` in `dir`, for another writer that needs
+/// the same bounded wait.
+pub(super) fn lock_file(dir: &Path, name: &str, wait: Duration) -> Option<File> {
     let mut options = OpenOptions::new();
     options.create(true).write(true).truncate(false);
     #[cfg(unix)]
@@ -473,7 +479,7 @@ pub(super) fn lock(dir: &Path, wait: Duration) -> Option<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(dir.join(LOCK_FILE_NAME)).ok()?;
+    let file = options.open(dir.join(name)).ok()?;
     let started = Instant::now();
     retry_lock(
         wait,

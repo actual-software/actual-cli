@@ -2604,12 +2604,13 @@ pub(super) fn record_direct_round(
 }
 
 /// Record a hook round in the local enforcement log, with the session's
-/// round counter for the gate when there is a session.
+/// round counter for the gate when there is a session and the judge ran.
 fn record_hook_round(
     run: &HookRun<'_>,
     session: &GovernanceSession,
     decision: PlanGovernanceDecision,
     verdicts: &[CheckedRule],
+    judge_ran: bool,
 ) {
     let round = Round::new(
         run.kind.into(),
@@ -2619,7 +2620,11 @@ fn record_hook_round(
         verdicts,
     );
     let round = match run.session_id {
-        Some(id) => round.in_session(id, session.loop_state(run.kind).rounds),
+        Some(id) if judge_ran => round.in_session(id, session.loop_state(run.kind).rounds),
+        Some(id) => Round {
+            session_id: Some(id.to_string()),
+            ..round
+        },
         None => round,
     };
     enforcement_log::record(&round);
@@ -2842,7 +2847,13 @@ fn finish_verdicts(
                 // Every rule here is `blocked: false` -- the round limit let
                 // the call through this round -- so this is `warn`, not
                 // `block`, distinct from a clean pass.
-                record_hook_round(run, session, PlanGovernanceDecision::Warn, &verdicts);
+                record_hook_round(
+                    run,
+                    session,
+                    PlanGovernanceDecision::Warn,
+                    &verdicts,
+                    judge_ran,
+                );
                 #[cfg(feature = "telemetry")]
                 super::check_telemetry::report_round(
                     run,
@@ -2913,7 +2924,13 @@ fn finish_verdicts(
                 Reply::Deny(with_override_reminder(deny_reason, session)),
             );
         }
-        record_hook_round(run, session, PlanGovernanceDecision::Block, &verdicts);
+        record_hook_round(
+            run,
+            session,
+            PlanGovernanceDecision::Block,
+            &verdicts,
+            judge_ran,
+        );
         #[cfg(feature = "telemetry")]
         super::check_telemetry::report_round(
             run,
@@ -2990,7 +3007,7 @@ fn finish_verdicts(
     } else {
         PlanGovernanceDecision::Allow
     };
-    record_hook_round(run, session, decision, &verdicts);
+    record_hook_round(run, session, decision, &verdicts, judge_ran);
     #[cfg(feature = "telemetry")]
     {
         use super::check_telemetry::WarnReason;
@@ -5574,6 +5591,35 @@ pub(crate) mod tests {
             (rounds[0].session_id.as_deref(), rounds[0].round),
             (None, None)
         );
+    }
+
+    /// A call where every rule was already settled writes its line with no
+    /// ADRs and no round number, so it doesn't repeat the last judged round's.
+    #[test]
+    fn test_finish_hook_logs_a_skipped_judge_without_a_round() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _on = EnvGuard::remove(enforcement_log::OFF_SWITCH);
+        let rules = tempdir().unwrap();
+        let run = hook_run(check::ArtifactKind::Plan, Some("s-skip"), rules.path(), 3);
+        let mut session = GovernanceSession::default();
+        session.plan.begin_round();
+        let mut outcome = verdicts_outcome(Vec::new());
+        if let Outcome::Verdicts { runner_label, .. } = &mut outcome {
+            *runner_label = None;
+        }
+
+        finish_hook(&run, &mut session, outcome);
+
+        let rounds = enforcement_log::read(None);
+        assert_eq!(rounds.len(), 1, "{rounds:?}");
+        assert_eq!(rounds[0].decision, enforcement_log::Decision::Allow);
+        assert_eq!(
+            (rounds[0].session_id.as_deref(), rounds[0].round),
+            (Some("s-skip"), None)
+        );
+        assert!(rounds[0].adrs.is_empty());
     }
 
     /// Outcomes that reach no verdict are not rounds, so they write nothing.
