@@ -18,8 +18,8 @@ use crate::adr::files::{self, DecisionFile, RenameOutcome};
 use crate::adr::overlap::{find_overlaps, ExistingDecision};
 use crate::adr::workflow::{self, DecisionEdit, LevelEdit, Listed, PolicyEdit};
 use crate::api::adr_types::{
-    CreateRequest, Decision, DecisionAction, DecisionList, ImportRequest, LifecycleAction,
-    NewDecision, SaveStatus,
+    CreateRequest, Decision, DecisionAction, DecisionList, DecisionState, ImportRequest,
+    LifecycleAction, NewDecision, SaveStatus,
 };
 use crate::cli::args::{
     AdrCreateArgs, AdrIdArgs, AdrListArgs, AdrRejectArgs, AdrShowArgs, AdrUpdateArgs,
@@ -955,11 +955,32 @@ async fn change(
     let write = workflow::lifecycle_write(listed, action, &session.org_id)
         .map_err(ActualError::AdrNotAllowed)?;
     session.client.write_decision(&write).await?;
+    if action == LifecycleAction::Publish && workflow::is_group(&listed.decision) {
+        confirm_published(session, &listed.decision.id).await?;
+    }
     Ok(DecisionAction {
         success: true,
         adr_id: listed.decision.id.clone(),
         reason_saved: None,
     })
+}
+
+/// Read an AI-grouped decision back after its publish. The group's accept
+/// answers success even when it moves no row, so only a decision that reads
+/// back active was published.
+async fn confirm_published(session: &Session, id: &str) -> Result<(), ActualError> {
+    let shown = sanitize_server_text(id);
+    let problem = match find(session, id).await {
+        Ok(read_back) if read_back.state == DecisionState::Active => return Ok(()),
+        Ok(_) => format!("{shown} isn't active when read back, so it wasn't published"),
+        Err(e) => {
+            format!("reading {shown} back failed ({e}), so it isn't known whether it was published")
+        }
+    };
+    Err(ActualError::AdrPublishUnconfirmed(format!(
+        "Actual AI answered the publish, but {problem}. Run `actual adr show {shown}` to see \
+         its state."
+    )))
 }
 
 /// Run lifecycle `action`, setting `found` once the decision is found.
@@ -2310,6 +2331,72 @@ mod tests {
             )
         );
         archive.assert();
+    }
+
+    #[test]
+    fn a_grouped_publish_is_read_back_and_fails_unless_active() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let group = |status: &str| {
+            format!(
+                r#"{{"adrs":[{{"id":"g1","date":"","title":"Page reads","status":"{status}",
+                    "policyRules":[{{"id":"R-1","adrId":"m1","level":"MUST","statement":"Page."}}],
+                    "candidateGroupId":"g1","memberAdrIds":["m1","m2"],"kind":"group",
+                    "primaryAdrId":"m1"}}],"suggestions":[]}}"#
+            )
+        };
+        // The first read finds the draft; the read back after the accept finds
+        // it published, still a draft, or can't be parsed.
+        let cases = [
+            (group("accepted"), "Published g1."),
+            (group("draft"), "g1 isn't active when read back"),
+            ("not json".to_string(), "reading g1 back failed"),
+        ];
+        for (read_back, expected) in cases {
+            let mut server = mockito::Server::new();
+            let reads = std::sync::atomic::AtomicUsize::new(0);
+            let draft = group("draft");
+            let read = server
+                .mock("GET", READ)
+                .match_query(org_read())
+                .with_body_from_request(move |_| {
+                    match reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => draft.clone().into(),
+                        _ => read_back.clone().into(),
+                    }
+                })
+                .expect(2)
+                .create();
+            let accept = server
+                .mock("POST", "/v1/gcp/product/adr-group-action")
+                .match_body(Matcher::Json(
+                    json!({"organization_id": ORG, "source_candidate_id": "g1", "action": "accept"}),
+                ))
+                .with_status(200)
+                .with_body(r#"{"success":true}"#)
+                .create();
+            let args = AdrIdArgs {
+                id: "m2".to_string(),
+                api: api(&server),
+            };
+            let text = match block(run_lifecycle(&args, LifecycleAction::Publish, &mut None)) {
+                Ok(text) => text,
+                Err(err) => {
+                    assert!(
+                        matches!(err, ActualError::AdrPublishUnconfirmed(_)),
+                        "{err:?}"
+                    );
+                    assert!(err
+                        .to_string()
+                        .ends_with("`actual adr show g1` to see its state."));
+                    err.to_string()
+                }
+            };
+            assert!(text.contains(expected), "{text}");
+            read.assert();
+            accept.assert();
+        }
     }
 
     #[test]
