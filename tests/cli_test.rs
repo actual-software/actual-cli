@@ -3391,6 +3391,117 @@ fn test_session_end_sends_token_totals_signed_in() {
     assert_eq!(value("actual.event.schema_version")["intValue"], "11");
 }
 
+/// Codex's `SessionEnd` envelope, exactly as its hook schema defines it,
+/// sends the rollout's per-model totals signed in, and nothing of the
+/// rollout's path or text.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_codex_session_end_sends_token_totals_signed_in() {
+    let config = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", "Bearer codex-usage-token")
+        .with_status(200)
+        .expect(1)
+        .create();
+    std::fs::write(config.path().join("credentials.yaml"),
+        "access_token: codex-usage-token\nrefresh_token: test-refresh-token\norganization_id: test-org\nmember_id: test-member\n").unwrap();
+    let rollout = config.path().join("secret-rollout.jsonl");
+    let turn = |turn: &str, model: &str| {
+        serde_json::json!({"type": "turn_context", "payload": {"turn_id": turn, "model": model,
+            "user_instructions": "secret words"}})
+        .to_string()
+    };
+    let record = |turn: &str, response: &str, n: u64| {
+        serde_json::json!({"type": "token_usage_record", "payload": {
+            "session_id": "codex-end", "thread_id": "codex-end", "turn_id": turn,
+            "response_id": response, "usage": {"input_tokens": n * 110, "cached_input_tokens": n * 100,
+            "cache_write_input_tokens": n, "output_tokens": n * 2, "reasoning_output_tokens": n}}})
+        .to_string()
+    };
+    std::fs::write(
+        &rollout,
+        [
+            turn("t1", "model-b"),
+            record("t1", "r1", 1),
+            record("t1", "r1", 1),
+            turn("t2", "model-a"),
+            record("t2", "r2", 2),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let sink = config.path().join("otlp.jsonl");
+    cmd()
+        .timeout(std::time::Duration::from_secs(5))
+        .arg("__session-ended")
+        .env("ACTUAL_CONFIG_DIR", config.path())
+        .env("ACTUAL_API_URL", server.url())
+        .env(
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            format!("{}/v1/logs", server.url()),
+        )
+        .env("ACTUAL_OTLP_FILE", &sink)
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("ACTUAL_NO_TELEMETRY")
+        .write_stdin(
+            serde_json::json!({"session_id": "codex-end", "hook_event_name": "SessionEnd",
+                "reason": "other", "cwd": config.path(), "transcript_path": rollout})
+            .to_string(),
+        )
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+    for _ in 0..100 {
+        if mock.matched() && std::fs::read_to_string(&sink).is_ok_and(|s| !s.is_empty()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    mock.assert();
+    let written = std::fs::read_to_string(sink).unwrap();
+    assert!(!written.contains("secret"), "{written}");
+    let request: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+    let record = &request["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+    assert_eq!(record["eventName"], "actual.session.ended");
+    let value = |key: &str| {
+        record["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|attribute| attribute["key"] == key)
+            .unwrap_or_else(|| panic!("no {key} in {record}"))["value"]
+            .clone()
+    };
+    let list = |key: &str, kind: &str| -> Vec<String> {
+        value(key)["arrayValue"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v[kind].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(value("actual.usage.source")["stringValue"], "responses");
+    assert_eq!(
+        list("actual.usage.models", "stringValue"),
+        ["model-a", "model-b"]
+    );
+    assert_eq!(list("actual.usage.input_tokens", "intValue"), ["20", "10"]);
+    assert_eq!(list("actual.usage.output_tokens", "intValue"), ["4", "2"]);
+    assert_eq!(
+        list("actual.usage.cache_read_tokens", "intValue"),
+        ["200", "100"]
+    );
+    assert_eq!(
+        list("actual.usage.cache_write_tokens", "intValue"),
+        ["2", "1"]
+    );
+    assert_eq!(value("actual.session.end_reason")["stringValue"], "other");
+    assert_eq!(value("actual.event.schema_version")["intValue"], "11");
+}
+
 #[cfg(feature = "telemetry")]
 #[test]
 fn test_session_end_skips_a_held_lock_without_consuming_the_end() {

@@ -174,7 +174,11 @@ pub(super) fn report(raw: &str) {
         .as_deref()
         .filter(|_| destination.signed_in())
         .and_then(|path| {
-            super::session_usage::read(path, std::time::Instant::now() + USAGE_SCAN_BUDGET)
+            super::session_usage::read(
+                path,
+                &envelope.session_id,
+                std::time::Instant::now() + USAGE_SCAN_BUDGET,
+            )
         });
     let mut records = vec![otlp::Origin::resolve().session_ended(
         &envelope.session_id,
@@ -372,6 +376,78 @@ mod tests {
         for record in [&signed_out, &no_transcript, &signed_in] {
             assert!(!record.to_string().contains("private"), "{record}");
         }
+    }
+
+    /// Codex's `SessionEnd` envelope, which always says `reason: "other"`,
+    /// carries the rollout's totals in the same six attributes, from the
+    /// `responses` source, and nothing of the rollout itself.
+    #[test]
+    fn a_signed_in_codex_end_carries_the_rollouts_token_totals() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::remove("ACTUAL_OTLP_FILE");
+        let _api = EnvGuard::set("ACTUAL_API_URL", "https://api.example.test");
+        let _endpoint = EnvGuard::set(
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "https://api.example.test/v1/logs",
+        );
+        crate::auth::store::save(&crate::telemetry::sign_in::tests::signed_in(
+            "org-a",
+            "token-a",
+            chrono::Duration::hours(1),
+            None,
+        ))
+        .unwrap();
+        let rollout = home.path().join("rollout-private.jsonl");
+        let lines = [
+            serde_json::json!({"type": "turn_context", "payload": {
+                "turn_id": "t1", "model": "gpt-codex", "cwd": "/private/repo"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message",
+                "content": [{"type": "output_text", "text": "private words"}]}}),
+            serde_json::json!({"type": "token_usage_record", "payload": {
+                "session_id": "codex-session", "turn_id": "t1", "response_id": "r1",
+                "usage": {"input_tokens": 120, "cached_input_tokens": 100,
+                          "cache_write_input_tokens": 0, "output_tokens": 9}}}),
+        ];
+        std::fs::write(&rollout, lines.map(|line| line.to_string() + "\n").concat()).unwrap();
+        take_captured();
+
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&envelope("codex-session", "other")).unwrap();
+        raw["transcript_path"] = serde_json::json!(rollout);
+        report(&raw.to_string());
+        let records = take_captured();
+
+        assert_eq!(records.len(), 1, "{records:?}");
+        let attrs = attributes(&records[0]);
+        let list = |key: &str| attrs[key]["arrayValue"]["values"].clone();
+        assert_eq!(attrs["actual.session.end_reason"]["stringValue"], "other");
+        assert_eq!(attrs["actual.usage.source"]["stringValue"], "responses");
+        assert_eq!(
+            list("actual.usage.models"),
+            serde_json::json!([{"stringValue": "gpt-codex"}])
+        );
+        assert_eq!(
+            list("actual.usage.input_tokens"),
+            serde_json::json!([{"intValue": "20"}])
+        );
+        assert_eq!(
+            list("actual.usage.output_tokens"),
+            serde_json::json!([{"intValue": "9"}])
+        );
+        assert_eq!(
+            list("actual.usage.cache_read_tokens"),
+            serde_json::json!([{"intValue": "100"}])
+        );
+        assert_eq!(
+            list("actual.usage.cache_write_tokens"),
+            serde_json::json!([{"intValue": "0"}])
+        );
+        assert!(!records[0].to_string().contains("private"), "{records:?}");
     }
 
     /// An end repeated with no hook check between is suppressed before the
