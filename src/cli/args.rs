@@ -1459,7 +1459,10 @@ fn parse_since(value: &str) -> Result<Since, String> {
         "w" => chrono::TimeDelta::try_weeks(count),
         _ => None,
     };
-    delta.map(Since::Last).ok_or_else(invalid)
+    delta
+        .filter(|delta| chrono::Utc::now().checked_sub_signed(*delta).is_some())
+        .map(Since::Last)
+        .ok_or_else(invalid)
 }
 
 /// Arguments for the `session` command
@@ -3896,6 +3899,7 @@ mod parse_tests {
             "7y",
             "1.5d",
             "99999999999999w",
+            "200000000w",
             "7é",
         ] {
             assert_eq!(since(bad), None, "{bad:?} should not parse");
