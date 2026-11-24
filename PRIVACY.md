@@ -762,7 +762,7 @@ there it can reach the provider running the agent.
 | `at` | When the round was recorded, in UTC |
 | `gate` | `plan` or `impl` |
 | `mode` | `hook` for a round an agent hook ran, `direct` for one you ran |
-| `session_id`, `round` | The agent session's id and that gate's round count in the session, on hook rounds inside a session only |
+| `session_id`, `round` | The agent session's id and that gate's round count in the session, on hook rounds inside a session only. A call with every applicable rule already cleared or overridden has the id and no round |
 | `rules_dir` | The absolute path of the rules directory the check read |
 | `decision` | `allow`, `warn` or `block` |
 | `adrs` | Each ADR the round judged, by its rule file's document slug, with the strongest verdict any of its rules got: `followed`, `not_applicable`, `conflicting` or `requires_decision`. Empty on a hook call whose applicable rules were all already cleared or overridden in the session |
