@@ -308,7 +308,7 @@ impl crate::runner::structured::StructuredRunner for CursorCliRunner {
         schema: &str,
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
-        _effort: Option<&str>,
+        _tuning: crate::runner::structured::Tuning,
     ) -> Result<serde_json::Value, ActualError> {
         self.run_structured(prompt, schema).await
     }
@@ -378,7 +378,13 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let value = CursorCliRunner::new(script, None, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object"}"#,
+                None,
+                None,
+                crate::runner::structured::Tuning::default(),
+            )
             .await
             .unwrap();
 
@@ -400,7 +406,13 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let err = CursorCliRunner::new(script, None, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object"}"#,
+                None,
+                None,
+                crate::runner::structured::Tuning::default(),
+            )
             .await
             .expect_err("expected Err");
         assert!(err.to_string().to_lowercase().contains("cursor"), "{err}");
