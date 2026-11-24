@@ -1,12 +1,12 @@
 # actual — Getting Started
 
-`actual` checks your coding agent's plans and changes against your team's architecture decisions. This guide takes you from installing the Actual.ai Skill and the CLI, through an optional sign-in and adding your decisions, to your first check, then lists every command and configuration setting.
+`actual` checks your coding agent's plans and changes against your team's architecture decisions. This guide takes you from installing the Actual.AI Plugin, through an optional sign-in and adding your decisions, to your first check, then lists every command and configuration setting.
 
 ## Installation
 
-### Actual.ai Skill
+### Actual.AI Plugin
 
-The checks run in Claude Code through the Actual.ai Skill, a Claude Code plugin. Run each command on its own, in a Claude Code session:
+The checks run in Claude Code through the Actual.AI Plugin. Run each command on its own, in a Claude Code session:
 
 ```
 /plugin marketplace add actual-software/actual-skill
@@ -20,7 +20,7 @@ The checks run in Claude Code through the Actual.ai Skill, a Claude Code plugin.
 /reload-plugins
 ```
 
-The first time you run `/actual`, the skill offers to install the CLI with npm. If you'd rather install the CLI yourself, or you need it in CI, use one of the methods below.
+The first time you run `/actual`, the plugin offers to install the CLI with npm. If you'd rather install the CLI yourself, or you need it in CI, use one of the methods below.
 
 **Linux:** every method below installs a prebuilt binary that needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40, RHEL 10, or a later release of any of them. Check yours with `ldd --version`. Ubuntu 22.04, Debian 12, RHEL 9 and Amazon Linux 2023 ship an older glibc, where the arm64 binary exits with ``version `GLIBC_2.39' not found`` and the x64 binary runs but prints ``weak version `GLIBC_2.39' not found`` every time it starts. On any glibc older than 2.39, build from source instead with `cargo install --git https://github.com/actual-software/actual-cli.git actual-cli`, which needs a Rust toolchain and a C compiler.
 
@@ -142,7 +142,7 @@ actual rules ls
 
 ## Running the checks
 
-In Claude Code, the skill runs them for you: `actual plan-check` on your agent's plan when it leaves plan mode, and `actual impl-check` on its changes at the end of every turn. To run them yourself, from inside the repository:
+In Claude Code, the plugin runs them for you: `actual plan-check` on your agent's plan when it leaves plan mode, and `actual impl-check` on its changes at the end of every turn. To run them yourself, from inside the repository:
 
 ```bash
 actual plan-check --plan-file plan.md
