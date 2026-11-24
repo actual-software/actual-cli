@@ -55,10 +55,13 @@ impl ActualApiClient {
     }
 
     /// Save a decision's Context File markdown as a new draft, as the web
-    /// app's Import does (`POST adr-import`), and return its id.
-    pub async fn import_decision(&self, request: &ImportRequest) -> Result<String, ActualError> {
-        let imported: ImportResponse = self.save_once("adr-import", request).await?;
-        Ok(imported.adr_id)
+    /// app's Import does (`POST adr-import`): its id, and whether its
+    /// `source_path` was saved before.
+    pub async fn import_decision(
+        &self,
+        request: &ImportRequest,
+    ) -> Result<ImportResponse, ActualError> {
+        self.save_once("adr-import", request).await
     }
 
     /// Send a write that saves a new decision, exactly once. A request that
@@ -237,6 +240,7 @@ mod tests {
             organization_id: ORG.into(),
             repo_unique_id: REPO.into(),
             markdown: "# Use Postgres\n".into(),
+            source_path: None,
         }
     }
 
@@ -331,12 +335,36 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let id = client(&server)
+        let imported = client(&server)
             .import_decision(&import_request())
             .await
             .unwrap();
-        assert_eq!(id, ADR);
+        assert_eq!(imported.adr_id, ADR);
+        assert!(!imported.already_saved);
         import.assert_async().await;
+
+        let keyed = server
+            .mock("POST", "/v1/gcp/product/adr-import")
+            .match_body(Matcher::Json(json!({
+                "organization_id": ORG,
+                "repo_unique_id": REPO,
+                "markdown": "# Use Postgres\n",
+                "source_path": "docs/adr/use-postgres.md"
+            })))
+            .with_status(200)
+            .with_body(format!(
+                r#"{{"success":true,"adr_id":"{ADR}","already_saved":true}}"#
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let request = ImportRequest {
+            source_path: Some("docs/adr/use-postgres.md".into()),
+            ..import_request()
+        };
+        let imported = client(&server).import_decision(&request).await.unwrap();
+        assert!(imported.already_saved);
+        keyed.assert_async().await;
     }
 
     #[tokio::test]
