@@ -169,6 +169,11 @@ pub enum ActualError {
     /// says which, without [`Self::ApiError`]'s prefix in front of its own.
     #[error("{0}")]
     AdrNotSaved(String),
+    /// An `actual adr` command or flag the current pathway can't take:
+    /// signed out the commands work on the files in `docs/adr/`, signed in
+    /// on the decisions in Actual AI. The message says why and what works.
+    #[error("{0}")]
+    AdrPathway(String),
 
     /// A private key was supplied in SEC1 form (`BEGIN EC PRIVATE KEY`), which
     /// the assertion signer cannot load — it reads PKCS#1 and PKCS#8 only.
@@ -247,7 +252,8 @@ impl ActualError {
             | Self::NotInteractive(_)
             | Self::SelfUpdateRefused { .. }
             | Self::AdrAccessDenied { .. }
-            | Self::AdrRepoRequired(_) => 2,
+            | Self::AdrRepoRequired(_)
+            | Self::AdrPathway(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_)
             | Self::ApiResponseError { .. }
@@ -1217,6 +1223,15 @@ mod tests {
         let repo = ActualError::AdrRepoRequired("no repository".to_string());
         assert_eq!(repo.exit_code(), 2);
         assert!(repo.hint().unwrap().contains("--repo"));
+
+        let pathway =
+            ActualError::AdrPathway("Signed out, `accept` has nothing to act on.".to_string());
+        assert_eq!(pathway.exit_code(), 2);
+        assert_eq!(
+            pathway.to_string(),
+            "Signed out, `accept` has nothing to act on."
+        );
+        assert!(pathway.hint().is_none());
 
         let missing = ActualError::AdrNotFound("No decision has the id d1.".to_string());
         assert_eq!(missing.exit_code(), 3);

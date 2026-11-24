@@ -6,6 +6,8 @@
 //! just saved, rather than spending a refresh token the server has already
 //! taken, and a sign-in saved in the meantime is the one it acts on.
 
+use std::path::PathBuf;
+
 use chrono::{Duration, Utc};
 
 use crate::auth::oauth;
@@ -14,6 +16,9 @@ use crate::error::ActualError;
 
 /// How close to its expiry an access token gets renewed.
 const REFRESH_LEEWAY_SECONDS: i64 = 60;
+
+/// The note beside the stored sign-in that its renewal was turned down.
+const TURNED_DOWN_FILENAME: &str = "renewal-turned-down";
 
 /// `creds`, renewed and saved first when its access token expires within a
 /// minute. The renewal waits for [`store::lock`] and works on the sign-in
@@ -28,15 +33,51 @@ pub async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials,
 }
 
 /// The sign-in stored under `lock`, renewed and saved first when it still
-/// needs it. `NotLoggedIn` when none is stored.
+/// needs it. `NotLoggedIn` when none is stored, or when it can't be renewed,
+/// which [`turned_down`] then reports; the stored sign-in stays either way.
 pub async fn refresh_held(lock: &store::Lock) -> Result<StoredCredentials, ActualError> {
     let current = lock.load()?.ok_or(ActualError::NotLoggedIn)?;
     if !needs_refresh(&current) {
         return Ok(current);
     }
-    let refreshed = oauth::refresh(&current).await?;
+    let refreshed = match oauth::refresh(&current).await {
+        Err(ActualError::NotLoggedIn) => {
+            note_turned_down(&current);
+            return Err(ActualError::NotLoggedIn);
+        }
+        refreshed => refreshed?,
+    };
     lock.save(&refreshed)?;
     Ok(refreshed)
+}
+
+/// Whether a renewal of `creds` was turned down, so only `actual login` brings
+/// the sign-in back. The note [`refresh_held`] leaves holds the sign-in's
+/// expiry, never a token, and a new sign-in has an expiry of its own.
+pub fn turned_down(creds: &StoredCredentials) -> bool {
+    turned_down_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|noted| noted == turned_down_key(creds))
+}
+
+/// Note that a renewal of `creds` was turned down. Best effort: without the
+/// note, the next renewal asks the auth server again.
+pub(crate) fn note_turned_down(creds: &StoredCredentials) {
+    if let Some(path) = turned_down_path() {
+        let _ = crate::config::paths::write_secure(&path, turned_down_key(creds).as_bytes());
+    }
+}
+
+fn turned_down_path() -> Option<PathBuf> {
+    let creds = store::credentials_path().ok()?;
+    Some(creds.with_file_name(TURNED_DOWN_FILENAME))
+}
+
+fn turned_down_key(creds: &StoredCredentials) -> String {
+    creds
+        .expires_at
+        .map(|at| at.to_rfc3339())
+        .unwrap_or_default()
 }
 
 /// Whether `creds` should be renewed before use: it carries a refresh token,
@@ -188,6 +229,7 @@ mod tests {
                 if m == "Token refresh failed (HTTP 500 Internal Server Error): server_error"),
             "got: {err:?}"
         );
+        assert!(!turned_down(&stale), "an outage is never a turn-down");
         assert_eq!(store::load().unwrap(), Some(stale));
     }
 
@@ -206,7 +248,8 @@ mod tests {
     }
 
     /// A refresh token the server refuses ends the session for the command,
-    /// and the stored sign-in stays for the next command to report.
+    /// and the stored sign-in stays for the next command to report. The
+    /// turn-down is noted for that sign-in only.
     #[tokio::test]
     async fn test_ensure_fresh_with_a_refused_refresh_token_is_not_logged_in() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -221,11 +264,15 @@ mod tests {
             .await;
         let stale = creds(Some(server.url()), Duration::seconds(-1));
         store::save(&stale).unwrap();
+        assert!(!turned_down(&stale));
 
         let err = ensure_fresh(stale.clone()).await.unwrap_err();
 
         assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
-        assert_eq!(store::load().unwrap(), Some(stale));
+        assert_eq!(store::load().unwrap(), Some(stale.clone()));
+        assert!(turned_down(&stale));
+        let signed_in_again = creds(Some(server.url()), Duration::hours(1));
+        assert!(!turned_down(&signed_in_again));
     }
 
     /// Signed out between reading the sign-in and renewing it: nothing to

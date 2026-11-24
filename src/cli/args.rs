@@ -818,8 +818,10 @@ pub enum CacheAction {
 /// Arguments for the `adr` command
 #[derive(Parser, Debug)]
 #[command(
-    after_help = "Local commands (new, check) need no sign-in. The others act on \
-    your organization's decisions in Actual AI and need `actual login`. See docs/ADR_COMMANDS.md."
+    after_help = "Signed out, the commands work on the decision files in docs/adr/. After \
+    `actual login` they work on your organization's decisions in Actual AI; unpublish, \
+    restore, accept, reject, create --file and create --all need it. check, discover, normalize \
+    and refresh read the files either way. See docs/ADR_COMMANDS.md."
 )]
 pub struct AdrArgs {
     #[command(subcommand)]
@@ -828,43 +830,55 @@ pub struct AdrArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AdrAction {
-    /// Write a decision into docs/adr/ and its rule file into .actual/rules/
-    New(AdrNewArgs),
+    /// Write a new decision: a file in docs/adr/ signed out, a decision in
+    /// Actual AI signed in
+    #[command(visible_alias = "new")]
+    Create(AdrCreateArgs),
 
     /// Check decision files with Actual AI's save rules and list likely
     /// duplicates
     Check(AdrCheckArgs),
 
-    /// List your organization's decisions
+    /// Sort every ADR under docs/adr/ by state: synced by Actual AI, managed
+    /// by this CLI, stale, or written elsewhere and not yet normalized
+    Discover(AdrDiscoverArgs),
+
+    /// Convert ADRs written elsewhere to Actual's format and write their
+    /// rule files, or re-index those whose doc changed
+    Normalize(AdrNormalizeArgs),
+
+    /// List decisions: the files in docs/adr/ signed out, your
+    /// organization's decisions signed in
     List(AdrListArgs),
 
     /// Show one decision with its policies
     Show(AdrShowArgs),
 
-    /// Save a decision to Actual AI, from a local file or from flags
-    Create(AdrCreateArgs),
-
     /// Change a decision's title, context, policies, levels or scope
     Update(AdrUpdateArgs),
 
-    /// Publish a draft decision so it governs
+    /// Publish a decision so it governs
     Publish(AdrIdArgs),
 
-    /// Move an active decision back to draft
+    /// Move a decision in Actual AI back to draft
     Unpublish(AdrIdArgs),
 
-    /// Archive an active decision or a draft, as Delete does in the web app
-    /// (`restore` undoes it)
+    /// Delete a decision: its file signed out; signed in, archive it as
+    /// Delete does in the web app (`restore` undoes it)
     Delete(AdrIdArgs),
 
-    /// Restore an archived decision
+    /// Restore an archived decision in Actual AI
     Restore(AdrIdArgs),
 
-    /// Accept a suggestion
+    /// Accept a suggestion in Actual AI
     Accept(AdrIdArgs),
 
-    /// Reject a suggestion, with a reason
+    /// Reject a suggestion in Actual AI, with a reason
     Reject(AdrRejectArgs),
+
+    /// Bring .actual/rules/ in step with docs/adr/ (signed out) or with
+    /// Actual AI (signed in), as the plugin's hooks do on every call
+    Refresh(AdrRefreshArgs),
 }
 
 /// Options shared by the `adr` commands that call Actual AI.
@@ -879,8 +893,7 @@ pub struct AdrApiOptions {
     pub json: bool,
 }
 
-/// The decision content `adr new` writes and `adr create` sends without a
-/// file.
+/// The decision content `adr create` writes or sends without a file.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct AdrContentArgs {
     /// Why the decision is needed: one point per flag.
@@ -891,40 +904,6 @@ pub struct AdrContentArgs {
     /// SHOULD, SHOULD NOT or MAY.
     #[arg(long = "policy", value_name = "POLICY")]
     pub policies: Vec<String>,
-}
-
-/// Arguments for `adr new`
-#[derive(Parser, Debug)]
-pub struct AdrNewArgs {
-    /// The decision's title, on one line.
-    #[arg(value_name = "TITLE")]
-    pub title: String,
-
-    #[command(flatten)]
-    pub content: AdrContentArgs,
-
-    /// Who made the decision, for the decision's Deciders line.
-    #[arg(long, value_name = "NAMES")]
-    pub deciders: Option<String>,
-
-    /// A path the decision applies to, relative to the repository root, one
-    /// per flag; a leading `!` excludes. Leave it out for the whole
-    /// repository.
-    #[arg(long = "scope", value_name = "GLOB")]
-    pub scope: Vec<String>,
-
-    /// `accepted` governs at once; `draft` is read by no check. Defaults to
-    /// accepted at a terminal and draft when no person is at one.
-    #[arg(long, value_enum)]
-    pub status: Option<crate::api::adr_types::SaveStatus>,
-
-    /// Repository root to write into. Defaults to the current directory.
-    #[arg(long, value_name = "PATH")]
-    pub root: Option<std::path::PathBuf>,
-
-    /// Print the files written as JSON.
-    #[arg(long)]
-    pub json: bool,
 }
 
 /// Arguments for `adr check`
@@ -943,6 +922,103 @@ pub struct AdrCheckArgs {
     /// Connected repository to compare with: its name, owner/name or id.
     /// Defaults to the one the working tree's origin remote names.
     #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr discover`
+#[derive(Parser, Debug)]
+pub struct AdrDiscoverArgs {
+    /// Don't compare synced decisions with Actual AI, even when signed in.
+    #[arg(long)]
+    pub no_cloud: bool,
+
+    /// Connected repository to compare with: its name, owner/name or id.
+    /// Defaults to the one the working tree's origin remote names.
+    #[arg(long, value_name = "REPO")]
+    pub repo: Option<String>,
+
+    /// Repository root to read. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr normalize`
+#[derive(Parser, Debug)]
+#[command(group(clap::ArgGroup::new("which").required(true).args(["files", "all"])))]
+pub struct AdrNormalizeArgs {
+    /// Decision docs under docs/adr/ to normalize or re-index.
+    #[arg(value_name = "FILE")]
+    pub files: Vec<std::path::PathBuf>,
+
+    /// Every doc `actual adr discover` says needs normalizing or re-indexing.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Show what would be written, and write nothing: each converted doc as a
+    /// diff, and which rule files would be written or re-indexed.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Ask nothing: an open question takes its safe answer, which writes the
+    /// decision as a draft, and a file with no policy is left alone.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// A JSON file of extractions, keyed by each doc's path from the
+    /// repository root, used instead of a model.
+    #[arg(long, value_name = "FILE")]
+    pub extracted: Option<std::path::PathBuf>,
+
+    /// A JSON file of answers to the questions a previous run asked, keyed
+    /// the same way.
+    #[arg(long, value_name = "FILE")]
+    pub answers: Option<std::path::PathBuf>,
+
+    /// Rename each normalized doc to the `<id>-<title>.md` name Actual AI's
+    /// sync uses. By default it keeps its name, so links to it still work.
+    #[arg(long)]
+    pub rename: bool,
+
+    /// Also convert ADRs `actual adr-bot` wrote. Their `.claude/rules/` files
+    /// are left as they are.
+    #[arg(long)]
+    pub legacy: bool,
+
+    /// Write a doc that looks like a decision the repository has already.
+    #[arg(long)]
+    pub allow_duplicate: bool,
+
+    /// Never call a model; a doc whose policies can't be read without one
+    /// asks for them instead.
+    #[arg(long)]
+    pub no_model: bool,
+
+    /// Runner for extracting decisions written as prose. Probed
+    /// automatically when omitted.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerChoice>,
+
+    /// Model for that runner, overriding the configured one.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Save each decision written to Actual AI too, as `actual adr create
+    /// --file` does. Needs `actual login`.
+    #[arg(long)]
+    pub push: bool,
+
+    /// Connected repository for --push: its name, owner/name or id.
+    #[arg(long, value_name = "REPO", requires = "push")]
     pub repo: Option<String>,
 
     /// Repository root to read. Defaults to the current directory.
@@ -988,39 +1064,84 @@ pub struct AdrShowArgs {
     pub api: AdrApiOptions,
 }
 
-/// Arguments for `adr create`
-#[derive(Parser, Debug)]
-#[command(group(clap::ArgGroup::new("source").required(true).args(["file", "title"])))]
+/// Arguments for `adr create`, also `adr new`
+#[derive(Parser, Debug, Default)]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["title", "title_flag", "file", "all"])))]
 pub struct AdrCreateArgs {
-    /// A decision file to push, such as one `actual adr new` wrote. Its pair
-    /// is renamed to the file names Actual AI's sync uses for the new
-    /// decision.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["title", "context", "policies"])]
-    pub file: Option<std::path::PathBuf>,
-
-    /// The decision's title, when it isn't sent from a file.
-    #[arg(long, value_name = "TITLE")]
+    /// The decision's title, on one line.
+    #[arg(value_name = "TITLE", conflicts_with = "title_flag")]
     pub title: Option<String>,
+
+    /// The title as a flag, the way `create` took it before `new` became its
+    /// alias.
+    #[arg(id = "title_flag", long = "title", value_name = "TITLE")]
+    pub title_flag: Option<String>,
+
+    /// Signed in: a decision file to send, such as one under docs/adr/. An
+    /// accepted save renames its pair to the file names Actual AI's sync
+    /// uses for the new decision; a draft leaves both files as they are.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["title", "title_flag", "context", "policies", "deciders", "scope"]
+    )]
+    pub file: Option<std::path::PathBuf>,
 
     #[command(flatten)]
     pub content: AdrContentArgs,
 
-    /// `accepted` governs at once; `draft` waits for `actual adr publish`.
-    /// Defaults to accepted at a terminal and draft when no person is at one.
+    /// Signed out: who made the decision, for the file's Deciders line.
+    #[arg(long, value_name = "NAMES")]
+    pub deciders: Option<String>,
+
+    /// A path the decision applies to, relative to the repository root, one
+    /// per flag; a leading `!` excludes. Leave it out for the whole
+    /// repository.
+    #[arg(long = "scope", value_name = "GLOB")]
+    pub scope: Vec<String>,
+
+    /// `accepted` governs at once; `draft` is read by no check until it's
+    /// published. Signed out only `accepted` is taken, since a draft lives
+    /// in Actual AI. Signed in it defaults to accepted at a terminal and
+    /// draft when no person is at one.
     #[arg(long, value_enum)]
     pub status: Option<crate::api::adr_types::SaveStatus>,
 
-    /// Connected repository: its name, owner/name or id. Defaults to the one
-    /// the working tree's origin remote names.
+    /// Repository root: where a signed-out create writes, and the checkout
+    /// whose origin remote names the connected repository signed in.
+    /// Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    /// Signed in: the connected repository, by its name, owner/name or id.
+    /// Defaults to the one the working tree's origin remote names.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 
-    /// Send it even if the repository has decisions that look the same.
+    /// Signed in: send it even if the repository has decisions that look
+    /// the same.
     #[arg(long)]
     pub allow_duplicate: bool,
 
+    /// Signed in: send every decision file under docs/adr/ that Actual AI
+    /// doesn't have yet, one at a time, keyed on its path. Each keeps the
+    /// status its header names; an accepted one goes up as a draft until it
+    /// is on the default branch when no person is at the terminal.
+    #[arg(
+        long,
+        conflicts_with_all = ["context", "policies", "deciders", "scope", "status"]
+    )]
+    pub all: bool,
+
     #[command(flatten)]
     pub api: AdrApiOptions,
+}
+
+impl AdrCreateArgs {
+    /// The title, given as the argument or as `--title`.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref().or(self.title_flag.as_deref())
+    }
 }
 
 /// Arguments for `adr update`
@@ -1074,6 +1195,28 @@ pub struct AdrIdArgs {
     /// The decision's id, as `actual adr list` prints it.
     #[arg(value_name = "ID")]
     pub id: String,
+
+    #[command(flatten)]
+    pub api: AdrApiOptions,
+}
+
+/// Arguments for `adr refresh`
+#[derive(Parser, Debug, Default)]
+pub struct AdrRefreshArgs {
+    /// Repository root. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<std::path::PathBuf>,
+
+    /// The longest a signed-in refresh waits for Actual AI, in
+    /// milliseconds. Past it the rule files stay as they are until the next
+    /// refresh.
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 1000,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    pub timeout_ms: u64,
 
     #[command(flatten)]
     pub api: AdrApiOptions,

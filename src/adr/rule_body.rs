@@ -202,6 +202,7 @@ mod tests {
             status: "created-from-user".to_string(),
             scope_root: ".".to_string(),
             scope_paths: Vec::new(),
+            source: None,
         });
         let body = render_rule_body(
             "Use Postgres for storage",

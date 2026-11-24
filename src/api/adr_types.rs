@@ -272,12 +272,21 @@ pub struct ImportRequest {
     pub organization_id: String,
     pub repo_unique_id: String,
     pub markdown: String,
+    /// The repository file the markdown came from, `docs/adr/…`. A path the
+    /// repository already saved returns that save's decision, and a draft
+    /// takes the new text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
 }
 
 /// What an import saved.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ImportResponse {
     pub adr_id: String,
+    /// Whether `source_path` was saved before, so `adr_id` is the decision
+    /// that save made. A server without the path key never sends it.
+    #[serde(default)]
+    pub already_saved: bool,
 }
 
 /// The decision fields an edit sends. The edit routes rebuild a decision's
@@ -628,6 +637,7 @@ mod tests {
             organization_id: "o".into(),
             repo_unique_id: "r".into(),
             markdown: "# T".into(),
+            source_path: None,
         };
         assert_eq!(
             serde_json::to_value(&request)
@@ -637,9 +647,24 @@ mod tests {
                 .len(),
             3
         );
+        let keyed = ImportRequest {
+            source_path: Some("docs/adr/t.md".into()),
+            ..request
+        };
+        assert_eq!(
+            serde_json::to_value(&keyed).unwrap()["source_path"],
+            "docs/adr/t.md"
+        );
         let imported: ImportResponse =
             serde_json::from_str(r#"{"success": true, "adr_id": "a"}"#).unwrap();
-        assert_eq!(imported.adr_id, "a");
+        assert_eq!(
+            (imported.adr_id.as_str(), imported.already_saved),
+            ("a", false)
+        );
+        let again: ImportResponse =
+            serde_json::from_str(r#"{"success": true, "adr_id": "a", "already_saved": true}"#)
+                .unwrap();
+        assert!(again.already_saved);
         let action = DecisionAction {
             success: true,
             adr_id: "a".into(),
