@@ -776,6 +776,11 @@ mod tests {
                 "Only a draft can be published; this decision is active.",
             ),
             (
+                Suggested,
+                Publish,
+                "Only a draft can be published; this decision is suggested.",
+            ),
+            (
                 Draft,
                 Unpublish,
                 "Only an active decision can move back to draft; this decision is draft.",
@@ -803,8 +808,15 @@ mod tests {
                 "Only a suggestion can be rejected; this decision is archived.",
             ),
         ];
+        // A grouped publish sends a suggestion's accept, so every state check
+        // has to come before the group arms.
         for (state, action, message) in cases {
             assert_eq!(refusal(single("x"), state, action), message);
+            assert_eq!(
+                refusal(group("x"), state, action),
+                message,
+                "grouped {action:?} from {state:?}"
+            );
         }
     }
 
