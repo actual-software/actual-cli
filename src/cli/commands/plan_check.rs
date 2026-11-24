@@ -836,14 +836,12 @@ mod tests {
         serde_json::json!({ "verdicts": entries })
     }
 
-    /// `structured_output` shaped for the *rank* schema (`slug`/`verdict`/
-    /// `reason`) — valid input for stage 2's rank, and deliberately the wrong
-    /// shape for the judge, so reusing it for a check call exercises the
-    /// "judge output was malformed" path.
-    fn rank_output(slug: &str) -> serde_json::Value {
-        serde_json::json!({
-            "verdicts": [{"slug": slug, "verdict": "governs", "reason": "it governs the change"}]
-        })
+    /// `structured_output` shaped for the *rank* schema (a score per
+    /// numbered candidate, here the first) — valid input for stage 2's rank,
+    /// and deliberately the wrong shape for the judge, so reusing it for a
+    /// check call exercises the "judge output was malformed" path.
+    fn rank_output() -> serde_json::Value {
+        serde_json::json!({ "scores": { "1": 9 } })
     }
 
     #[test]
@@ -1393,9 +1391,7 @@ mod tests {
         let bin = tempdir().unwrap();
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
-                .to_str()
-                .unwrap(),
+            fake_claude(bin.path(), &rank_output()).to_str().unwrap(),
         );
 
         let mut args = base_args();

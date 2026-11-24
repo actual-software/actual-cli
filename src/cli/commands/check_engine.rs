@@ -246,13 +246,7 @@ pub(super) fn run_pipeline_filtered(
     // rule turns out to already be excluded (see `gathered.excluded` below)
     // never has to resolve a runner it will not use.
     let early_runner = if use_rank {
-        match rules_rank::resolve_with_defaults(
-            knobs.runner,
-            knobs.model,
-            &cfg,
-            rules_rank::RANK_TIMEOUT_SECS,
-            knobs.default_runners,
-        ) {
+        match rules_rank::resolve_for_rank(knobs.runner, knobs.model, &cfg, knobs.default_runners) {
             Ok(runner) => Some(runner),
             Err(reason) => {
                 return Ok((
@@ -3371,14 +3365,12 @@ pub(crate) mod tests {
         serde_json::json!({ "verdicts": entries })
     }
 
-    /// `structured_output` shaped for the *rank* schema (`slug`/`verdict`/
-    /// `reason`) — valid input for stage 2's rank, and deliberately the wrong
-    /// shape for the judge, so reusing it for a check call exercises the
-    /// "judge output was malformed" path.
-    fn rank_output(slug: &str) -> serde_json::Value {
-        serde_json::json!({
-            "verdicts": [{"slug": slug, "verdict": "governs", "reason": "it governs the change"}]
-        })
+    /// `structured_output` shaped for the *rank* schema (a score per
+    /// numbered candidate, here the first) — valid input for stage 2's rank,
+    /// and deliberately the wrong shape for the judge, so reusing it for a
+    /// check call exercises the "judge output was malformed" path.
+    fn rank_output() -> serde_json::Value {
+        serde_json::json!({ "scores": { "1": 9 } })
     }
 
     // ── gather_rules ──────────────────────────────────────────────────────
@@ -4901,9 +4893,7 @@ pub(crate) mod tests {
         // Rank-shaped output is the wrong shape for the judge.
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
-                .to_str()
-                .unwrap(),
+            fake_claude(bin.path(), &rank_output()).to_str().unwrap(),
         );
 
         let mut args = base_args();
@@ -4984,9 +4974,7 @@ pub(crate) mod tests {
         let bin = tempdir().unwrap();
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
-                .to_str()
-                .unwrap(),
+            fake_claude(bin.path(), &rank_output()).to_str().unwrap(),
         );
 
         let mut args = base_args();
@@ -7629,7 +7617,6 @@ pub(crate) mod tests {
         let verdict = |at: usize, verdict: &str| scope::RankedVerdict {
             slug: candidates[at].slug.clone(),
             verdict: serde_json::from_value(serde_json::json!(verdict)).unwrap(),
-            reason: String::new(),
         };
         let selection = prefiltered.apply(&[verdict(0, "unrelated"), verdict(1, "governs")]);
 
