@@ -1021,10 +1021,10 @@ pub(crate) fn audit_log_path() -> Option<PathBuf> {
 /// `actual stats`. Lines that don't parse are skipped.
 pub(crate) fn read_audit(since: Option<DateTime<Utc>>) -> Vec<AuditEntry> {
     audit_log_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|path| std::fs::read(path).ok())
         .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<AuditEntry>(line).ok())
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<AuditEntry>(line).ok())
         .filter(|entry| since.is_none_or(|since| entry.at >= since))
         .collect()
 }

@@ -67,6 +67,9 @@ struct Overrides {
 #[derive(Debug, PartialEq, Serialize)]
 struct Report {
     since: Option<DateTime<Utc>>,
+    /// Set when the round log reaches back less far than the overrides in
+    /// the period: the oldest round it still holds.
+    rounds_since: Option<DateTime<Utc>>,
     repo: Option<String>,
     log_enabled: bool,
     rounds: Rounds,
@@ -79,11 +82,11 @@ struct Report {
 pub fn exec(args: &StatsArgs) -> Result<(), ActualError> {
     let since = match args.since {
         Since::All => None,
-        Since::Last(delta) => Some(Utc::now() - delta),
+        Since::Last(delta) => Utc::now().checked_sub_signed(delta),
     };
     let repo = args.repo.as_deref().map(rules_brief::resolve);
     let report = build(
-        &enforcement_log::read(since),
+        &enforcement_log::read(None),
         &governance_session::read_audit(since),
         since,
         repo.as_deref(),
@@ -101,6 +104,8 @@ fn rate(passed: usize, total: usize) -> Option<f64> {
     (total > 0).then(|| passed as f64 / total as f64)
 }
 
+/// `rounds` is the whole round log, unfiltered, so the oldest round in it
+/// says how far back the round counts can reach.
 fn build(
     rounds: &[Round],
     audit: &[AuditEntry],
@@ -108,14 +113,16 @@ fn build(
     repo: Option<&Path>,
     log_enabled: bool,
 ) -> Report {
+    let held_from = rounds.iter().map(|r| r.at).min();
     let rounds: Vec<&Round> = rounds
         .iter()
-        .filter(|r| in_repo(&r.rules_dir, repo))
+        .filter(|r| since.is_none_or(|since| r.at >= since) && in_repo(&r.rules_dir, repo))
         .collect();
     let audit: Vec<&AuditEntry> = audit
         .iter()
         .filter(|e| in_repo(&e.rules_dir, repo))
         .collect();
+    let rounds_since = held_from.filter(|from| audit.iter().any(|e| e.at < *from));
 
     let mut totals = Rounds::default();
     let mut adrs: BTreeMap<String, AdrStats> = BTreeMap::new();
@@ -192,6 +199,7 @@ fn build(
 
     Report {
         since,
+        rounds_since,
         repo: repo.map(|repo| repo.display().to_string()),
         log_enabled,
         rounds: totals,
@@ -225,6 +233,12 @@ fn render(report: &Report, json: bool) -> String {
         .as_deref()
         .map_or_else(String::new, |repo| format!(" in {repo}"));
     let mut out = vec![format!("{period}{scope}")];
+    if let Some(from) = report.rounds_since {
+        out.push(format!(
+            "Gate rounds go back only to {}, the oldest the round log still holds; overrides cover the whole period.",
+            from.format("%Y-%m-%d %H:%M UTC")
+        ));
+    }
     if !report.log_enabled {
         out.push(format!(
             "The enforcement log is off ({}=off), so new rounds are not recorded.",
@@ -729,6 +743,73 @@ mod tests {
         assert_eq!(text, expected.join("\n"));
     }
 
+    /// The round log is pruned and the override log is not, so a report
+    /// whose overrides reach back past the oldest round says so.
+    #[test]
+    fn test_says_when_rounds_reach_back_less_far_than_overrides() {
+        let dir = Path::new("/r");
+        let at = |days: i64| Utc::now() - TimeDelta::days(days);
+        let mut dropped = round(
+            Gate::Plan,
+            Mode::Hook,
+            dir,
+            Decision::Block,
+            &[("adr-a", Verdict::Conflicting)],
+        );
+        dropped.at = at(20);
+        let mut kept = round(
+            Gate::Plan,
+            Mode::Hook,
+            dir,
+            Decision::Allow,
+            &[("adr-a", Verdict::Followed)],
+        );
+        kept.at = at(5);
+        let recent = audit(
+            "override",
+            dir,
+            "adr-a::R-001",
+            serde_json::json!({"at": at(1)}),
+        );
+        let old = audit(
+            "override",
+            dir,
+            "adr-a::R-001",
+            serde_json::json!({"at": at(30)}),
+        );
+
+        let report = build(
+            std::slice::from_ref(&kept),
+            std::slice::from_ref(&recent),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(report.rounds_since, None, "no override predates the rounds");
+
+        let report = build(
+            std::slice::from_ref(&kept),
+            &[recent.clone(), old],
+            None,
+            None,
+            true,
+        );
+        assert_eq!(report.rounds_since, Some(kept.at));
+        let text = render(&report, false);
+        let note = format!(
+            "Gate rounds go back only to {}, the oldest the round log still holds; overrides cover the whole period.",
+            kept.at.format("%Y-%m-%d %H:%M UTC")
+        );
+        assert_eq!(text.lines().nth(1), Some(note.as_str()), "{text}");
+
+        let report = build(&[dropped, kept], &[recent], Some(at(7)), None, true);
+        assert_eq!((report.rounds.total, report.rounds.blocked), (1, 0));
+        assert_eq!(
+            report.rounds_since, None,
+            "the round log reaches back past the period"
+        );
+    }
+
     #[test]
     fn test_render_json() {
         let rounds = [round(
@@ -745,6 +826,7 @@ mod tests {
         assert_eq!(value["rounds"]["pass_rate"], 0.0);
         assert_eq!(value["adrs"][0]["breaches"], 1);
         assert_eq!(value["since"], serde_json::Value::Null);
+        assert_eq!(value["rounds_since"], serde_json::Value::Null);
         assert_eq!(value["log_enabled"], true);
     }
 
@@ -778,7 +860,7 @@ mod tests {
 
         let since = Some(Utc::now() - TimeDelta::days(7));
         let report = build(
-            &enforcement_log::read(since),
+            &enforcement_log::read(None),
             &governance_session::read_audit(since),
             since,
             None,
@@ -791,6 +873,7 @@ mod tests {
             "the override and the round land on the same ADR"
         );
         assert_eq!(report.adrs.len(), 1);
+        assert_eq!(report.rounds_since, None);
 
         let args = StatsArgs {
             since: Since::All,
@@ -817,13 +900,16 @@ mod tests {
         let dir = Path::new("/r");
         governance_session::record_override("s", dir, &["a::R-1".to_string()], "");
         let path = governance_session::audit_log_path().unwrap();
-        let mut text = std::fs::read_to_string(&path).unwrap();
-        text.push_str("not json\n");
-        std::fs::write(&path, text).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"not json\n{\"torn\xff\n");
+        std::fs::write(&path, bytes).unwrap();
+        governance_session::record_override("s", dir, &["a::R-2".to_string()], "");
 
-        let entries = governance_session::read_audit(None);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].key, "a::R-1");
+        let keys: Vec<String> = governance_session::read_audit(None)
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        assert_eq!(keys, ["a::R-1", "a::R-2"]);
         assert!(governance_session::read_audit(Some(Utc::now() + TimeDelta::days(1))).is_empty());
     }
 }
