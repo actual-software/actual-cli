@@ -779,7 +779,7 @@ text goes out as you work, without anyone typing a command.
 |---------|-----------------------|
 | `plan-check` | The plan's full text, and each judged rule's document slug, id, level and statement |
 | `impl-check` | The diff's full text, including the whole of any new file git doesn't ignore, and the same rule fields |
-| `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's slug, title, scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
+| `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's title (its slug when it has none), scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
 
 `claude-cli` runs these calls with no tools, and the API runners have no file
 tools. `codex-cli` and `cursor-cli` still run as agents in your repository,
