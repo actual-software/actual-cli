@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- `actual adr publish` publishes a draft that Actual AI grouped from several policies, sending the group's `accept` action on the route a grouped `unpublish`, `delete`, `accept` and `reject` already take. That route answers success even when it changes nothing, so `publish` reads the decision back and exits 3 unless it's active. In 0.14.0 through 0.16.0 it refused with "A grouped draft can't be published yet." A grouped decision still can't be restored
+- `actual adr publish` publishes a draft that Actual AI grouped from several policies, sending the group's `accept` action on the route a grouped `unpublish`, `delete`, `accept` and `reject` already take. That route answers success even when it changes nothing, so `publish` reads the decision back and exits 3 unless it's active. In 0.14.0 through 0.17.0 it refused with "A grouped draft can't be published yet." A grouped decision still can't be restored
 
 ## [0.17.0] - 2026-11-24
 
