@@ -173,21 +173,31 @@ impl PathGlob {
     }
 }
 
-/// How deep a brace list may nest, and how many alternatives one pattern may
-/// expand to.
+/// How many brace lists one alternative may pass through (nested or in
+/// sequence), how many alternatives one pattern may expand to, and how long a
+/// pattern with a brace list may be.
 ///
 /// A `{a,b}` repeated n times is 2^n strings from n×5 bytes: 20 pairs (100
-/// bytes) is 1 048 576 and 30 pairs is over a billion. Both limits sit far
-/// above any author-facing glob — a real one has two or three pairs — and both
-/// stop the expansion instead of letting it grow without bound.
+/// bytes) is 1 048 576 and 30 pairs is over a billion. Every alternative is
+/// about as long as the pattern, so the length limit keeps 4096 of them small.
+/// All three sit far above any author-facing glob — a real one has two or
+/// three pairs — and all three stop the expansion instead of letting it grow
+/// without bound.
 const MAX_BRACE_DEPTH: usize = 8;
 const MAX_BRACE_ALTERNATIVES: usize = 4096;
+const MAX_BRACE_PATTERN_BYTES: usize = 1024;
 
-/// [`expand_braces`] with those limits applied.
+/// Expand the first balanced brace list and recurse, so
+/// `app/{lib,hooks}/*.{ts,tsx}` becomes four glob-crate patterns, within
+/// those limits.
 ///
-/// `None` means the pattern expanded past them, which the caller treats the
-/// same as a pattern that would not compile: there is no answer to stand on.
+/// `None` means the pattern went past them or has an unbalanced `{`, which the
+/// caller treats the same as a pattern that would not compile: there is no
+/// answer to stand on.
 fn expand_braces_bounded(pattern: &str) -> Option<Vec<String>> {
+    if pattern.contains('{') && pattern.len() > MAX_BRACE_PATTERN_BYTES {
+        return None;
+    }
     let mut out = Vec::new();
     expand_braces_into(pattern, 0, &mut out)?;
     Some(out)
@@ -217,9 +227,10 @@ fn expand_braces_into(pattern: &str, depth: usize, out: &mut Vec<String>) -> Opt
             _ => {}
         }
     }
-    let Some(close) = close else {
-        return Some(());
-    };
+    // An unbalanced `{` has no well-formed expansion. It sits in the suffix
+    // every choice shares, so every branch would end here: stop the whole
+    // expansion now, before walking the others for nothing.
+    let close = close?;
     let prefix = &pattern[..open];
     let inside = &pattern[open + '{'.len_utf8()..close];
     let suffix = &pattern[close + '}'.len_utf8()..];
@@ -1618,6 +1629,39 @@ grep -r "jwt.sign" services/auth/jwks/ --include="*.ts"
         assert!(
             expand_braces_bounded(&pattern).is_none(),
             "a 2^20 expansion must be refused, not built"
+        );
+    }
+
+    /// Brace lists that end in an unbalanced `{` never produce an alternative,
+    /// so a limit on alternatives alone never fires; walking every branch of
+    /// seven 10-choice lists before giving up is 10^7 steps (k^7 grows without
+    /// bound in k). Refused at the first branch instead, with the same empty
+    /// answer as before.
+    #[test]
+    fn test_expand_braces_refuses_an_unbalanced_tail_without_walking_it() {
+        let list = format!("{{{}}}", ["x"; 10].join(","));
+        let pattern = format!("{}{{", list.repeat(7));
+        assert!(pattern.len() <= MAX_BRACE_PATTERN_BYTES);
+        let started = std::time::Instant::now();
+        assert!(expand_braces_bounded(&pattern).is_none());
+        assert!(glob(&pattern).alternatives().is_empty());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Every alternative is about as long as its pattern, so a long pattern
+    /// times 4096 alternatives is refused before anything is built. A long
+    /// pattern without a brace list is still itself.
+    #[test]
+    fn test_expand_braces_refuses_a_long_braced_pattern() {
+        let tail = "x".repeat(MAX_BRACE_PATTERN_BYTES);
+        assert!(expand_braces_bounded(&format!("{{a,b}}{tail}")).is_none());
+        assert_eq!(
+            expand_braces_bounded(&tail).expect("no braces"),
+            vec![tail.clone()]
         );
     }
 
