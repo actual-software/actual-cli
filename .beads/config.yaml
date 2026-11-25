@@ -1,0 +1,6 @@
+issue_prefix: ac
+issue-prefix: ac
+dolt.auto-start: false
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence
