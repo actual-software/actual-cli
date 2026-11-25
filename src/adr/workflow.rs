@@ -587,6 +587,7 @@ mod tests {
         let mut response = DecisionsResponse {
             adrs: adrs.iter().map(|s| item(s)).collect(),
             suggestions: suggestions.iter().map(|s| item(s)).collect(),
+            as_of: None,
         };
         response.adrs.push(WebDecision::default());
         let states: Vec<(String, &str)> = listed(response)

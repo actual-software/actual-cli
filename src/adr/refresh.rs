@@ -228,6 +228,28 @@ pub struct Record {
     /// says that none governs only when that's news.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governing: Option<Governing>,
+    /// Where the next signed-in read can start from instead of reading every
+    /// decision, for the connected repository it was read for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since: Option<ChangedSince>,
+}
+
+/// A signed-in read's `as_of` for one connected repository, and when the
+/// last read of all its decisions was, which the next read uses to ask only
+/// for what changed since.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedSince {
+    pub repo_id: String,
+    /// The last read's `as_of`, sent back as `updated_since`.
+    pub as_of: String,
+    /// When the last read of every decision was.
+    pub full_read_at: DateTime<Utc>,
+    /// The last refresh's read failed or ran out of time, so the next one
+    /// asks only for what changed even when a full read is due, and a
+    /// repository whose full read doesn't fit the time box still gets its
+    /// changes. The refresh after that tries the full read again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last_read_failed: bool,
 }
 
 /// Which decisions a refresh read, and whether any of them governs.
@@ -625,11 +647,17 @@ pub fn plan_from_docs(
 /// The plan that brings `.actual/rules/` in step with the repository's
 /// decisions in Actual AI: each decision's id with what it asks of its rule
 /// file. A decision listed twice counts once.
+///
+/// `complete` says `decisions` is every decision of the repository, so a
+/// rule file the record wrote from Actual AI for a decision not among them
+/// goes. A changed-since read isn't complete: a decision it leaves out only
+/// didn't change, and keeps its rule file.
 pub fn plan_from_cloud(
     root: &Path,
     decisions: &[(String, CloudRule)],
     on_disk: &BTreeMap<String, PathBuf>,
     record: &Record,
+    complete: bool,
 ) -> Plan {
     let mut planner = Planner::new(root, on_disk, record);
     let mut listed = HashSet::new();
@@ -645,9 +673,11 @@ pub fn plan_from_cloud(
             CloudRule::Pending => {}
         }
     }
-    for id in record.rules.keys() {
-        if !listed.contains(id.as_str()) {
-            planner.gone(id, Origin::ActualAi);
+    if complete {
+        for id in record.rules.keys() {
+            if !listed.contains(id.as_str()) {
+                planner.gone(id, Origin::ActualAi);
+            }
         }
     }
     planner.plan
@@ -1200,7 +1230,7 @@ mod tests {
             ".actual/rules/archived.md",
             "---\nversion: 2\nmetadata:\n  actual:\n    adr_id: archived-1\n---\n# T\n",
         );
-        let plan = plan_from_cloud(root, &decisions, &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &decisions, &on_disk(root), &record, true);
         let (applied, set, drop) = apply(root, plan);
         record.apply_edits(&set, &drop);
         assert_eq!(applied.written.len(), 1);
@@ -1213,11 +1243,15 @@ mod tests {
             (ID.to_string(), CloudRule::Governs(active.clone())),
             (ID.to_string(), CloudRule::Governs(active.clone())),
         ];
-        let plan = plan_from_cloud(root, &twice, &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &twice, &on_disk(root), &record, true);
         assert!(plan.changes.is_empty() && plan.set.is_empty());
 
+        // Left out of a changed-since read, it only didn't change: it stays.
+        let plan = plan_from_cloud(root, &[], &on_disk(root), &record, false);
+        assert_eq!(plan, Plan::default());
+
         // Gone from the list: the file the refresh wrote goes too.
-        let plan = plan_from_cloud(root, &[], &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &[], &on_disk(root), &record, true);
         let (applied, set, drop) = apply(root, plan);
         record.apply_edits(&set, &drop);
         assert_eq!(applied.removed.len(), 1);
@@ -1234,7 +1268,7 @@ mod tests {
         // A file from the sync, which the record doesn't know: none is
         // written, removed or recorded.
         let mut record = Record::default();
-        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record, true);
         assert_eq!(plan, Plan::default());
         // One the refresh followed while its decision was active: still
         // listed, so it isn't gone either.
@@ -1246,14 +1280,14 @@ mod tests {
                 path: None,
             },
         );
-        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record, true);
         assert_eq!(plan, Plan::default());
         let (applied, ..) = apply(root, plan);
         assert_eq!(applied.changed(), 0);
         assert_eq!(std::fs::read_to_string(&rule).unwrap(), synced);
         // With no rule file, none is written.
         std::fs::remove_file(&rule).unwrap();
-        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &pending(), &on_disk(root), &record, true);
         assert!(plan.changes.is_empty(), "{:?}", plan.changes);
     }
 
@@ -1278,6 +1312,7 @@ mod tests {
             &[(ID.to_string(), CloudRule::Governs(active.clone()))],
             &on_disk(root),
             &record,
+            true,
         );
         assert!(plan.changes.is_empty(), "{:?}", plan.changes);
         assert_eq!(plan.set[ID].origin, Origin::ActualAi);
@@ -1300,6 +1335,7 @@ mod tests {
             &[(ID.to_string(), CloudRule::Governs(source("T", "Do it.")))],
             &BTreeMap::new(),
             &Record::default(),
+            true,
         );
         let (applied, set, drop) = apply(root, plan);
         assert_eq!(applied.problems.len(), 1, "{applied:?}");
@@ -1355,7 +1391,7 @@ mod tests {
         );
         // Written from docs/adr/; signed in, with Actual AI listing nothing.
         record.rules.insert(ID.to_string(), entry(Origin::DocsAdr));
-        let plan = plan_from_cloud(root, &[], &on_disk(root), &record);
+        let plan = plan_from_cloud(root, &[], &on_disk(root), &record, true);
         assert!(
             plan.changes.is_empty() && plan.drop.is_empty(),
             "{:?}",

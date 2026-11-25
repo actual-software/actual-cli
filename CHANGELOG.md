@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - On codex-cli, a stage-2 rank or a `plan-check` or `impl-check` judge run outside a git repository no longer fails with "Not inside a trusted directory". These calls run read-only, so they pass `--skip-git-repo-check`. Tailoring, which writes files, still requires a git repository
 
+### Changed
+- Signed in, `actual adr refresh` reads only the decisions that changed since its last read, sending that read's `as_of` as `updated_since`, so most refreshes read a few decisions instead of all of them. It reads every decision again when its last full read is ten minutes old (counted when a refresh runs; nothing is read between calls), when the connected repository changes, when a rule file it wrote from Actual AI is missing, and when a changed-since read fails, as it does against an api-service that doesn't take `updated_since`. When a full read fails or runs out of time, the next refresh asks only for what changed, and the one after tries the full read again. Only a full read removes the rule file of a decision deleted outright and lists the files `actual adr create --all` would send. A repository whose full read never fits `--timeout-ms` still reads every decision each time, as before
+
 ## [0.17.0] - 2026-11-24
 
 ### Added

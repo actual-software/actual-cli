@@ -9,6 +9,13 @@
 //! so a hook that runs it can't fail on it; what went wrong is in the
 //! report.
 //!
+//! Signed in, a refresh reads only the decisions that changed since the
+//! last one (`updated_since`, the last read's `as_of`), and reads every
+//! decision when the last full read is [`FULL_READ_EVERY`] old, the
+//! connected repository changed, or a changed-since read fails. Only a full
+//! read removes the rule file of a decision deleted outright, and lists the
+//! files `create --all` would send. It reads nothing between calls.
+//!
 //! It never renews a sign-in itself. Actual AI rotates refresh tokens, so a
 //! renewal cut off by the time box, or by the hook's own timeout, would spend
 //! the stored refresh token and sign the person out. An access token about to
@@ -34,8 +41,8 @@ use crate::adr::context_file::Policy;
 use crate::adr::files::{rule_files_by_id, DECISION_DIR, RULES_DIR};
 use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::refresh::{
-    self as core, Applied, CloudRule, ConnectedRepo, Governing, Origin, Planner, Record,
-    RuleSource, Unnormalized, Unresolved, RECORD_FORMAT,
+    self as core, Applied, ChangedSince, CloudRule, ConnectedRepo, Governing, Origin, Planner,
+    Record, RuleSource, Unnormalized, Unresolved, RECORD_FORMAT,
 };
 use crate::api::adr_types::Decision;
 use crate::api::{resolve_api_url, ActualApiClient};
@@ -120,6 +127,7 @@ pub(super) fn refresh(
     let mut repo = record.connected_repo.clone();
     let mut unresolved = record.unresolved.clone();
     let mut create_all = None;
+    let mut changed_since = record.changed_since.clone();
     let (mode, plan, governing) = match store::load() {
         Ok(None) => (
             Mode::SignedOut,
@@ -149,30 +157,47 @@ pub(super) fn refresh(
             let cached = Cached {
                 repo: repo.as_ref(),
                 unresolved: unresolved.as_ref(),
+                changed_since: changed_since.as_ref(),
+                // A rule file written from Actual AI that's gone from disk (a
+                // branch switch, a clean) comes back only with a full read.
+                rule_missing: record.rules.iter().any(|(id, entry)| {
+                    entry.origin == Origin::ActualAi && !on_disk.contains_key(id)
+                }),
             };
             match read_cloud(root, &creds, &args.api, args.timeout_ms, cached) {
-                Ok((decisions, connected)) => {
-                    create_all = Some(super::batch::unsent_paths(
-                        root,
-                        &decisions,
-                        &connected.org_id,
-                        &connected.remote,
-                        today,
-                        None,
-                    ));
-                    repo = Some(connected);
+                Ok(read) => {
+                    let sources = rule_sources(&read.decisions);
+                    let plan =
+                        core::plan_from_cloud(root, &sources, &on_disk, &record, read.complete);
+                    changed_since = read.as_of.map(|as_of| ChangedSince {
+                        repo_id: read.connected.repo_id.clone(),
+                        as_of,
+                        full_read_at: match (&changed_since, read.complete) {
+                            (Some(last), false) => last.full_read_at,
+                            _ => Utc::now(),
+                        },
+                        last_read_failed: false,
+                    });
+                    // What every decision says, only a full read knows.
+                    let governing = read.complete.then(|| Governing {
+                        origin: Origin::ActualAi,
+                        any: sources
+                            .iter()
+                            .any(|(_, rule)| matches!(rule, CloudRule::Governs(_))),
+                    });
+                    if read.complete {
+                        create_all = Some(super::batch::unsent_paths(
+                            root,
+                            &read.decisions,
+                            &read.connected.org_id,
+                            &read.connected.remote,
+                            today,
+                            None,
+                        ));
+                    }
+                    repo = Some(read.connected);
                     unresolved = None;
-                    let sources = rule_sources(&decisions);
-                    (
-                        Mode::SignedIn,
-                        Some(core::plan_from_cloud(root, &sources, &on_disk, &record)),
-                        Some(Governing {
-                            origin: Origin::ActualAi,
-                            any: sources
-                                .iter()
-                                .any(|(_, rule)| matches!(rule, CloudRule::Governs(_))),
-                        }),
-                    )
+                    (Mode::SignedIn, Some(plan), governing)
                 }
                 Err(Unread::NoRepo(lookup)) => {
                     // Said once, and again only when the lookup finds
@@ -189,6 +214,11 @@ pub(super) fn refresh(
                 }
                 Err(Unread::Failed { problem, found }) => {
                     problems.push(problem);
+                    // Alternate: after a failed read the next asks only for
+                    // what changed, and after that a due full read again.
+                    if let Some(last) = changed_since.as_mut() {
+                        last.last_read_failed = !last.last_read_failed;
+                    }
                     if found.is_some() {
                         repo = found;
                         unresolved = None;
@@ -198,6 +228,7 @@ pub(super) fn refresh(
                 Err(Unread::Refused(problem)) => {
                     problems.push(problem);
                     repo = None;
+                    changed_since = None;
                     (Mode::SignedIn, None, None)
                 }
             }
@@ -231,6 +262,7 @@ pub(super) fn refresh(
         record.connected_repo = repo;
         record.unresolved = unresolved;
         record.governing = governing.or(record.governing);
+        record.changed_since = changed_since;
         if create_all_print.is_some() {
             record.create_all = create_all_print;
         }
@@ -311,11 +343,31 @@ const KEPT: &str = "so the rule files were left as they are";
 /// organization and origin remote, before a refresh looks again.
 const RECHECK_UNRESOLVED: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
+/// How old the last read of every decision gets before a refresh reads every
+/// decision again instead of only what changed, so a decision deleted
+/// outright loses its rule file. Counted when a refresh runs; nothing runs
+/// in between.
+const FULL_READ_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
+
 /// What the record remembers of the last signed-in read.
 #[derive(Clone, Copy)]
 struct Cached<'a> {
     repo: Option<&'a ConnectedRepo>,
     unresolved: Option<&'a Unresolved>,
+    changed_since: Option<&'a ChangedSince>,
+    rule_missing: bool,
+}
+
+/// A signed-in read of a connected repository's decisions.
+#[derive(Debug)]
+struct CloudRead {
+    decisions: Vec<Decision>,
+    connected: ConnectedRepo,
+    /// The read's `as_of`, when the api-service sent one.
+    as_of: Option<String>,
+    /// Whether these are every decision, or only those changed since the
+    /// last read.
+    complete: bool,
 }
 
 /// Why a signed-in refresh read no decisions.
@@ -352,7 +404,7 @@ fn read_cloud(
     api: &AdrApiOptions,
     timeout_ms: u64,
     cached: Cached<'_>,
-) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
+) -> Result<CloudRead, Unread> {
     let rt =
         runtime().map_err(|e| Unread::failed(format!("Couldn't read Actual AI ({e}), {KEPT}.")))?;
     match within(rt, timeout_ms, read_decisions(root, creds, api, cached)) {
@@ -391,7 +443,7 @@ async fn read_decisions(
     creds: &StoredCredentials,
     api: &AdrApiOptions,
     cached: Cached<'_>,
-) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
+) -> Result<CloudRead, Unread> {
     let unread = |e: ActualError| format!("Couldn't read your decisions in Actual AI ({e})");
     let session = Session {
         client: ActualApiClient::new(&resolve_api_url(api.api_url.as_deref()))
@@ -435,14 +487,63 @@ async fn read_decisions(
         remote,
         repo_id,
     };
-    match super::cloud::decisions(&session, Some(&connected.repo_id)).await {
-        Ok(decisions) => Ok((decisions, connected)),
+    // Only what changed since the last read, while it was of this repository
+    // and the last full read is recent. A changed-since read that fails, such
+    // as one an api-service without it turns down, falls back to a full read.
+    let since = cached
+        .changed_since
+        .filter(|last| {
+            reuse.is_some()
+                && !cached.rule_missing
+                && last.repo_id == connected.repo_id
+                && (last.last_read_failed || Utc::now() - last.full_read_at < FULL_READ_EVERY)
+        })
+        .map(|last| last.as_of.as_str());
+    if let Some(since) = since {
+        if let Ok(response) = session
+            .client
+            .read_decisions_changed(&session.org_id, Some(&connected.repo_id), Some(since))
+            .await
+        {
+            if response.as_of.is_some() {
+                let as_of = response.as_of.clone();
+                return Ok(CloudRead {
+                    decisions: views(response),
+                    connected,
+                    as_of,
+                    complete: false,
+                });
+            }
+        }
+    }
+    match session
+        .client
+        .read_decisions_changed(&session.org_id, Some(&connected.repo_id), None)
+        .await
+    {
+        Ok(response) => {
+            let as_of = response.as_of.clone();
+            Ok(CloudRead {
+                decisions: views(response),
+                connected,
+                as_of,
+                complete: true,
+            })
+        }
         Err(e) if refused(&e) => Err(Unread::Refused(unread(e))),
         Err(e) => Err(Unread::Failed {
             problem: unread(e),
             found: Some(connected),
         }),
     }
+}
+
+/// The decisions of a read as `list` prints them.
+fn views(response: crate::api::adr_types::DecisionsResponse) -> Vec<Decision> {
+    crate::adr::workflow::listed(response)
+        .iter()
+        .map(crate::adr::workflow::view)
+        .collect()
 }
 
 /// Whether Actual AI answered the read by turning it down, rather than
@@ -993,6 +1094,230 @@ mod tests {
         );
         repos.assert();
         list.assert();
+    }
+
+    #[test]
+    fn signed_in_refresh_reads_only_what_changed_until_a_full_read_is_due() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        git_repo(root, Some("git@github.com:actual-software/actual-cli.git"));
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        let full_query =
+            format!("organization_id={ORG}&repository_id={REPO}&include_summaries=false");
+        let with_as_of = |as_of: &str| {
+            DECISIONS.replacen(
+                "\"suggestions\":[]",
+                &format!("\"suggestions\":[],\"as_of\":\"{as_of}\""),
+                1,
+            )
+        };
+        let full = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(with_as_of("2026-11-25T10:00:00.000Z"))
+            .expect(1)
+            .create();
+        let records = config.path().join(DIR_NAME);
+        let dir = Some(records.as_path());
+        let name = rule_file_name(ID, "Use Postgres");
+        let rule = root.join(RULES_DIR).join(&name);
+
+        // The first read is full and keeps its as_of.
+        let first = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert_eq!(first.written, [format!("{RULES_DIR}/{name}")], "{first:?}");
+        assert!(first.create_all.is_some());
+        let since = load(&records, root).changed_since.unwrap();
+        assert_eq!(since.as_of, "2026-11-25T10:00:00.000Z");
+        assert_eq!(since.repo_id, REPO);
+        full.assert();
+
+        // The next asks only for what changed since then: the decision's
+        // policy did, so its rule file is rewritten. The archived decision
+        // the delta leaves out keeps its place, and the list create --all
+        // sends isn't rebuilt.
+        let changed = with_as_of("2026-11-25T10:01:00.000Z")
+            .replace("Add a second database.", "Add a third database.");
+        let delta = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:00:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(changed)
+            .expect(1)
+            .create();
+        let second = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(
+            second.problems.is_empty() && second.removed.is_empty(),
+            "{second:?}"
+        );
+        assert_eq!(
+            second.rewritten,
+            [format!("{RULES_DIR}/{name}")],
+            "{second:?}"
+        );
+        assert!(std::fs::read_to_string(&rule)
+            .unwrap()
+            .contains("third database"));
+        assert!(second.create_all.is_none() && second.recommendation.is_none());
+        // An unchanged decision left out of a delta keeps its rule file.
+        delta.remove();
+        let quiet = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:01:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:01:00.000Z"}"#)
+            .expect(1)
+            .create();
+        let unchanged = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(
+            unchanged.removed.is_empty() && rule.exists(),
+            "{unchanged:?}"
+        );
+        quiet.assert();
+        quiet.remove();
+        let after = load(&records, root).changed_since.unwrap();
+        assert_eq!(after.as_of, "2026-11-25T10:01:00.000Z");
+        assert_eq!(after.full_read_at, since.full_read_at);
+
+        // A rule file deleted locally is written back by a full read, though a
+        // changed-since read would otherwise do.
+        std::fs::remove_file(&rule).unwrap();
+        let no_delta = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:01:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:01:00.000Z"}"#)
+            .expect(0)
+            .create();
+        let restore = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(with_as_of("2026-11-25T10:01:00.000Z"))
+            .expect(1)
+            .create();
+        let restored = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert_eq!(
+            restored.written,
+            [format!("{RULES_DIR}/{name}")],
+            "{restored:?}"
+        );
+        no_delta.assert();
+        restore.assert();
+        no_delta.remove();
+        restore.remove();
+
+        // A changed-since read that fails, as an older api-service turns
+        // `updated_since` down, falls back to a full read.
+        let refused = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:01:00.000Z".into(),
+            ))
+            .with_status(400)
+            .with_body(r#"{"error":"bad_request"}"#)
+            .expect(1)
+            .create();
+        let gone = r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:02:00.000Z"}"#;
+        let emptied = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(gone)
+            .expect(1)
+            .create();
+        let third = refresh(root, &args(Some(&server)), TODAY, dir);
+        // A full read that no longer lists the decision removes its rule file.
+        assert_eq!(third.removed, [format!("{RULES_DIR}/{name}")], "{third:?}");
+        assert!(third.problems.is_empty(), "{third:?}");
+        refused.assert();
+        emptied.assert();
+        refused.remove();
+        emptied.remove();
+
+        // Once the last full read is older than FULL_READ_EVERY, the next
+        // read is full though an as_of is kept.
+        save(&records, root, |record| {
+            let since = record.changed_since.as_mut().unwrap();
+            since.full_read_at = Utc::now() - FULL_READ_EVERY - chrono::TimeDelta::seconds(1);
+        })
+        .unwrap();
+        let skipped = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:02:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(gone)
+            .expect(0)
+            .create();
+        // The due full read fails: the rule files stay, the as_of is kept.
+        let failing = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(500)
+            .expect(1)
+            .create();
+        let fourth = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(fourth.kept, "{fourth:?}");
+        skipped.assert();
+        failing.assert();
+        skipped.remove();
+        failing.remove();
+        let kept = load(&records, root).changed_since.unwrap();
+        assert_eq!(kept.as_of, "2026-11-25T10:02:00.000Z");
+        assert!(kept.last_read_failed);
+
+        // So the next asks only for what changed, though a full read is due...
+        let catch_up = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:02:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:03:00.000Z"}"#)
+            .expect(1)
+            .create();
+        let fifth = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(!fifth.kept && fifth.create_all.is_none(), "{fifth:?}");
+        catch_up.assert();
+        catch_up.remove();
+
+        // ...and the one after that reads every decision.
+        let due = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query))
+            .with_status(200)
+            .with_body(gone)
+            .expect(1)
+            .create();
+        let sixth = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(sixth.create_all.is_some(), "{sixth:?}");
+        assert!(
+            Utc::now() - load(&records, root).changed_since.unwrap().full_read_at < FULL_READ_EVERY
+        );
+        due.assert();
     }
 
     #[test]
