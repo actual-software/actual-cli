@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-25
+
 ### Added
 - Signed in to Actual's API, the `actual.session.ended` event the plugin's `SessionEnd` hook sends carries the session's token totals per model: `actual.usage.models`, with `actual.usage.input_tokens`, `actual.usage.output_tokens`, `actual.usage.cache_read_tokens` and `actual.usage.cache_write_tokens` in the same order, and `actual.usage.source` saying whether they came from Claude Code's last `cost-state` line (`session_totals`, which also counts subagents and background calls) or from adding up each assistant message in the transcript and its `subagents/` folder (`messages`). The hook reads the transcript on your machine and sends only the counts and the model names, as Claude Code recorded them. A signed-out end never opens the transcript, and every request without your sign-in's token leaves the six attributes out. The scan gives up after 500 ms and the end then carries no totals. The totals are those at the last end the CLI reported, so a session resumed for work that completes no hook check keeps its earlier end's totals. A Codex session's end carries the same totals, once the plugin's Codex hooks send `SessionEnd`: the usage its rollout records for each model response, added up per model with input less the cached tokens Codex counts inside it, under the source `responses`. `actual.event.schema_version` is now `11`. See `PRIVACY.md`
 - `actual adr discover` sends an `actual.adr.surveyed` event and `actual adr normalize` an `actual.adr.normalized` event, one per run, signed in or out. Each carries only counts and flags: discover counts the files it listed by what `normalize` would do with each and says whether it compared them with Actual AI; normalize counts the files it converted, re-indexed, left with questions, skipped or left unchanged, says whether it ran with `--dry-run` or `--push`, and counts the decisions `--push` saved and couldn't save. Both add the outcome, exit code, terminal flag and duration the other `actual adr` events send. Neither carries a path, title, id or decision text. `actual.event.schema_version` is now `13`. See `PRIVACY.md`
+
+### Fixed
+- The local enforcement log takes its lock for every write, compaction included, and waits at most 500 ms for it. A round that can't take the lock in time is left out of the log instead of being written without it. A round no longer joins onto a last line an earlier write left unfinished, so `actual stats` skips the torn line and still counts the new round. A hook call whose applicable rules were all already cleared or overridden keeps its line but no longer repeats the last judged round's number. See "Local enforcement log" in `PRIVACY.md`
 
 ## [0.17.0] - 2026-11-24
 
