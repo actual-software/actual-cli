@@ -505,15 +505,15 @@ async fn read_decisions(
             .read_decisions_changed(&session.org_id, Some(&connected.repo_id), Some(since))
             .await
         {
-            if response.as_of.is_some() {
-                let as_of = response.as_of.clone();
-                return Ok(CloudRead {
-                    decisions: views(response),
-                    connected,
-                    as_of,
-                    complete: false,
-                });
-            }
+            // An api-service that ignores `updated_since` answers with every
+            // decision and no `as_of`: that's a full read.
+            let as_of = response.as_of.clone();
+            return Ok(CloudRead {
+                decisions: views(response),
+                connected,
+                complete: as_of.is_none(),
+                as_of,
+            });
         }
     }
     match session
