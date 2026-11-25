@@ -2579,15 +2579,21 @@ mod tests {
         adr(root, "0007-use-postgres.md", NYGARD);
         adr(root, "0008-cache.md", PROSE);
         local_pair(root, "a.md", OTHER, &doc("Logging", "Log JSON."));
+        let stale = local_pair(root, "b.md", THIRD, &doc("Tracing", "Trace calls."));
+        let text = std::fs::read_to_string(&stale).unwrap();
+        write(&stale, &text.replace("Trace calls.", "Trace every call."));
+        adr(root, "README.md", "# ADRs\n");
 
         let named = [
             "docs/adr/0007-use-postgres.md",
             "docs/adr/0008-cache.md",
             "docs/adr/a.md",
+            "docs/adr/b.md",
+            "docs/adr/README.md",
         ];
         let (result, own) = normalize(root, &named, &|a| a.dry_run = true);
         result.unwrap();
-        assert_eq!(counts(&own), [3, 1, 0, 1, 0, 1, 0, 0]);
+        assert_eq!(counts(&own), [5, 1, 1, 1, 1, 1, 0, 0]);
         assert_eq!(own["actual.adr.normalize.dry_run"], true);
         assert_eq!(own["actual.adr.normalize.push"], false);
         assert_eq!(own["actual.adr.command.outcome"], "succeeded");
