@@ -65,7 +65,7 @@ use crate::rules::types::AdrMeta;
 /// real, measured reduction in typical-case latency, paired with the raised
 /// `CHECK_BUDGET` for margin against the variance no batch size alone
 /// removes.
-pub(super) const MAX_RULES_JUDGED: usize = 40;
+pub(crate) const MAX_RULES_JUDGED: usize = 40;
 
 // ── the shared pipeline ──────────────────────────────────────────────────
 
@@ -90,6 +90,9 @@ pub(super) struct CheckKnobs<'a> {
     /// [`GATE_RANK_BUDGET`] in a hook, where the judge needs the rest of the
     /// hook's timeout.
     pub(super) rank_budget: Duration,
+    /// The most individual rules one judge call reads: `--max-rules`,
+    /// [`MAX_RULES_JUDGED`] unless given.
+    pub(super) max_rules: usize,
 }
 
 impl CheckKnobs<'_> {
@@ -123,6 +126,7 @@ impl PlanCheckArgs {
             model: self.model.as_deref(),
             default_runners: rules_rank::DEFAULT_RUNNERS,
             rank_budget: RANK_BUDGET,
+            max_rules: usize::try_from(self.max_rules).unwrap_or(usize::MAX),
         }
     }
 }
@@ -134,6 +138,9 @@ impl PlanCheckArgs {
 /// fail-open. The non-`Verdicts` variants carry how many documents were under
 /// consideration when the pipeline stopped, so neither caller has to report a
 /// misleading zero for a failure that happened after selection ran.
+// One value per check run, built once and moved a few times: boxing the
+// verdicts variant would add churn at every match for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Outcome {
     /// No committed rule document applied to this artifact, or the rules
     /// directory holds none. Not a failure — most plans do not touch every
@@ -231,69 +238,17 @@ pub(super) fn run_pipeline_filtered(
     use_rank: bool,
     session: &GovernanceSession,
 ) -> Result<(Outcome, Option<FilterTally>), ActualError> {
-    let plan_digest = governance_session::content_digest(plan_text);
-    let resolved = scope::resolve_in(rules_dir, root, knobs.rebuild)?;
-    let query = match kind {
-        check::ArtifactKind::Plan => Query::new(plan_text),
-        check::ArtifactKind::Diff => Query::for_diff(plan_text),
+    let Prepared {
+        selection,
+        gathered,
+        tally,
+        cfg,
+        runtime,
+        ..
+    } = match prepare_round(plan_text, root, rules_dir, knobs, kind, use_rank, session)? {
+        PreparedRound::Stopped { outcome, tally, .. } => return Ok((outcome, tally)),
+        PreparedRound::Prepared(prepared) => prepared,
     };
-    let prefiltered = select::prefilter(&resolved.index, &query, knobs.limit, knobs.candidates);
-
-    if prefiltered.is_empty() {
-        let selection = prefiltered.finish(Stage2::NotRequested);
-        let tally = filter_tally(&prefiltered, &selection, &GatheredRules::default());
-        return Ok((Outcome::NothingApplies, Some(tally)));
-    }
-
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
-
-    // A runner is only resolved up front when stage 2's rank needs one to
-    // produce a selection at all. Otherwise resolution is deferred until
-    // just before the judge call, below — so a round whose every applicable
-    // rule turns out to already be excluded (see `gathered.excluded` below)
-    // never has to resolve a runner it will not use.
-    let early_runner = if use_rank {
-        match rules_rank::resolve_for_rank(knobs.runner, knobs.model, &cfg, knobs.default_runners) {
-            Ok(runner) => Some(runner),
-            Err(reason) => {
-                return Ok((
-                    Outcome::NoRunner {
-                        documents_selected: prefiltered.len(),
-                        reason,
-                    },
-                    None,
-                ))
-            }
-        }
-    } else {
-        None
-    };
-
-    let selection = if use_rank {
-        let runner = early_runner
-            .as_ref()
-            .expect("early_runner is always Some when use_rank is true");
-        runtime.block_on(prefiltered.rank_within(
-            &runner.runner,
-            runner.model.as_deref(),
-            runner.max_budget_usd,
-            knobs.rank_budget,
-        ))
-    } else {
-        prefiltered.finish(Stage2::NotRequested)
-    };
-
-    if selection.selected.is_empty() {
-        let tally = filter_tally(&prefiltered, &selection, &GatheredRules::default());
-        return Ok((Outcome::NothingApplies, Some(tally)));
-    }
-
-    let gathered = gather_rules(&selection, root, session, kind, &plan_digest);
-    let tally = filter_tally(&prefiltered, &selection, &gathered);
     if gathered.rules.is_empty() {
         let outcome = if gathered.excluded > 0 {
             // Every applicable rule was already settled this session: there
@@ -367,6 +322,185 @@ pub(super) fn run_pipeline_filtered(
         },
     };
     Ok((outcome, Some(tally)))
+}
+
+/// A round up to the judge: what it would be handed, or why it stops first.
+// One value per round, matched once, like `Outcome`.
+#[allow(clippy::large_enum_variant)]
+enum PreparedRound {
+    /// The round ends before the judge: nothing applies, or the rank found no
+    /// runner. `selection` is what stage 1 and the rank chose, when they got
+    /// that far.
+    Stopped {
+        outcome: Outcome,
+        tally: Option<FilterTally>,
+        selection: Option<Selection>,
+    },
+    Prepared(Prepared),
+}
+
+/// The selection and the rules gathered from it, ready for the judge.
+struct Prepared {
+    selection: Selection,
+    gathered: GatheredRules,
+    tally: FilterTally,
+    cfg: crate::config::types::Config,
+    runtime: tokio::runtime::Runtime,
+    /// Wall-clock seconds the rank took, when one ran.
+    rank_seconds: Option<f64>,
+}
+
+/// Everything [`run_pipeline_filtered`] does before the judge: resolve the
+/// index, run stage 1, rank when `use_rank`, and gather the selected
+/// documents' rules. Shared with [`selection_report`], so `--selection-only`
+/// reports what the judge would be handed rather than an imitation of it.
+fn prepare_round(
+    plan_text: &str,
+    root: &Path,
+    rules_dir: &Path,
+    knobs: &CheckKnobs,
+    kind: check::ArtifactKind,
+    use_rank: bool,
+    session: &GovernanceSession,
+) -> Result<PreparedRound, ActualError> {
+    let plan_digest = governance_session::content_digest(plan_text);
+    let resolved = scope::resolve_in(rules_dir, root, knobs.rebuild)?;
+    let query = match kind {
+        check::ArtifactKind::Plan => Query::new(plan_text),
+        check::ArtifactKind::Diff => Query::for_diff(plan_text),
+    };
+    let prefiltered = select::prefilter(&resolved.index, &query, knobs.limit, knobs.candidates);
+
+    if prefiltered.is_empty() {
+        let selection = prefiltered.finish(Stage2::NotRequested);
+        let tally = filter_tally(&prefiltered, &selection, &GatheredRules::default());
+        return Ok(PreparedRound::Stopped {
+            outcome: Outcome::NothingApplies,
+            tally: Some(tally),
+            selection: Some(selection),
+        });
+    }
+
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
+
+    // A runner is only resolved up front when stage 2's rank needs one to
+    // produce a selection at all. Otherwise resolution is deferred until
+    // just before the judge call — so a round whose every applicable rule
+    // turns out to already be excluded (see `gathered.excluded`) never has to
+    // resolve a runner it will not use.
+    let early_runner = if use_rank {
+        match rules_rank::resolve_for_rank(knobs.runner, knobs.model, &cfg, knobs.default_runners) {
+            Ok(runner) => Some(runner),
+            Err(reason) => {
+                return Ok(PreparedRound::Stopped {
+                    outcome: Outcome::NoRunner {
+                        documents_selected: prefiltered.len(),
+                        reason,
+                    },
+                    tally: None,
+                    selection: None,
+                })
+            }
+        }
+    } else {
+        None
+    };
+
+    let (selection, rank_seconds) = match early_runner.as_ref() {
+        Some(runner) => {
+            let started = std::time::Instant::now();
+            let selection = runtime.block_on(prefiltered.rank_within(
+                &runner.runner,
+                runner.model.as_deref(),
+                runner.max_budget_usd,
+                knobs.rank_budget,
+            ));
+            (selection, Some(started.elapsed().as_secs_f64()))
+        }
+        None => (prefiltered.finish(Stage2::NotRequested), None),
+    };
+
+    if selection.selected.is_empty() {
+        let tally = filter_tally(&prefiltered, &selection, &GatheredRules::default());
+        return Ok(PreparedRound::Stopped {
+            outcome: Outcome::NothingApplies,
+            tally: Some(tally),
+            selection: Some(selection),
+        });
+    }
+
+    let gathered = gather_rules_capped(
+        &selection,
+        root,
+        session,
+        kind,
+        &plan_digest,
+        knobs.max_rules,
+    );
+    let tally = filter_tally(&prefiltered, &selection, &gathered);
+    Ok(PreparedRound::Prepared(Prepared {
+        selection,
+        gathered,
+        tally,
+        cfg,
+        runtime,
+        rank_seconds,
+    }))
+}
+
+/// `--selection-only`: what a direct `plan-check` or `impl-check` would hand
+/// its judge, without calling the judge. The selection carries every stage-1
+/// candidate and, when the rank ran, its score, so another limit, cutoff or
+/// rule cap can be tried on the same answer offline.
+pub(super) fn selection_report(
+    plan_text: &str,
+    root: &Path,
+    rules_dir: &Path,
+    knobs: &CheckKnobs,
+    kind: check::ArtifactKind,
+    use_rank: bool,
+) -> Result<serde_json::Value, ActualError> {
+    let round = prepare_round(
+        plan_text,
+        root,
+        rules_dir,
+        knobs,
+        kind,
+        use_rank,
+        &GovernanceSession::default(),
+    )?;
+    Ok(match round {
+        PreparedRound::Stopped {
+            outcome, selection, ..
+        } => serde_json::json!({
+            "selection": selection,
+            "rules": [],
+            "rules_considered": 0,
+            "truncated": false,
+            "max_rules": knobs.max_rules,
+            "stopped": match outcome {
+                Outcome::NoRunner { reason, .. } => format!("no runner: {reason}"),
+                _ => "nothing applies".to_string(),
+            },
+        }),
+        PreparedRound::Prepared(prepared) => serde_json::json!({
+            "selection": prepared.selection,
+            "rules": prepared
+                .gathered
+                .rules
+                .iter()
+                .map(|rule| serde_json::json!({"doc_slug": rule.doc_slug, "rule_id": rule.rule_id}))
+                .collect::<Vec<_>>(),
+            "rules_considered": prepared.gathered.considered,
+            "truncated": prepared.gathered.truncated,
+            "max_rules": knobs.max_rules,
+            "rank_seconds": prepared.rank_seconds,
+        }),
+    })
 }
 
 /// The account of one round's selection: stage 1's and the limit's drops from
@@ -470,12 +604,33 @@ struct GatheredRules {
 /// between selection and this read) is skipped rather than failing the whole
 /// batch — one bad file never costs the rest, the same invariant
 /// `crate::rules::discover` enforces on the original scan.
+#[cfg(test)]
 fn gather_rules(
     selection: &Selection,
     root: &Path,
     session: &GovernanceSession,
     kind: check::ArtifactKind,
     plan_digest: &str,
+) -> GatheredRules {
+    gather_rules_capped(
+        selection,
+        root,
+        session,
+        kind,
+        plan_digest,
+        MAX_RULES_JUDGED,
+    )
+}
+
+/// [`gather_rules`], judging at most `cap` rules: `--max-rules`, which
+/// defaults to [`MAX_RULES_JUDGED`].
+fn gather_rules_capped(
+    selection: &Selection,
+    root: &Path,
+    session: &GovernanceSession,
+    kind: check::ArtifactKind,
+    plan_digest: &str,
+    cap: usize,
 ) -> GatheredRules {
     let mut candidates = Vec::new();
     let mut excluded = 0usize;
@@ -522,9 +677,9 @@ fn gather_rules(
         }
     }
     let considered = candidates.len();
-    let truncated = considered > MAX_RULES_JUDGED;
+    let truncated = considered > cap;
     if truncated {
-        candidates = select_judged_window(candidates, session, kind);
+        candidates = select_judged_window_capped(candidates, session, kind, cap);
     }
     let (judged, windowed): (Vec<_>, Vec<_>) = live
         .into_iter()
@@ -565,10 +720,21 @@ fn read_active(path: &Path) -> Option<crate::rules::types::RuleDocument> {
 /// window on their own (still in that same order) and nothing else rotates
 /// in this round. Denials recorded against the other artifact kind do not
 /// pin or rotate this window.
+#[cfg(test)]
 fn select_judged_window(
     candidates: Vec<RuleForJudging>,
     session: &GovernanceSession,
     kind: check::ArtifactKind,
+) -> Vec<RuleForJudging> {
+    select_judged_window_capped(candidates, session, kind, MAX_RULES_JUDGED)
+}
+
+/// [`select_judged_window`] with a window of `cap` rules.
+fn select_judged_window_capped(
+    candidates: Vec<RuleForJudging>,
+    session: &GovernanceSession,
+    kind: check::ArtifactKind,
+    cap: usize,
 ) -> Vec<RuleForJudging> {
     let active = session.loop_state(kind);
     let (mut pinned, mut rest): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|rule| {
@@ -576,11 +742,11 @@ fn select_judged_window(
             .deny_counts
             .contains_key(&governance_session::key(&rule.doc_slug, &rule.rule_id))
     });
-    if pinned.len() >= MAX_RULES_JUDGED {
-        pinned.truncate(MAX_RULES_JUDGED);
+    if pinned.len() >= cap {
+        pinned.truncate(cap);
         return pinned;
     }
-    let remaining = MAX_RULES_JUDGED - pinned.len();
+    let remaining = cap - pinned.len();
     if !rest.is_empty() {
         let offset = rotation_offset(active.rounds, remaining, rest.len());
         rest.rotate_left(offset);
@@ -733,8 +899,8 @@ pub(super) fn render_panel(
                 "Rules checked",
                 &match partial {
                     Some((judged, total)) => format!(
-                        "{judged} of {total} (over the {MAX_RULES_JUDGED}-rule cap; the rest \
-                         were not judged)"
+                        "{judged} of {total} (over the {judged}-rule cap; the rest were not \
+                         judged)"
                     ),
                     None => verdicts.len().to_string(),
                 },
@@ -2445,7 +2611,7 @@ fn codex_typed_override(
 pub(super) fn partial_coverage_note(judged: usize, total: usize) -> String {
     format!(
         "Only {judged} of {total} rules in scope were checked this round — the rest exceeded \
-         the {MAX_RULES_JUDGED}-rule judging cap and were not evaluated at all."
+         the {judged}-rule judging cap and were not evaluated at all."
     )
 }
 
@@ -3313,6 +3479,8 @@ pub(crate) mod tests {
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
+            max_rules: 40,
+            selection_only: false,
             runner: None,
             model: None,
             json: false,
@@ -3897,6 +4065,8 @@ pub(crate) mod tests {
             limit: 7,
             candidates: 9,
             no_rank: false,
+            max_rules: 40,
+            selection_only: false,
             runner: None,
             model: Some("m".to_string()),
             json: false,
@@ -4066,6 +4236,7 @@ pub(crate) mod tests {
             indexed_documents: 1,
             limit: 10,
             selected: vec![],
+            considered: vec![],
             stage2: Stage2::NotRequested,
         };
         let outcome = Outcome::Verdicts {
@@ -4102,6 +4273,7 @@ pub(crate) mod tests {
             indexed_documents: 1,
             limit: 10,
             selected: vec![],
+            considered: vec![],
             stage2: Stage2::NotRequested,
         };
         let outcome = Outcome::Verdicts {
@@ -4134,6 +4306,7 @@ pub(crate) mod tests {
             indexed_documents: 1,
             limit: 10,
             selected: vec![],
+            considered: vec![],
             stage2: Stage2::NotRequested,
         };
         let outcome = Outcome::Verdicts {
@@ -4172,6 +4345,7 @@ pub(crate) mod tests {
             indexed_documents: 1,
             limit: 10,
             selected: vec![],
+            considered: vec![],
             stage2: Stage2::NotRequested,
         };
         let conforming = Outcome::Verdicts {
@@ -4327,6 +4501,7 @@ pub(crate) mod tests {
             indexed_documents: 1,
             limit: 10,
             selected: Vec::new(),
+            considered: vec![],
             stage2: Stage2::NotRequested,
         };
         let outcome = Outcome::Verdicts {
@@ -5016,6 +5191,108 @@ pub(crate) mod tests {
         ));
     }
 
+    /// `--selection-only` reports what the judge would read — every stage-1
+    /// candidate with its rank score, and the gathered rules — and makes the
+    /// rank's call but never the judge's.
+    #[cfg(unix)]
+    #[test]
+    fn test_selection_report_ranks_but_never_judges() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[
+            ("cross-cutting-token-signing-1c57.md", OAUTH_DOC),
+            ("cross-cutting-terraform-c340.md", TERRAFORM_DOC),
+        ]);
+        let bin = tempdir().unwrap();
+        let log = bin.path().join("calls.log");
+        let script = fake_claude(bin.path(), &rank_output());
+        let body = std::fs::read_to_string(&script).unwrap();
+        std::fs::write(
+            &script,
+            body.replacen(
+                "fi\n",
+                &format!("fi\necho call >> '{}'\n", log.display()),
+                1,
+            ),
+        )
+        .unwrap();
+        let _binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.limit = 1;
+        let report = selection_report(
+            "Rotate the OAuth signing key and pin providers",
+            root.path(),
+            &crate::rules::rules_dir(root.path()),
+            &args.check_knobs(),
+            check::ArtifactKind::Plan,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "call\n");
+        let considered = report["selection"]["considered"].as_array().unwrap();
+        assert_eq!(considered.len(), 2);
+        assert_eq!(considered[0]["rank_score"], 9);
+        assert_eq!(report["selection"]["selected"].as_array().unwrap().len(), 1);
+        let rules = report["rules"].as_array().unwrap();
+        assert!(!rules.is_empty());
+        assert_eq!(report["rules_considered"], rules.len());
+        assert_eq!(report["max_rules"], MAX_RULES_JUDGED);
+        assert!(report["rank_seconds"].as_f64().is_some());
+    }
+
+    /// `--max-rules` caps what one judge call reads, and the report says the
+    /// rest were left out.
+    #[test]
+    fn test_selection_report_caps_the_rules_at_max_rules() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.max_rules = 1;
+
+        let report = selection_report(
+            "Rotate the OAuth signing key",
+            root.path(),
+            &crate::rules::rules_dir(root.path()),
+            &args.check_knobs(),
+            check::ArtifactKind::Plan,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(report["rules_considered"], 2);
+        assert_eq!(report["truncated"], true);
+        assert!(report["rank_seconds"].is_null());
+        let considered = report["selection"]["considered"].as_array().unwrap();
+        assert!(considered.iter().all(|c| c.get("rank_score").is_none()));
+    }
+
+    /// Nothing matching is reported as such, with the empty selection.
+    #[test]
+    fn test_selection_report_says_when_nothing_applies() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let report = selection_report(
+            "Repaint the marketing banner",
+            root.path(),
+            &crate::rules::rules_dir(root.path()),
+            &base_args().check_knobs(),
+            check::ArtifactKind::Plan,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report["stopped"], "nothing applies");
+        assert!(report["rules"].as_array().unwrap().is_empty());
+    }
+
     /// The mechanism the whole revision loop rests on: a rule named in
     /// `exclude` is never even offered to the judge as a candidate. Proven
     /// here by having the fake judge answer for it *anyway* (as a real judge
@@ -5209,6 +5486,7 @@ pub(crate) mod tests {
                 indexed_documents: 1,
                 limit: 10,
                 selected: vec![],
+                considered: vec![],
                 stage2: Stage2::NotRequested,
             },
             verdicts,
@@ -7635,6 +7913,7 @@ pub(crate) mod tests {
         let verdict = |at: usize, verdict: &str| scope::RankedVerdict {
             slug: candidates[at].slug.clone(),
             verdict: serde_json::from_value(serde_json::json!(verdict)).unwrap(),
+            score: 0,
         };
         let selection = prefiltered.apply(&[verdict(0, "unrelated"), verdict(1, "governs")]);
 
@@ -7677,6 +7956,7 @@ pub(crate) mod tests {
             indexed_documents: 3,
             limit: 3,
             selected: vec![selected("terraform"), selected("many"), selected("oauth")],
+            considered: vec![],
             stage2: Stage2::NotRequested,
         };
         let mut session = GovernanceSession::default();
@@ -7814,6 +8094,7 @@ pub(crate) mod tests {
                 indexed_documents: 1,
                 limit: 10,
                 selected: vec![],
+                considered: vec![],
                 stage2: Stage2::NotRequested,
             },
             verdicts,
