@@ -1,15 +1,20 @@
 //! `actual self-update`: replace a copy of `actual` someone downloaded by
 //! hand with the latest release, once the release's signature checks out.
 //!
-//! Homebrew and npm keep a record of the files they install, so those copies
-//! get that tool's command instead, and a build from source gets cargo's. It
-//! never writes where only an administrator can, and it never runs under CI,
-//! inside a command `actual` started, or with update checks turned off.
+//! Homebrew and npm keep a record of the files they install, so for their
+//! global installs it runs that tool's upgrade instead, after asking the
+//! person at the terminal; with no one there to ask, it prints the command.
+//! A build from source gets cargo's command. It never writes where only an
+//! administrator can, never runs `sudo`, and never runs under CI, inside a
+//! command `actual` started, or with update checks turned off.
 
+use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::cli::ui::real_terminal::RealTerminal;
+use crate::cli::ui::terminal::TerminalIO;
 use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::release_verify::{self, ReleaseKey, SIGNATURE_FILE, SUMS_FILE};
@@ -53,10 +58,17 @@ struct Setup<'a> {
     progress: bool,
     /// Who owns a path: [`owner_of`], or a stand-in a test can make say root.
     owner: fn(&Path) -> std::io::Result<u32>,
+    /// A person can answer a question: stdin and stderr are a terminal.
+    interactive: bool,
+    /// Where that question is asked.
+    terminal: &'a dyn TerminalIO,
+    /// The `PATH` that npm, and each command Homebrew and npm run, is found on.
+    path: OsString,
 }
 
 pub fn exec() -> Result<(), ActualError> {
     let keys = release_verify::committed_keys().map_err(|message| failed(message, None))?;
+    let terminal = RealTerminal::default();
     let setup = Setup {
         config: crate::config::paths::load().ok(),
         in_ci: update_check::env_is_set("CI"),
@@ -74,6 +86,9 @@ pub fn exec() -> Result<(), ActualError> {
         cache_path: update_check::cache_path(),
         progress: std::io::stderr().is_terminal(),
         owner: owner_of,
+        interactive: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+        terminal: &terminal,
+        path: std::env::var_os("PATH").unwrap_or_default(),
     };
     run(&setup, &mut std::io::stdout(), &mut std::io::stderr())
 }
@@ -87,7 +102,10 @@ fn run(setup: &Setup, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Ac
         .exe
         .clone()
         .ok_or_else(|| failed("Couldn't find the path of the running actual binary.", None))?;
-    check_unmanaged(&exe, setup.release_build)?;
+    if let Some(manager) = PackageManager::of(Channel::of_executable(&exe)) {
+        return delegate(setup, &exe, manager, out, err);
+    }
+    check_release_build(setup.release_build)?;
     let archive_name = archive_for(setup.os, setup.arch).ok_or_else(|| {
         refused(
             format!(
@@ -97,11 +115,9 @@ fn run(setup: &Setup, out: &mut dyn Write, err: &mut dyn Write) -> Result<(), Ac
             CARGO_COMMAND,
         )
     })?;
-    let latest = latest_version(setup)?;
-    if !update_check::is_newer(&latest, CURRENT_VERSION) {
-        writeln!(out, "actual {CURRENT_VERSION} is the latest release.")?;
+    let Some(latest) = newer_release(setup, out)? else {
         return Ok(());
-    }
+    };
 
     let staging = staging_dir(&exe, &latest)?;
     let user = (setup.owner)(staging.path())?;
@@ -191,26 +207,282 @@ fn check_allowed(setup: &Setup) -> Result<(), ActualError> {
     }
 }
 
-/// Homebrew and npm keep a record of the files they install, and their next
-/// upgrade overwrites a binary replaced behind their back anyway. A build from
-/// source, wherever it's installed, may be one made for a system the release
-/// builds don't run on, such as a Linux with a glibc older than theirs.
-fn check_unmanaged(exe: &Path, release_build: bool) -> Result<(), ActualError> {
-    let channel = Channel::of_executable(exe);
-    match channel.upgrade_command() {
-        Some(command) => Err(refused(
-            format!(
-                "This copy of actual was installed with {}, which keeps track of the files it installs, so it does the upgrade.",
-                channel.label()
-            ),
-            command,
-        )),
-        None if !release_build => Err(refused(
-            "This copy of actual was built from source, and a release build may not run on this system, so it upgrades by rebuilding.",
-            CARGO_COMMAND,
-        )),
-        None => Ok(()),
+/// A build from source, wherever it's installed, may be one made for a
+/// system the release builds don't run on, such as a Linux with a glibc older
+/// than theirs.
+fn check_release_build(release_build: bool) -> Result<(), ActualError> {
+    if release_build {
+        return Ok(());
     }
+    Err(refused(
+        "This copy of actual was built from source, and a release build may not run on this system, so it upgrades by rebuilding.",
+        CARGO_COMMAND,
+    ))
+}
+
+/// The release npm has when it's newer than this one, the same lookup the
+/// daily notice makes, so what gets installed is what the notice announced.
+/// Otherwise says this is the latest and returns `None`.
+fn newer_release(setup: &Setup, out: &mut dyn Write) -> Result<Option<String>, ActualError> {
+    let latest = latest_version(setup)?;
+    if update_check::is_newer(&latest, CURRENT_VERSION) {
+        return Ok(Some(latest));
+    }
+    writeln!(out, "actual {CURRENT_VERSION} is the latest release.")?;
+    Ok(None)
+}
+
+/// A package manager that keeps a record of the files it installs, so
+/// `actual self-update` runs it rather than replacing its copy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackageManager {
+    Homebrew,
+    Npm,
+}
+
+impl PackageManager {
+    fn of(channel: Channel) -> Option<Self> {
+        match channel {
+            Channel::Homebrew => Some(Self::Homebrew),
+            Channel::Npm => Some(Self::Npm),
+            Channel::Other => None,
+        }
+    }
+
+    fn channel(self) -> Channel {
+        match self {
+            Self::Homebrew => Channel::Homebrew,
+            Self::Npm => Channel::Npm,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        self.channel().label()
+    }
+
+    /// Its own upgrade command, for anywhere no one can answer.
+    fn command(self) -> &'static str {
+        self.channel()
+            .upgrade_command()
+            .expect("Homebrew and npm have an upgrade command")
+    }
+
+    /// The prefix of the global install that holds `exe`, and the directory
+    /// there it rewrites to upgrade actual: `<prefix>/Cellar/actual` for
+    /// Homebrew's `<prefix>/Cellar/actual/<version>/bin/actual`, and
+    /// `<prefix>/lib/node_modules/@actualai` for npm's. Each links
+    /// `<prefix>/bin/actual` into that directory. A project's own
+    /// `node_modules`, npx's cache, and pnpm's and bun's global directories
+    /// don't, so they get `None`, and so does anything that only looks like
+    /// one.
+    fn global_install(self, exe: &Path) -> Option<(PathBuf, PathBuf)> {
+        let (prefix, dir) = match self {
+            Self::Homebrew => {
+                let rack = exe.ancestors().find(|dir| dir.ends_with("Cellar/actual"))?;
+                (rack.parent()?.parent()?, rack.to_path_buf())
+            }
+            Self::Npm => {
+                let named = |name: &'static str| {
+                    move |dir: &&Path| dir.file_name() == Some(OsStr::new(name))
+                };
+                let modules = exe.ancestors().filter(named("node_modules")).last()?;
+                let lib = modules.parent().filter(named("lib"))?;
+                (lib.parent()?, modules.join("@actualai"))
+            }
+        };
+        let linked = std::fs::canonicalize(prefix.join("bin").join(BINARY)).ok()?;
+        linked
+            .starts_with(&dir)
+            .then(|| (prefix.to_path_buf(), dir))
+    }
+
+    /// The commands that upgrade the global install under `prefix`, each a
+    /// program and its arguments, never through a shell. Homebrew's own
+    /// `brew`, so a Mac with Homebrew in both `/usr/local` and
+    /// `/opt/homebrew` upgrades the one that holds this copy. npm from
+    /// `PATH`, told this install's prefix, so it replaces this copy whichever
+    /// node it belongs to.
+    fn steps(self, prefix: &Path) -> Vec<Vec<OsString>> {
+        match self {
+            Self::Homebrew => {
+                let brew = prefix.join("bin").join("brew");
+                vec![
+                    vec![brew.clone().into(), "update".into()],
+                    vec![
+                        brew.into(),
+                        "upgrade".into(),
+                        "actual-software/actual/actual".into(),
+                    ],
+                ]
+            }
+            Self::Npm => vec![vec![
+                "npm".into(),
+                "install".into(),
+                "-g".into(),
+                "--prefix".into(),
+                prefix.into(),
+                "@actualai/actual@latest".into(),
+            ]],
+        }
+    }
+
+    /// What to do before saying yes, if anything.
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Homebrew => None,
+            Self::Npm => Some("Close any Claude Code or Codex session that uses actual first, or its checks can fail while npm runs."),
+        }
+    }
+
+    /// The refusal when this user can't write `dir`, where the package
+    /// manager keeps actual, such as npm's prefix under `/usr`, which only
+    /// `sudo` changes.
+    fn unwritable(self, dir: &Path, latest: &str) -> ActualError {
+        let place = format!(
+            "actual {latest} is out, but you can't write to {}",
+            dir.display()
+        );
+        match self {
+            Self::Homebrew => refused(
+                format!("{place}, where Homebrew keeps it."),
+                "Run actual self-update as the user who owns Homebrew.",
+            ),
+            Self::Npm => refused(
+                format!("{place}, where npm keeps it. Have npm install into a folder you own with npm config set prefix ~/.local, put ~/.local/bin first on your PATH, then reinstall:"),
+                self.command(),
+            ),
+        }
+    }
+}
+
+/// Upgrade a global Homebrew or npm install with that package manager once
+/// the person at the terminal agrees, or with no one there to ask, print its
+/// command. Exits with the package manager's status when it fails.
+fn delegate(
+    setup: &Setup,
+    exe: &Path,
+    manager: PackageManager,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), ActualError> {
+    let label = manager.label();
+    if !setup.interactive {
+        return Err(refused(
+            format!("actual self-update asks before it runs {label}, so it needs a terminal. Run it in your terminal, or upgrade with {label} yourself:"),
+            manager.command(),
+        ));
+    }
+    let (prefix, dir) = manager.global_install(exe).ok_or_else(|| {
+        refused(
+            format!(
+                "actual self-update upgrades only the copy {label} links into its bin directory, and {} isn't that copy.",
+                exe.display()
+            ),
+            "Upgrade it with the tool that put it there.",
+        )
+    })?;
+    let Some(latest) = newer_release(setup, out)? else {
+        return Ok(());
+    };
+    let probe = tempfile::Builder::new()
+        .prefix(STAGING_PREFIX)
+        .tempfile_in(&dir)
+        .map_err(|_| manager.unwritable(&dir, &latest))?;
+    check_not_root((setup.owner)(probe.path())?)?;
+    drop(probe);
+
+    let steps = manager.steps(&prefix);
+    let plan = format!(
+        "actual {latest} is out (you have {CURRENT_VERSION}). To upgrade, actual self-update runs:"
+    );
+    writeln!(err, "{plan}")?;
+    for step in &steps {
+        writeln!(err, "  {}", shown(step))?;
+    }
+    if let Some(warning) = manager.warning() {
+        writeln!(err, "{warning}")?;
+    }
+    let before = identity(exe)?;
+    if !setup.terminal.confirm(&format!("Run {label} now?"))? {
+        writeln!(err, "Nothing was changed.")?;
+        return Err(ActualError::UserCancelled);
+    }
+    let _lock = lock(setup.lock_path.as_deref(), err)?;
+    // npm removes the old binary before it writes the new one, so a run that
+    // waited may find no file at all: that also means another run upgraded it.
+    if identity(exe).ok() != Some(before) {
+        let upgraded = "Another actual self-update upgraded actual while this one waited.";
+        writeln!(out, "{upgraded}")?;
+        return Ok(());
+    }
+
+    for step in &steps {
+        let status = std::process::Command::new(&step[0])
+            .args(&step[1..])
+            .current_dir(&prefix)
+            .env("PATH", &setup.path)
+            .status()
+            .map_err(|e| {
+                failed(
+                    format!("Couldn't run {}: {e}", shown(&step[..1])),
+                    Some(manager.command().to_string()),
+                )
+            })?;
+        if !status.success() {
+            let how = if status.code().is_some() {
+                "failed"
+            } else {
+                "was stopped"
+            };
+            return Err(ActualError::SelfUpdateToolFailed {
+                message: format!("{} {how}, so actual wasn't upgraded.", shown(step)),
+                code: status.code().unwrap_or(1),
+            });
+        }
+    }
+
+    let linked = prefix.join("bin").join(BINARY);
+    match installed_version(&linked, &setup.path) {
+        Some(now) if update_check::is_newer(&now, CURRENT_VERSION) => {
+            let updated = format!(
+                "Updated actual at {} from {CURRENT_VERSION} to {now} with {label}.",
+                linked.display()
+            );
+            writeln!(out, "{updated}")?;
+            Ok(())
+        }
+        Some(now) => Err(failed(
+            format!("{label} finished, but {} is still actual {now}: {label} may not offer actual {latest} yet, or it's holding actual back.", linked.display()),
+            Some("Try again later.".to_string()),
+        )),
+        None => Err(failed(
+            format!("{label} finished, but {} didn't report its version.", linked.display()),
+            Some("Run actual --version to check it.".to_string()),
+        )),
+    }
+}
+
+/// A command as the person is shown it.
+fn shown(step: &[OsString]) -> String {
+    step.iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The version `actual --version` at `path` reports, or `None` when it
+/// doesn't run or report one.
+fn installed_version(path: &Path, search_path: &OsStr) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .env("PATH", search_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text.split_whitespace().last()?;
+    semver::Version::parse(version).ok().map(|v| v.to_string())
 }
 
 /// The release archive built for `os` and `arch`, as `std::env::consts`
@@ -304,7 +576,7 @@ fn owner_of(_path: &Path) -> std::io::Result<u32> {
 fn check_not_root(owner: u32) -> Result<(), ActualError> {
     if owner == 0 {
         return Err(refused(
-            "actual self-update doesn't replace a binary as root.",
+            "actual self-update doesn't run as root.",
             "Run it as the user who installed actual.",
         ));
     }
@@ -450,9 +722,10 @@ fn install(new: &Path, exe: &Path) -> Result<(), ActualError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::cli::ui::test_utils::MockTerminal;
     use crate::config::types::UpdateCheckConfig;
     use crate::release_verify::test_key::{comment, TestKey};
-    use crate::testutil::{EnvGuard, ENV_MUTEX};
+    use crate::testutil::{write_executable_script, EnvGuard, ENV_MUTEX};
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex, MutexGuard};
@@ -538,6 +811,8 @@ mod tests {
         keys: Vec<ReleaseKey>,
         registry_url: String,
         download_base: String,
+        /// No one there: every question goes unanswered.
+        nobody: MockTerminal,
     }
 
     impl Fixture {
@@ -561,6 +836,7 @@ mod tests {
                 primary,
                 spare,
                 keys,
+                nobody: MockTerminal::new(vec![]),
             }
         }
 
@@ -580,6 +856,9 @@ mod tests {
                 cache_path: Some(self.home.path().join("update-check.yaml")),
                 progress: false,
                 owner: owner_of,
+                interactive: false,
+                terminal: &self.nobody,
+                path: OsString::new(),
             }
         }
 
@@ -985,11 +1264,33 @@ mod tests {
     #[test]
     fn refuses_under_ci_and_inside_its_own_subprocesses() {
         let _env = quiet_env();
-        assert_refused(|s| s.in_ci = true, "doesn't run under CI");
-        assert_refused(
-            |s| s.in_subprocess = true,
-            "inside a command actual started",
-        );
+        let brew = Global::new(Channel::Homebrew);
+        // Never asked: each run is refused first.
+        let answer: &'static MockTerminal = Box::leak(Box::new(MockTerminal::new(vec!["y"])));
+        for exe in [None, Some(brew.exe.clone())] {
+            let place = |s: &mut Setup| {
+                if let Some(exe) = &exe {
+                    s.exe = Some(exe.clone());
+                }
+                s.interactive = true;
+                s.terminal = answer;
+            };
+            assert_refused(
+                |s| {
+                    place(s);
+                    s.in_ci = true;
+                },
+                "doesn't run under CI",
+            );
+            assert_refused(
+                |s| {
+                    place(s);
+                    s.in_subprocess = true;
+                },
+                "inside a command actual started",
+            );
+        }
+        assert_eq!(brew.runs(), Vec::<String>::new());
     }
 
     #[test]
@@ -1009,12 +1310,12 @@ mod tests {
     }
 
     #[test]
-    fn gives_homebrew_and_npm_installs_their_own_command() {
+    fn prints_the_package_manager_command_with_no_one_to_answer() {
         let _env = quiet_env();
         for (path, command) in [
             (
                 "/opt/homebrew/Cellar/actual/0.9.0/bin/actual",
-                "brew upgrade actual-software/actual/actual",
+                "brew update && brew upgrade actual-software/actual/actual",
             ),
             (
                 "/usr/local/lib/node_modules/@actualai/actual-linux-x64/bin/actual",
@@ -1027,7 +1328,7 @@ mod tests {
                         s.exe = Some(PathBuf::from(path));
                         s.release_build = release_build;
                     },
-                    "which keeps track of the files it installs",
+                    "asks before it runs",
                 );
                 assert_eq!(err.hint().as_deref(), Some(command));
             }
@@ -1145,10 +1446,7 @@ mod tests {
 
         let err = update(&setup).0.unwrap_err();
 
-        assert_eq!(
-            err.to_string(),
-            "actual self-update doesn't replace a binary as root."
-        );
+        assert_eq!(err.to_string(), "actual self-update doesn't run as root.");
         assert_eq!(err.exit_code(), 2);
         assert!(err
             .hint()
@@ -1156,6 +1454,413 @@ mod tests {
             .starts_with("Run it as the user who installed actual"));
         assert_eq!(f.installed(), [BINARY]);
         registry.assert();
+    }
+
+    // ---- Homebrew and npm ----
+
+    /// A global install of actual under a fresh prefix, laid out the way
+    /// `channel` lays one out, with `<prefix>/bin/actual` linked to its
+    /// binary: a script reporting [`CURRENT_VERSION`]. Fake tools log each
+    /// run to `log` as their path and arguments.
+    struct Global {
+        _root: TempDir,
+        prefix: PathBuf,
+        exe: PathBuf,
+        /// The only directory on the `PATH` a run gets.
+        path_dir: PathBuf,
+        log: PathBuf,
+    }
+
+    impl Global {
+        fn new(channel: Channel) -> Self {
+            let root = tempdir().unwrap();
+            let base = std::fs::canonicalize(root.path()).unwrap();
+            let prefix = base.join("prefix");
+            let exe = prefix.join(if channel == Channel::Homebrew {
+                "Cellar/actual/0.1.0/bin/actual"
+            } else {
+                "lib/node_modules/@actualai/actual/node_modules/@actualai/actual-linux-x64/bin/actual"
+            });
+            let path_dir = base.join("path");
+            for dir in [exe.parent().unwrap(), &prefix.join("bin"), &path_dir] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            write_executable_script(&exe, Self::reporting(CURRENT_VERSION).as_bytes());
+            std::os::unix::fs::symlink(&exe, prefix.join("bin").join(BINARY)).unwrap();
+            Self {
+                log: base.join("runs.log"),
+                _root: root,
+                prefix,
+                exe,
+                path_dir,
+            }
+        }
+
+        /// A binary whose `--version` reports `version`.
+        fn reporting(version: &str) -> String {
+            format!("#!/bin/sh\necho actual {version}\n")
+        }
+
+        /// Put a fake `name` in `dir` that logs its run, then runs `body`.
+        fn tool(&self, dir: &Path, name: &str, body: &str) {
+            let script = format!(
+                "#!/bin/sh\necho \"$0 $*\" >> '{}'\n{body}\n",
+                self.log.display()
+            );
+            write_executable_script(&dir.join(name), script.as_bytes());
+        }
+
+        /// A tool body that upgrades the binary to [`FUTURE`].
+        fn upgrades(&self) -> String {
+            format!(
+                "printf '{}' > '{}'",
+                Self::reporting(FUTURE).replace('\n', "\\n"),
+                self.exe.display()
+            )
+        }
+
+        fn brew(&self, body: &str) {
+            self.tool(&self.prefix.join("bin"), "brew", body);
+        }
+
+        fn npm(&self, body: &str) {
+            self.tool(&self.path_dir, "npm", body);
+        }
+
+        fn runs(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.log)
+                .map(|log| log.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        }
+
+        /// `f`'s setup run from this install by someone answering with `terminal`.
+        fn setup<'a>(&'a self, f: &'a Fixture, terminal: &'a MockTerminal) -> Setup<'a> {
+            let mut setup = f.setup();
+            setup.exe = Some(self.exe.clone());
+            setup.interactive = true;
+            setup.terminal = terminal;
+            setup.path = self.path_dir.clone().into_os_string();
+            setup
+        }
+
+        fn brew_runs(&self) -> [String; 2] {
+            let brew = self.prefix.join("bin/brew");
+            [
+                format!("{} update", brew.display()),
+                format!("{} upgrade actual-software/actual/actual", brew.display()),
+            ]
+        }
+
+        /// The npm command as the person is shown it; the log holds npm's
+        /// path in `path_dir`.
+        fn npm_run(&self) -> String {
+            format!(
+                "npm install -g --prefix {} @actualai/actual@latest",
+                self.prefix.display()
+            )
+        }
+    }
+
+    #[test]
+    fn runs_brew_update_then_upgrade_once_the_person_agrees() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        let registry = f.latest(FUTURE, 1);
+        let g = Global::new(Channel::Homebrew);
+        g.brew(&format!(
+            "if [ \"$1\" = upgrade ]; then {}; fi",
+            g.upgrades()
+        ));
+        // A brew on PATH belongs to some other Homebrew.
+        g.tool(&g.path_dir, "brew", "exit 0");
+        let yes = MockTerminal::new(vec!["y"]);
+
+        let (result, out, err) = update(&g.setup(&f, &yes));
+
+        result.unwrap();
+        assert_eq!(g.runs(), g.brew_runs());
+        assert_eq!(
+            out,
+            format!(
+                "Updated actual at {} from {CURRENT_VERSION} to {FUTURE} with Homebrew.\n",
+                g.prefix.join("bin/actual").display()
+            )
+        );
+        let [update, upgrade] = g.brew_runs();
+        assert_eq!(
+            err,
+            format!("actual {FUTURE} is out (you have {CURRENT_VERSION}). To upgrade, actual self-update runs:\n  {update}\n  {upgrade}\n")
+        );
+        registry.assert();
+    }
+
+    #[test]
+    fn runs_npm_for_this_install_prefix_after_a_warning() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 1);
+        let g = Global::new(Channel::Npm);
+        g.npm(&g.upgrades());
+        let yes = MockTerminal::new(vec!["yes"]);
+
+        let (result, out, err) = update(&g.setup(&f, &yes));
+
+        result.unwrap();
+        assert_eq!(
+            g.runs(),
+            [format!("{}/{}", g.path_dir.display(), g.npm_run())]
+        );
+        assert!(out.ends_with(&format!("to {FUTURE} with npm.\n")), "{out}");
+        assert!(
+            err.contains("Close any Claude Code or Codex session that uses actual first"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn declining_runs_nothing() {
+        let _env = quiet_env();
+        for channel in [Channel::Homebrew, Channel::Npm] {
+            let mut f = Fixture::new();
+            f.latest(FUTURE, 1);
+            let g = Global::new(channel);
+            g.brew(&g.upgrades());
+            g.npm(&g.upgrades());
+            let no = MockTerminal::new(vec!["n"]);
+
+            let (result, out, err) = update(&g.setup(&f, &no));
+
+            let err_value = result.unwrap_err();
+            assert!(matches!(err_value, ActualError::UserCancelled));
+            assert_eq!(err_value.exit_code(), 4);
+            assert_eq!(out, "");
+            assert!(err.ends_with("Nothing was changed.\n"), "{err}");
+            assert_eq!(g.runs(), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn exits_with_the_status_of_the_step_that_failed() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 2);
+        let yes = || MockTerminal::new(vec!["y"]);
+
+        // brew update fails: brew upgrade never runs.
+        let g = Global::new(Channel::Homebrew);
+        g.brew("[ \"$1\" = update ] && exit 3; exit 0");
+        let answer = yes();
+        let err = update(&g.setup(&f, &answer)).0.unwrap_err();
+        let [update_run, _] = g.brew_runs();
+        assert_eq!(err.exit_code(), 3);
+        assert_eq!(
+            err.to_string(),
+            format!("{update_run} failed, so actual wasn't upgraded.")
+        );
+        assert_eq!(g.runs(), [update_run]);
+
+        // npm killed by a signal.
+        let g = Global::new(Channel::Npm);
+        g.npm("kill -9 $$");
+        let answer = yes();
+        let err = update(&g.setup(&f, &answer)).0.unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.to_string(),
+            format!("{} was stopped, so actual wasn't upgraded.", g.npm_run())
+        );
+    }
+
+    #[test]
+    fn reports_a_package_manager_that_left_the_old_version() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 2);
+        let linked = |g: &Global| g.prefix.join("bin/actual").display().to_string();
+
+        // The tap doesn't have the release npm announced yet.
+        let g = Global::new(Channel::Homebrew);
+        g.brew("exit 0");
+        let yes = MockTerminal::new(vec!["y"]);
+        let err = update(&g.setup(&f, &yes)).0.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("Homebrew finished, but {} is still actual {CURRENT_VERSION}: Homebrew may not offer actual {FUTURE} yet, or it's holding actual back.", linked(&g))
+        );
+        assert_eq!(err.hint().as_deref(), Some("Try again later."));
+        assert_eq!(err.exit_code(), 1);
+
+        // What it left behind doesn't say what it is.
+        let g = Global::new(Channel::Npm);
+        g.npm(&format!("echo 'exit 1' > '{}'", g.exe.display()));
+        let yes = MockTerminal::new(vec!["y"]);
+        let err = update(&g.setup(&f, &yes)).0.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "npm finished, but {} didn't report its version.",
+                linked(&g)
+            )
+        );
+    }
+
+    #[test]
+    fn reports_a_package_manager_it_cannot_find() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 1);
+        let g = Global::new(Channel::Npm);
+        let yes = MockTerminal::new(vec!["y"]);
+
+        let err = update(&g.setup(&f, &yes)).0.unwrap_err();
+
+        assert!(err.to_string().starts_with("Couldn't run npm: "), "{err}");
+        assert_eq!(err.hint().as_deref(), Channel::Npm.upgrade_command());
+        assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn stops_when_the_install_is_the_latest_release() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(CURRENT_VERSION, 1);
+        let g = Global::new(Channel::Homebrew);
+        g.brew("exit 0");
+        let yes = MockTerminal::new(vec!["y"]);
+
+        let (result, out, _) = update(&g.setup(&f, &yes));
+
+        result.unwrap();
+        assert_eq!(
+            out,
+            format!("actual {CURRENT_VERSION} is the latest release.\n")
+        );
+        assert_eq!(g.runs(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn leaves_a_copy_no_global_install_links_to() {
+        let _env = quiet_env();
+        // A project's own node_modules: no lib/ above it.
+        let project = tempdir().unwrap();
+        let base = std::fs::canonicalize(project.path()).unwrap();
+        let local = base.join("node_modules/@actualai/actual-linux-x64/bin/actual");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"").unwrap();
+        // A Homebrew prefix whose bin/actual links elsewhere.
+        let g = Global::new(Channel::Homebrew);
+        std::fs::remove_file(g.prefix.join("bin/actual")).unwrap();
+        std::os::unix::fs::symlink(&local, g.prefix.join("bin/actual")).unwrap();
+        g.brew("exit 0");
+        // Never asked: each run is refused first.
+        let yes: &'static MockTerminal = Box::leak(Box::new(MockTerminal::new(vec!["y"])));
+
+        for (exe, label) in [(local.clone(), "npm"), (g.exe.clone(), "Homebrew")] {
+            let err = assert_refused(
+                |s| {
+                    s.exe = Some(exe.clone());
+                    s.interactive = true;
+                    s.terminal = yes;
+                },
+                &format!("upgrades only the copy {label} links into its bin directory"),
+            );
+            assert!(
+                err.to_string().contains(&exe.display().to_string()),
+                "{err}"
+            );
+        }
+        assert_eq!(g.runs(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn leaves_an_install_this_user_cannot_write() {
+        let _env = quiet_env();
+        for (channel, hint) in [
+            (
+                Channel::Homebrew,
+                "Run actual self-update as the user who owns Homebrew.",
+            ),
+            (Channel::Npm, "npm install -g @actualai/actual@latest"),
+        ] {
+            let mut f = Fixture::new();
+            f.latest(FUTURE, 1);
+            let g = Global::new(channel);
+            g.brew("exit 0");
+            g.npm("exit 0");
+            let dir = if channel == Channel::Homebrew {
+                g.prefix.join("Cellar/actual")
+            } else {
+                g.prefix.join("lib/node_modules/@actualai")
+            };
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let yes = MockTerminal::new(vec!["y"]);
+
+            let result = update(&g.setup(&f, &yes)).0;
+
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let err = result.unwrap_err();
+            assert!(
+                err.to_string().starts_with(&format!(
+                    "actual {FUTURE} is out, but you can't write to {}, where ",
+                    dir.display()
+                )),
+                "{err}"
+            );
+            assert_eq!(err.exit_code(), 2);
+            assert_eq!(err.hint().as_deref(), Some(hint));
+            if channel == Channel::Npm {
+                assert!(
+                    err.to_string().contains("npm config set prefix ~/.local"),
+                    "{err}"
+                );
+            }
+            assert_eq!(g.runs(), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn runs_no_package_manager_as_root() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 1);
+        let g = Global::new(Channel::Npm);
+        g.npm("exit 0");
+        let yes = MockTerminal::new(vec!["y"]);
+        let mut setup = g.setup(&f, &yes);
+        setup.owner = |_| Ok(0);
+
+        let err = update(&setup).0.unwrap_err();
+
+        assert_eq!(err.to_string(), "actual self-update doesn't run as root.");
+        assert_eq!(g.runs(), Vec::<String>::new());
+        let leftovers: Vec<_> = std::fs::read_dir(g.prefix.join("lib/node_modules/@actualai"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, [OsString::from("actual")], "the probe is gone");
+    }
+
+    #[test]
+    fn stops_when_another_run_upgraded_the_install_while_it_waited() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        f.latest(FUTURE, 1);
+        let g = Global::new(Channel::Npm);
+        g.npm("exit 0");
+        let yes = MockTerminal::new(vec!["y"]);
+
+        let (result, out) = run_after_waiting(&f, g.setup(&f, &yes), || {
+            let other = g.exe.with_file_name("from-another-run");
+            write_executable_script(&other, Global::reporting(FUTURE).as_bytes());
+            std::fs::rename(&other, &g.exe).unwrap();
+        });
+
+        result.unwrap();
+        assert_eq!(
+            out.text(),
+            "Another actual self-update upgraded actual while this one waited.\n"
+        );
+        assert_eq!(g.runs(), Vec::<String>::new());
     }
 
     // ---- the lock ----
@@ -1198,13 +1903,13 @@ mod tests {
     /// `meanwhile`, then let it go.
     fn run_after_waiting(
         f: &Fixture,
+        setup: Setup,
         meanwhile: impl FnOnce(),
     ) -> (Result<(), ActualError>, SharedBuf) {
         let held = hold_lock(&f.lock_path());
         let (mut out, mut err) = (SharedBuf::default(), SharedBuf::default());
         let watch = err.clone();
         let result = std::thread::scope(|scope| {
-            let setup = f.setup();
             let output = out.clone();
             let run = scope.spawn(move || run(&setup, &mut output.clone(), &mut err));
             assert!(watch.shows("Waiting for another actual self-update to finish…"));
@@ -1224,7 +1929,7 @@ mod tests {
         let page = Page::signed_by(&f.primary, archive(Entry::File(NEW_BINARY)));
         let files = f.publish(&page, [1, 1, 1]);
 
-        let (result, out) = run_after_waiting(&f, || {});
+        let (result, out) = run_after_waiting(&f, f.setup(), || {});
 
         result.unwrap();
         let printed = out.text();
@@ -1241,7 +1946,7 @@ mod tests {
         let page = Page::signed_by(&f.primary, archive(Entry::File(NEW_BINARY)));
         let files = f.publish(&page, [0, 0, 0]);
 
-        let (result, out) = run_after_waiting(&f, || {
+        let (result, out) = run_after_waiting(&f, f.setup(), || {
             let other = f.install.path().join("from-another-run");
             std::fs::write(&other, b"another run's actual").unwrap();
             std::fs::rename(&other, &f.exe).unwrap();

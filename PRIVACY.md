@@ -782,6 +782,14 @@ telemetry data; like any web request, it shows npm your IP address.
 `actual version --check` and `actual self-update` make the same request when
 you run them. The answer is kept in `~/.actualai/actual/update-check.yaml`.
 
+On a Homebrew or npm install, once you confirm, `actual self-update` runs
+`brew update` and `brew upgrade`, or `npm install -g`. Those tools then contact
+the servers they're configured to use, under their own settings, including
+Homebrew's analytics and npm's registry credentials; `actual` adds nothing to
+their requests. `actual self-update` sends no telemetry event on any path: it
+works only on the CLI's own files, never on a repository or its decisions, and
+an upgrade shows in the CLI version that later events already carry.
+
 `ACTUAL_NO_UPDATE_CHECK=1`, or `update_check.enabled: false` in the config
 file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
 
@@ -794,7 +802,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
 | `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check` or `actual self-update`; no account or repository data | HTTPS |
-| `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
+| `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` on a hand-downloaded copy and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
 | Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, plan or diff text + rule text for `plan-check`, `impl-check` and `rules select`, and, for `actual models`, a request for the model list that holds only your API key | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`, and for `actual models`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
 | The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, check events and session-end events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, check events and session-end events, one OTLP/JSON request per line | Local file, readable only by the owner |

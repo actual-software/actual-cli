@@ -36,6 +36,8 @@ brew install actual-software/actual/actual
 npm install -g @actualai/actual
 ```
 
+To upgrade a Homebrew or npm install later, run `actual self-update` in your terminal. It shows the commands it will run and asks before it runs them. See [Self-update](SELF_UPDATE.md#homebrew-and-npm-installs).
+
 ### Manual download
 
 Download the archive for your platform from the [releases repository](https://github.com/actual-software/actual-releases/releases): `actual-darwin-arm64.tar.gz`, `actual-darwin-x64.tar.gz`, `actual-linux-arm64.tar.gz`, or `actual-linux-x64.tar.gz`. Extract it and move the binary onto your `PATH`. On Apple Silicon:

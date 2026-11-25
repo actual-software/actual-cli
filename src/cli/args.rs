@@ -479,12 +479,13 @@ pub enum Command {
     /// Print the version, how this copy was installed, and how to upgrade it
     Version(VersionArgs),
 
-    /// Replace a hand-downloaded actual with the latest signed release
+    /// Upgrade actual to the latest release
     ///
-    /// Checks the release's signature against the keys built into actual and
-    /// its archive against SHA256SUMS before renaming the new binary into
-    /// place. A copy installed with Homebrew, npm or cargo gets that tool's
-    /// command instead. See docs/SELF_UPDATE.md.
+    /// A hand-downloaded copy is replaced once the release's signature checks
+    /// out against the keys built into actual. A Homebrew or npm install is
+    /// upgraded by running that tool after you confirm, or, with no terminal
+    /// to ask in, its command is printed. A build from source gets cargo's
+    /// command. See docs/SELF_UPDATE.md.
     SelfUpdate,
 
     /// Internal: look up the latest published version once, record it in the

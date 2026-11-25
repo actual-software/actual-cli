@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `actual self-update` now upgrades a global Homebrew or npm install too. At a terminal, it shows the commands it will run and asks once (Enter alone means no), then runs `brew update` and `brew upgrade actual-software/actual/actual` with the `brew` of the Homebrew that holds this copy, or `npm install -g --prefix <prefix> @actualai/actual@latest` for this copy's npm prefix, after warning that open Claude Code or Codex sessions should be closed first. It never runs `sudo` or a shell. It exits with the package manager's status when that fails, 4 when you answer no, and 1 when the upgraded `actual` still reports the old version, as when the Homebrew tap doesn't have the release yet. An npm prefix you can't write, a copy outside the global install (a project's `node_modules`, npx's cache, pnpm or bun), root, CI, a command `actual` started and update checks turned off are refused as before (exit 2), and with no terminal to ask in it prints the package manager's command (exit 2). See [docs/SELF_UPDATE.md](docs/SELF_UPDATE.md#homebrew-and-npm-installs)
+- The daily update notice and `actual version` name `actual self-update` for Homebrew and npm installs as well as hand-downloaded ones
+- The Homebrew command printed where `actual self-update` can't ask, and reported as `upgrade_command` by `actual version --json`, is now `brew update && brew upgrade actual-software/actual/actual`, since a bare `brew upgrade` can read a tap up to a day old and report the latest release as missing. `upgrade_command` is now `actual self-update` for a hand-downloaded release build, where it was `null`; a build from source still reports `null`. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md#actual-version)
+
 ## [0.17.0] - 2026-11-24
 
 ### Added

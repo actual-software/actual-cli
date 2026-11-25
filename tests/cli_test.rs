@@ -194,6 +194,37 @@ fn test_self_update_refuses_with_update_checks_off() {
     assert!(!dir.path().join("update-check.yaml").exists());
 }
 
+/// With no terminal to ask in, as in an agent's shell, a Homebrew install
+/// gets Homebrew's command and nothing runs. The binary is hard-linked into a
+/// Cellar, since actual reads its channel from its resolved path.
+#[cfg(unix)]
+#[test]
+fn test_self_update_prints_the_homebrew_command_without_a_terminal() {
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let keg = root.path().join("prefix/Cellar/actual/0.1.0/bin");
+    std::fs::create_dir_all(&keg).unwrap();
+    let exe = keg.join("actual");
+    let built = assert_cmd::cargo::cargo_bin!("actual");
+    std::fs::hard_link(built, &exe)
+        .or_else(|_| std::fs::copy(built, &exe).map(|_| ()))
+        .unwrap();
+    let config = root.path().join("config");
+    Command::new(&exe)
+        .arg("self-update")
+        .env("ACTUAL_CONFIG_DIR", &config)
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("CI")
+        .env_remove("ACTUAL_CLI_SUBPROCESS")
+        .env_remove("ACTUAL_NO_UPDATE_CHECK")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("asks before it runs Homebrew"))
+        .stderr(predicate::str::contains(
+            "brew update && brew upgrade actual-software/actual/actual",
+        ));
+    assert!(!config.join("self-update.lock").exists());
+}
+
 /// cargo builds the test binary without `ACTUAL_RELEASE_BUILD`.
 #[test]
 fn test_self_update_refuses_a_build_from_source() {

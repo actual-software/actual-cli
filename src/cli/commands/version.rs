@@ -51,7 +51,9 @@ struct Report<'a> {
     /// `null` whenever `latest_version` is.
     update_available: Option<bool>,
     channel: Channel,
-    /// `null` for a binary no package manager owns; see `release_url`.
+    /// What upgrades this binary with no one there to answer a question:
+    /// the package manager's command, `actual self-update` for a release
+    /// build no package manager owns, or `null` for a build from source.
     upgrade_command: Option<&'a str>,
     release_url: &'a str,
 }
@@ -77,7 +79,7 @@ fn render_json(channel: Channel, latest: &Latest) -> String {
         update_available: latest_version
             .map(|latest| update_check::is_newer(latest, CURRENT_VERSION)),
         channel,
-        upgrade_command: channel.upgrade_command(),
+        upgrade_command: channel.unattended_upgrade(),
         release_url: RELEASE_URL,
     };
     serde_json::to_string_pretty(&report).expect("version report is serializable")
@@ -130,7 +132,7 @@ mod tests {
                 "latest_version": null,
                 "update_available": null,
                 "channel": "homebrew",
-                "upgrade_command": "brew upgrade actual-software/actual/actual",
+                "upgrade_command": "brew update && brew upgrade actual-software/actual/actual",
                 "release_url": RELEASE_URL,
             })
         );
@@ -160,7 +162,10 @@ mod tests {
         .unwrap();
         assert_eq!(same["update_available"], false);
         assert_eq!(same["channel"], "other");
-        assert!(same["upgrade_command"].is_null());
+        assert!(
+            same["upgrade_command"].is_null(),
+            "a test build is a build from source"
+        );
     }
 
     #[test]
@@ -185,7 +190,7 @@ mod tests {
             format!(
                 "actual {CURRENT_VERSION}\n  \
                  Installed via:  Homebrew\n  \
-                 Upgrade with:   brew upgrade actual-software/actual/actual"
+                 Upgrade with:   actual self-update"
             )
         );
         let text = render(Channel::Other, &Latest::NotRequested, false);
