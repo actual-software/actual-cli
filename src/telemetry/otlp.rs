@@ -98,6 +98,13 @@ pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
 /// The event a run of `actual adr new` or `actual adr create` sends.
 pub(crate) const ADR_CREATED: &str = "actual.adr.created";
 
+/// The event an `actual adr discover` run sends once it has sorted the files.
+pub(crate) const ADR_SURVEYED: &str = "actual.adr.surveyed";
+
+/// The event an `actual adr normalize` run sends once it has dealt with the
+/// files.
+pub(crate) const ADR_NORMALIZED: &str = "actual.adr.normalized";
+
 /// The event `rules report-use` sends for each ADR the agent says it used in
 /// a turn, in answer to the Stop hook's question.
 pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
@@ -158,8 +165,9 @@ const SIGNED_IN_ONLY: [&str; 9] = [
 /// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes; 10
 /// adds `actual.adr.review.pathway` and `actual.adr.review.prior_status` to
 /// [`ADR_REVIEWED`]; 11 adds the `actual.usage.*` token totals to
-/// [`SESSION_ENDED`].
-const SCHEMA_VERSION: i64 = 11;
+/// [`SESSION_ENDED`]; 13 adds [`ADR_SURVEYED`] and [`ADR_NORMALIZED`] and
+/// their `actual.adr.survey.*` and `actual.adr.normalize.*` attributes.
+const SCHEMA_VERSION: i64 = 13;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -482,8 +490,7 @@ pub(crate) struct OverrideReason<'a> {
     pub text: Option<&'a str>,
 }
 
-/// How one run of an `actual adr` command ended, which both of its events
-/// record.
+/// How one run of an `actual adr` command ended, which its event records.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdrRun<'a> {
     /// `actual.adr.command.outcome`.
@@ -505,6 +512,47 @@ pub(crate) struct CheckCounts {
     pub failed: usize,
     /// Likely duplicates listed.
     pub duplicates: usize,
+}
+
+/// What an `adr discover` run found, as its [`ADR_SURVEYED`] record counts
+/// it: the files, by what `adr normalize` would do with each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SurveyCounts {
+    /// Every file listed, ignored and unreadable ones included.
+    pub files: usize,
+    /// Docs to convert, for the first time or again.
+    pub to_normalize: usize,
+    /// Docs whose rule file is missing or older than the doc.
+    pub to_reindex: usize,
+    /// Docs that look like a decision the repository already has.
+    pub to_review: usize,
+    /// Synced docs edited since, to save to Actual AI or revert.
+    pub to_push: usize,
+    /// Whether the run compared synced docs with Actual AI.
+    pub compared: bool,
+}
+
+/// What an `adr normalize` run did, as its [`ADR_NORMALIZED`] record counts
+/// it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NormalizeCounts {
+    /// Every file the run reported on.
+    pub files: usize,
+    /// Docs converted, or that `--dry-run` would convert.
+    pub converted: usize,
+    /// Rule files written again, or that `--dry-run` would write.
+    pub reindexed: usize,
+    /// Docs left with questions for a person.
+    pub needs_input: usize,
+    pub skipped: usize,
+    pub unchanged: usize,
+    pub dry_run: bool,
+    /// Whether `--push` asked for each written doc to be saved to Actual AI.
+    pub push: bool,
+    /// Docs saved to Actual AI.
+    pub pushed: usize,
+    /// Docs written here that weren't saved to Actual AI.
+    pub push_failed: usize,
 }
 
 /// The decision a review command acted on, as its [`ADR_REVIEWED`] record
@@ -798,6 +846,42 @@ impl Origin {
         record
     }
 
+    /// The [`ADR_SURVEYED`] record for one `adr discover` run: what it found,
+    /// then how the run ended.
+    pub(crate) fn adr_surveyed(&self, counts: SurveyCounts, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_SURVEYED, "", None);
+        record.attributes.extend([
+            count("actual.adr.survey.files", counts.files),
+            count("actual.adr.survey.to_normalize", counts.to_normalize),
+            count("actual.adr.survey.to_reindex", counts.to_reindex),
+            count("actual.adr.survey.to_review", counts.to_review),
+            count("actual.adr.survey.to_push", counts.to_push),
+            boolean("actual.adr.survey.compared", counts.compared),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
+    /// The [`ADR_NORMALIZED`] record for one `adr normalize` run: what it did
+    /// with the files, then how the run ended.
+    pub(crate) fn adr_normalized(&self, counts: NormalizeCounts, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_NORMALIZED, "", None);
+        record.attributes.extend([
+            count("actual.adr.normalize.files", counts.files),
+            count("actual.adr.normalize.converted", counts.converted),
+            count("actual.adr.normalize.reindexed", counts.reindexed),
+            count("actual.adr.normalize.needs_input", counts.needs_input),
+            count("actual.adr.normalize.skipped", counts.skipped),
+            count("actual.adr.normalize.unchanged", counts.unchanged),
+            boolean("actual.adr.normalize.dry_run", counts.dry_run),
+            boolean("actual.adr.normalize.push", counts.push),
+            count("actual.adr.normalize.pushed", counts.pushed),
+            count("actual.adr.normalize.push_failed", counts.push_failed),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
     /// The [`ADR_REPORTED`] record for one ADR an agent named in its answer
     /// to the Stop hook's question. `report.adr` is `None` for a name that
     /// matched no ADR in the session, sent with an empty ref and no ids.
@@ -929,7 +1013,7 @@ impl Origin {
     }
 }
 
-/// The attributes both `actual adr` events end with.
+/// The attributes every `actual adr` event ends with.
 fn adr_run(run: AdrRun<'_>) -> [KeyValue; 4] {
     [
         text("actual.adr.command.outcome", Some(run.outcome)),
@@ -1757,7 +1841,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "11"})
+            serde_json::json!({"intValue": "13"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2342,7 +2426,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(11))
+            Some(&common::any_value::Value::IntValue(13))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2561,7 +2645,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"11"}"#, r#"{"intValue":"eleven"}"#),
+            whole.replace(r#"{"intValue":"13"}"#, r#"{"intValue":"thirteen"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -4372,7 +4456,8 @@ mod tests {
 
     // ── the `actual adr` events ─────────────────────────────────────────
 
-    /// One `adr check` event and one review event naming decision `id`.
+    /// One event of each `actual adr` kind, the review and create ones
+    /// naming decision `id`.
     fn adr_events(id: &str) -> Vec<LogRecord> {
         let origin = origin(None);
         let run = AdrRun {
@@ -4400,6 +4485,8 @@ mod tests {
             origin.adr_discovered(CheckCounts::default(), run),
             origin.adr_reviewed("accept", decision, run),
             origin.adr_created(created, run),
+            origin.adr_surveyed(SurveyCounts::default(), run),
+            origin.adr_normalized(NormalizeCounts::default(), run),
         ]
     }
 
@@ -4443,8 +4530,12 @@ mod tests {
         assert_ne!(ADR_DISCOVERED, ADR_DETECTED);
         assert_ne!(ADR_REVIEWED, ADR_DETECTED);
         assert_eq!(events[2].event_name, ADR_CREATED);
-        assert_eq!(keys(&events[0]), keys(&events[0].clone().signed_out()));
-        for event in &events[1..] {
+        assert_eq!(events[3].event_name, ADR_SURVEYED);
+        assert_eq!(events[4].event_name, ADR_NORMALIZED);
+        for event in [&events[0], &events[3], &events[4]] {
+            assert_eq!(keys(event), keys(&event.clone().signed_out()));
+        }
+        for event in &events[1..3] {
             let signed_in = keys(event);
             let signed_out = keys(&event.clone().signed_out());
             assert!(signed_in.iter().any(|key| key == DECISION_ID));
@@ -4497,9 +4588,13 @@ mod tests {
                 (None, ADR_DISCOVERED, false),
                 (None, ADR_REVIEWED, false),
                 (None, ADR_CREATED, false),
+                (None, ADR_SURVEYED, false),
+                (None, ADR_NORMALIZED, false),
                 (Some(stamp.as_str()), ADR_DISCOVERED, false),
                 (Some(stamp.as_str()), ADR_REVIEWED, true),
                 (Some(stamp.as_str()), ADR_CREATED, true),
+                (Some(stamp.as_str()), ADR_SURVEYED, false),
+                (Some(stamp.as_str()), ADR_NORMALIZED, false),
             ]
         );
     }
@@ -4536,6 +4631,8 @@ mod tests {
                 (ADR_DISCOVERED.to_string(), None),
                 (ADR_REVIEWED.to_string(), Some("in-1".to_string())),
                 (ADR_CREATED.to_string(), Some("in-1".to_string())),
+                (ADR_SURVEYED.to_string(), None),
+                (ADR_NORMALIZED.to_string(), None),
             ]]
         );
         assert_eq!(
@@ -4544,6 +4641,8 @@ mod tests {
                 (ADR_DISCOVERED.to_string(), None),
                 (ADR_REVIEWED.to_string(), None),
                 (ADR_CREATED.to_string(), None),
+                (ADR_SURVEYED.to_string(), None),
+                (ADR_NORMALIZED.to_string(), None),
             ]]
         );
     }
