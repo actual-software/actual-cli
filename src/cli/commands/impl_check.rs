@@ -104,6 +104,7 @@ impl ImplCheckArgs {
             model: self.model.as_deref(),
             default_runners: crate::cli::commands::rules_rank::DEFAULT_RUNNERS,
             rank_budget: crate::rules::scope::rank::RANK_BUDGET,
+            max_rules: usize::try_from(self.max_rules).unwrap_or(usize::MAX),
         }
     }
 }
@@ -128,6 +129,19 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
+
+    if args.selection_only {
+        let report = check_engine::selection_report(
+            &diff_text,
+            &root,
+            &rules_dir,
+            &args.check_knobs(),
+            ArtifactKind::Diff,
+            !args.no_rank,
+        )?;
+        println!("{report}");
+        return Ok(());
+    }
 
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
@@ -819,6 +833,8 @@ mod tests {
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
+            max_rules: 40,
+            selection_only: false,
             runner: None,
             model: None,
             json: false,
