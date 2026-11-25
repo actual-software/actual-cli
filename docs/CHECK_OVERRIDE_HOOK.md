@@ -40,9 +40,11 @@ The reason's first word can be a reason code: `misread`, `not-here`, `adr-wrong`
 
 Exit code 0 in every case below. Stdout is one JSON object, or nothing.
 
-**Not an override command.** Anything else (another event, no `session_id`, unparseable JSON, a prompt that isn't `/actual-cli:override` or `/override`) prints nothing and records nothing. The mod should treat silence as "not ours".
+### Not an override command
 
-**Override recorded.**
+Anything else (another event, no `session_id`, unparseable JSON, a prompt that isn't `/actual-cli:override` or `/override`) prints nothing and records nothing. The mod should treat silence as "not ours".
+
+### Override recorded
 
 ```json
 {
@@ -56,7 +58,9 @@ Exit code 0 in every case below. Stdout is one JSON object, or nothing.
 
 `overridden` lists the full keys actually recorded, in order. Its presence is how the mod tells an override that landed from one that didn't, without reading the prose. `additionalContext` is for the agent: it says what was overridden, and with `--via prompt` it tells the agent to retry the blocked action and not to run the command itself. Its wording is not part of the contract.
 
-**Listing a gate's blocking rules.** With `--list-blocking`, any envelope with a `session_id` prints the rules the `--gate` is blocking now, sorted, and records nothing:
+### Listing a gate's blocking rules
+
+With `--list-blocking`, any envelope with a `session_id` prints the rules the `--gate` is blocking now, sorted, and records nothing:
 
 ```json
 { "blocking": ["<doc-slug>::<rule-id>", "..."] }
@@ -64,7 +68,9 @@ Exit code 0 in every case below. Stdout is one JSON object, or nothing.
 
 This is the set `/actual-cli:override all` with the same `--gate` records, so a dialog that lists it shows exactly what choosing "Override all" will turn off. Read it from here rather than from the deny text: the deny text quotes the plan or diff, which the agent writes.
 
-**Nothing recorded.** The command named no rule, no rule matched, a bare id was ambiguous, or `all` found nothing blocking. The output has `hookSpecificOutput` with an explanation for the agent, and no `overridden` field.
+### Nothing recorded
+
+The command named no rule, no rule matched, a bare id was ambiguous, or `all` found nothing blocking. The output has `hookSpecificOutput` with an explanation for the agent, and no `overridden` field.
 
 ## What is recorded
 

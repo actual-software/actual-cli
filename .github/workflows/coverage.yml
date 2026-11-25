@@ -58,7 +58,11 @@ jobs:
           # paths), and test files from coverage measurement.
           # Run lib tests + all integration tests except tui_e2e (which hangs
           # under coverage instrumentation due to crossterm TTY interactions).
-          # ⚠ When adding new test files, update this list to include them.
+          # ⚠ When adding new test files, update this list to include them,
+          # and its copy in CONTRIBUTING.md's coverage command. The
+          # --ignore-filename-regex is repeated in both report steps below,
+          # in CONTRIBUTING.md and in docs/LOCAL_DEVELOPMENT.md; change
+          # every copy.
           # cli/commands/login.rs is the interactive browser-OAuth command shell
           # (launches a real browser + binds a loopback redirect listener); like
           # the PTY/renderer files above it cannot execute under CI. Its logic is

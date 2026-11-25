@@ -153,6 +153,11 @@ pub enum ActualError {
     /// may have been saved. Never retried; `hint` says how to look first.
     #[error("{message}")]
     AdrCreateUnconfirmed { message: String, hint: String },
+    /// A grouped `publish` was answered, but the decision read back afterwards
+    /// isn't active, or couldn't be read. The group's accept answers success
+    /// even when it moves no row.
+    #[error("{0}")]
+    AdrPublishUnconfirmed(String),
     /// No decision in the organization has the id `actual adr` was given.
     #[error("{0}")]
     AdrNotFound(String),
@@ -259,6 +264,7 @@ impl ActualError {
             | Self::ApiResponseError { .. }
             | Self::ServiceUnavailable
             | Self::AdrCreateUnconfirmed { .. }
+            | Self::AdrPublishUnconfirmed(_)
             | Self::AdrNotFound(_)
             | Self::AdrNotAllowed(_)
             | Self::AdrNotSaved(_) => 3,
@@ -1219,6 +1225,11 @@ mod tests {
         assert_eq!(unconfirmed.exit_code(), 3);
         assert_eq!(unconfirmed.to_string(), "may have landed");
         assert_eq!(unconfirmed.hint().as_deref(), Some("actual adr list"));
+
+        let unpublished = ActualError::AdrPublishUnconfirmed("g1 isn't active.".to_string());
+        assert_eq!(unpublished.exit_code(), 3);
+        assert_eq!(unpublished.to_string(), "g1 isn't active.");
+        assert_eq!(unpublished.hint(), None);
 
         let repo = ActualError::AdrRepoRequired("no repository".to_string());
         assert_eq!(repo.exit_code(), 2);
