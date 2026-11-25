@@ -1,0 +1,11 @@
+# Merging to main does not publish; a v* tag does. A pull request that changes
+# what a tag publishes needs a review from one of these owners: the version bump
+# in Cargo.toml, and the release pipeline with its signing tool and keys. Every
+# other change can merge without one. See docs/CLI_DISTRIBUTION.md.
+/Cargo.toml @austinborn @backlineint @benw5483 @audiojak @davidmiuraactualai @max-winderbaum
+/.github/workflows/release.yml @austinborn @backlineint @benw5483 @audiojak @davidmiuraactualai @max-winderbaum
+/crates/release-sign/ @austinborn @backlineint @benw5483 @audiojak @davidmiuraactualai @max-winderbaum
+/release-keys/ @austinborn @backlineint @benw5483 @audiojak @davidmiuraactualai @max-winderbaum
+
+# Changing who owns what needs a review too.
+/.github/CODEOWNERS @austinborn @backlineint @benw5483 @audiojak @davidmiuraactualai @max-winderbaum
