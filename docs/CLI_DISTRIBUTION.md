@@ -16,7 +16,7 @@ A pull request that changes `release.yml`, the signing tool in `crates/release-s
 
 ## Cutting a release
 
-First land a commit on `main` that bumps `version` in `Cargo.toml`, with the matching `Cargo.lock` change, and adds the release's `CHANGELOG.md` entry, the way `chore: release v0.8.0` did. `actual --version` reports the `Cargo.toml` version while npm and Homebrew take theirs from the tag, so a tag without the bump would publish npm 0.9.0 with a binary that reports 0.8.0.
+First land a commit on `main` that bumps `version` in `Cargo.toml`, with the matching `Cargo.lock` change, and adds the release's `CHANGELOG.md` entry, the way `chore: release v0.8.0` did. `actual --version` reports the `Cargo.toml` version while npm and Homebrew take theirs from the tag, so a tag without the bump would publish npm 0.9.0 with a binary that reports 0.8.0. [`.github/CODEOWNERS`](../.github/CODEOWNERS) owns `Cargo.toml` and the release pipeline, so the bump needs an approving review from a teammate; other pull requests can merge without one.
 
 Then tag that commit and push the tag:
 
