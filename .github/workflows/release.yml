@@ -84,6 +84,13 @@ jobs:
             echo "::error::$GITHUB_REF_NAME does not match version $CRATE_VERSION in Cargo.toml. Merge the version bump to main first, then tag it."
             exit 1
           fi
+          # npm publishes every release as latest, so an older version would
+          # downgrade everyone who updates.
+          LATEST=$(git tag -l 'v*' | grep -vE -- '-(alpha|beta|rc|test)[.0-9]*$' | grep -vxF "$GITHUB_REF_NAME" | sed 's/^v//' | sort -V | tail -n1)
+          if [ -n "$LATEST" ] && [ "$(printf '%s\n' "$LATEST" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]; then
+            echo "::error::$GITHUB_REF_NAME is not newer than the latest release, v$LATEST. Raise the version in Cargo.toml above it."
+            exit 1
+          fi
 
   build-macos-arm64:
     name: Build (macOS arm64)
