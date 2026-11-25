@@ -370,11 +370,22 @@ The `actual adr` commands send one event per run:
   and the id a signed-in run saved it under, then the same outcome, exit code,
   terminal flag and duration. A signed-out run has no id to send. A flag the
   pathway can't take is refused before the run starts, and sends no event.
+- `actual.adr.surveyed` from each `actual adr discover` run, signed in or
+  not: how many files it listed, and how many of them need converting,
+  re-indexing, a check for a duplicate, or saving to Actual AI after an edit
+  to a synced decision; whether it compared synced decisions with Actual AI;
+  then the same outcome, exit code, terminal flag and duration.
+- `actual.adr.normalized` from each `actual adr normalize` run, signed in or
+  not: how many files it reported on, and how many it converted, re-indexed,
+  left with questions, skipped or left unchanged (with `--dry-run`, how many
+  it would have converted or re-indexed); whether it ran with `--dry-run` and
+  with `--push`, how many decisions `--push` saved to Actual AI and how many
+  it couldn't save; then the same outcome, exit code, terminal flag and
+  duration. A `--push` save sends no `actual.adr.created` event of its own.
 
 None of these events carries a decision's title, context, policy text or
 scope globs, a file path, or the text of `reject --reason`. `adr list`,
-`adr show`, `adr discover`, `adr normalize`, `adr refresh` and
-`adr create --all` send none of them.
+`adr show`, `adr refresh` and `adr create --all` send none of them.
 
 `adr create --all` saves each decision file with its path in the repository,
 so a second save of the same file returns the decision the first one made. It
@@ -456,8 +467,17 @@ event adds `actual.adr.check.files`, `actual.adr.check.failed_files` and
 `actual.adr.decision_id` in a request that carries your sign-in's token; a
 create event adds `actual.adr.create.target`, `actual.adr.create.source`,
 `actual.adr.create.status`, `actual.adr.create.policies` and
-`actual.adr.create.partial`, plus `actual.adr.decision_id` the same way; and
-all three add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
+`actual.adr.create.partial`, plus `actual.adr.decision_id` the same way; a
+discover event adds `actual.adr.survey.files`,
+`actual.adr.survey.to_normalize`, `actual.adr.survey.to_reindex`,
+`actual.adr.survey.to_review`, `actual.adr.survey.to_push` and
+`actual.adr.survey.compared`; a normalize event adds
+`actual.adr.normalize.files`, `actual.adr.normalize.converted`,
+`actual.adr.normalize.reindexed`, `actual.adr.normalize.needs_input`,
+`actual.adr.normalize.skipped`, `actual.adr.normalize.unchanged`,
+`actual.adr.normalize.dry_run`, `actual.adr.normalize.push`,
+`actual.adr.normalize.pushed` and `actual.adr.normalize.push_failed`; and
+all five add `actual.adr.command.outcome`, `actual.adr.command.exit_code`,
 `actual.adr.command.stdin_is_terminal` and `actual.adr.command.duration_ms`.
 A report event adds `actual.adr.ref` and `actual.adr.ids`, then `actual.turn.index`, `actual.report.check_action_id`, `actual.report.evidence`, `actual.report.evidence_reason` and `actual.report.anchor`, plus `actual.report.file_path` in a signed-in request.
 A filter event adds `actual.filter.selector`, `actual.filter.min_score`, `actual.filter.index_size`, the nine `actual.filter.dropped.*` counts, `actual.filter.kept_count`, `actual.filter.kept_refs` and `actual.filter.kept_scores`.
@@ -477,7 +497,7 @@ has only the classes its fields carry below:
 |-----------|------------|---------------|
 | `log.record.uid` | The event's `actual.event.id`, repeated under the name OpenTelemetry tools use to drop a duplicate delivery | anonymous |
 | `actual.event.id` | A fresh random UUIDv7 per event | anonymous |
-| `actual.event.schema_version` | The version of this attribute set, currently `11` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, 9 added `actual.adr.created` and its attributes, 10 added `actual.adr.review.pathway` and `actual.adr.review.prior_status`, and 11 added the `actual.usage.*` attributes) | anonymous |
+| `actual.event.schema_version` | The version of this attribute set, currently `13` (2 added `actual.override.reason` and `actual.override.reason_text`, 3 added the `actual.adr.discovered` and `actual.adr.reviewed` events, 4 added `actual.adr.verdict`, 5 added `actual.adr.reported` and its attributes, 6 added `actual.filter.evaluated` and its attributes, 7 added `actual.gate.resolved` and its attributes, 8 changed only what Actual's web app records, 9 added `actual.adr.created` and its attributes, 10 added `actual.adr.review.pathway` and `actual.adr.review.prior_status`, 11 added the `actual.usage.*` attributes, and 13 added the `actual.adr.surveyed` and `actual.adr.normalized` events and their attributes) | anonymous |
 | `actual.action.id` | A fresh random UUIDv7 per run of the CLI, shared by every event that run sends | anonymous |
 | `actual.session.id` | Claude Code's id for the conversation: random, generated by Claude Code, never derived from account data. It groups one conversation's events. An override event carries the id the human passed to `check-override --session`, which the gate's denial printed, and a check run outside a hook and every `actual adr` event send it empty | first-party identity-linked |
 | `actual.agent.id` | Claude Code's id for the subagent that was briefed, or whose plan or diff a gate checked, empty for the main agent, on every override event and `actual adr` event, and on a check run outside a hook. On `actual.gate.resolved` it names the agent whose check ended the block, which can differ from the one the block stopped, because a session's agents share each gate's blocks; it is empty for an override and at the session's end: random, generated by Claude Code | first-party identity-linked |
@@ -519,7 +539,23 @@ has only the classes its fields carry below:
 | `actual.adr.create.status` | `accepted` or `draft`: the status the decision was written or saved with, or the one the run asked for when it stopped first. A signed-in `create` that can't set the scope or publish is saved as a draft | anonymous |
 | `actual.adr.create.policies` | How many policies the decision has, `0` when the run stopped before it read them | anonymous |
 | `actual.adr.create.partial` | Whether a signed-in `create` saved the decision but couldn't set its scope or publish it. Always `false` signed out | anonymous |
-| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error. For `adr create` (and `adr new`): `succeeded`, `invalid` when the decision fails the save rules, `duplicate` when a signed-in `create` finds it likely already exists, `not_signed_in`, or `failed` for any other error | anonymous |
+| `actual.adr.survey.files` | How many files an `adr discover` run listed under `docs/adr/` and `.actual/rules/`, ignored and unreadable ones included | anonymous |
+| `actual.adr.survey.to_normalize` | How many of them `adr normalize` would convert, for the first time or again | anonymous |
+| `actual.adr.survey.to_reindex` | How many have a rule file that is missing or older than the doc, which `adr normalize` writes again | anonymous |
+| `actual.adr.survey.to_review` | How many look like a decision the repository already has, to check before converting | anonymous |
+| `actual.adr.survey.to_push` | How many are decisions Actual AI's sync wrote and that were edited since, to save to Actual AI or revert | anonymous |
+| `actual.adr.survey.compared` | Whether the run compared the synced decisions with the ones Actual AI keeps. It doesn't when no doc is synced, with `--no-cloud`, signed out, or when Actual AI's decisions couldn't be read | anonymous |
+| `actual.adr.normalize.files` | How many files an `adr normalize` run reported on | anonymous |
+| `actual.adr.normalize.converted` | How many docs it converted, or with `--dry-run` would have converted | anonymous |
+| `actual.adr.normalize.reindexed` | How many rule files it wrote again, or with `--dry-run` would have written | anonymous |
+| `actual.adr.normalize.needs_input` | How many docs it left with questions for a person to answer | anonymous |
+| `actual.adr.normalize.skipped` | How many files it left alone, such as one Actual AI's sync owns | anonymous |
+| `actual.adr.normalize.unchanged` | How many were already up to date | anonymous |
+| `actual.adr.normalize.dry_run` | Whether the run had `--dry-run`, so it wrote nothing | anonymous |
+| `actual.adr.normalize.push` | Whether the run had `--push`, which saves each decision it writes to Actual AI | anonymous |
+| `actual.adr.normalize.pushed` | How many decisions `--push` saved to Actual AI | anonymous |
+| `actual.adr.normalize.push_failed` | How many decisions it wrote here that `--push` couldn't save to Actual AI | anonymous |
+| `actual.adr.command.outcome` | How the run ended. For `adr check`: `passed`, `failed` when a file failed the save rules, or `error` when the check couldn't run. For a review command: `succeeded`, `refused` when the CLI's check of the decision's state, or of the edit `update` asks for, turns the change down before anything is sent, `not_signed_in`, or `failed` for any other error. For `adr create` (and `adr new`): `succeeded`, `invalid` when the decision fails the save rules, `duplicate` when a signed-in `create` finds it likely already exists, `not_signed_in`, or `failed` for any other error. For `adr discover`: `succeeded`, or `failed` when it couldn't run. For `adr normalize`: `succeeded`, `not_saved` when `--push` left decisions written here but not saved to Actual AI, or `failed` for any other error | anonymous |
 | `actual.adr.command.exit_code` | The exit code the run ended with, `0` on success | anonymous |
 | `actual.adr.command.stdin_is_terminal` | Whether standard input was a terminal, which tells a person at the keyboard from a coding agent, script or CI job | anonymous |
 | `actual.adr.command.duration_ms` | How long the run took, in milliseconds | anonymous |
