@@ -315,18 +315,35 @@ impl Prefiltered {
     ///
     /// **This is the only place the stage-2 trigger is decided.** Every caller
     /// that has a runner goes through here — the `rules select` command,
-    /// `rules eval --rank`, and [`select`] — so a measurement cannot report a
+    /// `rules eval --rank`, `plan-check` and `impl-check`, and [`select`] — so
+    /// a measurement cannot report a
     /// number for a path the shipped command does not take. An earlier version
     /// had the gate in two of the three and the tests pointed at the third.
     ///
     /// Never fails: a runner that is down, slow or wrong produces the stage-1
     /// answer with the reason recorded, because a degraded selection is the
     /// acceptance criterion and an error is not.
+    ///
+    /// The rank gets [`rank::RANK_BUDGET`]; [`Self::rank_within`] takes another.
     pub async fn rank_with<R: StructuredRunner>(
         &self,
         runner: &R,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+    ) -> Selection {
+        self.rank_within(runner, model_override, max_budget_usd, rank::RANK_BUDGET)
+            .await
+    }
+
+    /// [`Self::rank_with`] with a deadline of `budget` on the rank: the gates'
+    /// hooks pass [`rank::GATE_RANK_BUDGET`]. A rank that misses it falls back
+    /// to the prefilter like any other failure.
+    pub async fn rank_within<R: StructuredRunner>(
+        &self,
+        runner: &R,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+        budget: std::time::Duration,
     ) -> Selection {
         if !self.needs_rank() {
             // `finish` rewrites this to `NotNeeded`, which is the honest
@@ -349,6 +366,7 @@ impl Prefiltered {
             &self.candidates(),
             model_override,
             max_budget_usd,
+            budget,
         )
         .await
         {

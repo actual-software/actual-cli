@@ -525,7 +525,7 @@ has only the classes its fields carry below:
 | `actual.filter.dropped.no_match` | Rule files that matched nothing in the plan, diff or path. For the brief this includes files that matched on fewer than two words when the path alone matched nothing | anonymous |
 | `actual.filter.dropped.below_floor` | Rule files that matched but scored under `actual.filter.min_score` | anonymous |
 | `actual.filter.dropped.capped` | Rule files cut by the candidate cap or the selection's limit | anonymous |
-| `actual.filter.dropped.unrelated` | Rule files stage 2's rank judged unrelated. A hook never runs stage 2, so it sends `0` | anonymous |
+| `actual.filter.dropped.unrelated` | Rule files stage 2's rank judged unrelated. `0` when no rank ran: the first pass found no more rules than the limit keeps, the rank failed or missed its deadline, or `--no-rank` was given | anonymous |
 | `actual.filter.dropped.session` | Gates only: rule files whose every rule was already cleared or overridden in this session | anonymous |
 | `actual.filter.dropped.window` | Gates only: rule files with a rule still to judge, none of them inside the 40 rules the judge sees in one round | anonymous |
 | `actual.filter.dropped.brief_cap` | Brief only: rule files cut by the brief's decision limit, by what the agent was already briefed on, or by the brief's size budget | anonymous |
@@ -736,9 +736,12 @@ tools. `codex-cli` and `cursor-cli` still run as agents in your repository,
 reading them. These prompts don't ask them to open other files, but the CLI
 doesn't stop them, and anything they read goes to their provider.
 
-A `plan-check` or `impl-check` you run yourself can make that `rules select`
-call first, with the diff standing in for the plan on `impl-check`. The hook
-paths never make it, `--no-rank` skips it, and so does `rules select --by-adr`.
+A `plan-check` or `impl-check` can make that `rules select` call first, with
+the diff standing in for the plan on `impl-check`, whether you run it yourself
+or a hook does. That rank prompt holds the same plan or diff the check sends,
+and the candidate rules' titles, scopes and path patterns. `--no-rank` skips
+it (the plugin passes it when `ACTUAL_GATE_RANK=off`), and so does
+`rules select --by-adr`.
 `rules eval --rank` can make it for each case in the file you give it. No prompt
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.

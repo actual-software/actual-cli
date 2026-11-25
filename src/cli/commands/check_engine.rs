@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -34,6 +35,7 @@ use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
 use crate::rules::check::{self, CheckedRule, RuleForJudging, Verdict};
+use crate::rules::scope::rank::{GATE_RANK_BUDGET, RANK_BUDGET};
 use crate::rules::scope::{self, select, FilterTally, KeptFile, Query, Selection, Stage2};
 use crate::rules::types::AdrMeta;
 
@@ -84,17 +86,26 @@ pub(super) struct CheckKnobs<'a> {
     /// The runners tried when nothing names one. See
     /// [`rules_rank::resolve_with_defaults`].
     pub(super) default_runners: &'static [RunnerChoice],
+    /// The deadline on stage 2's rank: [`RANK_BUDGET`] run by hand, and
+    /// [`GATE_RANK_BUDGET`] in a hook, where the judge needs the rest of the
+    /// hook's timeout.
+    pub(super) rank_budget: Duration,
 }
 
 impl CheckKnobs<'_> {
-    /// These knobs for a check running in `host`: inside Codex, the OpenAI
-    /// backends are tried first when nothing names a runner.
+    /// These knobs for a check running in `host`'s hook: the rank keeps to
+    /// [`GATE_RANK_BUDGET`], and inside Codex the OpenAI backends are tried
+    /// first when nothing names a runner.
     pub(super) fn for_host(self, host: HookHost) -> Self {
+        let knobs = Self {
+            rank_budget: GATE_RANK_BUDGET,
+            ..self
+        };
         match host {
-            HookHost::Claude => self,
+            HookHost::Claude => knobs,
             HookHost::Codex => Self {
                 default_runners: rules_rank::CODEX_DEFAULT_RUNNERS,
-                ..self
+                ..knobs
             },
         }
     }
@@ -111,6 +122,7 @@ impl PlanCheckArgs {
             runner: self.runner.as_ref(),
             model: self.model.as_deref(),
             default_runners: rules_rank::DEFAULT_RUNNERS,
+            rank_budget: RANK_BUDGET,
         }
     }
 }
@@ -167,9 +179,8 @@ pub(super) enum Outcome {
 /// out to need no judging at all — every applicable rule already excluded —
 /// never probes for a runner it will not use.
 ///
-/// `use_rank` gates selection's stage 2. `--claude-hook` always passes
-/// `false`, unconditionally, regardless of any flag — see the module doc for
-/// why. Direct mode passes `!args.no_rank`.
+/// `use_rank` gates selection's stage 2. Every mode passes `!args.no_rank`;
+/// a hook's knobs carry [`GATE_RANK_BUDGET`] (see [`CheckKnobs::for_host`]).
 ///
 /// `session` names every rule that must never reach the judge again for
 /// *this* artifact — see [`GovernanceSession::excludes`] for exactly what
@@ -266,10 +277,11 @@ pub(super) fn run_pipeline_filtered(
         let runner = early_runner
             .as_ref()
             .expect("early_runner is always Some when use_rank is true");
-        runtime.block_on(prefiltered.rank_with(
+        runtime.block_on(prefiltered.rank_within(
             &runner.runner,
             runner.model.as_deref(),
             runner.max_budget_usd,
+            knobs.rank_budget,
         ))
     } else {
         prefiltered.finish(Stage2::NotRequested)
@@ -3880,6 +3892,12 @@ pub(crate) mod tests {
         assert_eq!(codex.default_runners, rules_rank::CODEX_DEFAULT_RUNNERS);
         assert_eq!((codex.limit, codex.candidates, codex.rebuild), (7, 9, true));
         assert_eq!(codex.model, Some("m"));
+        // A hook's rank keeps to the gate's deadline, on either host, so the
+        // judge keeps the rest of the hook's timeout; by hand it gets the
+        // default.
+        assert_eq!(args.check_knobs().rank_budget, RANK_BUDGET);
+        assert_eq!(claude.rank_budget, GATE_RANK_BUDGET);
+        assert_eq!(codex.rank_budget, GATE_RANK_BUDGET);
     }
 
     #[test]
