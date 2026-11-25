@@ -2578,10 +2578,16 @@ mod tests {
         );
         assert!(
             question.contains(
-                "\n\nAfter fixing the above, answer with one command, then end your turn:\n"
+                "\n\nFixing a blocked rule changes what you wrote, so each ADR marked blocked above counts once you revise for it. After fixing the above, answer with one command, then end your turn:\n"
             ),
             "{question}"
         );
+        assert!(
+            question.contains("\n- `cross-cutting-token-signing-1c57`: ")
+                && question.contains(" (blocked above: R-A-001)\n"),
+            "{question}"
+        );
+        assert!(!question.contains("R-A-002"), "{question}");
 
         // Answering the question settles nothing: the same diff is judged,
         // and blocked, again.

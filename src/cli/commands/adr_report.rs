@@ -12,10 +12,12 @@
 //! diff that still matches the one recorded when the turn started holds only
 //! earlier turns' uncommitted work, so that turn is not asked.
 //!
-//! **The list is the brief ledger, unfiltered.** It names every decision that
-//! reached the session through `rules brief`, which is keyed on the session
-//! alone, so subagents and compactions are covered and the gate's selector
-//! plays no part. An empty ledger asks nothing.
+//! **The list is the brief ledger, plus the round's blocks.** It names every
+//! decision that reached the session through `rules brief`, which is keyed on
+//! the session alone, so subagents and compactions are covered. A question
+//! that rides on a block also lists each decision a blocking rule belongs to,
+//! marked with those rules, because the block put it in front of the agent
+//! and its fix is the clearest use there is. An empty ledger asks nothing.
 //!
 //! **The check is deterministic.** A claim holds when its ADR was in the
 //! question and its line is one this turn added or changed, or one of the
@@ -44,7 +46,7 @@
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -69,13 +71,16 @@ const MAX_LABEL_CHARS: usize = 120;
 
 /// The question's first paragraph, which says what counts as used.
 const QUESTION_HEAD: &str = "Which of these ADRs did you use this turn? \
-     An ADR counts only if it changed or decided what you wrote. \
-     Leave out any your change merely complies with or happens to agree with.";
+     An ADR counts if it changed or decided what you wrote: \
+     you revised your change because one of its rules blocked it, \
+     or it settled which API, import or pattern you used. \
+     Leave out any your change only happens to agree with.";
 
 const ANSWER: &str = "Answer with one command, then end your turn:";
 
-const ANSWER_ON_BLOCK: &str =
-    "After fixing the above, answer with one command, then end your turn:";
+const ANSWER_ON_BLOCK: &str = "Fixing a blocked rule changes what you wrote, \
+     so each ADR marked blocked above counts once you revise for it. \
+     After fixing the above, answer with one command, then end your turn:";
 
 /// How far, in lines, a diff claim may miss the added or changed line it
 /// means, within one hunk.
@@ -232,19 +237,76 @@ pub struct PreparedAsk {
     turn: u64,
     token: String,
     diff_digest: String,
+    session_id: String,
+    root: PathBuf,
+    rules_dir: PathBuf,
+    briefed: Vec<String>,
+    index: Option<ScopeIndex>,
+}
+
+/// The question as one round asks it.
+#[derive(Debug, Clone)]
+pub struct RoundAsk {
     adrs: Vec<AskedAdr>,
     text: String,
-    text_on_block: String,
+    on_block: bool,
+}
+
+impl RoundAsk {
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 impl PreparedAsk {
-    /// The question, worded on a block to be answered once the block's
-    /// reason is fixed, so the claims are checked against the fixed diff.
-    pub(super) fn text(&self, on_block: bool) -> &str {
-        if on_block {
-            &self.text_on_block
+    /// The question for a round that passed (`blocking` is `None`) or
+    /// blocked on `blocking`'s `(doc_slug, rule_id)` pairs. On a block it is
+    /// worded to be answered once the block's reason is fixed, so the claims
+    /// are checked against the fixed diff, and it lists each blocking rule's
+    /// decision, marked with the rules.
+    pub(super) fn round(&self, blocking: Option<&[(&str, &str)]>) -> RoundAsk {
+        let mut blocked: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (slug, rule_id) in blocking.unwrap_or_default() {
+            let key = self
+                .index
+                .iter()
+                .flat_map(|index| index.documents.iter())
+                .find(|document| document.slug == *slug)
+                .map(|document| document.decision_key());
+            if let Some(rules) = key.map(|key| blocked.entry(key).or_default()) {
+                let rule_id = clean(rule_id, MAX_LABEL_CHARS);
+                if !rules.contains(&rule_id) {
+                    rules.push(rule_id);
+                }
+            }
+        }
+        let mut keys = self.briefed.clone();
+        keys.extend(blocked.keys().cloned());
+        keys.sort();
+        keys.dedup();
+        let mut listed = asked_adrs(keys.iter(), self.index.as_ref());
+        for (adr, label) in &mut listed {
+            if let Some(rules) = blocked.get(&adr.key) {
+                label.push_str(&format!(" (blocked above: {})", rules.join(", ")));
+            }
+        }
+        let answer = if blocking.is_some() {
+            ANSWER_ON_BLOCK
         } else {
-            &self.text
+            ANSWER
+        };
+        let text = question(
+            &self.session_id,
+            &self.token,
+            &self.root,
+            &self.rules_dir,
+            &listed,
+            answer,
+        );
+        RoundAsk {
+            adrs: listed.into_iter().map(|(adr, _)| adr).collect(),
+            text,
+            on_block: blocking.is_some(),
         }
     }
 }
@@ -287,35 +349,32 @@ pub(super) fn prepare(
     let index = crate::rules::scope::resolve_in(rules_dir, root, false)
         .ok()
         .map(|resolved| resolved.index);
-    let listed = asked_adrs(ledger.briefed.iter(), index.as_ref());
     let token = format!(
         "{}-{}",
         session.turn,
         diff_digest.get(..8).unwrap_or(diff_digest)
     );
-    let text = question(session_id, &token, root, rules_dir, &listed, ANSWER);
-    let text_on_block = question(
-        session_id,
-        &token,
-        root,
-        rules_dir,
-        &listed,
-        ANSWER_ON_BLOCK,
-    );
     Some(PreparedAsk {
         turn: session.turn,
         token,
         diff_digest: diff_digest.to_string(),
-        adrs: listed.into_iter().map(|(adr, _)| adr).collect(),
-        text,
-        text_on_block,
+        session_id: session_id.to_string(),
+        root: root.to_path_buf(),
+        rules_dir: rules_dir.to_path_buf(),
+        briefed: ledger.briefed.into_iter().collect(),
+        index,
     })
 }
 
-/// Record `ask` as this turn's question, unless one already was. True only
+/// Record `round` as this turn's question, unless one already was. True only
 /// when this call recorded it and the session reads it back, so a session
 /// that cannot be written never asks, and never asks again after its answer.
-pub(super) fn mark(session_id: &str, rules_dir: &Path, ask: &PreparedAsk, on_block: bool) -> bool {
+pub(super) fn mark(
+    session_id: &str,
+    rules_dir: &Path,
+    ask: &PreparedAsk,
+    round: &RoundAsk,
+) -> bool {
     let mut marked = false;
     governance_session::update(session_id, rules_dir, |session| {
         let asked = session
@@ -329,9 +388,9 @@ pub(super) fn mark(session_id: &str, rules_dir: &Path, ask: &PreparedAsk, on_blo
             turn: ask.turn,
             token: ask.token.clone(),
             action_id: action_id(),
-            adrs: ask.adrs.clone(),
+            adrs: round.adrs.clone(),
             diff_digest: ask.diff_digest.clone(),
-            on_block,
+            on_block: round.on_block,
             answer: None,
         });
         marked = true;
@@ -461,8 +520,8 @@ fn question(
          {command} --claim <adr>=<repo-relative-path>:<line>\n\n\
          Repeat --claim for each ADR you used, naming the line you added or changed this turn that best shows its effect. \
          For a line of the plan approved this turn, use --plan-claim <adr>=<line>. \
-         When no listed ADR shaped the change, run the command with --none in place of the claims. \
-         That is a normal, expected answer.",
+         When no listed ADR changed or decided anything you wrote, run the command with --none in place of the claims. \
+         That is a normal answer.",
         list.join("\n")
     )
 }
@@ -986,8 +1045,6 @@ fn report(session_id: &str, ask: &AdrAsk, claims: &[CheckedClaim]) {
 pub(super) mod tests {
     use super::*;
 
-    use std::path::PathBuf;
-
     use crate::testutil::{EnvGuard, ENV_MUTEX};
     use tempfile::{tempdir, TempDir};
 
@@ -1113,7 +1170,7 @@ pub(super) mod tests {
                 "0123456789abcdef",
             )
             .unwrap();
-            assert!(mark(session, &self.rules_dir(), &ask, false));
+            assert!(mark(session, &self.rules_dir(), &ask, &ask.round(None)));
             ask.token
         }
 
@@ -1400,17 +1457,24 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             "0123456789abcdef",
         )
         .unwrap();
-        let text = ask.text(false);
+        let round = ask.round(None);
+        let text = round.text();
+        assert!(!round.on_block);
         assert!(text.starts_with(&format!("{QUESTION_HEAD}\n\n")));
         assert!(text.contains(&format!("\n\n{ANSWER}\n")));
         assert!(!text.contains(ANSWER_ON_BLOCK));
-        let on_block = ask.text(true);
-        assert!(on_block.contains(&format!("\n\n{ANSWER_ON_BLOCK}\n")));
-        assert_eq!(on_block.replace(ANSWER_ON_BLOCK, ANSWER), text);
-        assert!(text.contains("An ADR counts only if it changed or decided what you wrote."));
-        assert!(text.contains("merely complies with or happens to agree with"));
+        let on_block = ask.round(Some(&[]));
+        assert!(on_block.on_block);
+        assert!(on_block
+            .text()
+            .contains(&format!("\n\n{ANSWER_ON_BLOCK}\n")));
+        assert_eq!(on_block.text().replace(ANSWER_ON_BLOCK, ANSWER), text);
+        assert!(text.contains("An ADR counts if it changed or decided what you wrote: you revised your change because one of its rules blocked it, or it settled which API, import or pattern you used."));
+        assert!(text.contains("Leave out any your change only happens to agree with."));
+        assert!(!text.contains("complies"));
         assert!(text.contains("the line you added or changed this turn that best shows its effect"));
-        assert!(text.contains("run the command with --none in place of the claims. That is a normal, expected answer."));
+        assert!(text.contains("When no listed ADR changed or decided anything you wrote, run the command with --none in place of the claims. That is a normal answer."));
+        assert!(!text.contains("blocked above"));
         for line in [
             "- `api-errors-001`: Typed API Errors",
             "- `legacy-naming`: Legacy Naming",
@@ -1423,20 +1487,20 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         let command = format!("actual rules report-use --claude-session s1 --turn 0-01234567 --repo {} --claim <adr>=<repo-relative-path>:<line>", shell_word(&repo));
         assert!(text.contains(&command));
         assert!(!text.contains("--rules-dir"));
-        let errors = ask
+        let errors = round
             .adrs
             .iter()
             .find(|adr| adr.handle == "api-errors-001")
             .unwrap();
         assert_eq!(errors.adr_ref.as_deref(), Some("grp-errors"));
         assert_eq!(errors.adr_ids, ["adr-errors-1", "adr-errors-2"]);
-        let logging = ask
+        let logging = round
             .adrs
             .iter()
             .find(|adr| adr.handle == "logging-001")
             .unwrap();
         assert_eq!(logging.adr_ref.as_deref(), Some("adr-logging"));
-        let legacy = ask
+        let legacy = round
             .adrs
             .iter()
             .find(|adr| adr.handle == "legacy-naming")
@@ -1449,6 +1513,70 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             " --rules-dir {} --claim",
             shell_word(&other_rules.to_string_lossy())
         )));
+    }
+
+    /// On a block the question also lists each blocking rule's decision,
+    /// marked with its rules, though no brief delivered it, and a claim on it
+    /// verifies. A passing round lists the brief ledger alone.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_a_block_lists_and_marks_each_blocking_decision() {
+        let _lock = lock();
+        let fx = Fixture::new(TELEMETRY_ON);
+        let rules = fx.rules_dir();
+        let index = crate::rules::scope::resolve_in(&rules, fx.repo.path(), false)
+            .unwrap()
+            .index;
+        let logging = index
+            .documents
+            .iter()
+            .find(|document| document.slug == "logging-001")
+            .unwrap()
+            .decision_key();
+        brief_ledger::record(
+            &brief_ledger::ledger_dir().unwrap(),
+            &LedgerKey {
+                session_id: "s1",
+                rules_dir: &super::super::rules_brief::resolve(&rules),
+            },
+            [logging.as_str()],
+        );
+        let state = governance_session::load("s1", &rules);
+        let ask = prepare(Some("s1"), &state, fx.repo.path(), &rules, None, "d").unwrap();
+        let handles = |round: &RoundAsk| -> Vec<String> {
+            round.adrs.iter().map(|adr| adr.handle.clone()).collect()
+        };
+        assert_eq!(handles(&ask.round(None)), ["logging-001"]);
+
+        let blocked = ask.round(Some(&[
+            ("api-errors-002", "R-1"),
+            ("api-errors-001", "R-1"),
+            ("api-errors-001", "R-2"),
+            ("no-such-file", "R-9"),
+        ]));
+        assert_eq!(handles(&blocked), ["api-errors-001", "logging-001"]);
+        let text = blocked.text();
+        assert!(text.contains("\n- `api-errors-001`: Typed API Errors (blocked above: R-1, R-2)\n"));
+        assert!(text.contains("\n- `logging-001`: Structured Logging\n"));
+        assert!(!text.contains("legacy-naming"));
+        assert!(text.contains(ANSWER_ON_BLOCK));
+
+        assert!(mark("s1", &rules, &ask, &blocked));
+        assert!(
+            governance_session::load("s1", &rules)
+                .adr_ask
+                .unwrap()
+                .on_block
+        );
+        std::fs::write(
+            fx.repo.path().join("src/orders.rs"),
+            "fn a() {}\nfn b() -> Result<(), ApiError> {}\n",
+        )
+        .unwrap();
+        let mut args = fx.args("s1", &ask.token);
+        args.claims = vec!["api-errors-002=src/orders.rs:2".to_string()];
+        answer(&args, None::<&[u8]>).unwrap();
+        assert_eq!(reasons(&fx.answer("s1").unwrap()), [None]);
     }
 
     #[cfg(feature = "telemetry")]
@@ -1582,11 +1710,12 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             "abcdef0123",
         )
         .unwrap();
+        let round = ask.round(None);
         governance_session::update("s1", &rules, |s| s.turn = 4);
-        assert!(!mark("s1", &rules, &ask, false), "the turn moved on");
+        assert!(!mark("s1", &rules, &ask, &round), "the turn moved on");
         governance_session::update("s1", &rules, |s| s.turn = 0);
-        assert!(mark("s1", &rules, &ask, false));
-        assert!(!mark("s1", &rules, &ask, false), "already asked");
+        assert!(mark("s1", &rules, &ask, &round));
+        assert!(!mark("s1", &rules, &ask, &round), "already asked");
         let recorded = governance_session::load("s1", &rules).adr_ask.unwrap();
         assert_eq!(recorded.token, "0-abcdef01");
         assert!(!recorded.action_id.is_empty());

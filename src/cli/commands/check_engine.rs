@@ -2488,12 +2488,13 @@ pub(super) fn emit(json: String) {
 }
 
 /// What a hook round answers, before the ADR question is folded in.
-enum Reply {
+enum Reply<'a> {
     Silent,
     /// Information only: a notice on Claude Code, silence on Codex.
     Status(String),
     Notice(String),
-    Deny(String),
+    /// A block's reason, and the rules that blocked.
+    Deny(String, &'a [&'a CheckedRule]),
 }
 
 /// Emit `reply`, carrying `run`'s ADR question when this round is the one that
@@ -2501,15 +2502,24 @@ enum Reply {
 /// fixed, as the reason of a block that would
 /// otherwise have been a notice (which stays beside it for the user), or as
 /// the reason of a block on an otherwise silent pass.
-fn reply(run: &HookRun<'_>, reply: Reply) {
-    let on_block = matches!(reply, Reply::Deny(_));
-    let question = run
-        .ask
+fn reply(run: &HookRun<'_>, reply: Reply<'_>) {
+    let blocking: Option<Vec<(&str, &str)>> = match &reply {
+        Reply::Deny(_, rules) => Some(
+            rules
+                .iter()
+                .map(|rule| (rule.doc_slug.as_str(), rule.rule_id.as_str()))
+                .collect(),
+        ),
+        _ => None,
+    };
+    let round = run.ask.map(|ask| (ask, ask.round(blocking.as_deref())));
+    let question = round
+        .as_ref()
         .zip(run.session_id)
-        .filter(|(ask, session_id)| {
-            super::adr_report::mark(session_id, run.rules_dir, ask, on_block)
+        .filter(|((ask, round), session_id)| {
+            super::adr_report::mark(session_id, run.rules_dir, ask, round)
         })
-        .map(|(ask, _)| ask.text(on_block));
+        .map(|((_, round), _)| round.text());
     let json = match (reply, question) {
         (Reply::Silent, None) => return,
         (Reply::Status(message), None) => match run.host.status(&message) {
@@ -2517,12 +2527,14 @@ fn reply(run: &HookRun<'_>, reply: Reply) {
             None => return,
         },
         (Reply::Notice(message), None) => run.host.notice(&message),
-        (Reply::Deny(reason), None) => run.host.deny(&reason),
+        (Reply::Deny(reason, _), None) => run.host.deny(&reason),
         (Reply::Silent, Some(question)) => run.host.deny(question),
         (Reply::Status(message) | Reply::Notice(message), Some(question)) => {
             run.host.deny_with_notice(question, &message)
         }
-        (Reply::Deny(reason), Some(question)) => run.host.deny(&format!("{reason}\n\n{question}")),
+        (Reply::Deny(reason, _), Some(question)) => {
+            run.host.deny(&format!("{reason}\n\n{question}"))
+        }
     };
     emit(json);
 }
@@ -2910,7 +2922,7 @@ fn finish_verdicts(
             let deny_reason = hook_deny_reason_for(run.host, &blocking, session_id, partial, kind);
             reply(
                 run,
-                Reply::Deny(with_override_reminder(deny_reason, session)),
+                Reply::Deny(with_override_reminder(deny_reason, session), &blocking),
             );
         }
         record_hook_round(run, session, PlanGovernanceDecision::Block, &verdicts);
