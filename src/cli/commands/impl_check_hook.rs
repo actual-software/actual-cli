@@ -48,6 +48,9 @@ pub struct HookEnvelope {
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
     pub tool_response: Option<serde_json::Value>,
+    /// Codex only: the agent's final message on a `Stop`, which carries its
+    /// answer to the ADR question (see `adr_report::record_reply`).
+    pub last_assistant_message: Option<String>,
 }
 
 impl HookEnvelope {

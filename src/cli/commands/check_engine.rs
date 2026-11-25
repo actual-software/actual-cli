@@ -2509,7 +2509,7 @@ fn reply(run: &HookRun<'_>, reply: Reply) {
         .filter(|(ask, session_id)| {
             super::adr_report::mark(session_id, run.rules_dir, ask, on_block)
         })
-        .map(|(ask, _)| ask.text(on_block));
+        .map(|(ask, _)| ask.text(run.host, on_block));
     let json = match (reply, question) {
         (Reply::Silent, None) => return,
         (Reply::Status(message), None) => match run.host.status(&message) {

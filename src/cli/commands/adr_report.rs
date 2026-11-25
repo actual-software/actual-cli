@@ -41,6 +41,13 @@
 //! and stdin there takes a pipe or a redirect, which the skill's permission
 //! hook refuses. So the question names `--claim` and `--none`, and JSON on
 //! stdin stays for scripts.
+//!
+//! **Codex answers in its reply.** A Codex agent's shell runs in a sandbox
+//! that cannot write the session file under the config directory, so running
+//! the command there records nothing. The Codex question asks for the
+//! filled-in command as the agent's final reply instead, and the `Stop` hook
+//! that follows, which runs outside the sandbox, reads it from the envelope's
+//! `last_assistant_message` and records it through [`record_reply`].
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -53,6 +60,7 @@ use crate::cli::args::RulesReportUseArgs;
 use crate::cli::commands::brief_ledger::{self, LedgerKey};
 use crate::cli::commands::check_engine::capped_read;
 use crate::cli::commands::governance_session::{self, GovernanceSession};
+use crate::cli::commands::hook_host::HookHost;
 use crate::cli::commands::impl_check;
 use crate::cli::commands::plan_check::repo_root;
 use crate::error::ActualError;
@@ -76,6 +84,16 @@ const ANSWER: &str = "Answer with one command, then end your turn:";
 
 const ANSWER_ON_BLOCK: &str =
     "After fixing the above, answer with one command, then end your turn:";
+
+const NONE: &str = "run the command with --none";
+
+const CODEX_ANSWER: &str = "Answer by giving this command, filled in, as your whole reply, \
+     then end your turn. Do not run it; it is recorded from your reply:";
+
+const CODEX_ANSWER_ON_BLOCK: &str = "After fixing the above, answer by giving this command, \
+     filled in, as your whole reply, then end your turn. Do not run it; it is recorded from your reply:";
+
+const CODEX_NONE: &str = "give the command with --none";
 
 /// How far, in lines, a diff claim may miss the added or changed line it
 /// means, within one hunk.
@@ -235,16 +253,21 @@ pub struct PreparedAsk {
     adrs: Vec<AskedAdr>,
     text: String,
     text_on_block: String,
+    codex_text: String,
+    codex_text_on_block: String,
 }
 
 impl PreparedAsk {
-    /// The question, worded on a block to be answered once the block's
-    /// reason is fixed, so the claims are checked against the fixed diff.
-    pub(super) fn text(&self, on_block: bool) -> &str {
-        if on_block {
-            &self.text_on_block
-        } else {
-            &self.text
+    /// The question as `host` asks it, worded on a block to be answered once
+    /// the block's reason is fixed, so the claims are checked against the
+    /// fixed diff. Codex's asks for the command as the reply (see the module
+    /// doc).
+    pub(super) fn text(&self, host: HookHost, on_block: bool) -> &str {
+        match (host, on_block) {
+            (HookHost::Claude, false) => &self.text,
+            (HookHost::Claude, true) => &self.text_on_block,
+            (HookHost::Codex, false) => &self.codex_text,
+            (HookHost::Codex, true) => &self.codex_text_on_block,
         }
     }
 }
@@ -293,15 +316,13 @@ pub(super) fn prepare(
         session.turn,
         diff_digest.get(..8).unwrap_or(diff_digest)
     );
-    let text = question(session_id, &token, root, rules_dir, &listed, ANSWER);
-    let text_on_block = question(
-        session_id,
-        &token,
-        root,
-        rules_dir,
-        &listed,
-        ANSWER_ON_BLOCK,
-    );
+    let ask = |answer: &str, none: &str| {
+        question(session_id, &token, root, rules_dir, &listed, answer, none)
+    };
+    let text = ask(ANSWER, NONE);
+    let text_on_block = ask(ANSWER_ON_BLOCK, NONE);
+    let codex_text = ask(CODEX_ANSWER, CODEX_NONE);
+    let codex_text_on_block = ask(CODEX_ANSWER_ON_BLOCK, CODEX_NONE);
     Some(PreparedAsk {
         turn: session.turn,
         token,
@@ -309,6 +330,8 @@ pub(super) fn prepare(
         adrs: listed.into_iter().map(|(adr, _)| adr).collect(),
         text,
         text_on_block,
+        codex_text,
+        codex_text_on_block,
     })
 }
 
@@ -439,6 +462,7 @@ fn question(
     rules_dir: &Path,
     adrs: &[(AskedAdr, String)],
     answer: &str,
+    none: &str,
 ) -> String {
     let list: Vec<String> = adrs
         .iter()
@@ -461,7 +485,7 @@ fn question(
          {command} --claim <adr>=<repo-relative-path>:<line>\n\n\
          Repeat --claim for each ADR you used, naming the line you added or changed this turn that best shows its effect. \
          For a line of the plan approved this turn, use --plan-claim <adr>=<line>. \
-         When no listed ADR shaped the change, run the command with --none in place of the claims. \
+         When no listed ADR shaped the change, {none} in place of the claims. \
          That is a normal, expected answer.",
         list.join("\n")
     )
@@ -624,6 +648,88 @@ fn exec_with(args: &RulesReportUseArgs, stdin: Option<&str>) -> Result<String, A
 }
 
 const ALREADY: &str = "This turn's answer is already recorded; nothing changed.";
+
+/// Record the answer a Codex agent gave as its reply: the first line of
+/// `reply` that is a `report-use` command for `session_id`, checked and stored
+/// as if it had been run from `root` against `rules_dir`, whatever repository
+/// the line names. True when it stored an answer. Nothing is recorded while
+/// the turn's question is unasked or already answered, nor from a line that
+/// does not parse, gives no claim and no `--none`, or names another session
+/// or question.
+pub(super) fn record_reply(
+    session_id: &str,
+    session: &GovernanceSession,
+    root: &Path,
+    rules_dir: &Path,
+    reply: &str,
+) -> bool {
+    let open = session
+        .adr_ask
+        .as_ref()
+        .is_some_and(|ask| ask.turn == session.turn && ask.answer.is_none());
+    if !open {
+        return false;
+    }
+    let Some(mut args) = reply.lines().find_map(reply_command) else {
+        return false;
+    };
+    if args.claude_session != session_id
+        || (args.claims.is_empty() && args.plan_claims.is_empty() && !args.none)
+    {
+        return false;
+    }
+    args.repo = Some(root.to_path_buf());
+    args.rules_dir = Some(rules_dir.to_path_buf());
+    exec_with(&args, None).is_ok_and(|line| line != ALREADY)
+}
+
+/// `line` as `report-use` arguments, when it is the command, bare or in
+/// backticks, possibly after a `$ ` prompt.
+fn reply_command(line: &str) -> Option<RulesReportUseArgs> {
+    let line = line.trim().trim_matches('`').trim();
+    let line = line.strip_prefix("$ ").unwrap_or(line);
+    let rest = line.strip_prefix("actual rules report-use ")?;
+    let mut words = vec!["report-use".to_string()];
+    words.extend(shell_words(rest)?);
+    use clap::Parser;
+    RulesReportUseArgs::try_parse_from(words).ok()
+}
+
+/// `text` split into words the way a POSIX shell splits plain words and
+/// quoted ones, or `None` when a quote is left open.
+fn shell_words(text: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => words.extend(word.take()),
+            '\'' => {
+                let word = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => word.push(c),
+                    }
+                }
+            }
+            '"' => {
+                let word = word.get_or_insert_with(String::new);
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => word.push(chars.next()?),
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => word.get_or_insert_with(String::new).push(chars.next()?),
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    Some(words)
+}
 
 fn usage(message: &str) -> ActualError {
     ActualError::ConfigError(format!("rules report-use: {message}"))
@@ -1101,7 +1207,7 @@ pub(super) mod tests {
         }
 
         /// Ask `session`'s current turn, returning the token.
-        fn ask(&self, session: &str) -> String {
+        pub(in crate::cli::commands) fn ask(&self, session: &str) -> String {
             self.brief_all(session);
             let state = governance_session::load(session, &self.rules_dir());
             let ask = prepare(
@@ -1129,7 +1235,7 @@ pub(super) mod tests {
             }
         }
 
-        fn answer(&self, session: &str) -> Option<Answer> {
+        pub(in crate::cli::commands) fn answer(&self, session: &str) -> Option<Answer> {
             governance_session::load(session, &self.rules_dir())
                 .adr_ask
                 .and_then(|ask| ask.answer)
@@ -1163,7 +1269,7 @@ pub(super) mod tests {
     }
 
     /// Telemetry on, with no output configured, so a test build sends nothing.
-    const TELEMETRY_ON: &str = "telemetry:\n  enabled: true\n";
+    pub(in crate::cli::commands) const TELEMETRY_ON: &str = "telemetry:\n  enabled: true\n";
 
     const NO_TELEMETRY: &str = "telemetry:\n  enabled: false\n";
 
@@ -1400,17 +1506,32 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
             "0123456789abcdef",
         )
         .unwrap();
-        let text = ask.text(false);
+        let text = ask.text(HookHost::Claude, false);
         assert!(text.starts_with(&format!("{QUESTION_HEAD}\n\n")));
         assert!(text.contains(&format!("\n\n{ANSWER}\n")));
         assert!(!text.contains(ANSWER_ON_BLOCK));
-        let on_block = ask.text(true);
+        let on_block = ask.text(HookHost::Claude, true);
         assert!(on_block.contains(&format!("\n\n{ANSWER_ON_BLOCK}\n")));
         assert_eq!(on_block.replace(ANSWER_ON_BLOCK, ANSWER), text);
         assert!(text.contains("An ADR counts only if it changed or decided what you wrote."));
         assert!(text.contains("merely complies with or happens to agree with"));
         assert!(text.contains("the line you added or changed this turn that best shows its effect"));
         assert!(text.contains("run the command with --none in place of the claims. That is a normal, expected answer."));
+        let codex = ask.text(HookHost::Codex, false);
+        assert!(codex.contains(&format!("\n\n{CODEX_ANSWER}\n")));
+        assert!(codex.contains("give the command with --none in place of the claims."));
+        assert_eq!(
+            codex
+                .replace(CODEX_ANSWER, ANSWER)
+                .replace(CODEX_NONE, NONE),
+            text
+        );
+        let codex_on_block = ask.text(HookHost::Codex, true);
+        assert!(codex_on_block.contains(&format!("\n\n{CODEX_ANSWER_ON_BLOCK}\n")));
+        assert_eq!(
+            codex_on_block.replace(CODEX_ANSWER_ON_BLOCK, CODEX_ANSWER),
+            codex
+        );
         for line in [
             "- `api-errors-001`: Typed API Errors",
             "- `legacy-naming`: Legacy Naming",
@@ -1444,7 +1565,7 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         assert_eq!((legacy.adr_ref.clone(), legacy.adr_ids.len()), (None, 0));
 
         let other_rules = fx.repo.path().join("other-rules");
-        let text = question("s1", "0-x", fx.repo.path(), &other_rules, &[], ANSWER);
+        let text = question("s1", "0-x", fx.repo.path(), &other_rules, &[], ANSWER, NONE);
         assert!(text.contains(&format!(
             " --rules-dir {} --claim",
             shell_word(&other_rules.to_string_lossy())
@@ -1816,6 +1937,102 @@ diff --git \"a/sp ace\\303\\251.rs\" \"b/sp ace\\303\\251.rs\"\n--- \"a/sp ace\\
         governance_session::update("s1", &fx.rules_dir(), |s| s.turn += 1);
         assert!(answer(&args, None::<&[u8]>).is_err(), "the turn moved on");
         assert!(fx.answer("s1").is_none());
+    }
+
+    /// A Codex reply holding the command, in backticks as observed on Codex
+    /// CLI 0.166.0, records the answer against the hook's own repository,
+    /// once. A reply with no command, an unfilled template, another session or
+    /// another question records nothing.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_record_reply_reads_the_command_from_a_codex_reply() {
+        let _lock = lock();
+        let fx = Fixture::new(TELEMETRY_ON);
+        let rules = fx.rules_dir();
+        let root = fx.repo.path();
+        let token = fx.ask("s1");
+        std::fs::write(
+            root.join("src/orders.rs"),
+            "fn a() {}\nfn b() -> Result<(), ApiError> {}\n",
+        )
+        .unwrap();
+        let session = || governance_session::load("s1", &rules);
+        let command = |rest: &str| {
+            format!("actual rules report-use --claude-session s1 --turn {token} --repo /elsewhere {rest}")
+        };
+        for refused in [
+            "Done.".to_string(),
+            command("--claim <adr>=<repo-relative-path>:<line>"),
+            command("--claim api-errors-001=src/orders.rs:2").replace("s1", "s2"),
+            command("--claim api-errors-001=src/orders.rs:2").replace(&token, "0-ffffffff"),
+            command(""),
+            command("--claim 'api-errors-001=src/orders.rs:2"),
+        ] {
+            assert!(
+                !record_reply("s1", &session(), root, &rules, &refused),
+                "{refused}"
+            );
+        }
+        assert!(fx.answer("s1").is_none());
+
+        let reply = format!(
+            "Updated the handler.\n\n`{}`",
+            command("--claim api-errors-001=src/orders.rs:2")
+        );
+        assert!(record_reply("s1", &session(), root, &rules, &reply));
+        let recorded = fx.answer("s1").unwrap();
+        assert_eq!(reasons(&recorded), [None]);
+        assert_eq!(recorded.claims[0].file.as_deref(), Some("src/orders.rs"));
+        assert!(
+            !record_reply("s1", &session(), root, &rules, &reply),
+            "answered already"
+        );
+    }
+
+    /// `--none` in a reply records an answer with no claims, and a question
+    /// from an earlier turn is not open to one.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_record_reply_takes_none_for_this_turns_question_only() {
+        let _lock = lock();
+        let fx = Fixture::new(TELEMETRY_ON);
+        let rules = fx.rules_dir();
+        let token = fx.ask("s1");
+        let reply = format!("actual rules report-use --claude-session s1 --turn {token} --none");
+        governance_session::update("s1", &rules, |s| s.turn += 1);
+        let session = governance_session::load("s1", &rules);
+        assert!(!record_reply(
+            "s1",
+            &session,
+            fx.repo.path(),
+            &rules,
+            &reply
+        ));
+        governance_session::update("s1", &rules, |s| s.turn -= 1);
+        let session = governance_session::load("s1", &rules);
+        assert!(record_reply(
+            "s1",
+            &session,
+            fx.repo.path(),
+            &rules,
+            &format!("$ {reply}")
+        ));
+        assert!(fx.answer("s1").unwrap().claims.is_empty());
+    }
+
+    #[test]
+    fn test_shell_words_reads_the_quoting_the_question_writes() {
+        let words = |text: &str| shell_words(text).map(|w| w.join("|"));
+        assert_eq!(words("a  b\tc").as_deref(), Some("a|b|c"));
+        let repo = "/tmp/it's here";
+        assert_eq!(
+            words(&format!("--repo {}", shell_word(repo))).as_deref(),
+            Some(format!("--repo|{repo}").as_str())
+        );
+        assert_eq!(words(r#""a \" b" c\ d"#).as_deref(), Some(r#"a " b|c d"#));
+        assert_eq!(words("''").as_deref(), Some(""));
+        assert_eq!(words("'open"), None);
+        assert_eq!(words("trailing\\"), None);
     }
 
     #[cfg(feature = "telemetry")]
