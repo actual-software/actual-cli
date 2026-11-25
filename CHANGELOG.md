@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A stage-2 rank asks for low reasoning effort and no extended thinking: `--effort low` and `alwaysThinkingEnabled: false` on claude-cli, `model_reasoning_effort=low` on codex-cli. Haiku 4.5 used to think through most ranks and miss the 90-second deadline, and Codex ran at the effort set in your own Codex config. The conformance judge's existing low effort now reaches codex-cli too
 - With no `--model` and no `model:` in the config, a stage-2 rank uses `claude-sonnet-5-5` on claude-cli and anthropic-api and `gpt-6.2-sol` on codex-cli, where it used `claude-sonnet-4-6` and Codex's own configured model. The conformance judge and `adr adopt` keep their defaults
 
+### Fixed
+- On codex-cli, a stage-2 rank or a `plan-check` or `impl-check` judge run outside a git repository no longer fails with "Not inside a trusted directory". These calls run read-only, so they pass `--skip-git-repo-check`. Tailoring, which writes files, still requires a git repository
+
 ## [0.17.0] - 2026-11-24
 
 ### Added
