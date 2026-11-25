@@ -53,6 +53,15 @@ thousands of tokens over a list it then scored the same way.
 codex-cli. The other calls that resolve a runner — the conformance judge,
 `adr adopt` — keep their own defaults.
 
+**In the gates.** `plan-check` and `impl-check` rank before they judge, with
+the plan or the turn's diff as the query, and so do the plugin's plan and
+implementation gates, which run them from hooks. A hook's rank keeps to a
+15-second deadline instead of 90, so the conformance judge keeps the rest of
+the hook's timeout, and a rank that misses it falls back to stage 1 like any
+other failure. `--no-rank` skips the rank in every mode, and the plugin passes
+it when `ACTUAL_GATE_RANK=off`. The hooks used to skip stage 2, when a rank
+took about 16 seconds; the measurements below show why they no longer do.
+
 ## What the model is allowed to do
 
 Three constraints, each enforced in code rather than requested in the prompt.
@@ -164,6 +173,30 @@ in k. Against the earlier prompt on the same pull requests, the difference in
 coverage@5 is −0.03 [−0.11, +0.03] on `claude-cli` and +0.00 [−0.07, +0.07] on
 `codex-cli` (95% intervals, resampling pull requests).
 
+**The gates' queries** — the same pull requests and labels, with each query the
+gates would send. Neither gate passes a list of paths: a plan is matched on its
+own text and the paths written in it, and a diff on its text and the paths its
+file headers name. The PR's title and description stand in for a plan; the
+labelling judges also read the description, which may flatter every selector a
+little but none more than another. The diff is the whole PR's, where the
+implementation gate sees one turn's.
+
+| query | selector | coverage@5 | coverage@10 | precision@10 | p95 latency |
+|---|---|---|---|---|---|
+| title and description | two-stage, `claude-cli` | 0.50 | 0.41 | 0.49 | 5.3 s |
+| title and description | two-stage, `codex-cli` | 0.50 | 0.43 | 0.49 | 11.2 s |
+| title and description | scope index | 0.34 | 0.31 | 0.30 | 0.2 s |
+| diff | two-stage, `claude-cli` | 0.53 | 0.51 | 0.51 | 6.0 s |
+| diff | two-stage, `codex-cli` | 0.57 | 0.56 | 0.55 | 11.0 s |
+| diff | scope index | 0.41 | 0.36 | 0.34 | 0.5 s |
+
+Against the scope index on the same query, the rank adds +0.10 [+0.04, +0.17]
+to coverage@10 on a description and +0.15 [+0.07, +0.23] on a diff with
+`claude-cli`, and +0.13 [+0.05, +0.20] and +0.20 [+0.12, +0.29] with
+`codex-cli`. The scope index does worse on both queries than on the title with
+the PR's paths (0.42): a description names few paths, and a diff names them all
+but buries them in the words of its code.
+
 Two further properties are asserted in `tests/integration_scope_select.rs`
 against a perfectly calibrated fake ranker, which measures the plumbing rather
 than any model: the rank never loses a true positive the prefilter had, and
@@ -185,7 +218,9 @@ talking is never cut off by it: a measured `claude-cli` call under the earlier
 prompt ran 218 seconds under a 60-second runner timeout. On the 25 pull requests
 above, a rank took 4.0 seconds at the median and 4.3 at the 95th percentile on
 `claude-cli`, and 8.6 and 9.6 on `codex-cli`. Exceeding the deadline degrades to
-the prefilter like any other failure.
+the prefilter like any other failure. In the gates' hooks the deadline is 15
+seconds, which the 95th percentile on both queries above stays inside on both
+backends.
 
 **Money, on one backend.** A rank inherits `max_budget_usd` from the config, so
 a selection cannot outspend what tailoring is allowed. Only the Claude CLI
@@ -242,7 +277,15 @@ five.
 - **Stage-2 latency is a model call's.** A rank now typically answers in 4 to
   10 seconds, but it is still a network call to a model, and the deadline is
   what bounds the worst case. A caller that cannot tolerate a 90-second wait
-  should pass `--no-rank`.
+  should pass `--no-rank`. The gates' hooks wait at most 15 seconds.
+- **The gates keep twice the measured cap.** `plan-check` and `impl-check`
+  judge up to 20 documents by default, where the measurements above keep 10.
+  They rank only when stage 1 finds more than 20, and the rank's gain at that
+  cap is not measured; what carries over is that it drops the candidates it
+  scores unrelated, which the judge then never reads.
+- **Each round of a gate ranks afresh.** A plan the agent revises after a
+  denial is ranked again, so every round of the revision loop costs a rank as
+  well as a judgement. No scores are reused between rounds.
 - **The fixture corpus is synthetic.** It is the CI regression gate, not
   evidence on its own. See the limits section of
   [SCOPE_INDEX.md](SCOPE_INDEX.md).
