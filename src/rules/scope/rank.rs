@@ -73,6 +73,17 @@ use super::index::Match;
 /// "60 seconds without a word, or 90 seconds in total, whichever comes first".
 pub const RANK_BUDGET: Duration = Duration::from_secs(90);
 
+/// [`RANK_BUDGET`] for a rank inside the plan and implementation gates' hooks.
+///
+/// The gate's hook has a fixed timeout, and its conformance judge needs most
+/// of it (see [`crate::rules::check::CHECK_BUDGET`]), so the rank gets a short
+/// deadline of its own and falls back to the prefilter when it misses. On the
+/// queries the gates send — a plan, or a diff — the default models' ranks took
+/// at most 6 seconds at the 95th percentile on claude-cli and 11 on codex-cli,
+/// measured over 25 merged pull requests from one repository with each PR's
+/// description and diff standing in for the plan and the turn's diff.
+pub const GATE_RANK_BUDGET: Duration = Duration::from_secs(15);
+
 /// How a rank call is tuned: low effort, and no extended thinking.
 ///
 /// Scoring a numbered list is a bounded classification the prompt spells out,
@@ -372,7 +383,8 @@ pub fn candidate_from(hit: &Match, globs: &[String], scope: Option<&str>) -> Can
     Candidate::new(&hit.slug, hit.title.as_deref(), scope, globs)
 }
 
-/// Ask `runner` to judge `candidates` against `plan`, inside [`RANK_BUDGET`].
+/// Ask `runner` to judge `candidates` against `plan`, inside `budget`:
+/// [`RANK_BUDGET`], or [`GATE_RANK_BUDGET`] in a gate's hook.
 ///
 /// Returns the validated verdicts, or the reason the rank could not be used.
 /// A transport failure, an overrun budget and an unusable answer all come back
@@ -385,6 +397,7 @@ pub async fn rank<R: StructuredRunner>(
     candidates: &[Candidate],
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
+    budget: Duration,
 ) -> Result<Vec<RankedVerdict>, ActualError> {
     let prompt = build_prompt(plan, paths, candidates);
     let schema = output_schema(candidates.len());
@@ -395,11 +408,12 @@ pub async fn rank<R: StructuredRunner>(
         max_budget_usd,
         RANK_TUNING,
     );
-    let value = tokio::time::timeout(RANK_BUDGET, call)
-        .await
-        .map_err(|_| ActualError::RunnerTimeout {
-            seconds: RANK_BUDGET.as_secs(),
-        })??;
+    let value =
+        tokio::time::timeout(budget, call)
+            .await
+            .map_err(|_| ActualError::RunnerTimeout {
+                seconds: budget.as_secs(),
+            })??;
     // Not `TailoringValidationError`: this payload has nothing to do with
     // tailoring, and a caller matching on that variant to handle a tailoring
     // failure would catch a rank failure too. The string is what a user sees,
@@ -710,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn test_rank_returns_validated_verdicts() {
         let runner = FakeRunner::new(Ok(scores_value(&[("1", 9.into())])));
-        let verdicts = rank(&runner, "plan", &[], &candidates(), None, None)
+        let verdicts = rank(&runner, "plan", &[], &candidates(), None, None, RANK_BUDGET)
             .await
             .unwrap();
         assert_eq!(verdicts.len(), 1);
@@ -722,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn test_rank_sends_the_schema_for_its_candidates_and_the_rank_tuning() {
         let runner = FakeRunner::new(Ok(scores_value(&[("1", 9.into())])));
-        rank(&runner, "plan", &[], &candidates(), None, None)
+        rank(&runner, "plan", &[], &candidates(), None, None, RANK_BUDGET)
             .await
             .unwrap();
         let (schema, tuning) = runner.seen.lock().unwrap().clone().unwrap();
@@ -735,7 +749,7 @@ mod tests {
     #[tokio::test]
     async fn test_rank_propagates_a_runner_failure() {
         let runner = FakeRunner::new(Err(()));
-        let err = rank(&runner, "plan", &[], &candidates(), None, None)
+        let err = rank(&runner, "plan", &[], &candidates(), None, None, RANK_BUDGET)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("runner is down"));
@@ -776,7 +790,7 @@ mod tests {
         }
 
         let runner = HangingRunner::default();
-        let err = rank(&runner, "plan", &[], &candidates(), None, None)
+        let err = rank(&runner, "plan", &[], &candidates(), None, None, RANK_BUDGET)
             .await
             .unwrap_err();
         assert!(
@@ -786,12 +800,31 @@ mod tests {
         assert!(
             matches!(err, ActualError::RunnerTimeout { seconds } if seconds == RANK_BUDGET.as_secs())
         );
+
+        // A gate's hook passes its own, shorter deadline, and the rank keeps
+        // to that one rather than to the default.
+        let started = tokio::time::Instant::now();
+        let err = rank(
+            &HangingRunner::default(),
+            "plan",
+            &[],
+            &candidates(),
+            None,
+            None,
+            GATE_RANK_BUDGET,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(started.elapsed(), GATE_RANK_BUDGET);
+        assert!(
+            matches!(err, ActualError::RunnerTimeout { seconds } if seconds == GATE_RANK_BUDGET.as_secs())
+        );
     }
 
     #[tokio::test]
     async fn test_rank_reports_an_unusable_answer_as_a_validation_error() {
         let runner = FakeRunner::new(Ok(serde_json::json!({"nope": true})));
-        let err = rank(&runner, "plan", &[], &candidates(), None, None)
+        let err = rank(&runner, "plan", &[], &candidates(), None, None, RANK_BUDGET)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no `scores` object"));
