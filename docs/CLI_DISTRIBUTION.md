@@ -6,7 +6,7 @@ How the `actual` binary is built and published to Homebrew, npm, and GitHub Rele
 
 ## Overview
 
-A release is triggered by pushing a `v*` tag to `main`. Pre-release tags (suffixed with `-alpha`, `-beta`, `-rc`, or `-test`) are detected and skipped by the release workflow — only clean semver tags (e.g. `v0.2.0`) produce published artifacts.
+A release is triggered by merging a version bump to `main`: `.github/workflows/tag-release.yml` tags the merged commit `v<version>`, and the tag starts the release. Pre-release tags (suffixed with `-alpha`, `-beta`, `-rc`, or `-test`) are detected and skipped by the release workflow — only clean semver tags (e.g. `v0.2.0`) produce published artifacts.
 
 One workflow, `.github/workflows/release.yml`, builds the binaries once per tag and feeds every channel from that build: the two GitHub Releases, the Homebrew tap and the five npm packages. It also writes `SHA256SUMS` for the four tarballs, which a member of the signing group signs after the release (see [RELEASE_SIGNING.md](RELEASE_SIGNING.md)).
 
@@ -16,26 +16,13 @@ A pull request that changes `release.yml`, the signing tool in `crates/release-s
 
 ## Cutting a release
 
-First land a commit on `main` that bumps `version` in `Cargo.toml`, with the matching `Cargo.lock` change, and adds the release's `CHANGELOG.md` entry, the way `chore: release v0.8.0` did. `actual --version` reports the `Cargo.toml` version while npm and Homebrew take theirs from the tag, so a tag without the bump would publish npm 0.9.0 with a binary that reports 0.8.0. [`.github/CODEOWNERS`](../.github/CODEOWNERS) owns `Cargo.toml` and the release pipeline, so the bump needs an approving review from a teammate; other pull requests can merge without one.
+Open a pull request that bumps `version` in `Cargo.toml`, with the matching `Cargo.lock` change, and adds the release's `CHANGELOG.md` entry, the way `chore: release v0.8.0` did. [`.github/CODEOWNERS`](../.github/CODEOWNERS) owns `Cargo.toml` and the release pipeline, so the bump needs an approving review from a teammate; other pull requests can merge without one.
 
-Then tag that commit and push the tag. Only repository admins can push `v*` tags, and the release stops before it builds anything unless the tag is on `main` and matches the `Cargo.toml` version:
+Merging it is the release. `Tag Release` (`.github/workflows/tag-release.yml`) runs on every push to `main` that changes `Cargo.toml`. When the `Cargo.toml` version has no tag yet, it creates `v<version>` on the merged commit, and the release workflow fires on that tag. A `Cargo.toml` change that leaves the version alone, such as a dependency update, finds its tag already there and does nothing. A version lower than the latest release fails `Tag Release` and publishes nothing. Once the release workflow has published both GitHub Releases, a member of the signing group signs the release's `SHA256SUMS` with `cargo run -p release-sign -- release <tag> --kms-key <key version>`, as [RELEASE_SIGNING.md](RELEASE_SIGNING.md) describes.
 
-```bash
-# Ensure you're on main and up to date
-git checkout main && git pull origin main
+Nobody pushes `v*` tags by hand: the "Release Tags" ruleset lets only the release GitHub App create, move or delete them, and `Tag Release` creates the tag with that app's token (`RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`). A tag created with the workflow's own `GITHUB_TOKEN` would not start the release workflow. The release workflow still stops before it builds anything unless the tag is on `main`, matches the `Cargo.toml` version and is newer than the latest release.
 
-# Tag and push
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-The release workflow fires on the tag push. Once it has published both GitHub Releases, a member of the signing group signs the release's `SHA256SUMS` with `cargo run -p release-sign -- release <tag> --kms-key <key version>`, as [RELEASE_SIGNING.md](RELEASE_SIGNING.md) describes.
-
-**Pre-release tag** (does not publish):
-```bash
-git tag v0.2.0-beta.1
-git push origin v0.2.0-beta.1
-```
+**Pre-release** (does not publish): set the `Cargo.toml` version to one with a pre-release suffix, such as `0.2.0-beta.1`. `Tag Release` tags it like any other version, and the release workflow skips it.
 
 ---
 
