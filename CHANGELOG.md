@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `plan-check` and `impl-check` take `--max-rules N`, the most individual rules one judge call reads (default 40, the cap that applied before), and `--selection-only`, which prints as JSON what the judge would be handed — every stage-1 candidate with its stage-1 and stage-2 scores, the selected documents, the gathered rules, whether the cap cut any, and the rank's time — without calling the judge. `rules select --json` lists every stage-1 candidate the same way, under `selection.considered`. See [docs/RULE_SELECTION.md](docs/RULE_SELECTION.md#commands)
+
 ### Changed
 - Stage 2 of rule selection, the model rank behind `rules select`, `plan-check` and `impl-check`, asks for one score from 0 to 9 per candidate instead of a verdict and a reason for each, so it writes about 150 tokens instead of about 2,400 and answers in about 4 seconds instead of about 16. A score of 7 to 9 counts as `governs`, 3 to 6 as `related` and 0 to 2 as `unrelated`, and the order within each is the index's, as before. Each selected rule's reason is now the index's own evidence for it, the same reason `--no-rank` gives. See [docs/RULE_SELECTION.md](docs/RULE_SELECTION.md)
 - A stage-2 rank asks for low reasoning effort and no extended thinking: `--effort low` and `alwaysThinkingEnabled: false` on claude-cli, `model_reasoning_effort=low` on codex-cli. Haiku 4.5 used to think through most ranks and miss the 90-second deadline, and Codex ran at the effort set in your own Codex config. The conformance judge's existing low effort now reaches codex-cli too

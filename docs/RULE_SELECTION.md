@@ -304,6 +304,19 @@ actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]...
 One of `PLAN` or `--file` is required. `--file` alone is a valid query — a
 path and no plan — and skips stage 2 because it ranks against plan prose.
 
+`rules select --json` lists every stage-1 candidate under `selection.considered`,
+in stage-1 order, with its stage-1 `score` and, when stage 2 scored it, its
+`rank_score` from 0 to 9 — the unrelated and the capped too — so another limit
+or cutoff can be tried on the same answer without asking the model again.
+
+`plan-check` and `impl-check` select the same way before they judge, and take
+`--limit`, `--candidates` and `--no-rank` with the same meaning, plus
+`--max-rules N` (default 40), the most individual rules one judge call reads.
+`--selection-only` prints, as JSON, what the judge would be handed — the
+selection with every candidate's scores, the gathered rules, whether the cap
+cut any, and how long the rank took — and stops before the judge. It is for
+measuring and tuning selection; a hook never uses it.
+
 `--runner` and `--model` steer stage 2 only, and both fall back to the same
 config fields `actual adr-bot` uses.
 
