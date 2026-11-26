@@ -1714,9 +1714,10 @@ mod tests {
 
         let bin = tempdir().unwrap();
         let log = bin.path().join("calls.log");
-        let judge = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "sign_with_rs256", "reason": "uses RS256"},
-        ]));
+        // A numbered answer is valid whichever rule the limit of one keeps;
+        // an answer keyed to the other rule would be rejected, and the judge
+        // made a second time.
+        let judge = serde_json::json!({"verdicts": {"1": "not_applicable", "2": "not_applicable"}});
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
             rank_and_judge_claude(bin.path(), &judge, &log)
