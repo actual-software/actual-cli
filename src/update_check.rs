@@ -1,16 +1,19 @@
 //! The once-a-day update notice, and the facts `actual version` reports.
 //!
-//! The running binary's own path names the channel that installed it, so the
-//! notice can print that channel's upgrade command. Homebrew and npm keep
-//! records of the files they installed, so only a release build neither owns
-//! is pointed at `actual self-update`, and a build from source at cargo. The
-//! check itself never replaces the binary.
+//! The running binary's own path names the channel that installed it. The
+//! notice points every release build, from Homebrew, npm or a download, at
+//! `actual self-update`, and a build from source at cargo; `actual version
+//! --json` names the package manager's own command for scripts and agents.
+//! The check itself never replaces the binary.
 //!
 //! No command waits on the network for the notice. After a command succeeds,
 //! [`after_command`] prints a notice the local cache already holds, and when
 //! the last lookup is more than a day old it starts the hidden
 //! `__update-check` command as a detached child, which asks the npm registry
 //! for the latest version and records the answer for a later run.
+//!
+//! The same cache holds the registry's `minimum` tag, which the version gate
+//! ([`crate::version_gate`]) reads through [`supported_minimum`].
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -27,10 +30,18 @@ use crate::config::types::Config;
 /// does for telemetry.
 pub const OPT_OUT_ENV: &str = "ACTUAL_NO_UPDATE_CHECK";
 
-/// The npm registry's `latest` document for the CLI's package: about 2 KB from
-/// npm's CDN. GitHub's REST API would allow only 60 unauthenticated calls an
-/// hour per IP address, which a shared office address can use up.
-pub(crate) const REGISTRY_URL: &str = "https://registry.npmjs.org/@actualai/actual/latest";
+/// The npm registry's dist-tags for the CLI's package: `latest`, and
+/// `minimum`, the oldest release still supported, when one is set. A few
+/// dozen bytes from npm's CDN. GitHub's REST API would allow only 60
+/// unauthenticated calls an hour per IP address, which a shared office address
+/// can use up.
+pub(crate) const REGISTRY_URL: &str =
+    "https://registry.npmjs.org/-/package/@actualai/actual/dist-tags";
+
+/// Points every registry lookup somewhere else, for testing. A release build
+/// accepts only a loopback URL, so a repository's agent settings can't send
+/// its lookups, and the minimum they decide, to another host.
+pub const REGISTRY_OVERRIDE_ENV: &str = "ACTUAL_UPDATE_REGISTRY_URL";
 
 /// The latest release's page, for downloading a release by hand.
 pub const RELEASE_URL: &str = "https://github.com/actual-software/actual-releases/releases/latest";
@@ -103,14 +114,29 @@ impl Channel {
         std::env::current_exe().map_or(Channel::Other, |exe| Self::of_executable(&exe))
     }
 
-    /// The command that upgrades this channel's install. Homebrew's needs the
-    /// tap's full name, because a bare `actual` resolves to an unrelated cask.
+    /// The package manager's own upgrade command, for a shell with no one to
+    /// answer `actual self-update`'s question, such as an agent's. Homebrew's
+    /// refreshes the tap first, which `brew upgrade` otherwise reads up to a
+    /// day stale, and names the tap in full, because a bare `actual` resolves
+    /// to an unrelated cask.
     pub fn upgrade_command(self) -> Option<&'static str> {
         match self {
-            Channel::Homebrew => Some("brew upgrade actual-software/actual/actual"),
+            Channel::Homebrew => Some("brew update && brew upgrade actual-software/actual/actual"),
             Channel::Npm => Some("npm install -g @actualai/actual@latest"),
             Channel::Other => None,
         }
+    }
+
+    /// What `actual version --json` reports as `upgrade_command`: what
+    /// upgrades this binary with no one there to answer a question, as in an
+    /// agent's shell. `None` for a build from source.
+    pub fn unattended_upgrade(self) -> Option<&'static str> {
+        self.unattended_upgrade_for(RELEASE_BUILD)
+    }
+
+    fn unattended_upgrade_for(self, release_build: bool) -> Option<&'static str> {
+        self.upgrade_command()
+            .or_else(|| release_build.then_some(SELF_UPDATE_COMMAND))
     }
 
     /// The command the notice and `actual version` print for this binary.
@@ -118,14 +144,13 @@ impl Channel {
         self.upgrade_hint_for(RELEASE_BUILD)
     }
 
-    /// The package manager's command, or for a copy no package manager owns,
-    /// `actual self-update` when it's a release build and cargo's when it was
-    /// built from source, which `actual self-update` refuses.
+    /// `actual self-update`, which upgrades Homebrew and npm installs through
+    /// their package manager and replaces a release build no package manager
+    /// owns, or cargo's command for a build from source, which it refuses.
     fn upgrade_hint_for(self, release_build: bool) -> &'static str {
-        match self.upgrade_command() {
-            Some(command) => command,
-            None if release_build => SELF_UPDATE_COMMAND,
-            None => CARGO_COMMAND,
+        match self {
+            Channel::Other if !release_build => CARGO_COMMAND,
+            _ => SELF_UPDATE_COMMAND,
         }
     }
 
@@ -148,6 +173,22 @@ pub fn is_disabled(config: &Config) -> bool {
 
 pub(crate) fn env_is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+/// Where registry lookups go: [`REGISTRY_URL`], or [`REGISTRY_OVERRIDE_ENV`]
+/// when it is set and this build accepts it.
+pub(crate) fn registry_url() -> String {
+    registry_url_from(
+        std::env::var(REGISTRY_OVERRIDE_ENV).ok().as_deref(),
+        RELEASE_BUILD,
+    )
+}
+
+fn registry_url_from(over: Option<&str>, release_build: bool) -> String {
+    match over.filter(|url| !url.is_empty()) {
+        Some(url) if !release_build || crate::net::is_loopback_http_url(url) => url.to_string(),
+        _ => REGISTRY_URL.to_string(),
+    }
 }
 
 /// True when a registry request may go out: the configuration loaded, and
@@ -218,7 +259,8 @@ pub fn applies_to(command: &Command) -> bool {
         },
         Command::MintToken(_)
         | Command::Version(_)
-        | Command::SelfUpdate
+        | Command::SelfUpdate(_)
+        | Command::Plugin(_)
         | Command::UpdateCheck
         | Command::TelemetryFlush
         | Command::SessionEnded => false,
@@ -359,9 +401,86 @@ pub(crate) fn refresh(config: Option<&Config>, url: &str, cache_path: &Path) {
     if !may_check(config) {
         return;
     }
-    if let Some(latest) = lookup_latest(url, LOOKUP_TIMEOUT) {
-        record_latest(cache_path, &latest, Utc::now());
+    if let Some(tags) = lookup_tags(url, LOOKUP_TIMEOUT) {
+        record_tags(cache_path, &tags, Utc::now());
     }
+}
+
+/// The longest the version gate waits on the registry before it runs a
+/// command.
+pub(crate) const GATE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Days a successful lookup keeps the gate from asking again.
+const GATE_FRESH_DAYS: i64 = 7;
+
+/// The oldest supported release, for the version gate: the cached minimum,
+/// after a lookup when one is due and `may_fetch` allows it. A lookup is due
+/// when the last success is more than a week old (or in the future), or when
+/// the cached minimum is newer than `current`, so a minimum that was lowered
+/// lets the run through; but at most once an hour across every process, so
+/// an offline machine pays the timeout at most hourly. The hour is claimed
+/// under the cache lock before the request, so hooks starting together make
+/// one request. A failed lookup leaves the cache as it was. `None` without a
+/// cache path, or when no minimum is known.
+pub(crate) fn supported_minimum(
+    cache_path: Option<&Path>,
+    url: &str,
+    current: &str,
+    now: DateTime<Utc>,
+    timeout: Duration,
+    may_fetch: bool,
+) -> Option<String> {
+    let path = cache_path?;
+    let cache = load_cache(path);
+    // The hour is claimed before the request, so every process but one reads
+    // the cache.
+    if !(may_fetch
+        && gate_lookup_due(&cache, current, now)
+        && claim_gate_lookup(path, current, now))
+    {
+        return cache.minimum_version;
+    }
+    match lookup_tags(url, timeout) {
+        Some(tags) => {
+            record_tags(path, &tags, now);
+            tags.minimum
+        }
+        None => load_cache(path).minimum_version,
+    }
+}
+
+/// The minimum the cache holds, without asking the registry.
+pub(crate) fn cached_minimum(cache_path: Option<&Path>) -> Option<String> {
+    cache_path.map(load_cache)?.minimum_version
+}
+
+fn gate_lookup_due(cache: &UpdateCache, current: &str, now: DateTime<Utc>) -> bool {
+    let fresh = cache.fetched_at.is_some_and(|at| {
+        let age = now - at;
+        age >= chrono::Duration::zero() && age < chrono::Duration::days(GATE_FRESH_DAYS)
+    });
+    let below = cache
+        .minimum_version
+        .as_deref()
+        .is_some_and(|minimum| is_newer(minimum, current));
+    let asked_this_hour = cache
+        .checked_at
+        .is_some_and(|at| (now - at).num_minutes().abs() < 60);
+    (!fresh || below) && !asked_this_hour
+}
+
+/// Record the gate's attempt under the lock, so a process that starts at the
+/// same moment finds it and skips the request. True once it is saved.
+fn claim_gate_lookup(cache_path: &Path, current: &str, now: DateTime<Utc>) -> bool {
+    let Some(_lock) = lock_cache(cache_path) else {
+        return false;
+    };
+    let mut cache = load_cache(cache_path);
+    if !gate_lookup_due(&cache, current, now) {
+        return false;
+    }
+    cache.checked_at = Some(now);
+    save_cache(cache_path, &cache)
 }
 
 /// What `actual version` learned about the latest release.
@@ -399,12 +518,18 @@ pub(crate) fn look_up(
     if is_disabled(config) {
         return Latest::Disabled;
     }
-    match lookup_latest(url, LOOKUP_TIMEOUT) {
-        Some(latest) => {
+    look_up_regardless(url, cache_path)
+}
+
+/// [`look_up`]'s request, made whether or not update checks are on: for
+/// `actual self-update` below the minimum, which the version gate requires.
+pub(crate) fn look_up_regardless(url: &str, cache_path: Option<&Path>) -> Latest {
+    match lookup_tags(url, LOOKUP_TIMEOUT) {
+        Some(tags) => {
             if let Some(path) = cache_path {
-                record_latest(path, &latest, Utc::now());
+                record_tags(path, &tags, Utc::now());
             }
-            Latest::Found(latest)
+            Latest::Found(tags.latest)
         }
         None => Latest::Unavailable,
     }
@@ -422,14 +547,26 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-#[derive(Deserialize)]
-struct RegistryLatest {
-    version: String,
+/// What the registry says about the CLI's releases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DistTags {
+    /// The latest release.
+    pub latest: String,
+    /// The oldest release still supported, when one is set.
+    pub minimum: Option<String>,
 }
 
-/// Ask the registry for the latest published version. `None` on any failure:
-/// offline, a timeout, an error status, or a body that names no valid version.
-async fn fetch_latest(url: &str, timeout: Duration) -> Option<String> {
+#[derive(Deserialize)]
+struct RegistryTags {
+    latest: String,
+    minimum: Option<String>,
+}
+
+/// Ask the registry for the dist-tags. `None` on any failure: offline, a
+/// timeout, an error status, or a body whose `latest` is no valid version. A
+/// `minimum` that isn't a valid version, or is newer than `latest`, counts as
+/// none: no release could satisfy it, so `actual self-update` couldn't help.
+async fn fetch_tags(url: &str, timeout: Duration) -> Option<DistTags> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .https_only(!crate::net::is_loopback_http_url(url))
@@ -437,19 +574,30 @@ async fn fetch_latest(url: &str, timeout: Duration) -> Option<String> {
         .build()
         .ok()?;
     let response = client.get(url).send().await.ok()?.error_for_status().ok()?;
-    let latest: RegistryLatest = response.json().await.ok()?;
-    semver::Version::parse(&latest.version)
-        .ok()
-        .map(|version| version.to_string())
+    let tags: RegistryTags = response.json().await.ok()?;
+    let valid = |version: &str| semver::Version::parse(version).ok().map(|v| v.to_string());
+    let latest = valid(&tags.latest)?;
+    let minimum = tags
+        .minimum
+        .as_deref()
+        .and_then(valid)
+        .filter(|minimum| !is_newer(minimum, &latest));
+    Some(DistTags { latest, minimum })
 }
 
-/// [`fetch_latest`] for callers outside an async context.
-fn lookup_latest(url: &str, timeout: Duration) -> Option<String> {
-    tokio::runtime::Builder::new_current_thread()
+/// [`fetch_tags`] for callers outside an async context.
+///
+/// The runtime is shut down without waiting for its blocking threads: a name
+/// lookup stuck in the system resolver would otherwise hold the process past
+/// `timeout` for as long as the resolver takes.
+pub(crate) fn lookup_tags(url: &str, timeout: Duration) -> Option<DistTags> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .ok()?
-        .block_on(fetch_latest(url, timeout))
+        .ok()?;
+    let tags = runtime.block_on(fetch_tags(url, timeout));
+    runtime.shutdown_background();
+    tags
 }
 
 /// What the update check remembers between runs, in
@@ -465,6 +613,12 @@ struct UpdateCache {
     /// When the notice was last printed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notified_at: Option<DateTime<Utc>>,
+    /// The oldest supported release the last successful lookup found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    minimum_version: Option<String>,
+    /// When a lookup last succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fetched_at: Option<DateTime<Utc>>,
 }
 
 /// The cache file, beside `config.yaml`.
@@ -490,15 +644,18 @@ fn save_cache(path: &Path, cache: &UpdateCache) -> bool {
 }
 
 /// Record a successful lookup, under the cache lock, so a notice stamp or a
-/// daily claim saved at the same moment survives it. Records nothing when the
-/// cache can't be locked.
-fn record_latest(cache_path: &Path, latest: &str, now: DateTime<Utc>) {
+/// daily claim saved at the same moment survives it. A lookup without a
+/// minimum clears the one cached. Records nothing when the cache can't be
+/// locked.
+pub(crate) fn record_tags(cache_path: &Path, tags: &DistTags, now: DateTime<Utc>) {
     let Some(_lock) = lock_cache(cache_path) else {
         return;
     };
     let mut cache = load_cache(cache_path);
     cache.checked_at = Some(now);
-    cache.latest_version = Some(latest.to_string());
+    cache.fetched_at = Some(now);
+    cache.latest_version = Some(tags.latest.clone());
+    cache.minimum_version = tags.minimum.clone();
     save_cache(cache_path, &cache);
 }
 
@@ -508,7 +665,12 @@ fn record_latest(cache_path: &Path, latest: &str, now: DateTime<Utc>) {
 /// as does the process exiting, so a crash leaves nothing held. `None` when
 /// the lock file can't be opened or locked.
 fn lock_cache(cache_path: &Path) -> Option<std::fs::File> {
-    let lock_path = cache_path.with_file_name(LOCK_FILENAME);
+    lock_file(&cache_path.with_file_name(LOCK_FILENAME))
+}
+
+/// Take an exclusive lock on `lock_path`, creating it, as [`lock_cache`]
+/// does.
+pub(crate) fn lock_file(lock_path: &Path) -> Option<std::fs::File> {
     std::fs::create_dir_all(lock_path.parent()?).ok()?;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).truncate(false);
@@ -522,7 +684,7 @@ fn lock_cache(cache_path: &Path) -> Option<std::fs::File> {
 /// True when `at` lies within a day of `now`, on either side: a timestamp far
 /// in the future, left by a clock that was later set back, counts as stale
 /// rather than holding the check off until the clock catches up.
-fn within_a_day(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+pub(crate) fn within_a_day(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     at.is_some_and(|at| (now - at).num_hours().abs() < INTERVAL_HOURS)
 }
 
@@ -541,7 +703,7 @@ mod tests {
 
     fn command(args: &[&str]) -> Command {
         Cli::try_parse_from(std::iter::once("actual").chain(args.iter().copied()))
-            .unwrap_or_else(|e| panic!("{args:?} should parse: {e}"))
+            .expect("the arguments should parse")
             .command
     }
 
@@ -554,6 +716,14 @@ mod tests {
 
     fn hours_ago(now: DateTime<Utc>, hours: i64) -> Option<DateTime<Utc>> {
         Some(now - chrono::Duration::hours(hours))
+    }
+
+    fn record_latest(path: &Path, latest: &str, now: DateTime<Utc>) {
+        let tags = DistTags {
+            latest: latest.to_string(),
+            minimum: None,
+        };
+        record_tags(path, &tags, now);
     }
 
     // ---- channel ----
@@ -649,24 +819,41 @@ mod tests {
     fn channel_upgrade_commands_and_labels() {
         assert_eq!(
             Channel::Homebrew.upgrade_command(),
-            Some("brew upgrade actual-software/actual/actual")
+            Some("brew update && brew upgrade actual-software/actual/actual")
         );
         assert_eq!(
             Channel::Npm.upgrade_command(),
             Some("npm install -g @actualai/actual@latest")
         );
         assert_eq!(Channel::Other.upgrade_command(), None);
+        // actual self-update runs Homebrew and npm itself, whoever built the binary.
         for release_build in [true, false] {
             assert_eq!(
                 Channel::Homebrew.upgrade_hint_for(release_build),
-                "brew upgrade actual-software/actual/actual"
+                "actual self-update"
             );
             assert_eq!(
                 Channel::Npm.upgrade_hint_for(release_build),
-                "npm install -g @actualai/actual@latest"
+                "actual self-update"
             );
         }
         assert_eq!(Channel::Other.upgrade_hint_for(true), "actual self-update");
+        for release_build in [true, false] {
+            assert_eq!(
+                Channel::Homebrew.unattended_upgrade_for(release_build),
+                Channel::Homebrew.upgrade_command()
+            );
+            assert_eq!(
+                Channel::Npm.unattended_upgrade_for(release_build),
+                Channel::Npm.upgrade_command()
+            );
+        }
+        assert_eq!(
+            Channel::Other.unattended_upgrade_for(true),
+            Some("actual self-update")
+        );
+        assert_eq!(Channel::Other.unattended_upgrade_for(false), None);
+        assert_eq!(Channel::Other.unattended_upgrade(), None);
         assert_eq!(Channel::Other.upgrade_hint_for(false), CARGO_COMMAND);
         assert_eq!(Channel::Other.upgrade_hint(), CARGO_COMMAND);
         assert_eq!(Channel::Homebrew.label(), "Homebrew");
@@ -881,6 +1068,7 @@ mod tests {
             checked_at: Some(Utc::now()),
             latest_version: Some("0.9.0".to_string()),
             notified_at: None,
+            ..UpdateCache::default()
         };
         assert!(save_cache(&path, &cache));
         assert_eq!(load_cache(&path), cache);
@@ -970,6 +1158,7 @@ mod tests {
                 checked_at: hours_ago(now, 1),
                 latest_version: Some(FUTURE.to_string()),
                 notified_at: hours_ago(now, 30),
+                ..UpdateCache::default()
             },
         );
 
@@ -981,10 +1170,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("To upgrade, run: "), "{out}");
-        assert!(
-            out.contains("brew upgrade actual-software/actual/actual"),
-            "{out}"
-        );
+        assert!(out.contains("To upgrade, run: actual self-update"), "{out}");
         assert!(!refresh, "a lookup ran an hour ago");
         assert_eq!(load_cache(&path).notified_at, Some(now));
 
@@ -1005,6 +1191,7 @@ mod tests {
                 checked_at: hours_ago(now, 30),
                 latest_version: Some(FUTURE.to_string()),
                 notified_at: None,
+                ..UpdateCache::default()
             },
         );
 
@@ -1025,6 +1212,7 @@ mod tests {
             checked_at: hours_ago(now, 2),
             latest_version: Some(CURRENT_VERSION.to_string()),
             notified_at: None,
+            ..UpdateCache::default()
         };
         seed(&path, &cache);
 
@@ -1066,6 +1254,7 @@ mod tests {
                 checked_at: hours_ago(now, 30),
                 latest_version: Some(FUTURE.to_string()),
                 notified_at: hours_ago(now, 30),
+                ..UpdateCache::default()
             },
         );
 
@@ -1111,6 +1300,7 @@ mod tests {
                     checked_at: hours_ago(now, 1),
                     latest_version: Some(FUTURE.to_string()),
                     notified_at: hours_ago(now, 30),
+                    ..UpdateCache::default()
                 },
             );
             let start = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -1151,6 +1341,7 @@ mod tests {
             checked_at: hours_ago(now, 30),
             latest_version: Some(FUTURE.to_string()),
             notified_at: hours_ago(now, 30),
+            ..UpdateCache::default()
         };
         seed(&path, &stale);
         std::fs::create_dir(dir.path().join(LOCK_FILENAME)).unwrap();
@@ -1193,6 +1384,7 @@ mod tests {
                 checked_at: hours_ago(now, 1),
                 latest_version: Some(FUTURE.to_string()),
                 notified_at: None,
+                ..UpdateCache::default()
             },
         );
         let mut probe = LockProbe {
@@ -1243,9 +1435,10 @@ mod tests {
             checked_at: hours_ago(now, 30),
             latest_version: Some(FUTURE.to_string()),
             notified_at: hours_ago(now, 30),
+            ..UpdateCache::default()
         };
         seed(&path, &stale);
-        let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 0);
+        let (server, mock) = registry(r#"{"latest":"0.9.0"}"#, 200, 0);
         let url = latest_url(&server);
 
         let mut out = Vec::new();
@@ -1292,6 +1485,7 @@ mod tests {
             checked_at: hours_ago(now, 1),
             latest_version: Some(FUTURE.to_string()),
             notified_at: hours_ago(now, 30),
+            ..UpdateCache::default()
         };
         let path = dir.path().join(CACHE_FILENAME);
         seed(&path, &cache);
@@ -1393,39 +1587,42 @@ mod tests {
     }
 
     #[test]
-    fn lookup_latest_reads_the_registry_version() {
-        let (server, mock) = registry(r#"{"name":"@actualai/actual","version":"0.9.0"}"#, 200, 1);
+    fn lookup_tags_reads_the_registry_version() {
+        let (server, mock) = registry(r#"{"latest":"0.9.0","next":"1.0.0-rc.1"}"#, 200, 1);
         assert_eq!(
-            lookup_latest(&latest_url(&server), LOOKUP_TIMEOUT),
-            Some("0.9.0".to_string())
+            lookup_tags(&latest_url(&server), LOOKUP_TIMEOUT),
+            Some(DistTags {
+                latest: "0.9.0".to_string(),
+                minimum: None
+            })
         );
         mock.assert();
     }
 
     #[test]
-    fn lookup_latest_sends_the_cli_user_agent() {
+    fn lookup_tags_sends_the_cli_user_agent() {
         let mut server = mockito::Server::new();
         let mock = server
             .mock("GET", "/@actualai/actual/latest")
             .match_header("user-agent", USER_AGENT)
-            .with_body(r#"{"version":"0.9.0"}"#)
+            .with_body(r#"{"latest":"0.9.0"}"#)
             .create();
-        assert!(lookup_latest(&latest_url(&server), LOOKUP_TIMEOUT).is_some());
+        assert!(lookup_tags(&latest_url(&server), LOOKUP_TIMEOUT).is_some());
         mock.assert();
     }
 
     #[test]
-    fn lookup_latest_is_none_on_a_bad_answer() {
+    fn lookup_tags_is_none_on_a_bad_answer() {
         let cases = [
-            (r#"{"version":"0.9.0"}"#, 503),
-            (r#"{"version":"latest-and-greatest"}"#, 200),
-            (r#"{"name":"@actualai/actual"}"#, 200),
+            (r#"{"latest":"0.9.0"}"#, 503),
+            (r#"{"latest":"latest-and-greatest"}"#, 200),
+            (r#"{"next":"1.0.0"}"#, 200),
             ("<html>not json</html>", 200),
         ];
         for (body, status) in cases {
             let (server, mock) = registry(body, status, 1);
             assert_eq!(
-                lookup_latest(&latest_url(&server), LOOKUP_TIMEOUT),
+                lookup_tags(&latest_url(&server), LOOKUP_TIMEOUT),
                 None,
                 "{status} {body}"
             );
@@ -1434,12 +1631,12 @@ mod tests {
     }
 
     #[test]
-    fn lookup_latest_is_none_offline() {
-        assert_eq!(lookup_latest(&closed_url(), LOOKUP_TIMEOUT), None);
+    fn lookup_tags_is_none_offline() {
+        assert_eq!(lookup_tags(&closed_url(), LOOKUP_TIMEOUT), None);
     }
 
     #[test]
-    fn lookup_latest_gives_up_at_the_timeout() {
+    fn lookup_tags_gives_up_at_the_timeout() {
         // Accepts the connection (the OS completes the handshake from the
         // backlog) and never answers.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1448,7 +1645,7 @@ mod tests {
             listener.local_addr().unwrap()
         );
         let started = std::time::Instant::now();
-        assert_eq!(lookup_latest(&url, Duration::from_millis(200)), None);
+        assert_eq!(lookup_tags(&url, Duration::from_millis(200)), None);
         assert!(started.elapsed() < Duration::from_secs(2));
         drop(listener);
     }
@@ -1459,7 +1656,7 @@ mod tests {
         let _env = EnvGuard::remove(OPT_OUT_ENV);
         let dir = tempdir().unwrap();
         let path = dir.path().join(CACHE_FILENAME);
-        let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 1);
+        let (server, mock) = registry(r#"{"latest":"0.9.0"}"#, 200, 1);
 
         refresh(Some(&Config::default()), &latest_url(&server), &path);
         mock.assert();
@@ -1478,6 +1675,7 @@ mod tests {
             checked_at: Some(Utc::now()),
             latest_version: None,
             notified_at: None,
+            ..UpdateCache::default()
         };
         seed(&path, &claimed);
 
@@ -1491,7 +1689,7 @@ mod tests {
         let _env = EnvGuard::set(OPT_OUT_ENV, "1");
         let dir = tempdir().unwrap();
         let path = dir.path().join(CACHE_FILENAME);
-        let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 0);
+        let (server, mock) = registry(r#"{"latest":"0.9.0"}"#, 200, 0);
 
         refresh(Some(&Config::default()), &latest_url(&server), &path);
         mock.assert();
@@ -1504,7 +1702,7 @@ mod tests {
         let _env = EnvGuard::remove(OPT_OUT_ENV);
         let dir = tempdir().unwrap();
         let path = dir.path().join(CACHE_FILENAME);
-        let (server, mock) = registry(r#"{"version":"0.9.0"}"#, 200, 2);
+        let (server, mock) = registry(r#"{"latest":"0.9.0"}"#, 200, 2);
         let url = latest_url(&server);
 
         assert_eq!(
@@ -1553,5 +1751,243 @@ mod tests {
             crate::yaml::from_str::<UpdateCache>(&rewritten).unwrap(),
             cache
         );
+    }
+
+    // ---- the version gate's minimum ----
+
+    fn tags_body(latest: &str, minimum: Option<&str>) -> String {
+        match minimum {
+            Some(minimum) => format!(r#"{{"latest":"{latest}","minimum":"{minimum}"}}"#),
+            None => format!(r#"{{"latest":"{latest}"}}"#),
+        }
+    }
+
+    fn gate(path: &Path, url: &str, now: DateTime<Utc>) -> Option<String> {
+        supported_minimum(
+            Some(path),
+            url,
+            "0.16.0",
+            now,
+            Duration::from_millis(500),
+            true,
+        )
+    }
+
+    fn cached(
+        path: &Path,
+        minimum: Option<&str>,
+        fetched: Option<DateTime<Utc>>,
+        checked: Option<DateTime<Utc>>,
+    ) {
+        save_cache(
+            path,
+            &UpdateCache {
+                minimum_version: minimum.map(str::to_string),
+                fetched_at: fetched,
+                checked_at: checked,
+                ..UpdateCache::default()
+            },
+        );
+    }
+
+    #[test]
+    fn lookup_tags_reads_the_minimum_and_ignores_one_that_is_not_a_version() {
+        for (minimum, expected) in [
+            (Some("0.17.0"), Some("0.17.0")),
+            (Some("soon"), None),
+            (Some("0.18.0"), Some("0.18.0")),
+            // Newer than latest: no release could satisfy it.
+            (Some("0.19.0"), None),
+            (None, None),
+        ] {
+            let (server, mock) = registry(&tags_body("0.18.0", minimum), 200, 1);
+            let tags = lookup_tags(&latest_url(&server), LOOKUP_TIMEOUT).unwrap();
+            assert_eq!(tags.latest, "0.18.0");
+            assert_eq!(tags.minimum.as_deref(), expected, "{minimum:?}");
+            mock.assert();
+        }
+    }
+
+    #[test]
+    fn the_gate_reads_a_fresh_cache_without_asking() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        let (server, mock) = registry(&tags_body("0.18.0", Some("0.17.0")), 200, 0);
+        cached(
+            &path,
+            Some("0.15.0"),
+            hours_ago(now, 24 * 6),
+            hours_ago(now, 24 * 6),
+        );
+        assert_eq!(
+            gate(&path, &latest_url(&server), now).as_deref(),
+            Some("0.15.0")
+        );
+        mock.assert();
+        // No cache file at all, and no fetch allowed: nothing is known.
+        let missing = dir.path().join("none.yaml");
+        assert_eq!(
+            supported_minimum(
+                Some(&missing),
+                &latest_url(&server),
+                "0.16.0",
+                now,
+                LOOKUP_TIMEOUT,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            supported_minimum(
+                None,
+                &latest_url(&server),
+                "0.16.0",
+                now,
+                LOOKUP_TIMEOUT,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_gate_asks_when_the_cache_is_missing_a_week_old_or_from_the_future() {
+        let now = Utc::now();
+        for fetched in [
+            None,
+            hours_ago(now, 24 * 7),
+            Some(now + chrono::Duration::days(30)),
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(CACHE_FILENAME);
+            if fetched.is_some() {
+                cached(&path, Some("0.15.0"), fetched, fetched);
+            }
+            let (server, mock) = registry(&tags_body("0.18.0", Some("0.17.0")), 200, 1);
+            assert_eq!(
+                gate(&path, &latest_url(&server), now).as_deref(),
+                Some("0.17.0"),
+                "{fetched:?}"
+            );
+            mock.assert();
+            let cache = load_cache(&path);
+            assert_eq!(cache.fetched_at, Some(now));
+            assert_eq!(cache.latest_version.as_deref(), Some("0.18.0"));
+        }
+    }
+
+    #[test]
+    fn below_the_cached_minimum_the_gate_asks_again_and_a_lowered_one_lets_it_run() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        cached(&path, Some("0.17.0"), hours_ago(now, 2), hours_ago(now, 2));
+        let (server, mock) = registry(&tags_body("0.18.0", None), 200, 1);
+        assert_eq!(gate(&path, &latest_url(&server), now), None);
+        mock.assert();
+        assert_eq!(
+            load_cache(&path).minimum_version,
+            None,
+            "a lookup without a minimum clears it"
+        );
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_the_cache_and_waits_an_hour() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        cached(
+            &path,
+            Some("0.17.0"),
+            hours_ago(now, 24 * 8),
+            hours_ago(now, 2),
+        );
+        assert_eq!(gate(&path, &closed_url(), now).as_deref(), Some("0.17.0"));
+        assert_eq!(load_cache(&path).checked_at, Some(now));
+        // Within the hour nothing is asked, even below the minimum.
+        let (server, mock) = registry(&tags_body("0.18.0", None), 200, 0);
+        let later = now + chrono::Duration::minutes(59);
+        assert_eq!(
+            gate(&path, &latest_url(&server), later).as_deref(),
+            Some("0.17.0")
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn hooks_starting_together_make_one_request() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let now = Utc::now();
+        let (server, mock) = registry(&tags_body("0.18.0", Some("0.17.0")), 200, 1);
+        let url = latest_url(&server);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| gate(&path, &url, now));
+            }
+        });
+        mock.assert();
+    }
+
+    #[test]
+    fn the_gate_asks_nothing_when_the_cache_cannot_be_locked() {
+        let dir = tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "").unwrap();
+        let path = blocker.join(CACHE_FILENAME);
+        let (server, mock) = registry(&tags_body("0.18.0", Some("0.17.0")), 200, 0);
+        assert_eq!(gate(&path, &latest_url(&server), Utc::now()), None);
+        mock.assert();
+    }
+
+    #[test]
+    fn look_up_regardless_ignores_the_opt_out() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set(OPT_OUT_ENV, "1");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CACHE_FILENAME);
+        let (server, mock) = registry(&tags_body("0.18.0", None), 200, 1);
+        assert_eq!(
+            look_up_regardless(&latest_url(&server), Some(&path)),
+            Latest::Found("0.18.0".to_string())
+        );
+        mock.assert();
+        assert_eq!(look_up_regardless(&closed_url(), None), Latest::Unavailable);
+    }
+
+    #[test]
+    fn a_release_build_takes_only_a_loopback_registry_override() {
+        let cases = [
+            (None, true, REGISTRY_URL),
+            (Some(""), false, REGISTRY_URL),
+            (
+                Some("http://127.0.0.1:9/tags"),
+                true,
+                "http://127.0.0.1:9/tags",
+            ),
+            (Some("https://evil.example/tags"), true, REGISTRY_URL),
+            (
+                Some("http://127.0.0.1@evil.example/tags"),
+                true,
+                REGISTRY_URL,
+            ),
+            (
+                Some("https://evil.example/tags"),
+                false,
+                "https://evil.example/tags",
+            ),
+        ];
+        for (over, release_build, expected) in cases {
+            assert_eq!(
+                registry_url_from(over, release_build),
+                expected,
+                "{over:?} {release_build}"
+            );
+        }
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set(REGISTRY_OVERRIDE_ENV, "http://127.0.0.1:9/tags");
+        assert_eq!(registry_url(), "http://127.0.0.1:9/tags");
     }
 }

@@ -11,7 +11,7 @@ use crate::error::ActualError;
 use crate::update_check::{self, Channel, Latest, CURRENT_VERSION, RELEASE_URL};
 
 pub fn exec(args: &VersionArgs) -> Result<(), ActualError> {
-    println!("{}", report(args, update_check::REGISTRY_URL));
+    println!("{}", report(args, &update_check::registry_url()));
     Ok(())
 }
 
@@ -29,7 +29,7 @@ fn report(args: &VersionArgs, url: &str) -> String {
 /// update-check cache. Never fails: the command that started it has already
 /// exited.
 pub fn exec_refresh() -> Result<(), ActualError> {
-    refresh_from(update_check::REGISTRY_URL);
+    refresh_from(&update_check::registry_url());
     Ok(())
 }
 
@@ -51,7 +51,9 @@ struct Report<'a> {
     /// `null` whenever `latest_version` is.
     update_available: Option<bool>,
     channel: Channel,
-    /// `null` for a binary no package manager owns; see `release_url`.
+    /// What upgrades this binary with no one there to answer a question:
+    /// the package manager's command, `actual self-update` for a release
+    /// build no package manager owns, or `null` for a build from source.
     upgrade_command: Option<&'a str>,
     release_url: &'a str,
 }
@@ -77,7 +79,7 @@ fn render_json(channel: Channel, latest: &Latest) -> String {
         update_available: latest_version
             .map(|latest| update_check::is_newer(latest, CURRENT_VERSION)),
         channel,
-        upgrade_command: channel.upgrade_command(),
+        upgrade_command: channel.unattended_upgrade(),
         release_url: RELEASE_URL,
     };
     serde_json::to_string_pretty(&report).expect("version report is serializable")
@@ -130,7 +132,7 @@ mod tests {
                 "latest_version": null,
                 "update_available": null,
                 "channel": "homebrew",
-                "upgrade_command": "brew upgrade actual-software/actual/actual",
+                "upgrade_command": "brew update && brew upgrade actual-software/actual/actual",
                 "release_url": RELEASE_URL,
             })
         );
@@ -160,7 +162,10 @@ mod tests {
         .unwrap();
         assert_eq!(same["update_available"], false);
         assert_eq!(same["channel"], "other");
-        assert!(same["upgrade_command"].is_null());
+        assert!(
+            same["upgrade_command"].is_null(),
+            "a test build is a build from source"
+        );
     }
 
     #[test]
@@ -185,7 +190,7 @@ mod tests {
             format!(
                 "actual {CURRENT_VERSION}\n  \
                  Installed via:  Homebrew\n  \
-                 Upgrade with:   brew upgrade actual-software/actual/actual"
+                 Upgrade with:   actual self-update"
             )
         );
         let text = render(Channel::Other, &Latest::NotRequested, false);
@@ -283,7 +288,7 @@ mod tests {
         let mock = server
             .mock("GET", "/latest")
             .with_header("content-type", "application/json")
-            .with_body(r#"{"version":"0.9.0"}"#)
+            .with_body(r#"{"latest":"0.9.0"}"#)
             .expect(hits)
             .create();
         let url = format!("{}/latest", server.url());

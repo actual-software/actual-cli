@@ -43,7 +43,7 @@ Both Linux binaries link against the runner's glibc, which on `ubuntu-latest` (U
 
 All builds use `cargo build --release` (LTO, stripped, single codegen unit — see `[profile.release]` in `Cargo.toml`).
 
-Each of the four build steps sets `ACTUAL_RELEASE_BUILD=1`, which marks the binary as a release build. [`actual self-update`](SELF_UPDATE.md) replaces only a release build, and the [update notice](UPDATE_CHECK.md) points any other build at the `cargo install` command, so a build step that loses the variable ships binaries that refuse to update themselves and tell their users to rebuild. A test in `src/update_check.rs` reads this workflow and fails when one does.
+Each of the four build steps sets `ACTUAL_RELEASE_BUILD=1`, which marks the binary as a release build. [`actual self-update`](SELF_UPDATE.md) replaces only a release build, and the [update notice](UPDATE_CHECK.md) points any other hand-downloaded build at the `cargo install` command, so a build step that loses the variable ships manual-download binaries that refuse to update themselves and tell their users to rebuild. Homebrew and npm installs of such a build still upgrade through their package manager. A test in `src/update_check.rs` reads this workflow and fails when one does.
 
 ---
 
@@ -133,6 +133,20 @@ npm install -g @actualai/actual
 **Credentials:** the publish job authenticates through npm trusted publishing (GitHub OIDC, from the job's `id-token: write` permission, with npm 11.5.1 or later), so it uses no npm token, and npm records a provenance attestation for each package it publishes. npm checks the workflow's file name, so `release.yml` has to be a trusted publisher on all five packages, with direct `npm publish` allowed. Only the publish job holds `id-token: write`: npm exchanges the OIDC token even for `npm publish --dry-run`, so the job that packs and checks the packages, which also runs on pull requests, goes without it. The scaffolding checkout uses the workflow's own token, since `actual-software/actual-releases` is public.
 
 ---
+
+## Raising the supported minimum
+
+The npm dist-tag `minimum` names the oldest release still supported. A release build from 0.18.0 on that is older refuses every command except `version`, `help`, `self-update` and `plugin update`, with exit 78, including in CI and in every plugin hook, and has no override. Releases up to 0.17 ignore the tag. See [UPDATE_CHECK.md](UPDATE_CHECK.md#supported-versions).
+
+Before raising it, make sure every channel has the release users will upgrade to: the npm packages, the GitHub release with its signed `SHA256SUMS` (a hand-downloaded `self-update` checks the signature), and the Homebrew tap formula (Homebrew's `self-update` exits 1 while the tap lags). The minimum must not be newer than `latest`; the CLI ignores one that is.
+
+```bash
+npm dist-tag add @actualai/actual@0.19.0 minimum   # raise it
+npm dist-tag ls @actualai/actual                   # check latest and minimum
+npm dist-tag rm @actualai/actual minimum           # undo: no minimum
+```
+
+To undo a bad minimum, remove the tag or point it at an older release. A refused machine asks again at most once an hour, so it runs again within about an hour; one that can't reach the registry stays refused from its cache until it can. CI pipelines pinned below the minimum stop until their pin is raised, and `actual self-update` refuses under `CI`.
 
 ## Decision log
 

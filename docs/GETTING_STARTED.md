@@ -36,6 +36,8 @@ brew install actual-software/actual/actual
 npm install -g @actualai/actual
 ```
 
+To upgrade a Homebrew or npm install later, run `actual self-update` in your terminal. It shows the commands it will run and asks before it runs them. See [Self-update](SELF_UPDATE.md#homebrew-and-npm-installs).
+
 ### Manual download
 
 Download the archive for your platform from the [releases repository](https://github.com/actual-software/actual-releases/releases): `actual-darwin-arm64.tar.gz`, `actual-darwin-x64.tar.gz`, `actual-linux-arm64.tar.gz`, or `actual-linux-x64.tar.gz`. Extract it and move the binary onto your `PATH`. On Apple Silicon:
@@ -203,7 +205,7 @@ on first run. All fields are optional — missing fields use sensible defaults.
 | `exclude_categories` | list | — | ADR categories to always exclude |
 | `include_general` | boolean | — | Whether to include language-agnostic ADRs |
 | `max_per_framework` | integer | — | Max ADRs per framework |
-| `update_check.enabled` | boolean | `true` | Daily update notice and `actual version --check` (see [UPDATE_CHECK.md](UPDATE_CHECK.md)) |
+| `update_check.enabled` | boolean | `true` | Daily update notice and `actual version --check`, not the supported-version check (see [UPDATE_CHECK.md](UPDATE_CHECK.md#supported-versions)) |
 | `telemetry.enabled` | boolean | `true` | Set to `false` to stop every telemetry event (see [PRIVACY.md](../PRIVACY.md)) |
 | `telemetry.otlp_logs_endpoint` | string | `/v1/logs` on `api_url` | OTLP/HTTP logs URL for ADR context, use, breach and override events, check events and session-end events, used as-is with no redirects followed: HTTPS, or plain HTTP to localhost only. Unset, release builds send to the default and debug builds send nothing; turning telemetry off stops both. When it is at the address `actual advisor` uses (`ACTUAL_API_URL` when it's set, otherwise `https://api-service.api.prod.actual.ai`) and you're signed in, requests carry your sign-in (see [PRIVACY.md](../PRIVACY.md)) |
 | `telemetry.otlp_file` | string | — | Absolute path of a local file each ADR, check and session-end event request is appended to (see [PRIVACY.md](../PRIVACY.md)) |
@@ -228,7 +230,7 @@ telemetry:
 | `ANTHROPIC_API_KEY` | Anthropic API key (overrides config file) |
 | `OPENAI_API_KEY` | OpenAI API key (overrides config file) |
 | `CURSOR_API_KEY` | Cursor API key (overrides config file) |
-| `ACTUAL_NO_UPDATE_CHECK` | Set to any value to turn off the update check |
+| `ACTUAL_NO_UPDATE_CHECK` | Set to any non-empty value to turn off the daily update notice and `actual version --check`; the [supported-version check](UPDATE_CHECK.md#supported-versions) still runs |
 | `ACTUAL_NO_TELEMETRY` | Set to any non-empty value for the same effect as `telemetry.enabled: false`, for CI and one-off runs |
 | `ACTUAL_OTLP_LOGS_ENDPOINT` | OTLP logs URL for ADR context, use, breach and override events, check events and session-end events (overrides config file) |
 | `ACTUAL_OTLP_FILE` | Local file for ADR context, use, breach and override events, check events and session-end events (overrides config file) |

@@ -1,11 +1,29 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use actual_cli::{handle_result, run, update_check, Cli, Command};
+use actual_cli::{handle_result, run, update_check, version_gate, Cli, Command};
 use clap::Parser;
 
 fn main() {
     let cli = Cli::parse();
     init_logging(&cli);
+    let verdict = version_gate::check(&cli.command);
+    let stdin = std::io::stdin();
+    let mut input: Box<dyn std::io::Read> = if stdin.is_terminal() {
+        Box::new(std::io::empty())
+    } else {
+        Box::new(stdin.lock())
+    };
+    if let Some(code) = version_gate::apply(
+        &verdict,
+        &cli.command,
+        &mut input,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    ) {
+        std::process::exit(code);
+    }
+    drop(input);
     let update_notice = update_check::should_run_after(&cli.command);
     let exit_code = handle_result(run(cli));
     if update_notice && exit_code == 0 {

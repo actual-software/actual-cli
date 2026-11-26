@@ -121,6 +121,33 @@ fn test_version_check_makes_no_request_when_turned_off() {
         ));
 }
 
+/// Below a cached minimum, a build from source (every test build) warns and
+/// runs the command, and asks no registry: the URL points nowhere. Exempt
+/// commands say nothing.
+#[test]
+fn test_a_build_from_source_below_the_minimum_warns_and_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("update-check.yaml"),
+        "minimum_version: \"999.0.0\"\nfetched_at: \"2000-01-01T00:00:00Z\"\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        cmd()
+            .args(args)
+            .env("ACTUAL_CONFIG_DIR", dir.path())
+            .env_remove("ACTUAL_CONFIG")
+            .env("ACTUAL_UPDATE_REGISTRY_URL", "http://127.0.0.1:9/tags")
+            .assert()
+            .success()
+    };
+    run(&["runners"]).stderr(predicate::str::contains(format!(
+        "warning: actual {} is no longer supported (minimum 999.0.0). Run \"actual self-update\", then try again.",
+        env!("CARGO_PKG_VERSION")
+    )));
+    run(&["version"]).stderr(predicate::str::is_empty());
+}
+
 /// A config file that fails to load may be the one turning update checks off.
 /// `version --json` still answers with the local facts beside it.
 #[test]
@@ -192,6 +219,39 @@ fn test_self_update_refuses_with_update_checks_off() {
         .code(2)
         .stderr(predicate::str::contains("Update checks are turned off"));
     assert!(!dir.path().join("update-check.yaml").exists());
+}
+
+/// With no terminal to ask in, as in an agent's shell, a Homebrew install
+/// gets Homebrew's command and nothing runs. The binary is hard-linked into a
+/// Cellar, since actual reads its channel from its resolved path.
+#[cfg(unix)]
+#[test]
+fn test_self_update_prints_the_homebrew_command_without_a_terminal() {
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let keg = root.path().join("prefix/Cellar/actual/0.1.0/bin");
+    std::fs::create_dir_all(&keg).unwrap();
+    let exe = keg.join("actual");
+    let built = assert_cmd::cargo::cargo_bin!("actual");
+    std::fs::hard_link(built, &exe)
+        .or_else(|_| std::fs::copy(built, &exe).map(|_| ()))
+        .unwrap();
+    let config = root.path().join("config");
+    Command::new(&exe)
+        .arg("self-update")
+        .env("ACTUAL_CONFIG_DIR", &config)
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("CI")
+        .env_remove("ACTUAL_CLI_SUBPROCESS")
+        .env_remove("ACTUAL_NO_UPDATE_CHECK")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "needs your OK before it runs Homebrew",
+        ))
+        .stderr(predicate::str::contains(
+            "brew update && brew upgrade actual-software/actual/actual",
+        ));
+    assert!(!config.join("self-update.lock").exists());
 }
 
 /// cargo builds the test binary without `ACTUAL_RELEASE_BUILD`.

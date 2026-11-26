@@ -16,6 +16,7 @@ pub mod tailoring;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 pub mod update_check;
+pub mod version_gate;
 pub(crate) mod yaml;
 
 pub use cli::commands::handle_result;
@@ -57,7 +58,8 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
         Command::SessionEnded => cli::commands::session_end::exec(),
         Command::Version(args) => cli::commands::version::exec(args),
-        Command::SelfUpdate => cli::commands::self_update::exec(),
+        Command::SelfUpdate(args) => cli::commands::self_update::exec(args),
+        Command::Plugin(args) => cli::commands::plugin_update::exec(args),
         Command::UpdateCheck => cli::commands::version::exec_refresh(),
     }
 }
@@ -269,5 +271,21 @@ mod tests {
             matches!(result, Err(ActualError::SelfUpdateRefused { .. })),
             "self-update with update checks off should return SelfUpdateRefused"
         );
+    }
+
+    #[test]
+    fn test_run_plugin_update_dispatch_reports_no_agent() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        // Exercises the Command::Plugin arm. With nothing on PATH neither
+        // agent is found, so no plugin command runs.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _path = EnvGuard::set("PATH", "");
+        let result = run(Cli::parse_from(["actual", "plugin", "update"]));
+        assert_eq!(result.map_err(|e| e.exit_code()), Err(2));
     }
 }

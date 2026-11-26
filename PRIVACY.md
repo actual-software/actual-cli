@@ -826,15 +826,41 @@ The telemetry setting doesn't change it. The log is written with telemetry off a
 
 At most once a day, after a command run at a terminal, the CLI asks the npm
 registry for the latest published version of `@actualai/actual`. It is one
-HTTPS `GET` of `https://registry.npmjs.org/@actualai/actual/latest` with a
-`User-Agent: actual-cli/<version>` header, made by a background process so the
-command never waits for it. It carries no account, repository, file or
+HTTPS `GET` of `https://registry.npmjs.org/-/package/@actualai/actual/dist-tags`
+with a `User-Agent: actual-cli/<version>` header, made by a background process
+so the command never waits for it. It carries no account, repository, file or
 telemetry data; like any web request, it shows npm your IP address.
 `actual version --check` and `actual self-update` make the same request when
-you run them. The answer is kept in `~/.actualai/actual/update-check.yaml`.
+you run them. The answer, the latest version and the oldest supported one, is
+kept in `~/.actualai/actual/update-check.yaml`.
+
+A release build also makes that request before a command, waiting at most 1.5
+seconds, when the cached answer is more than a week old or says the running
+version is no longer supported. While the request keeps failing, it is tried
+again at most once an hour. This one runs with update checks turned off, since
+it decides whether `actual` may run at all. A run it refuses ends before its
+command starts, so it sends none of that command's telemetry. See
+[docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md#supported-versions).
+
+`actual plugin update` runs `claude plugin marketplace update` and `claude
+plugin update`, or `codex plugin marketplace upgrade`. Those tools then fetch
+the plugin's marketplace from where it was added, usually GitHub, under their
+own settings; `actual` adds nothing to their requests. It sends no telemetry
+event: like `actual self-update`, it changes only the coding agents' own plugin
+files, never a repository or its decisions, and `--background` runs from a
+hook where no one is watching for it to finish.
+
+On a Homebrew or npm install, once you confirm, `actual self-update` runs
+`brew update` and `brew upgrade`, or `npm install -g`. Those tools then contact
+the servers they're configured to use, under their own settings, including
+Homebrew's analytics and npm's registry credentials; `actual` adds nothing to
+their requests. `actual self-update` sends no telemetry event on any path: it
+works only on the CLI's own files, never on a repository or its decisions, and
+an upgrade shows in the CLI version that later events already carry.
 
 `ACTUAL_NO_UPDATE_CHECK=1`, or `update_check.enabled: false` in the config
-file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
+file, stops the daily and on-demand requests, but not the supported-version
+check before a command. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.md).
 
 ## Where data is sent
 
@@ -844,8 +870,8 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
-| `registry.npmjs.org` | A request for the latest CLI version: at most once a day in the background, and each time you run `actual version --check` or `actual self-update`; no account or repository data | HTTPS |
-| `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
+| `registry.npmjs.org` | A request for the latest and oldest supported CLI versions: at most once a day in the background, each time you run `actual version --check` or `actual self-update`, and in a release build before a command when the cached answer is a week old or says this version is unsupported (at most hourly while it fails, also with update checks off); no account or repository data | HTTPS |
+| `github.com` (the actual-releases mirror, which redirects each download to GitHub's file host) | Only when you run `actual self-update` on a hand-downloaded copy and a newer release is out: downloads of that release's `SHA256SUMS`, its signature and your platform's archive; no account or repository data | HTTPS |
 | Your AI provider (Anthropic, OpenAI or Cursor) | ADR content + repo context for tailoring, plan or diff text + rule text for `plan-check`, `impl-check` and `rules select`, and, for `actual models`, a request for the model list that holds only your API key | HTTPS for the API runners, including tailoring's `codex-cli` retry through `openai-api`, and for `actual models`; the tool's own connection for `claude`, `codex` and `cursor-agent` |
 | The OTLP logs endpoint: `/v1/logs` on `api_url` in release builds, or the one you set | ADR context, use, breach and override events, check events and session-end events, plus your sign-in's access token when the endpoint is at the address `actual advisor` uses and you're signed in | OTLP/HTTP with binary protobuf over HTTPS (enforced; plain HTTP only to localhost) |
 | The local file you configure (none by default) | ADR context, use, breach and override events, check events and session-end events, one OTLP/JSON request per line | Local file, readable only by the owner |

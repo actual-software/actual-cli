@@ -230,12 +230,27 @@ pub enum ActualError {
         message: String,
         hint: Option<String>,
     },
+
+    /// The Homebrew or npm command `actual self-update` ran failed. Exits
+    /// with that command's own status, 1 when a signal stopped it.
+    #[error("{message}")]
+    SelfUpdateToolFailed { message: String, code: i32 },
+
+    /// `actual plugin update` couldn't update the plugin: no coding agent has
+    /// it, or the agent's own command failed, whose status this exits with.
+    #[error("{message}")]
+    PluginUpdate {
+        message: String,
+        hint: Option<String>,
+        code: i32,
+    },
 }
 
 impl ActualError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::UserCancelled => 4,
+            Self::SelfUpdateToolFailed { code, .. } | Self::PluginUpdate { code, .. } => *code,
             Self::ClaudeNotFound
             | Self::ClaudeNotAuthenticated
             | Self::CodexNotFound
@@ -320,7 +335,12 @@ impl ActualError {
             // for the reason documented on it.
             Self::Sec1KeyUnsupported { hint, .. } => Some(Cow::Owned(hint.clone())),
             Self::SelfUpdateRefused { hint, .. } => Some(Cow::Owned(hint.clone())),
-            Self::SelfUpdateFailed { hint, .. } => hint.clone().map(Cow::Owned),
+            Self::SelfUpdateFailed { hint, .. } | Self::PluginUpdate { hint, .. } => {
+                hint.clone().map(Cow::Owned)
+            }
+            Self::SelfUpdateToolFailed { .. } => Some(Cow::Borrowed(
+                "Fix the problem it reported above, then run actual self-update again.",
+            )),
             Self::AdrAccessDenied { hint, .. }
             | Self::AdrDuplicate { hint, .. }
             | Self::AdrCreateUnconfirmed { hint, .. } => Some(Cow::Owned(hint.clone())),
