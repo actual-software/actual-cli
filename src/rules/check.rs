@@ -22,7 +22,15 @@
 //! a rule on claude-cli and codex-cli alike — so 40 rules in one call took
 //! about 47 seconds where two calls of 20 take about as long as one, 23.
 //! Splitting finer would spend the hook's budget on the fixed cost of each
-//! call instead of on the judgement, so the chunks stay large.
+//! call instead of on the judgement, so the chunks stay large. Measured on 8
+//! pull requests, 60 to 80 rules took 9 to 18 seconds at the median where one
+//! call had taken 76 to 101, with the verdicts on the same rules agreeing
+//! 97–99% about whether to block.
+//!
+//! **A failed chunk is made once more.** One chunk that does not answer
+//! fails the whole check open, so more chunks would mean more chances of a
+//! stray failure. A chunk that answers badly, errors, or runs past
+//! [`FIRST_CALL_BUDGET`] is made again inside the rest of [`CHECK_BUDGET`].
 //!
 //! **A verdict is keyed by the rule's number, and a rule that does not apply
 //! gets the verdict alone.** Most rules a gate sends do not apply to the
@@ -671,7 +679,7 @@ pub async fn check<R: StructuredRunner>(
 ) -> Result<Vec<CheckedRule>, ActualError> {
     let calls = chunks(rules)
         .into_iter()
-        .map(|chunk| judge_chunk(runner, kind, text, chunk, model_override, max_budget_usd));
+        .map(|chunk| judge_retrying(runner, kind, text, chunk, model_override, max_budget_usd));
     let answers = tokio::time::timeout(CHECK_BUDGET, futures::future::join_all(calls))
         .await
         .map_err(|_| ActualError::RunnerTimeout {
@@ -682,6 +690,63 @@ pub async fn check<R: StructuredRunner>(
         verdicts.extend(answer?);
     }
     Ok(verdicts)
+}
+
+/// How long a chunk's first call may take before it is abandoned and made
+/// again: half of [`CHECK_BUDGET`], so the second call has the other half.
+///
+/// A chunk took 9 to 27 seconds at the 95th percentile on both runners
+/// (claude-cli and codex-cli, 8 pull requests, plans and diffs, 20 to 80
+/// rules), and the slowest call that finished took 52; the calls that did
+/// not finish stalled until the whole budget ran out, and the same calls made
+/// again alone finished in 22 and 24 seconds.
+pub const FIRST_CALL_BUDGET: Duration = Duration::from_secs(CHECK_BUDGET.as_secs() / 2);
+
+/// [`judge_chunk`], made a second time when the first call fails in a way a
+/// second call can fix or runs past [`FIRST_CALL_BUDGET`]. One failed chunk
+/// fails the whole check, so the more chunks a check has the more a single
+/// stray failure costs; the retry is what keeps a long list as reliable as a
+/// short one. The caller's [`CHECK_BUDGET`] still bounds both calls.
+async fn judge_retrying<R: StructuredRunner>(
+    runner: &R,
+    kind: ArtifactKind,
+    text: &str,
+    rules: &[RuleForJudging],
+    model_override: Option<&str>,
+    max_budget_usd: Option<f64>,
+) -> Result<Vec<CheckedRule>, ActualError> {
+    let first = tokio::time::timeout(
+        FIRST_CALL_BUDGET,
+        judge_chunk(runner, kind, text, rules, model_override, max_budget_usd),
+    )
+    .await;
+    match first {
+        Ok(Ok(verdicts)) => return Ok(verdicts),
+        Ok(Err(e)) if !worth_retrying(&e) => return Err(e),
+        Ok(Err(e)) => tracing::warn!("judge call failed, making it again: {e}"),
+        Err(_) => tracing::warn!(
+            "judge call ran past {} seconds, making it again",
+            FIRST_CALL_BUDGET.as_secs()
+        ),
+    }
+    judge_chunk(runner, kind, text, rules, model_override, max_budget_usd).await
+}
+
+/// Whether a failed judge call might succeed if made again: a model that
+/// answered badly, a call that failed or timed out, a backend that errored.
+/// A missing or signed-out runner, a missing key or an empty credit balance
+/// fails the same way every time, so it is reported at once.
+fn worth_retrying(e: &ActualError) -> bool {
+    matches!(
+        e,
+        ActualError::RuleCheckInvalid(_)
+            | ActualError::RunnerFailed { .. }
+            | ActualError::RunnerTimeout { .. }
+            | ActualError::RunnerOutputParse(_)
+            | ActualError::ApiError(_)
+            | ActualError::ApiResponseError { .. }
+            | ActualError::ServiceUnavailable
+    )
 }
 
 /// One judge call over `rules`, validated.
@@ -731,13 +796,13 @@ mod tests {
 
     /// A gate's rank and its judge run one after the other inside the hook's
     /// timeout. Both deadlines together must leave room for everything else
-    /// the hook does, even under the plugin's older 180-second timeout.
+    /// the hook does under the plugin's 200-second gate timeout.
     #[test]
-    fn test_the_gate_rank_and_the_judge_fit_inside_the_older_hook_timeout() {
-        let older_hook_timeout = Duration::from_secs(180);
+    fn test_the_gate_rank_and_the_judge_fit_inside_the_hook_timeout() {
+        let hook_timeout = Duration::from_secs(200);
         let spent = CHECK_BUDGET + crate::rules::scope::rank::GATE_RANK_BUDGET;
-        assert!(spent < older_hook_timeout, "{spent:?}");
-        assert!(older_hook_timeout - spent >= Duration::from_secs(15));
+        assert!(spent < hook_timeout, "{spent:?}");
+        assert!(hook_timeout - spent >= Duration::from_secs(15));
     }
 
     fn rules() -> Vec<RuleForJudging> {
@@ -1321,10 +1386,20 @@ mod tests {
 
     /// Answers every call with `not_applicable` for every number its schema
     /// asks for, after `delay`, and records how many rules each call held.
+    #[derive(Default)]
     struct ChunkRunner {
         delay: Duration,
         calls: std::sync::Mutex<Vec<usize>>,
+        /// Answer badly for the chunk holding this rule id…
         fail_on: Option<&'static str>,
+        /// …this many times (`None`: every time).
+        fail_times: Option<usize>,
+        /// Stall past the whole budget, once, for the chunk holding this id.
+        stall_on: Option<&'static str>,
+        /// Fail as an unusable runner would, every time.
+        signed_out: bool,
+        failed: std::sync::atomic::AtomicUsize,
+        stalled: std::sync::atomic::AtomicBool,
     }
 
     impl StructuredRunner for ChunkRunner {
@@ -1342,9 +1417,22 @@ mod tests {
                 .unwrap()
                 .clone();
             self.calls.lock().unwrap().push(numbers.len());
+            if self.signed_out {
+                return Err(ActualError::ClaudeNotAuthenticated);
+            }
+            if self.stall_on.is_some_and(|id| prompt.contains(id))
+                && !self.stalled.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::time::sleep(CHECK_BUDGET * 2).await;
+            }
             tokio::time::sleep(self.delay).await;
             if self.fail_on.is_some_and(|id| prompt.contains(id)) {
-                return Ok(serde_json::json!({"verdicts": {}}));
+                let failed = self
+                    .failed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.fail_times.is_none_or(|times| failed < times) {
+                    return Ok(serde_json::json!({"verdicts": {}}));
+                }
             }
             let answer: serde_json::Map<String, serde_json::Value> = numbers
                 .iter()
@@ -1360,8 +1448,7 @@ mod tests {
     async fn test_check_judges_a_long_list_in_concurrent_chunks() {
         let runner = ChunkRunner {
             delay: Duration::from_secs(10),
-            calls: std::sync::Mutex::new(Vec::new()),
-            fail_on: None,
+            ..ChunkRunner::default()
         };
         let rules = many_rules(45);
         let started = tokio::time::Instant::now();
@@ -1375,14 +1462,15 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
-    /// A chunk that did not answer is part of the change nobody judged, so
-    /// the whole check fails open rather than passing on the rest.
+    /// A chunk that did not answer, even made twice, is part of the change
+    /// nobody judged, so the whole check fails open rather than passing on
+    /// the rest.
     #[tokio::test(start_paused = true)]
     async fn test_check_fails_when_any_chunk_fails() {
         let runner = ChunkRunner {
             delay: Duration::from_secs(1),
-            calls: std::sync::Mutex::new(Vec::new()),
             fail_on: Some("R-X-030"),
+            ..ChunkRunner::default()
         };
         let err = check(
             &runner,
@@ -1395,6 +1483,90 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, ActualError::RuleCheckInvalid(_)), "{err:?}");
+        // Three chunks, and the failing one made twice.
+        assert_eq!(runner.calls.lock().unwrap().len(), 4);
+    }
+
+    /// A chunk that answers badly once is made again, and the check passes.
+    #[tokio::test(start_paused = true)]
+    async fn test_check_makes_a_failed_chunk_again() {
+        let runner = ChunkRunner {
+            delay: Duration::from_secs(10),
+            fail_on: Some("R-X-030"),
+            fail_times: Some(1),
+            ..ChunkRunner::default()
+        };
+        let started = tokio::time::Instant::now();
+        let verdicts = check(
+            &runner,
+            ArtifactKind::Diff,
+            "diff",
+            &many_rules(45),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdicts.len(), 45);
+        assert_eq!(*runner.calls.lock().unwrap(), vec![15, 15, 15, 15]);
+        // The second call follows the first: two calls' time, not one.
+        assert_eq!(started.elapsed(), Duration::from_secs(20));
+    }
+
+    /// A chunk whose first call stalls is abandoned at the first call's
+    /// budget and made again inside the rest.
+    #[tokio::test(start_paused = true)]
+    async fn test_check_abandons_a_stalled_chunk_and_makes_it_again() {
+        let runner = ChunkRunner {
+            delay: Duration::from_secs(10),
+            stall_on: Some("R-X-030"),
+            ..ChunkRunner::default()
+        };
+        let started = tokio::time::Instant::now();
+        let verdicts = check(
+            &runner,
+            ArtifactKind::Diff,
+            "diff",
+            &many_rules(45),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdicts.len(), 45);
+        assert_eq!(
+            started.elapsed(),
+            FIRST_CALL_BUDGET + Duration::from_secs(10)
+        );
+    }
+
+    /// A runner that cannot work is reported at once, not asked twice.
+    #[tokio::test(start_paused = true)]
+    async fn test_check_does_not_retry_a_runner_that_cannot_work() {
+        let runner = ChunkRunner {
+            signed_out: true,
+            ..ChunkRunner::default()
+        };
+        let err = check(
+            &runner,
+            ArtifactKind::Diff,
+            "diff",
+            &many_rules(10),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ClaudeNotAuthenticated),
+            "{err:?}"
+        );
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_first_call_leaves_the_retry_half_the_budget() {
+        assert_eq!(FIRST_CALL_BUDGET * 2, CHECK_BUDGET);
     }
 
     /// The deadline is on every chunk together, not on each.
@@ -1402,8 +1574,7 @@ mod tests {
     async fn test_check_budget_covers_every_chunk_together() {
         let runner = ChunkRunner {
             delay: CHECK_BUDGET + Duration::from_secs(1),
-            calls: std::sync::Mutex::new(Vec::new()),
-            fail_on: None,
+            ..ChunkRunner::default()
         };
         let started = tokio::time::Instant::now();
         let err = check(
