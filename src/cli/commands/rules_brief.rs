@@ -1598,7 +1598,9 @@ mod tests {
     /// Run `body` with the config directory pointed at a scratch one, so no
     /// test writes to the machine's real session state.
     fn with_scratch_config(body: impl FnOnce()) {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir =
             crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
@@ -1824,7 +1826,9 @@ mod tests {
     /// reset does nothing and every read is briefed, never silenced.
     #[test]
     fn test_an_unusable_config_dir_means_no_memory() {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _dir = crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", "not/absolute");
         let _file = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
         let root = repo();
@@ -2588,7 +2592,9 @@ mod tests {
     /// for the hook too.
     #[test]
     fn test_min_score_prefers_the_flag_then_the_config() {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir =
             crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
@@ -2612,7 +2618,9 @@ mod tests {
     /// a floor fitted to this rule set is the one the hook applies.
     #[test]
     fn test_min_score_prefers_the_repo_floor_over_the_user_wide_one() {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir =
             crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
@@ -2636,7 +2644,9 @@ mod tests {
     /// must fail open to no floor rather than let NaN reject every document.
     #[test]
     fn test_min_score_ignores_an_invalid_config_value() {
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir =
             crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());

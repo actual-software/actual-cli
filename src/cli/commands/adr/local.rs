@@ -622,6 +622,28 @@ mod tests {
         runtime().unwrap().block_on(future)
     }
 
+    /// `ENV_MUTEX`, held with the config dir pointed at a scratch directory,
+    /// for a test whose command reports telemetry and so loads the config.
+    /// Fields drop in order, restoring the env before the lock is released.
+    struct ScratchConfig {
+        _env: [EnvGuard; 2],
+        _home: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn scratch_config() -> ScratchConfig {
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        ScratchConfig {
+            _env: [
+                EnvGuard::remove("ACTUAL_CONFIG"),
+                EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+            ],
+            _home: home,
+            _lock: lock,
+        }
+    }
+
     #[test]
     fn create_writes_an_accepted_file_and_the_rule_file_the_checks_enforce() {
         let tmp = tempdir().unwrap();
@@ -763,10 +785,7 @@ mod tests {
 
     #[test]
     fn exec_create_prints_text_or_json() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let config = tempdir().unwrap();
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", config.path().to_str().unwrap());
+        let _config = scratch_config();
         let tmp = tempdir().unwrap();
         let mut args = new_args("Use Postgres", &["MUST: Use it."], &[]);
         args.root = Some(tmp.path().to_path_buf());
@@ -923,6 +942,7 @@ mod tests {
 
     #[test]
     fn check_of_an_empty_repository_passes() {
+        let _config = scratch_config();
         let tmp = tempdir().unwrap();
         let mut args = check_args(&[]);
         args.root = Some(tmp.path().to_path_buf());
@@ -938,6 +958,7 @@ mod tests {
 
     #[test]
     fn exec_check_fails_when_a_file_fails() {
+        let _config = scratch_config();
         let tmp = tempdir().unwrap();
         mixed_repository(tmp.path());
         let mut args = check_args(&[]);

@@ -1,8 +1,10 @@
 //! The OpenTelemetry events the `actual adr` commands send: one
 //! [`otlp::ADR_DISCOVERED`] record per `adr check` run, one
 //! [`otlp::ADR_REVIEWED`] record per run of `accept`, `reject`, `publish`,
-//! `unpublish`, `delete`, `restore` or `update`, and one
-//! [`otlp::ADR_CREATED`] record per run of `adr new` or `adr create`.
+//! `unpublish`, `delete`, `restore` or `update`, one
+//! [`otlp::ADR_CREATED`] record per run of `adr new` or `adr create`, one
+//! [`otlp::ADR_SURVEYED`] record per `adr discover` run and one
+//! [`otlp::ADR_NORMALIZED`] record per `adr normalize` run.
 //!
 //! # Design
 //!
@@ -11,7 +13,8 @@
 //! through one group action, so the event says it was grouped and how many
 //! rows that action covers. A check event counts the files it checked. A
 //! create event is the one decision `create` wrote signed out or saved
-//! signed in.
+//! signed in. A discover event counts the files by what `normalize` would do
+//! with each, and a normalize event counts them by what it did.
 //!
 //! **Signed in or not, by the sender.** The records are spooled like every
 //! other OTLP record: under a sign-in they go with its token, and otherwise
@@ -41,9 +44,9 @@ use crate::adr::workflow::{self, Listed};
 use crate::api::adr_types::{DecisionState, LifecycleAction, WebDecision};
 use crate::error::ActualError;
 #[cfg(feature = "telemetry")]
-pub(super) use crate::telemetry::otlp::CheckCounts;
-#[cfg(feature = "telemetry")]
 use crate::telemetry::otlp::{self, CreatedDecision, ReviewedDecision};
+#[cfg(feature = "telemetry")]
+pub(super) use crate::telemetry::otlp::{CheckCounts, NormalizeCounts, SurveyCounts};
 
 /// A command run being timed, and whether a person was at the terminal.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
@@ -184,6 +187,38 @@ pub(super) struct CheckCounts {
     pub duplicates: usize,
 }
 
+/// What an `adr discover` run found, which nothing reads in a build without
+/// the `telemetry` feature.
+#[cfg(not(feature = "telemetry"))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SurveyCounts {
+    pub files: usize,
+    pub to_normalize: usize,
+    pub to_reindex: usize,
+    pub to_review: usize,
+    pub to_push: usize,
+    pub compared: bool,
+}
+
+/// What an `adr normalize` run did, which nothing reads in a build without
+/// the `telemetry` feature.
+#[cfg(not(feature = "telemetry"))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct NormalizeCounts {
+    pub files: usize,
+    pub converted: usize,
+    pub reindexed: usize,
+    pub needs_input: usize,
+    pub skipped: usize,
+    pub unchanged: usize,
+    pub dry_run: bool,
+    pub push: bool,
+    pub pushed: usize,
+    pub push_failed: usize,
+}
+
 #[cfg(feature = "telemetry")]
 fn exit_code<T>(result: &Result<T, ActualError>) -> i32 {
     result.as_ref().err().map_or(0, ActualError::exit_code)
@@ -258,6 +293,35 @@ pub(super) fn report_create<T>(run: &Run, creation: &Creation, result: &Result<T
     send(|origin| origin.adr_created(decision, run.ended(outcome, exit_code(result))));
 }
 
+/// Report one `adr discover` run that found `counts`: `succeeded`, or
+/// `failed` when it couldn't run.
+#[cfg(feature = "telemetry")]
+pub(super) fn report_survey(run: &Run, counts: SurveyCounts, result: &Result<(), ActualError>) {
+    let outcome = if result.is_ok() {
+        "succeeded"
+    } else {
+        "failed"
+    };
+    send(|origin| origin.adr_surveyed(counts, run.ended(outcome, exit_code(result))));
+}
+
+/// Report one `adr normalize` run that did `counts`: `succeeded`,
+/// `not_saved` when `--push` left files written here but not saved to Actual
+/// AI, or `failed`.
+#[cfg(feature = "telemetry")]
+pub(super) fn report_normalize(
+    run: &Run,
+    counts: NormalizeCounts,
+    result: &Result<(), ActualError>,
+) {
+    let outcome = match result {
+        Ok(()) => "succeeded",
+        Err(ActualError::AdrNotSaved(_)) => "not_saved",
+        Err(_) => "failed",
+    };
+    send(|origin| origin.adr_normalized(counts, run.ended(outcome, exit_code(result))));
+}
+
 #[cfg(feature = "telemetry")]
 fn send(build: impl FnOnce(&otlp::Origin) -> otlp::LogRecord) {
     let Some(destination) = brief_telemetry::Destination::resolve() else {
@@ -281,6 +345,12 @@ pub(super) fn report_review<T>(
 
 #[cfg(not(feature = "telemetry"))]
 pub(super) fn report_create<T>(_: &Run, _: &Creation, _: &Result<T, ActualError>) {}
+
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_survey(_: &Run, _: SurveyCounts, _: &Result<(), ActualError>) {}
+
+#[cfg(not(feature = "telemetry"))]
+pub(super) fn report_normalize(_: &Run, _: NormalizeCounts, _: &Result<(), ActualError>) {}
 
 #[cfg(all(test, feature = "telemetry"))]
 pub(super) mod tests {
@@ -415,7 +485,7 @@ pub(super) mod tests {
                 let all = attributes(&records[0]);
                 assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
                 assert_eq!(all["actual.session.id"], "");
-                assert_eq!(all["actual.event.schema_version"], 10);
+                assert_eq!(all["actual.event.schema_version"], 13);
             }
         });
     }
@@ -618,7 +688,7 @@ pub(super) mod tests {
                     }),
                     "{outcome}"
                 );
-                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 10);
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 13);
             }
 
             let saved = Creation {
@@ -667,6 +737,110 @@ pub(super) mod tests {
         });
     }
 
+    const SURVEY: SurveyCounts = SurveyCounts {
+        files: 6,
+        to_normalize: 2,
+        to_reindex: 1,
+        to_review: 1,
+        to_push: 1,
+        compared: true,
+    };
+
+    const NORMALIZED: NormalizeCounts = NormalizeCounts {
+        files: 7,
+        converted: 2,
+        reindexed: 1,
+        needs_input: 1,
+        skipped: 1,
+        unchanged: 2,
+        dry_run: false,
+        push: true,
+        pushed: 1,
+        push_failed: 1,
+    };
+
+    #[test]
+    fn discover_reports_its_counts_and_each_outcome() {
+        with_config(WITH_FILE, |_| {
+            let cases: [(Result<(), ActualError>, &str, i64); 2] = [
+                (Ok(()), "succeeded", 0),
+                (
+                    Err(ActualError::InternalError("no runtime".to_string())),
+                    "failed",
+                    1,
+                ),
+            ];
+            for (result, outcome, code) in cases {
+                report_survey(&run(false), SURVEY, &result);
+                let records = take_captured();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0]["eventName"], otlp::ADR_SURVEYED);
+                assert_eq!(
+                    Value::Object(own(&records[0])),
+                    json!({
+                        "actual.adr.survey.files": 6,
+                        "actual.adr.survey.to_normalize": 2,
+                        "actual.adr.survey.to_reindex": 1,
+                        "actual.adr.survey.to_review": 1,
+                        "actual.adr.survey.to_push": 1,
+                        "actual.adr.survey.compared": true,
+                        "actual.adr.command.outcome": outcome,
+                        "actual.adr.command.exit_code": code,
+                        "actual.adr.command.stdin_is_terminal": false,
+                    })
+                );
+                let all = attributes(&records[0]);
+                assert!(all["actual.adr.command.duration_ms"].as_i64().unwrap() >= 0);
+                assert_eq!(all["actual.session.id"], "");
+                assert_eq!(all["actual.event.schema_version"], 13);
+            }
+        });
+    }
+
+    #[test]
+    fn normalize_reports_its_counts_and_each_outcome() {
+        with_config(WITH_FILE, |_| {
+            let cases: [(Result<(), ActualError>, &str, i64); 3] = [
+                (Ok(()), "succeeded", 0),
+                (
+                    Err(ActualError::AdrNotSaved("1 file was".to_string())),
+                    "not_saved",
+                    3,
+                ),
+                (
+                    Err(ActualError::InternalError("disk full".to_string())),
+                    "failed",
+                    1,
+                ),
+            ];
+            for (result, outcome, code) in cases {
+                report_normalize(&run(true), NORMALIZED, &result);
+                let records = take_captured();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0]["eventName"], otlp::ADR_NORMALIZED);
+                assert_eq!(
+                    Value::Object(own(&records[0])),
+                    json!({
+                        "actual.adr.normalize.files": 7,
+                        "actual.adr.normalize.converted": 2,
+                        "actual.adr.normalize.reindexed": 1,
+                        "actual.adr.normalize.needs_input": 1,
+                        "actual.adr.normalize.skipped": 1,
+                        "actual.adr.normalize.unchanged": 2,
+                        "actual.adr.normalize.dry_run": false,
+                        "actual.adr.normalize.push": true,
+                        "actual.adr.normalize.pushed": 1,
+                        "actual.adr.normalize.push_failed": 1,
+                        "actual.adr.command.outcome": outcome,
+                        "actual.adr.command.exit_code": code,
+                        "actual.adr.command.stdin_is_terminal": true,
+                    })
+                );
+                assert_eq!(attributes(&records[0])["actual.event.schema_version"], 13);
+            }
+        });
+    }
+
     /// Opted out by config or by env, no event is built.
     #[test]
     fn the_telemetry_off_switch_stops_every_event() {
@@ -675,6 +849,8 @@ pub(super) mod tests {
             report_check(&run(true), COUNTS, &Ok(()));
             report_review(&run(true), CLOUD, "accept", Some(&reviewed), &Ok(()));
             report_create(&run(true), &Creation::local(), &Ok(()));
+            report_survey(&run(true), SURVEY, &Ok(()));
+            report_normalize(&run(true), NORMALIZED, &Ok(()));
             take_captured()
         };
         with_config(&format!("{WITH_FILE}  enabled: false\n"), |_| {
@@ -688,7 +864,7 @@ pub(super) mod tests {
             assert!(report_both().is_empty(), "no output resolved");
         });
         with_config(WITH_FILE, |_| {
-            assert_eq!(report_both().len(), 3, "the positive control");
+            assert_eq!(report_both().len(), 5, "the positive control");
         });
     }
 
@@ -702,12 +878,20 @@ pub(super) mod tests {
             report_check(&run(true), COUNTS, &Ok(()));
             report_review(&run(true), CLOUD, "accept", Some(&reviewed), &Ok(()));
             report_create(&run(true), &Creation::local(), &Ok(()));
+            report_survey(&run(true), SURVEY, &Ok(()));
+            report_normalize(&run(true), NORMALIZED, &Ok(()));
             assert!(take_captured().is_empty());
             let lines = crate::telemetry::debug::tests::logged("adr-off");
             let names: Vec<_> = lines.iter().map(|l| &l["event"]["eventName"]).collect();
             assert_eq!(
                 names,
-                [otlp::ADR_DISCOVERED, otlp::ADR_REVIEWED, otlp::ADR_CREATED]
+                [
+                    otlp::ADR_DISCOVERED,
+                    otlp::ADR_REVIEWED,
+                    otlp::ADR_CREATED,
+                    otlp::ADR_SURVEYED,
+                    otlp::ADR_NORMALIZED
+                ]
             );
             for line in &lines {
                 assert_eq!(line["stage"], "not_sent");

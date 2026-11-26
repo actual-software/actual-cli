@@ -15,9 +15,10 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::local::{cloud_decisions, CloudComparison};
+use super::telemetry::{self, NormalizeCounts, SurveyCounts};
 use super::{interactive, json_text, runtime, today};
 use crate::adr::context_file::{js_trim, ContextFile};
-use crate::adr::discovery::{self, relative, Entry, State};
+use crate::adr::discovery::{self, relative, Action, Entry, State};
 use crate::adr::files::{self, DECISION_DIR, RULES_DIR};
 use crate::adr::header::{normalize_scope_root, REPOSITORY_ROOT};
 use crate::adr::names::{decision_doc_file_name, rule_file_name};
@@ -48,6 +49,17 @@ struct DiscoverReport {
 }
 
 pub(super) fn exec_discover(args: &AdrDiscoverArgs) -> Result<(), ActualError> {
+    let run = telemetry::Run::start();
+    let mut counts = SurveyCounts::default();
+    let result = discover_and_print(args, &mut counts);
+    telemetry::report_survey(&run, counts, &result);
+    result
+}
+
+fn discover_and_print(
+    args: &AdrDiscoverArgs,
+    counts: &mut SurveyCounts,
+) -> Result<(), ActualError> {
     let root = args.root.clone().unwrap_or_else(resolve_cwd);
     let report = runtime()?.block_on(run_discover(
         args.no_cloud,
@@ -55,12 +67,32 @@ pub(super) fn exec_discover(args: &AdrDiscoverArgs) -> Result<(), ActualError> {
         &args.api,
         &root,
     ));
+    *counts = survey_counts(&report);
     if args.api.json {
         println!("{}", json_text(&report));
     } else {
         print!("{}", render_discover(&report));
     }
     Ok(())
+}
+
+/// The files `report` lists, by what `normalize` would do with each.
+fn survey_counts(report: &DiscoverReport) -> SurveyCounts {
+    let mut counts = SurveyCounts {
+        files: report.entries.len(),
+        compared: report.cloud.compared,
+        ..SurveyCounts::default()
+    };
+    for entry in &report.entries {
+        match entry.state.action() {
+            Action::Normalize | Action::Renormalize => counts.to_normalize += 1,
+            Action::Reindex => counts.to_reindex += 1,
+            Action::Review => counts.to_review += 1,
+            Action::Push => counts.to_push += 1,
+            Action::None => {}
+        }
+    }
+    counts
 }
 
 async fn run_discover(
@@ -389,6 +421,21 @@ struct NormalizeReport {
 }
 
 pub(super) fn exec_normalize(args: &AdrNormalizeArgs) -> Result<(), ActualError> {
+    let run = telemetry::Run::start();
+    let mut counts = NormalizeCounts {
+        dry_run: args.dry_run,
+        push: args.push,
+        ..NormalizeCounts::default()
+    };
+    let result = normalize_and_print(args, &mut counts);
+    telemetry::report_normalize(&run, counts, &result);
+    result
+}
+
+fn normalize_and_print(
+    args: &AdrNormalizeArgs,
+    counts: &mut NormalizeCounts,
+) -> Result<(), ActualError> {
     let root = args.root.clone().unwrap_or_else(resolve_cwd);
     let terminal = RealTerminal::default();
     let ask: Option<&dyn TerminalIO> =
@@ -416,12 +463,34 @@ pub(super) fn exec_normalize(args: &AdrNormalizeArgs) -> Result<(), ActualError>
     let today = today();
     let normalizing = run_normalize(args, &root, &today, ask, &progress, resolve);
     let report = runtime()?.block_on(normalizing)?;
+    *counts = normalize_counts(counts, &report);
     if args.api.json {
         println!("{}", json_text(&report));
     } else {
         print!("{}", render_normalize(&report));
     }
     unsaved_error(&report).map_or(Ok(()), Err)
+}
+
+/// What `report` says the run did with each file, on top of the flags in
+/// `asked`.
+fn normalize_counts(asked: &NormalizeCounts, report: &NormalizeReport) -> NormalizeCounts {
+    let mut counts = NormalizeCounts {
+        files: report.files.len(),
+        ..*asked
+    };
+    for file in &report.files {
+        match file.outcome {
+            Outcome::Written | Outcome::WouldWrite => counts.converted += 1,
+            Outcome::Reindexed | Outcome::WouldReindex => counts.reindexed += 1,
+            Outcome::NeedsInput => counts.needs_input += 1,
+            Outcome::Skipped => counts.skipped += 1,
+            Outcome::Unchanged => counts.unchanged += 1,
+        }
+        counts.pushed += usize::from(file.pushed.is_some());
+        counts.push_failed += usize::from(file.push_problem.is_some());
+    }
+    counts
 }
 
 /// The error for a run whose `--push` left files written here but not saved
@@ -2369,5 +2438,231 @@ mod tests {
         let model = model_from(resolved);
         assert_eq!(model.model.as_deref(), Some("m"));
         assert!(model.label.contains("m"));
+    }
+
+    // ── telemetry ──
+
+    /// The one event `records` holds, as its own attributes, after checking
+    /// it is `event` and names none of `content`.
+    #[cfg(feature = "telemetry")]
+    fn the_event(
+        records: &[serde_json::Value],
+        event: &str,
+        content: &[&str],
+    ) -> serde_json::Value {
+        assert_eq!(records.len(), 1, "{records:#?}");
+        assert_eq!(records[0]["eventName"], event);
+        let sent = records[0].to_string().to_lowercase();
+        for text in content {
+            assert!(!sent.contains(&text.to_lowercase()), "{text} in {sent}");
+        }
+        serde_json::Value::Object(super::super::telemetry::tests::own(&records[0]))
+    }
+
+    /// A `discover` run sends one event counting the files by what
+    /// `normalize` would do with each, signed out and signed in, and none of
+    /// their paths, titles or ids.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn discover_sends_one_event_counting_the_files_on_each_pathway() {
+        use super::super::telemetry::tests::sending_to_a_file;
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        use crate::telemetry::otlp::ADR_SURVEYED;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let content = ["postgres", "mysql", "docs/adr", ID];
+
+        // Signed out: the files alone.
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _telemetry = sending_to_a_file(home.path());
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        adr(root, "0007-use-postgres.md", NYGARD);
+        adr(root, "README.md", "# ADRs\n");
+        local_pair(root, "a.md", OTHER, &doc("Logging", "Log JSON."));
+        let stale = local_pair(root, "b.md", THIRD, &doc("Tracing", "Trace calls."));
+        let text = std::fs::read_to_string(&stale).unwrap();
+        write(&stale, &text.replace("Trace calls.", "Trace every call."));
+        let discover = |no_cloud: bool, repo: Option<&str>, api_url: Option<String>| {
+            exec_discover(&AdrDiscoverArgs {
+                no_cloud,
+                repo: repo.map(str::to_string),
+                root: Some(root.to_path_buf()),
+                api: AdrApiOptions {
+                    api_url,
+                    json: true,
+                },
+            })
+        };
+        discover(true, None, None).unwrap();
+        assert_eq!(
+            the_event(&take_captured(), ADR_SURVEYED, &content),
+            serde_json::json!({
+                "actual.adr.survey.files": 4,
+                "actual.adr.survey.to_normalize": 1,
+                "actual.adr.survey.to_reindex": 1,
+                "actual.adr.survey.to_review": 0,
+                "actual.adr.survey.to_push": 0,
+                "actual.adr.survey.compared": false,
+                "actual.adr.command.outcome": "succeeded",
+                "actual.adr.command.exit_code": 0,
+                "actual.adr.command.stdin_is_terminal": super::super::interactive(),
+            })
+        );
+
+        // Signed in: a synced doc edited since is compared with Actual AI.
+        let config = tempdir().unwrap();
+        let _signed_in = sign_in(config.path());
+        let _telemetry = sending_to_a_file(config.path());
+        synced_pair(root, ID, "Use Postgres");
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded("repository_id".into(), REPO.into()))
+            .with_status(200)
+            .with_body(format!(
+                r#"{{"adrs":[{{"id":"{ID}","title":"Use MySQL","status":"accepted","policyRules":[{{"id":"r","adrId":"{ID}","level":"MUST","statement":"Store data in Postgres."}}]}}],"suggestions":[]}}"#
+            ))
+            .create();
+        discover(false, Some(REPO), Some(server.url())).unwrap();
+        let own = the_event(&take_captured(), ADR_SURVEYED, &content);
+        assert_eq!(own["actual.adr.survey.files"], 5);
+        assert_eq!(own["actual.adr.survey.to_push"], 1);
+        assert_eq!(own["actual.adr.survey.compared"], true);
+        assert_eq!(own["actual.adr.command.outcome"], "succeeded");
+    }
+
+    /// A `normalize` run sends one event counting what it did with the files:
+    /// signed out, with a push it couldn't make, and signed in, with one it
+    /// made. A run that stops before it reads a file still sends its flags.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn normalize_sends_one_event_counting_what_it_did_on_each_pathway() {
+        use super::super::telemetry::tests::sending_to_a_file;
+        use crate::cli::commands::brief_telemetry::tests::take_captured;
+        use crate::telemetry::otlp::ADR_NORMALIZED;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let content = ["postgres", "redis", "kafka", "docs/adr", "cache sessions"];
+        let normalize = |root: &Path, files: &[&str], edit: &dyn Fn(&mut AdrNormalizeArgs)| {
+            let mut a = args(files);
+            a.root = Some(root.to_path_buf());
+            a.no_model = true;
+            a.api.json = true;
+            edit(&mut a);
+            let result = exec_normalize(&a);
+            (
+                result,
+                the_event(&take_captured(), ADR_NORMALIZED, &content),
+            )
+        };
+        let counts = |own: &serde_json::Value| -> Vec<i64> {
+            [
+                "files",
+                "converted",
+                "reindexed",
+                "needs_input",
+                "skipped",
+                "unchanged",
+                "pushed",
+                "push_failed",
+            ]
+            .iter()
+            .map(|key| own[format!("actual.adr.normalize.{key}")].as_i64().unwrap())
+            .collect()
+        };
+
+        let home = tempdir().unwrap();
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _telemetry = sending_to_a_file(home.path());
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        adr(root, "0007-use-postgres.md", NYGARD);
+        adr(root, "0008-cache.md", PROSE);
+        local_pair(root, "a.md", OTHER, &doc("Logging", "Log JSON."));
+        let stale = local_pair(root, "b.md", THIRD, &doc("Tracing", "Trace calls."));
+        let text = std::fs::read_to_string(&stale).unwrap();
+        write(&stale, &text.replace("Trace calls.", "Trace every call."));
+        adr(root, "README.md", "# ADRs\n");
+
+        let named = [
+            "docs/adr/0007-use-postgres.md",
+            "docs/adr/0008-cache.md",
+            "docs/adr/a.md",
+            "docs/adr/b.md",
+            "docs/adr/README.md",
+        ];
+        let (result, own) = normalize(root, &named, &|a| a.dry_run = true);
+        result.unwrap();
+        assert_eq!(counts(&own), [5, 1, 1, 1, 1, 1, 0, 0]);
+        assert_eq!(own["actual.adr.normalize.dry_run"], true);
+        assert_eq!(own["actual.adr.normalize.push"], false);
+        assert_eq!(own["actual.adr.command.outcome"], "succeeded");
+        assert_eq!(own["actual.adr.command.exit_code"], 0);
+        assert_eq!(
+            own["actual.adr.command.stdin_is_terminal"],
+            super::super::interactive()
+        );
+
+        // Signed out, `--push` writes the file and can't save it.
+        adr(root, "0010-new.md", &NYGARD.replace("Postgres", "Redis"));
+        let (result, own) = normalize(root, &["docs/adr/0010-new.md"], &|a| {
+            a.push = true;
+            a.allow_duplicate = true;
+        });
+        assert!(
+            matches!(result, Err(ActualError::AdrNotSaved(_))),
+            "{result:?}"
+        );
+        assert_eq!(counts(&own), [1, 1, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(own["actual.adr.normalize.dry_run"], false);
+        assert_eq!(own["actual.adr.normalize.push"], true);
+        assert_eq!(own["actual.adr.command.outcome"], "not_saved");
+        assert_eq!(own["actual.adr.command.exit_code"], 3);
+
+        // A run that can't read its extractions sends its flags and no counts.
+        let (result, own) = normalize(root, &[], &|a| {
+            a.dry_run = true;
+            a.extracted = Some(PathBuf::from("/nonexistent/extracted.json"));
+        });
+        let code = i64::from(result.unwrap_err().exit_code());
+        assert_eq!(counts(&own), [0; 8]);
+        assert_eq!(own["actual.adr.normalize.dry_run"], true);
+        assert_eq!(own["actual.adr.command.outcome"], "failed");
+        assert_eq!(own["actual.adr.command.exit_code"], code);
+
+        // Signed in, `--push` saves what it wrote.
+        let config = tempdir().unwrap();
+        let _signed_in = sign_in(config.path());
+        let _telemetry = sending_to_a_file(config.path());
+        git_repo(root, Some("https://github.com/actual-software/actual-cli"));
+        adr(root, "0011-new.md", &NYGARD.replace("Postgres", "Kafka"));
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"version":1,"repository_summaries":[]}"#)
+            .create();
+        server
+            .mock("POST", "/v1/gcp/product/adr-import")
+            .with_status(200)
+            .with_body(r#"{"success":true,"adr_id":"33333333-3333-4333-8333-333333333333"}"#)
+            .expect(1)
+            .create();
+        let url = server.url();
+        let (result, own) = normalize(root, &["docs/adr/0011-new.md"], &|a| {
+            a.push = true;
+            a.allow_duplicate = true;
+            a.api.api_url = Some(url.clone());
+        });
+        result.unwrap();
+        assert_eq!(counts(&own), [1, 1, 0, 0, 0, 0, 1, 0]);
+        assert_eq!(own["actual.adr.command.outcome"], "succeeded");
     }
 }

@@ -577,4 +577,105 @@ mod tests {
             Err(ActualError::NotLoggedIn)
         ));
     }
+
+    /// The event each `adr` subcommand sends, or `None` for one PRIVACY.md
+    /// names among the commands that send none. `create --all` is a path of
+    /// `create` that sends none.
+    #[cfg(feature = "telemetry")]
+    const COMMAND_EVENTS: &[(&str, Option<&str>)] = {
+        use crate::telemetry::otlp::{
+            ADR_CREATED, ADR_DISCOVERED, ADR_NORMALIZED, ADR_REVIEWED, ADR_SURVEYED,
+        };
+        &[
+            ("create", Some(ADR_CREATED)),
+            ("create --all", None),
+            ("list", None),
+            ("show", None),
+            ("update", Some(ADR_REVIEWED)),
+            ("publish", Some(ADR_REVIEWED)),
+            ("unpublish", Some(ADR_REVIEWED)),
+            ("delete", Some(ADR_REVIEWED)),
+            ("restore", Some(ADR_REVIEWED)),
+            ("accept", Some(ADR_REVIEWED)),
+            ("reject", Some(ADR_REVIEWED)),
+            ("check", Some(ADR_DISCOVERED)),
+            ("discover", Some(ADR_SURVEYED)),
+            ("normalize", Some(ADR_NORMALIZED)),
+            ("refresh", None),
+            ("new", Some(ADR_CREATED)),
+        ]
+    };
+
+    /// Every `adr` subcommand clap knows, aliases included, is in
+    /// [`COMMAND_EVENTS`], and PRIVACY.md agrees with it: each event's entry
+    /// in the `actual adr` section names the commands that send it, and the
+    /// sentence after the entries names exactly the commands that send none.
+    /// A new subcommand fails here until it sends its family's event or
+    /// PRIVACY.md says it sends none.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn every_adr_command_sends_its_event_or_privacy_md_says_it_sends_none() {
+        use clap::CommandFactory;
+        use std::collections::BTreeSet;
+
+        let mut known: BTreeSet<String> = BTreeSet::new();
+        for sub in AdrArgs::command().get_subcommands() {
+            known.insert(sub.get_name().to_string());
+            known.extend(sub.get_all_aliases().map(str::to_string));
+        }
+        let classified: BTreeSet<String> = COMMAND_EVENTS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .filter(|name| !name.contains(' '))
+            .collect();
+        assert_eq!(
+            known, classified,
+            "add each new `adr` subcommand to COMMAND_EVENTS with the event it sends"
+        );
+
+        let privacy = include_str!("../../../../PRIVACY.md");
+        let start = privacy
+            .find("The `actual adr` commands send one event per run:")
+            .expect("PRIVACY.md's `actual adr` section");
+        let section = &privacy[start..];
+        let end = section
+            .find("send none of them.")
+            .expect("the sentence naming the `adr` commands that send no event");
+        let section = &section[..end];
+        let (entries, silent) = section
+            .split_once("None of these events carries")
+            .expect("the entries, then what they never carry");
+
+        for &(name, event) in COMMAND_EVENTS {
+            let Some(event) = event else { continue };
+            let entry = entries
+                .split("\n- ")
+                .find(|entry| entry.starts_with(&format!("`{event}`")))
+                .unwrap_or_else(|| panic!("PRIVACY.md has no entry for {event}"));
+            let entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
+            let command = name.split(' ').next().unwrap();
+            assert!(
+                entry.contains(&format!("`{command}`"))
+                    || entry.contains(&format!("adr {command}`")),
+                "PRIVACY.md's {event} entry doesn't name `{command}`: {entry}"
+            );
+        }
+
+        let named: BTreeSet<String> = silent
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|quoted| quoted.strip_prefix("adr "))
+            .map(str::to_string)
+            .collect();
+        let expected: BTreeSet<String> = COMMAND_EVENTS
+            .iter()
+            .filter(|(_, event)| event.is_none())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(
+            named, expected,
+            "PRIVACY.md's sentence on the `adr` commands that send no event"
+        );
+    }
 }

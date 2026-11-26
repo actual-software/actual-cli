@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_resolve_builds_then_reuses_the_cached_index() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_resolve_rebuilds_after_a_rule_file_changes() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -239,7 +239,7 @@ mod tests {
     /// ordinary call is a hit.
     #[test]
     fn test_resolve_force_rebuild_rewrites_the_cache() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_resolve_on_a_repository_with_no_rules_directory() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_resolve_propagates_a_load_failure() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_builds_then_reuses_the_cached_index() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_rebuilds_after_a_rule_file_changes() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_force_rebuild_rewrites_the_cache() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -366,7 +366,7 @@ mod tests {
     /// independently of anything the outer root's convention path might find.
     #[test]
     fn test_resolve_in_does_not_collide_with_the_convention_path_cache() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_on_a_directory_that_does_not_exist() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_propagates_a_load_failure() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");

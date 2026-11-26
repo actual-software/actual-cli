@@ -1265,6 +1265,11 @@ mod tests {
 
     #[test]
     fn unpublish_needs_a_sign_in_and_leaves_the_files_as_they_were() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _no_config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         let tmp = tempdir().unwrap();
         let root = tmp.path();
         let id = create(
@@ -1316,6 +1321,11 @@ mod tests {
     }
     #[test]
     fn restore_accept_and_reject_need_a_sign_in() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _no_config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
         for (action, word) in [
             (LifecycleAction::Restore, "git restore"),
             (LifecycleAction::Accept, "`accept` acts on a suggestion"),

@@ -98,6 +98,13 @@ pub(crate) const ADR_REVIEWED: &str = "actual.adr.reviewed";
 /// The event a run of `actual adr new` or `actual adr create` sends.
 pub(crate) const ADR_CREATED: &str = "actual.adr.created";
 
+/// The event an `actual adr discover` run sends once it has sorted the files.
+pub(crate) const ADR_SURVEYED: &str = "actual.adr.surveyed";
+
+/// The event an `actual adr normalize` run sends once it has dealt with the
+/// files.
+pub(crate) const ADR_NORMALIZED: &str = "actual.adr.normalized";
+
 /// The event `rules report-use` sends for each ADR the agent says it used in
 /// a turn, in answer to the Stop hook's question.
 pub(crate) const ADR_REPORTED: &str = "actual.adr.reported";
@@ -123,8 +130,28 @@ const DECISION_ID: &str = "actual.adr.decision_id";
 /// request carrying the sign-in's token holds.
 const REPORT_FILE_PATH: &str = "actual.report.file_path";
 
+/// Where a session's token totals came from, and the totals: one entry per
+/// model in each list, in the same order. Only a request carrying the
+/// sign-in's token holds them.
+const USAGE_SOURCE: &str = "actual.usage.source";
+const USAGE_MODELS: &str = "actual.usage.models";
+const USAGE_INPUT: &str = "actual.usage.input_tokens";
+const USAGE_OUTPUT: &str = "actual.usage.output_tokens";
+const USAGE_CACHE_READ: &str = "actual.usage.cache_read_tokens";
+const USAGE_CACHE_WRITE: &str = "actual.usage.cache_write_tokens";
+
 /// The attributes [`LogRecord::signed_out`] leaves out.
-const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
+const SIGNED_IN_ONLY: [&str; 9] = [
+    REASON_TEXT,
+    DECISION_ID,
+    REPORT_FILE_PATH,
+    USAGE_SOURCE,
+    USAGE_MODELS,
+    USAGE_INPUT,
+    USAGE_OUTPUT,
+    USAGE_CACHE_READ,
+    USAGE_CACHE_WRITE,
+];
 
 /// The version of the attributes below, sent as `actual.event.schema_version`.
 /// 2 adds `actual.override.reason` and `actual.override.reason_text`; 3 adds
@@ -137,8 +164,10 @@ const SIGNED_IN_ONLY: [&str; 3] = [REASON_TEXT, DECISION_ID, REPORT_FILE_PATH];
 /// the web app's `actual.adr.reviewed` attributes, which the CLI doesn't
 /// send; 9 adds [`ADR_CREATED`] and its `actual.adr.create.*` attributes; 10
 /// adds `actual.adr.review.pathway` and `actual.adr.review.prior_status` to
-/// [`ADR_REVIEWED`].
-const SCHEMA_VERSION: i64 = 10;
+/// [`ADR_REVIEWED`]; 11 adds the `actual.usage.*` token totals to
+/// [`SESSION_ENDED`]; 13 adds [`ADR_SURVEYED`] and [`ADR_NORMALIZED`] and
+/// their `actual.adr.survey.*` and `actual.adr.normalize.*` attributes.
+const SCHEMA_VERSION: i64 = 13;
 
 /// `deployment.environment.name`: release builds are the ones users run.
 const ENVIRONMENT: &str = if cfg!(debug_assertions) {
@@ -381,6 +410,18 @@ fn int(key: &'static str, value: i64) -> KeyValue {
     }
 }
 
+/// A list of integers, each past `i64::MAX` sent as `i64::MAX`.
+fn ints(key: &'static str, values: impl Iterator<Item = u64>) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: AnyValue::ArrayValue {
+            values: values
+                .map(|value| AnyValue::IntValue(i64::try_from(value).unwrap_or(i64::MAX)))
+                .collect(),
+        },
+    }
+}
+
 /// A double. NaN and the infinities, which JSON cannot hold and no score is,
 /// go as 0.
 fn double(key: &'static str, value: f64) -> KeyValue {
@@ -449,8 +490,7 @@ pub(crate) struct OverrideReason<'a> {
     pub text: Option<&'a str>,
 }
 
-/// How one run of an `actual adr` command ended, which both of its events
-/// record.
+/// How one run of an `actual adr` command ended, which its event records.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdrRun<'a> {
     /// `actual.adr.command.outcome`.
@@ -472,6 +512,47 @@ pub(crate) struct CheckCounts {
     pub failed: usize,
     /// Likely duplicates listed.
     pub duplicates: usize,
+}
+
+/// What an `adr discover` run found, as its [`ADR_SURVEYED`] record counts
+/// it: the files, by what `adr normalize` would do with each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SurveyCounts {
+    /// Every file listed, ignored and unreadable ones included.
+    pub files: usize,
+    /// Docs to convert, for the first time or again.
+    pub to_normalize: usize,
+    /// Docs whose rule file is missing or older than the doc.
+    pub to_reindex: usize,
+    /// Docs that look like a decision the repository already has.
+    pub to_review: usize,
+    /// Synced docs edited since, to save to Actual AI or revert.
+    pub to_push: usize,
+    /// Whether the run compared synced docs with Actual AI.
+    pub compared: bool,
+}
+
+/// What an `adr normalize` run did, as its [`ADR_NORMALIZED`] record counts
+/// it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NormalizeCounts {
+    /// Every file the run reported on.
+    pub files: usize,
+    /// Docs converted, or that `--dry-run` would convert.
+    pub converted: usize,
+    /// Rule files written again, or that `--dry-run` would write.
+    pub reindexed: usize,
+    /// Docs left with questions for a person.
+    pub needs_input: usize,
+    pub skipped: usize,
+    pub unchanged: usize,
+    pub dry_run: bool,
+    /// Whether `--push` asked for each written doc to be saved to Actual AI.
+    pub push: bool,
+    /// Docs saved to Actual AI.
+    pub pushed: usize,
+    /// Docs written here that weren't saved to Actual AI.
+    pub push_failed: usize,
 }
 
 /// The decision a review command acted on, as its [`ADR_REVIEWED`] record
@@ -511,6 +592,24 @@ pub(crate) struct CreatedDecision<'a> {
     pub id: Option<&'a str>,
 }
 
+/// One model's token totals for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelTokens {
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+/// A session's token totals per model, as [`SESSION_ENDED`] sends them, and
+/// where they came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionUsage {
+    pub source: &'static str,
+    pub models: Vec<ModelTokens>,
+}
+
 /// What the records from one run share: the CLI execution that sends them,
 /// when, and the trace they belong to.
 pub(crate) struct Origin {
@@ -532,17 +631,35 @@ impl Origin {
         }
     }
 
+    /// The [`SESSION_ENDED`] record: how the session ended, whether its last
+    /// completed check blocked, and, when given, its token totals per model.
     pub(crate) fn session_ended(
         &self,
         session_id: &str,
         reason: &str,
         last_check_blocked: bool,
+        usage: Option<&SessionUsage>,
     ) -> LogRecord {
         let mut record = self.record(SESSION_ENDED, session_id, None);
         record.attributes.extend([
             text("actual.session.end_reason", Some(reason)),
             boolean("actual.session.last_check_blocked", last_check_blocked),
         ]);
+        if let Some(usage) = usage {
+            let column =
+                |key, value: fn(&ModelTokens) -> u64| ints(key, usage.models.iter().map(value));
+            record.attributes.extend([
+                text(USAGE_SOURCE, Some(usage.source)),
+                strings(
+                    USAGE_MODELS,
+                    &usage.models.iter().map(|m| &m.model).collect::<Vec<_>>(),
+                ),
+                column(USAGE_INPUT, |m| m.input),
+                column(USAGE_OUTPUT, |m| m.output),
+                column(USAGE_CACHE_READ, |m| m.cache_read),
+                column(USAGE_CACHE_WRITE, |m| m.cache_write),
+            ]);
+        }
         record
     }
 
@@ -729,6 +846,42 @@ impl Origin {
         record
     }
 
+    /// The [`ADR_SURVEYED`] record for one `adr discover` run: what it found,
+    /// then how the run ended.
+    pub(crate) fn adr_surveyed(&self, counts: SurveyCounts, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_SURVEYED, "", None);
+        record.attributes.extend([
+            count("actual.adr.survey.files", counts.files),
+            count("actual.adr.survey.to_normalize", counts.to_normalize),
+            count("actual.adr.survey.to_reindex", counts.to_reindex),
+            count("actual.adr.survey.to_review", counts.to_review),
+            count("actual.adr.survey.to_push", counts.to_push),
+            boolean("actual.adr.survey.compared", counts.compared),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
+    /// The [`ADR_NORMALIZED`] record for one `adr normalize` run: what it did
+    /// with the files, then how the run ended.
+    pub(crate) fn adr_normalized(&self, counts: NormalizeCounts, run: AdrRun<'_>) -> LogRecord {
+        let mut record = self.record(ADR_NORMALIZED, "", None);
+        record.attributes.extend([
+            count("actual.adr.normalize.files", counts.files),
+            count("actual.adr.normalize.converted", counts.converted),
+            count("actual.adr.normalize.reindexed", counts.reindexed),
+            count("actual.adr.normalize.needs_input", counts.needs_input),
+            count("actual.adr.normalize.skipped", counts.skipped),
+            count("actual.adr.normalize.unchanged", counts.unchanged),
+            boolean("actual.adr.normalize.dry_run", counts.dry_run),
+            boolean("actual.adr.normalize.push", counts.push),
+            count("actual.adr.normalize.pushed", counts.pushed),
+            count("actual.adr.normalize.push_failed", counts.push_failed),
+        ]);
+        record.attributes.extend(adr_run(run));
+        record
+    }
+
     /// The [`ADR_REPORTED`] record for one ADR an agent named in its answer
     /// to the Stop hook's question. `report.adr` is `None` for a name that
     /// matched no ADR in the session, sent with an empty ref and no ids.
@@ -860,7 +1013,7 @@ impl Origin {
     }
 }
 
-/// The attributes both `actual adr` events end with.
+/// The attributes every `actual adr` event ends with.
 fn adr_run(run: AdrRun<'_>) -> [KeyValue; 4] {
     [
         text("actual.adr.command.outcome", Some(run.outcome)),
@@ -1688,7 +1841,7 @@ mod tests {
         assert_eq!(value("log.record.uid"), value("actual.event.id"));
         assert_eq!(
             value("actual.event.schema_version"),
-            serde_json::json!({"intValue": "10"})
+            serde_json::json!({"intValue": "13"})
         );
         assert_eq!(value("actual.action.id")["stringValue"], "action-1");
         assert_eq!(value("actual.session.id")["stringValue"], "session-1");
@@ -2273,7 +2426,7 @@ mod tests {
                 .value
                 .as_ref()
                 .and_then(|value| value.value.as_ref()),
-            Some(&common::any_value::Value::IntValue(10))
+            Some(&common::any_value::Value::IntValue(13))
         );
         assert_eq!(keys[4], "actual.session.id");
         assert_eq!(string(record.attributes[4].value.as_ref()), "session-1");
@@ -2492,7 +2645,7 @@ mod tests {
                 "4bf92f3577b34da6a3ce929d0e0e473",
             ),
             whole.replace("00f067aa0ba902b7", "00f067aa0ba902bz"),
-            whole.replace(r#"{"intValue":"10"}"#, r#"{"intValue":"ten"}"#),
+            whole.replace(r#"{"intValue":"13"}"#, r#"{"intValue":"thirteen"}"#),
         ];
         assert!(damaged[2..].iter().all(|line| line != whole), "{damaged:?}");
         assert!(records(&damaged).is_empty(), "{damaged:?}");
@@ -3934,6 +4087,90 @@ mod tests {
         assert_eq!(both.matches(REASON_TEXT).count(), 1, "{both}");
     }
 
+    /// A session end's token totals go out as lists in model order, and only
+    /// spooled under a sign-in; the rest of the end is spooled either way.
+    #[test]
+    fn test_session_usage_is_spooled_only_under_a_sign_in() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = clear_env();
+        let (home, _api) = isolated("https://api.example.test");
+        let outputs = Outputs {
+            endpoint: Some("https://api.example.test/v1/logs".to_string()),
+            file: None,
+        };
+        let spool_file = home.path().join("otlp-logs-spool.jsonl");
+        let model = |model: &str, n: u64| ModelTokens {
+            model: model.to_string(),
+            input: n,
+            output: n + 1,
+            cache_read: n + 2,
+            cache_write: u64::MAX,
+        };
+        let usage = SessionUsage {
+            source: "messages",
+            models: vec![model("claude-haiku", 1), model("claude-opus", 10)],
+        };
+        let ended = origin(None).session_ended("session-1", "other", false, Some(&usage));
+        let attrs = record_json(&ended)["attributes"].clone();
+        let value = |key: &str| {
+            attrs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kv| kv["key"] == key)
+                .unwrap()["value"]
+                .clone()
+        };
+        let ints = |key: &str| -> Vec<Value> {
+            value(key)["arrayValue"]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["intValue"].clone())
+                .collect()
+        };
+        assert_eq!(value(USAGE_SOURCE)["stringValue"], "messages");
+        assert_eq!(
+            value(USAGE_MODELS)["arrayValue"]["values"],
+            serde_json::json!([{"stringValue": "claude-haiku"}, {"stringValue": "claude-opus"}])
+        );
+        assert_eq!(ints(USAGE_INPUT), ["1", "10"]);
+        assert_eq!(ints(USAGE_OUTPUT), ["2", "11"]);
+        assert_eq!(ints(USAGE_CACHE_READ), ["3", "12"]);
+        assert_eq!(
+            ints(USAGE_CACHE_WRITE),
+            [i64::MAX.to_string(), i64::MAX.to_string()]
+        );
+        assert!(ended.to_proto().is_some());
+
+        spool(&outputs, std::slice::from_ref(&ended));
+        let signed_out = std::fs::read_to_string(&spool_file).unwrap();
+        save(&signed_in(
+            "org-a",
+            "token-a",
+            ChronoDuration::hours(1),
+            None,
+        ));
+        spool(&outputs, &[ended]);
+        let both = std::fs::read_to_string(&spool_file).unwrap();
+
+        assert!(!signed_out.contains("actual.usage."), "{signed_out}");
+        assert!(
+            signed_out.contains("actual.session.end_reason"),
+            "{signed_out}"
+        );
+        for key in [
+            USAGE_SOURCE,
+            USAGE_MODELS,
+            USAGE_INPUT,
+            USAGE_OUTPUT,
+            USAGE_CACHE_READ,
+            USAGE_CACHE_WRITE,
+        ] {
+            assert_eq!(both.matches(key).count(), 1, "{key}: {both}");
+        }
+    }
+
     fn reported_record(file_path: Option<&str>) -> LogRecord {
         let ids = ids(&["adr-1"]);
         origin(None).reported(
@@ -4219,7 +4456,8 @@ mod tests {
 
     // ── the `actual adr` events ─────────────────────────────────────────
 
-    /// One `adr check` event and one review event naming decision `id`.
+    /// One event of each `actual adr` kind, the review and create ones
+    /// naming decision `id`.
     fn adr_events(id: &str) -> Vec<LogRecord> {
         let origin = origin(None);
         let run = AdrRun {
@@ -4247,6 +4485,8 @@ mod tests {
             origin.adr_discovered(CheckCounts::default(), run),
             origin.adr_reviewed("accept", decision, run),
             origin.adr_created(created, run),
+            origin.adr_surveyed(SurveyCounts::default(), run),
+            origin.adr_normalized(NormalizeCounts::default(), run),
         ]
     }
 
@@ -4290,8 +4530,12 @@ mod tests {
         assert_ne!(ADR_DISCOVERED, ADR_DETECTED);
         assert_ne!(ADR_REVIEWED, ADR_DETECTED);
         assert_eq!(events[2].event_name, ADR_CREATED);
-        assert_eq!(keys(&events[0]), keys(&events[0].clone().signed_out()));
-        for event in &events[1..] {
+        assert_eq!(events[3].event_name, ADR_SURVEYED);
+        assert_eq!(events[4].event_name, ADR_NORMALIZED);
+        for event in [&events[0], &events[3], &events[4]] {
+            assert_eq!(keys(event), keys(&event.clone().signed_out()));
+        }
+        for event in &events[1..3] {
             let signed_in = keys(event);
             let signed_out = keys(&event.clone().signed_out());
             assert!(signed_in.iter().any(|key| key == DECISION_ID));
@@ -4344,9 +4588,13 @@ mod tests {
                 (None, ADR_DISCOVERED, false),
                 (None, ADR_REVIEWED, false),
                 (None, ADR_CREATED, false),
+                (None, ADR_SURVEYED, false),
+                (None, ADR_NORMALIZED, false),
                 (Some(stamp.as_str()), ADR_DISCOVERED, false),
                 (Some(stamp.as_str()), ADR_REVIEWED, true),
                 (Some(stamp.as_str()), ADR_CREATED, true),
+                (Some(stamp.as_str()), ADR_SURVEYED, false),
+                (Some(stamp.as_str()), ADR_NORMALIZED, false),
             ]
         );
     }
@@ -4383,6 +4631,8 @@ mod tests {
                 (ADR_DISCOVERED.to_string(), None),
                 (ADR_REVIEWED.to_string(), Some("in-1".to_string())),
                 (ADR_CREATED.to_string(), Some("in-1".to_string())),
+                (ADR_SURVEYED.to_string(), None),
+                (ADR_NORMALIZED.to_string(), None),
             ]]
         );
         assert_eq!(
@@ -4391,6 +4641,8 @@ mod tests {
                 (ADR_DISCOVERED.to_string(), None),
                 (ADR_REVIEWED.to_string(), None),
                 (ADR_CREATED.to_string(), None),
+                (ADR_SURVEYED.to_string(), None),
+                (ADR_NORMALIZED.to_string(), None),
             ]]
         );
     }

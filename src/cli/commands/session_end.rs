@@ -7,6 +7,11 @@
 //! block still open. A gate's session file is keyed by its rules directory as
 //! well as the session, so the state names every rules directory a block
 //! opened under.
+//!
+//! A signed-in end adds the session's token totals per model, read from the
+//! transcript the envelope names; see [`super::session_usage`]. A repeated
+//! end is suppressed before the scan, so the totals are those at the last end
+//! reported, which lags a resumed session that completes no hook check.
 
 use crate::error::ActualError;
 
@@ -30,6 +35,11 @@ use std::time::Duration;
 #[cfg(feature = "telemetry")]
 const END_LOCK_WAIT: Duration = Duration::from_millis(100);
 
+/// How long the end may spend reading the transcript's token totals, inside
+/// the plugin's 1 s hook timeout.
+#[cfg(feature = "telemetry")]
+const USAGE_SCAN_BUDGET: Duration = Duration::from_millis(500);
+
 #[cfg(feature = "telemetry")]
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -47,6 +57,8 @@ struct Envelope {
     session_id: String,
     hook_event_name: String,
     reason: String,
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
 }
 
 #[cfg(feature = "telemetry")]
@@ -157,10 +169,22 @@ pub(super) fn report(raw: &str) {
             )
         })
         .collect();
+    let usage = envelope
+        .transcript_path
+        .as_deref()
+        .filter(|_| destination.signed_in())
+        .and_then(|path| {
+            super::session_usage::read(
+                path,
+                &envelope.session_id,
+                std::time::Instant::now() + USAGE_SCAN_BUDGET,
+            )
+        });
     let mut records = vec![otlp::Origin::resolve().session_ended(
         &envelope.session_id,
         reason,
         state.last_check_blocked,
+        usage.as_ref(),
     )];
     records.extend(super::check_telemetry::resolved_records(
         Some(&envelope.session_id),
@@ -269,6 +293,216 @@ mod tests {
             attrs["actual.session.last_check_blocked"]["boolValue"],
             false
         );
+    }
+
+    /// Signed in to Actual's API, the end carries the transcript's token
+    /// totals and nothing of the transcript itself. Signed out, or with no
+    /// transcript to read, it carries none.
+    #[test]
+    fn a_signed_in_end_carries_the_transcripts_token_totals() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::remove("ACTUAL_OTLP_FILE");
+        let _api = EnvGuard::set("ACTUAL_API_URL", "https://api.example.test");
+        let _endpoint = EnvGuard::set(
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "https://api.example.test/v1/logs",
+        );
+        let transcript = home.path().join("private-transcript.jsonl");
+        let line = serde_json::json!({"type": "assistant", "message": {
+            "id": "m1", "model": "claude-opus", "content": [{"type": "text", "text": "private words"}],
+            "usage": {"input_tokens": 3, "output_tokens": 10, "cache_read_input_tokens": 100,
+                      "cache_creation_input_tokens": 20}}});
+        std::fs::write(&transcript, format!("{line}\n{line}\n")).unwrap();
+        let end = |id: &str, transcript: Option<&Path>| {
+            let mut raw: serde_json::Value = serde_json::from_str(&envelope(id, "clear")).unwrap();
+            raw["transcript_path"] = serde_json::json!(transcript);
+            report(&raw.to_string());
+            let records = take_captured();
+            assert_eq!(records.len(), 1);
+            records.into_iter().next().unwrap()
+        };
+        let usage_keys = |record: &serde_json::Value| -> Vec<String> {
+            attributes(record)
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|key| key.starts_with("actual.usage."))
+                .cloned()
+                .collect()
+        };
+        take_captured();
+
+        let signed_out = end("signed-out", Some(&transcript));
+        crate::auth::store::save(&crate::telemetry::sign_in::tests::signed_in(
+            "org-a",
+            "token-a",
+            chrono::Duration::hours(1),
+            None,
+        ))
+        .unwrap();
+        let no_transcript = end("no-transcript", None);
+        let signed_in = end("signed-in", Some(&transcript));
+
+        assert!(usage_keys(&signed_out).is_empty(), "{signed_out}");
+        assert!(usage_keys(&no_transcript).is_empty(), "{no_transcript}");
+        let attrs = attributes(&signed_in);
+        let list = |key: &str| attrs[key]["arrayValue"]["values"].clone();
+        assert_eq!(attrs["actual.usage.source"]["stringValue"], "messages");
+        assert_eq!(
+            list("actual.usage.models"),
+            serde_json::json!([{"stringValue": "claude-opus"}])
+        );
+        assert_eq!(
+            list("actual.usage.input_tokens"),
+            serde_json::json!([{"intValue": "3"}])
+        );
+        assert_eq!(
+            list("actual.usage.output_tokens"),
+            serde_json::json!([{"intValue": "10"}])
+        );
+        assert_eq!(
+            list("actual.usage.cache_read_tokens"),
+            serde_json::json!([{"intValue": "100"}])
+        );
+        assert_eq!(
+            list("actual.usage.cache_write_tokens"),
+            serde_json::json!([{"intValue": "20"}])
+        );
+        for record in [&signed_out, &no_transcript, &signed_in] {
+            assert!(!record.to_string().contains("private"), "{record}");
+        }
+    }
+
+    /// Codex's `SessionEnd` envelope, which always says `reason: "other"`,
+    /// carries the rollout's totals in the same six attributes, from the
+    /// `responses` source, and nothing of the rollout itself.
+    #[test]
+    fn a_signed_in_codex_end_carries_the_rollouts_token_totals() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::remove("ACTUAL_OTLP_FILE");
+        let _api = EnvGuard::set("ACTUAL_API_URL", "https://api.example.test");
+        let _endpoint = EnvGuard::set(
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "https://api.example.test/v1/logs",
+        );
+        crate::auth::store::save(&crate::telemetry::sign_in::tests::signed_in(
+            "org-a",
+            "token-a",
+            chrono::Duration::hours(1),
+            None,
+        ))
+        .unwrap();
+        let rollout = home.path().join("rollout-private.jsonl");
+        let lines = [
+            serde_json::json!({"type": "turn_context", "payload": {
+                "turn_id": "t1", "model": "gpt-codex", "cwd": "/private/repo"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message",
+                "content": [{"type": "output_text", "text": "private words"}]}}),
+            serde_json::json!({"type": "token_usage_record", "payload": {
+                "session_id": "codex-session", "turn_id": "t1", "response_id": "r1",
+                "usage": {"input_tokens": 120, "cached_input_tokens": 100,
+                          "cache_write_input_tokens": 0, "output_tokens": 9}}}),
+        ];
+        std::fs::write(&rollout, lines.map(|line| line.to_string() + "\n").concat()).unwrap();
+        take_captured();
+
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&envelope("codex-session", "other")).unwrap();
+        raw["transcript_path"] = serde_json::json!(rollout);
+        report(&raw.to_string());
+        let records = take_captured();
+
+        assert_eq!(records.len(), 1, "{records:?}");
+        let attrs = attributes(&records[0]);
+        let list = |key: &str| attrs[key]["arrayValue"]["values"].clone();
+        assert_eq!(attrs["actual.session.end_reason"]["stringValue"], "other");
+        assert_eq!(attrs["actual.usage.source"]["stringValue"], "responses");
+        assert_eq!(
+            list("actual.usage.models"),
+            serde_json::json!([{"stringValue": "gpt-codex"}])
+        );
+        assert_eq!(
+            list("actual.usage.input_tokens"),
+            serde_json::json!([{"intValue": "20"}])
+        );
+        assert_eq!(
+            list("actual.usage.output_tokens"),
+            serde_json::json!([{"intValue": "9"}])
+        );
+        assert_eq!(
+            list("actual.usage.cache_read_tokens"),
+            serde_json::json!([{"intValue": "100"}])
+        );
+        assert_eq!(
+            list("actual.usage.cache_write_tokens"),
+            serde_json::json!([{"intValue": "0"}])
+        );
+        assert!(!records[0].to_string().contains("private"), "{records:?}");
+    }
+
+    /// An end repeated with no hook check between is suppressed before the
+    /// scan, so tokens added after the first end go unreported until a hook
+    /// check reopens the session.
+    #[test]
+    fn a_repeated_end_keeps_the_totals_of_the_last_reported_end() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _config = EnvGuard::remove("ACTUAL_CONFIG");
+        let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let _ci = EnvGuard::remove("CI");
+        let _out = EnvGuard::remove("ACTUAL_OTLP_FILE");
+        let _api = EnvGuard::set("ACTUAL_API_URL", "https://api.example.test");
+        let _endpoint = EnvGuard::set(
+            "ACTUAL_OTLP_LOGS_ENDPOINT",
+            "https://api.example.test/v1/logs",
+        );
+        crate::auth::store::save(&crate::telemetry::sign_in::tests::signed_in(
+            "org-a",
+            "token-a",
+            chrono::Duration::hours(1),
+            None,
+        ))
+        .unwrap();
+        let transcript = home.path().join("transcript.jsonl");
+        let message = |id: &str, input: u64| {
+            serde_json::json!({"type": "assistant", "message": {
+                "id": id, "model": "claude-opus", "usage": {"input_tokens": input}}})
+            .to_string()
+                + "\n"
+        };
+        let end = || {
+            let mut raw: serde_json::Value =
+                serde_json::from_str(&envelope("resumed", "resume")).unwrap();
+            raw["transcript_path"] = serde_json::json!(transcript);
+            report(&raw.to_string());
+            take_captured()
+        };
+        let input_tokens = |records: Vec<serde_json::Value>| {
+            assert_eq!(records.len(), 1, "{records:?}");
+            attributes(&records[0])["actual.usage.input_tokens"]["arrayValue"]["values"].clone()
+        };
+        take_captured();
+
+        std::fs::write(&transcript, message("m1", 3)).unwrap();
+        assert_eq!(input_tokens(end()), serde_json::json!([{"intValue": "3"}]));
+
+        let grown = message("m1", 3) + &message("m2", 5);
+        std::fs::write(&transcript, grown).unwrap();
+        assert!(end().is_empty());
+
+        record_check("resumed", false);
+        assert_eq!(input_tokens(end()), serde_json::json!([{"intValue": "8"}]));
     }
 
     #[test]
