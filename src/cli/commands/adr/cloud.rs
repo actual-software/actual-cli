@@ -954,7 +954,27 @@ async fn change(
 ) -> Result<DecisionAction, ActualError> {
     let write = workflow::lifecycle_write(listed, action, &session.org_id)
         .map_err(ActualError::AdrNotAllowed)?;
-    session.client.write_decision(&write).await?;
+    session
+        .client
+        .write_decision(&write)
+        .await
+        .map_err(|err| match err {
+            // The server can't place some decisions, such as a deferred one,
+            // and only the web app can choose their list. Any other conflict,
+            // such as a teammate's restore first, keeps the server's message.
+            ActualError::ApiResponseError { code, message }
+                if code == "conflict"
+                    && action == LifecycleAction::Restore
+                    && message.starts_with("This decision has no earlier status") =>
+            {
+                ActualError::AdrNotAllowed(
+                    "This decision can't be restored from the command line. \
+                     Restore it from the Archived list in the web app."
+                        .to_string(),
+                )
+            }
+            err => err,
+        })?;
     Ok(DecisionAction {
         success: true,
         adr_id: listed.decision.id.clone(),
@@ -2270,6 +2290,69 @@ mod tests {
             );
             write.assert();
         }
+    }
+
+    #[test]
+    fn a_restore_the_server_cannot_place_points_to_the_web_app() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _guards = sign_in(tmp.path());
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(
+                ADR,
+                "T",
+                "deleted",
+                &[("MUST", "A.")],
+            )]))
+            .create();
+        server
+            .mock("POST", "/v1/gcp/product/adr-restore")
+            .with_status(409)
+            .with_body(
+                r#"{"error":"conflict","message":"This decision has no earlier status to return to; restore it with target_status"}"#,
+            )
+            .create();
+        let args = AdrIdArgs {
+            id: ADR.to_string(),
+            api: api(&server),
+        };
+        let err = block(run_lifecycle(&args, LifecycleAction::Restore, &mut None)).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("web app") && !text.contains("target_status"),
+            "{text}"
+        );
+        assert_eq!(err.exit_code(), 3);
+        // A teammate restored it first: the server's own message stands.
+        server.reset();
+        server
+            .mock("GET", READ)
+            .match_query(org_read())
+            .with_status(200)
+            .with_body(read_body(&[web_json(
+                ADR,
+                "T",
+                "deleted",
+                &[("MUST", "A.")],
+            )]))
+            .create();
+        server
+            .mock("POST", "/v1/gcp/product/adr-restore")
+            .with_status(409)
+            .with_body(
+                r#"{"error":"conflict","message":"ADR is not in a restorable state (current: accepted)"}"#,
+            )
+            .create();
+        let err = block(run_lifecycle(&args, LifecycleAction::Restore, &mut None)).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("restorable state") && !text.contains("web app"),
+            "{text}"
+        );
     }
 
     #[test]
