@@ -519,6 +519,18 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     let mut session = session_id
         .map(|id| governance_session::load(id, &rules_dir))
         .unwrap_or_default();
+    // A Codex agent answers the ADR question in its reply, which reaches the
+    // `Stop` after it (see `adr_report`'s module doc).
+    if let (HookHost::Codex, false, Some(id), Some(reply)) = (
+        host,
+        from_subagent,
+        session_id,
+        envelope.last_assistant_message.as_deref(),
+    ) {
+        if super::adr_report::record_reply(id, &session, &root, &rules_dir, reply) {
+            session = governance_session::load(id, &rules_dir);
+        }
+    }
 
     // Unlike plan text, the diff is never carried on the envelope -- always
     // the working-tree diff in the resolved repo, against the commit this
@@ -2705,6 +2717,38 @@ mod tests {
             GovernanceSession::default()
         );
         exec_hook_with(&args, HookHost::Codex, "not json");
+    }
+
+    /// The `Stop` after a Codex agent replied with its answer records it,
+    /// and only for the root agent on Codex.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_hook_with_codex_records_the_answer_in_the_reply() {
+        use super::super::adr_report::tests::{Fixture, TELEMETRY_ON};
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let fx = Fixture::new(TELEMETRY_ON);
+        let token = fx.ask("sess-codex-impl");
+        let mut args = base_args();
+        args.repo = Some(fx.repo.path().to_path_buf());
+        let rollout = tempdir().unwrap();
+        let stop = |agent_id: Option<&str>| {
+            let mut envelope: serde_json::Value =
+                serde_json::from_str(&codex_stop(rollout.path(), "default")).unwrap();
+            envelope["last_assistant_message"] = format!(
+                "`actual rules report-use --claude-session sess-codex-impl --turn {token} --none`"
+            )
+            .into();
+            if let Some(id) = agent_id {
+                envelope["agent_id"] = id.into();
+            }
+            envelope.to_string()
+        };
+
+        exec_hook_with(&args, HookHost::Codex, &stop(Some("sub-1")));
+        exec_hook_with(&args, HookHost::Claude, &stop(None));
+        assert!(fx.answer("sess-codex-impl").is_none());
+        exec_hook_with(&args, HookHost::Codex, &stop(None));
+        assert!(fx.answer("sess-codex-impl").unwrap().claims.is_empty());
     }
 
     /// Any other turn is checked, and a conflict is counted.
