@@ -102,7 +102,7 @@ clawhub install actual
 
 Merge to `main` on `actual-software/actual-skill`. A new install copies whatever `main` holds, but an existing install changes only when `version` in `.claude-plugin/plugin.json` changes. Claude Code compares that string, so commits merged without a bump never reach anyone who already has the plugin ([Release a new version](https://code.claude.com/docs/en/plugins/host-marketplace#release-a-new-version)). Bump it in every merge users should receive.
 
-After a bump, an install updates itself only if its user turned on auto-update for the marketplace, which is off by default for a third-party marketplace like this one: `/plugin`, then **Marketplaces**, `actual-cli-skills`, **Enable auto-update**. Otherwise users update by hand, then restart Claude Code or run `/reload-plugins`:
+After a bump, an install updates itself only if its user turned on auto-update for the marketplace, which is off by default for a third-party marketplace like this one: `/plugin`, then **Marketplaces**, `actual-cli-skills`, **Enable auto-update**. Otherwise users update by hand with `actual plugin update`, which updates the plugin in Claude Code and Codex wherever it's installed, or with the two commands below, then restart Claude Code or run `/reload-plugins`:
 
 ```bash
 claude plugin marketplace update actual-cli-skills

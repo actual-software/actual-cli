@@ -3,16 +3,19 @@
 //!
 //! Homebrew and npm keep a record of the files they install, so for their
 //! global installs it runs that tool's upgrade instead, after asking the
-//! person at the terminal; with no one there to ask, it prints the command.
-//! A build from source gets cargo's command. It never writes where only an
-//! administrator can, never runs `sudo`, and never runs under CI, inside a
-//! command `actual` started, or with update checks turned off.
+//! person at the terminal, or at once with `--yes`; with no one there to ask
+//! and no `--yes`, it prints the command. A build from source gets cargo's
+//! command. It never writes where only an administrator can, never runs
+//! `sudo`, and never runs under CI or inside a command `actual` started. It
+//! doesn't run with update checks turned off either, unless this release is
+//! below the oldest one supported.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::cli::args::SelfUpdateArgs;
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::config::types::Config;
@@ -64,11 +67,19 @@ struct Setup<'a> {
     terminal: &'a dyn TerminalIO,
     /// The `PATH` that npm, and each command Homebrew and npm run, is found on.
     path: OsString,
+    /// `--yes`: upgrade without asking, also with no terminal to ask in.
+    yes: bool,
+    /// The cache says this release is below the oldest one supported, so
+    /// actual refuses to run anything else until it is upgraded.
+    below_minimum: bool,
 }
 
-pub fn exec() -> Result<(), ActualError> {
+pub fn exec(args: &SelfUpdateArgs) -> Result<(), ActualError> {
     let keys = release_verify::committed_keys().map_err(|message| failed(message, None))?;
     let terminal = RealTerminal::default();
+    let registry_url = update_check::registry_url();
+    let cache_path = update_check::cache_path();
+    let minimum = update_check::cached_minimum(cache_path.as_deref());
     let setup = Setup {
         config: crate::config::paths::load().ok(),
         in_ci: update_check::env_is_set("CI"),
@@ -77,18 +88,20 @@ pub fn exec() -> Result<(), ActualError> {
         release_build: update_check::RELEASE_BUILD,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
-        registry_url: update_check::REGISTRY_URL,
+        registry_url: &registry_url,
         download_base: DOWNLOAD_BASE,
         keys: &keys,
         lock_path: crate::config::paths::config_dir()
             .ok()
             .map(|dir| dir.join(LOCK_FILENAME)),
-        cache_path: update_check::cache_path(),
+        cache_path,
         progress: std::io::stderr().is_terminal(),
         owner: owner_of,
         interactive: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
         terminal: &terminal,
         path: std::env::var_os("PATH").unwrap_or_default(),
+        yes: args.yes,
+        below_minimum: minimum.is_some_and(|m| update_check::is_newer(&m, CURRENT_VERSION)),
     };
     run(&setup, &mut std::io::stdout(), &mut std::io::stderr())
 }
@@ -177,7 +190,9 @@ fn failed(message: impl Into<String>, hint: Option<String>) -> ActualError {
 }
 
 /// Refuse when no person is the one asking, or update checks are off. A
-/// config file that couldn't load may be the one turning them off.
+/// config file that couldn't load may be the one turning them off. Below the
+/// oldest supported release, turning update checks off doesn't stop it: actual
+/// runs nothing else until it is upgraded.
 fn check_allowed(setup: &Setup) -> Result<(), ActualError> {
     if setup.in_ci {
         return Err(refused(
@@ -190,6 +205,9 @@ fn check_allowed(setup: &Setup) -> Result<(), ActualError> {
             "actual self-update doesn't run inside a command actual started itself.",
             "Run it from your own terminal.",
         ));
+    }
+    if setup.below_minimum {
+        return Ok(());
     }
     match &setup.config {
         None => Err(refused(
@@ -366,9 +384,9 @@ fn delegate(
     err: &mut dyn Write,
 ) -> Result<(), ActualError> {
     let label = manager.label();
-    if !setup.interactive {
+    if !setup.interactive && !setup.yes {
         return Err(refused(
-            format!("actual self-update asks before it runs {label}, so it needs a terminal. Run it in your terminal, or upgrade with {label} yourself:"),
+            format!("actual self-update needs your OK before it runs {label}. Run it in your terminal, run actual self-update --yes to upgrade now, or upgrade with {label} yourself:"),
             manager.command(),
         ));
     }
@@ -403,7 +421,7 @@ fn delegate(
         writeln!(err, "{warning}")?;
     }
     let before = identity(exe)?;
-    if !setup.terminal.confirm(&format!("Run {label} now?"))? {
+    if !setup.yes && !setup.terminal.confirm(&format!("Run {label} now?"))? {
         writeln!(err, "Nothing was changed.")?;
         return Err(ActualError::UserCancelled);
     }
@@ -500,12 +518,19 @@ fn archive_for(os: &str, arch: &str) -> Option<&'static str> {
 /// The latest version npm has, the same lookup the daily notice makes, so
 /// the release this installs is the one the notice announced.
 fn latest_version(setup: &Setup) -> Result<String, ActualError> {
-    match update_check::look_up(
-        true,
-        setup.config.as_ref(),
-        setup.registry_url,
-        setup.cache_path.as_deref(),
-    ) {
+    // Below the minimum the lookup goes out whatever the configuration says,
+    // as the version gate's does.
+    let latest = if setup.below_minimum {
+        update_check::look_up_regardless(setup.registry_url, setup.cache_path.as_deref())
+    } else {
+        update_check::look_up(
+            true,
+            setup.config.as_ref(),
+            setup.registry_url,
+            setup.cache_path.as_deref(),
+        )
+    };
+    match latest {
         Latest::Found(version) => Ok(version),
         _ => Err(failed(
             "Couldn't find the latest release: the npm registry didn't answer.",
@@ -859,6 +884,8 @@ mod tests {
                 interactive: false,
                 terminal: &self.nobody,
                 path: OsString::new(),
+                yes: false,
+                below_minimum: false,
             }
         }
 
@@ -870,7 +897,7 @@ mod tests {
         fn latest(&mut self, version: &str, hits: usize) -> mockito::Mock {
             self.server
                 .mock("GET", "/registry")
-                .with_body(format!(r#"{{"version":"{version}"}}"#))
+                .with_body(format!(r#"{{"latest":"{version}"}}"#))
                 .expect(hits)
                 .create()
         }
@@ -1328,7 +1355,7 @@ mod tests {
                         s.exe = Some(PathBuf::from(path));
                         s.release_build = release_build;
                     },
-                    "asks before it runs",
+                    "needs your OK before it runs",
                 );
                 assert_eq!(err.hint().as_deref(), Some(command));
             }
@@ -1614,6 +1641,71 @@ mod tests {
         assert!(
             err.contains("Close any Claude Code or Codex session that uses actual first"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn yes_upgrades_without_asking_and_without_a_terminal() {
+        let _env = quiet_env();
+        let mut f = Fixture::new();
+        let registry = f.latest(FUTURE, 1);
+        let g = Global::new(Channel::Homebrew);
+        g.brew(&format!(
+            "if [ \"$1\" = upgrade ]; then {}; fi",
+            g.upgrades()
+        ));
+        // No answers: asking at all would fail the run.
+        let nobody = MockTerminal::new(vec![]);
+        let mut setup = g.setup(&f, &nobody);
+        setup.interactive = false;
+        setup.yes = true;
+
+        let (result, out, _) = update(&setup);
+
+        result.unwrap();
+        assert!(out.starts_with("Updated actual at"), "{out}");
+        assert_eq!(g.runs(), g.brew_runs());
+        registry.assert();
+    }
+
+    #[test]
+    fn below_the_minimum_it_runs_with_update_checks_off_but_never_under_ci() {
+        let _env = quiet_env();
+        let off = Config {
+            update_check: Some(UpdateCheckConfig {
+                enabled: Some(false),
+            }),
+            ..Config::default()
+        };
+        for (config, opt_out) in [
+            (Some(off), false),
+            (None, false),
+            (Some(Config::default()), true),
+        ] {
+            let _on = opt_out.then(|| EnvGuard::set(update_check::OPT_OUT_ENV, "1"));
+            let mut f = Fixture::new();
+            let registry = f.latest(FUTURE, 1);
+            let g = Global::new(Channel::Npm);
+            g.npm(&g.upgrades());
+            let nobody = MockTerminal::new(vec![]);
+            let mut setup = g.setup(&f, &nobody);
+            setup.config = config;
+            setup.yes = true;
+            setup.below_minimum = true;
+
+            let (result, out, _) = update(&setup);
+
+            result.unwrap();
+            assert!(out.contains(&format!("to {FUTURE} with npm")), "{out}");
+            registry.assert();
+        }
+        assert_refused(
+            |s| {
+                s.below_minimum = true;
+                s.yes = true;
+                s.in_ci = true;
+            },
+            "doesn't run under CI",
         );
     }
 
@@ -2025,7 +2117,7 @@ mod tests {
         for (name, message) in cases {
             let _clear: Vec<EnvGuard> = cases.iter().map(|(n, _)| EnvGuard::remove(n)).collect();
             let _set = EnvGuard::set(name, "1");
-            let err = exec().unwrap_err();
+            let err = exec(&SelfUpdateArgs::default()).unwrap_err();
             assert!(err.to_string().contains(message), "{name}: {err}");
         }
         assert!(!home.path().join(LOCK_FILENAME).exists());

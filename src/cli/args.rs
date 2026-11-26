@@ -483,10 +483,14 @@ pub enum Command {
     ///
     /// A hand-downloaded copy is replaced once the release's signature checks
     /// out against the keys built into actual. A Homebrew or npm install is
-    /// upgraded by running that tool after you confirm, or, with no terminal
-    /// to ask in, its command is printed. A build from source gets cargo's
-    /// command. See docs/SELF_UPDATE.md.
-    SelfUpdate,
+    /// upgraded by running that tool after you confirm, or at once with
+    /// `--yes`; with no terminal to ask in and no `--yes`, its command is
+    /// printed. A build from source gets cargo's command. See
+    /// docs/SELF_UPDATE.md.
+    SelfUpdate(SelfUpdateArgs),
+
+    /// Manage the Actual plugin in Claude Code and Codex
+    Plugin(PluginArgs),
 
     /// Internal: look up the latest published version once, record it in the
     /// update-check cache, then exit.
@@ -2182,6 +2186,52 @@ pub struct PlanCheckOverrideArgs {
     /// unrelated one.
     #[arg(long, value_name = "PATH")]
     pub rules_dir: Option<std::path::PathBuf>,
+}
+
+/// Arguments for `actual self-update`
+#[derive(Parser, Debug, Default)]
+pub struct SelfUpdateArgs {
+    /// Upgrade without asking first, also where no terminal can ask, as in
+    /// an agent's shell. Every other refusal still applies.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+/// Arguments for `actual plugin`
+#[derive(Parser, Debug)]
+pub struct PluginArgs {
+    #[command(subcommand)]
+    pub action: PluginAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// Update the Actual plugin to the latest release
+    ///
+    /// Updates it in each coding agent that has it installed, or only in the
+    /// one `--agent` names. The new version applies once you restart Claude
+    /// Code, or in a new Codex thread.
+    Update(PluginUpdateArgs),
+}
+
+/// The coding agents the Actual plugin installs into.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginAgent {
+    Claude,
+    Codex,
+}
+
+/// Arguments for `actual plugin update`
+#[derive(Parser, Debug)]
+pub struct PluginUpdateArgs {
+    /// Update the plugin only in this coding agent.
+    #[arg(long, value_enum)]
+    pub agent: Option<PluginAgent>,
+
+    /// Start the update in the background and return at once, at most once a
+    /// day. Prints nothing. The plugin runs this when a session starts.
+    #[arg(long)]
+    pub background: bool,
 }
 
 /// Arguments for the `version` command

@@ -38,7 +38,7 @@ The reason's first word can be a reason code: `misread`, `not-here`, `adr-wrong`
 
 ## Output
 
-Exit code 0 in every case below. Stdout is one JSON object, or nothing.
+Exit code 0 in every case below. Stdout is one JSON object, or nothing. When this CLI or the plugin is out of date ([supported versions](UPDATE_CHECK.md#supported-versions)), it records nothing: it exits 78 with the reason on stderr, or, for a plugin that sets no `ACTUAL_PLUGIN_VERSION`, prints nothing and exits 0.
 
 **Not an override command.** Anything else (another event, no `session_id`, unparseable JSON, a prompt that isn't `/actual-cli:override` or `/override`) prints nothing and records nothing. The mod should treat silence as "not ours".
 
