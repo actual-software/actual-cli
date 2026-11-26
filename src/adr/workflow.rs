@@ -1,9 +1,8 @@
 //! The decision workflow the web app runs in its own code around the decision
 //! routes, run here for `actual adr`: which of the web app's lists a decision
-//! is in, which change its state allows, which route a change takes for a
-//! person's decision or an AI-grouped one, and where Restore sends it. The
-//! routes check little of this themselves, so a change is refused here before
-//! anything is sent.
+//! is in, which change its state allows, and which route a change takes for a
+//! person's decision or an AI-grouped one. The routes check little of this
+//! themselves, so a change is refused here before anything is sent.
 //!
 //! A person's decision takes the single-row routes, which answer a wrong state
 //! with a 409 of their own. An AI-grouped decision, whose id names no row,
@@ -157,17 +156,6 @@ fn row_id(decision: &WebDecision) -> &str {
     decision.primary_adr_id.as_deref().unwrap_or(&decision.id)
 }
 
-/// Where Restore sends an archived decision: back to the list it was
-/// archived from.
-pub fn restore_target(decision: &WebDecision) -> &'static str {
-    match decision.status.as_deref() {
-        Some("archived-draft") => "draft",
-        _ if decision.base_adr_id.is_some() => "updated",
-        Some("rejected") => "suggested",
-        _ => "accepted",
-    }
-}
-
 /// The write `action` sends for the decision, or why its state doesn't allow
 /// the change.
 pub fn lifecycle_write(
@@ -224,14 +212,9 @@ pub fn lifecycle_write(
         LifecycleAction::Restore if group => {
             Err("A grouped decision can't be restored yet.".to_string())
         }
-        LifecycleAction::Restore => Ok(DecisionWrite {
-            route: "adr-restore",
-            body: json!({
-                "organization_id": org_id,
-                "adr_id": row_id(decision),
-                "target_status": restore_target(decision),
-            }),
-        }),
+        // The server returns the decision to the status it had before it was
+        // archived, which only its events record.
+        LifecycleAction::Restore => Ok(row("adr-restore")),
         LifecycleAction::Accept | LifecycleAction::Reject
             if state != Suggested && state != Updated =>
         {
@@ -688,19 +671,6 @@ mod tests {
         assert!(!is_group(&bare));
     }
 
-    #[test]
-    fn restore_goes_back_to_the_list_it_left() {
-        let target = |status: &str, base: Option<&str>| {
-            let mut decision = single(status);
-            decision.base_adr_id = base.map(str::to_string);
-            restore_target(&decision)
-        };
-        assert_eq!(target("archived-draft", Some("b")), "draft");
-        assert_eq!(target("rejected", Some("b")), "updated");
-        assert_eq!(target("rejected", None), "suggested");
-        assert_eq!(target("deleted", None), "accepted");
-    }
-
     fn write(
         decision: WebDecision,
         state: DecisionState,
@@ -723,7 +693,7 @@ mod tests {
             (Draft, Publish, "adr-publish", row_body.clone()),
             (Active, Unpublish, "adr-move-to-draft", row_body.clone()),
             (Active, Archive, "adr-archive", row_body.clone()),
-            (Draft, Archive, "adr-archive", row_body),
+            (Draft, Archive, "adr-archive", row_body.clone()),
             (Suggested, Accept, "adr-accept", suggestion_body.clone()),
             (Updated, Reject, "adr-reject", suggestion_body),
         ];
@@ -735,12 +705,16 @@ mod tests {
                 "{action:?} from {state:?}"
             );
         }
-        let restore = write(single("archived-draft"), Archived, Restore);
-        assert_eq!(restore.route, "adr-restore");
-        assert_eq!(
-            restore.body,
-            json!({"organization_id": ORG, "adr_id": ROW, "target_status": "draft"})
-        );
+        // Restore leaves the target to the server, whatever list the
+        // decision was archived from.
+        for status in ["deleted", "archived-draft", "rejected"] {
+            let sent = write(single(status), Archived, Restore);
+            assert_eq!(
+                (sent.route, sent.body),
+                ("adr-restore", row_body.clone()),
+                "{status}"
+            );
+        }
     }
 
     #[test]
