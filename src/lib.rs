@@ -56,6 +56,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Stats(args) => cli::commands::stats::exec(args),
         Command::TelemetryFlush => cli::commands::telemetry_flush::exec(),
         Command::SessionEnded => cli::commands::session_end::exec(),
+        Command::GateDelivered(args) => cli::commands::gate_delivered::exec(args),
         Command::Version(args) => cli::commands::version::exec(args),
         Command::SelfUpdate => cli::commands::self_update::exec(),
         Command::UpdateCheck => cli::commands::version::exec_refresh(),
@@ -98,6 +99,35 @@ mod tests {
             "a plan",
         ]);
         assert!(run(cli).is_ok());
+    }
+
+    #[test]
+    fn test_run_gate_delivered_dispatch_refuses_an_agent_shell() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        // Exercises the Command::GateDelivered dispatch arm. With CLAUDECODE
+        // set the command refuses before it reads config or the session, so
+        // the arm is covered hermetically.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _marker = EnvGuard::set("CLAUDECODE", "1");
+        let cli = Cli::parse_from([
+            "actual",
+            "__gate-delivered",
+            "--session",
+            "s1",
+            "--rules-dir",
+            "rules",
+            "--gate",
+            "plan",
+            "--dialog",
+            "off",
+            "--delivery",
+            "as-written",
+        ]);
+        assert!(matches!(
+            run(cli),
+            Err(crate::error::ActualError::NotInteractive(_))
+        ));
     }
 
     #[test]

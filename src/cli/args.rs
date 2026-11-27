@@ -476,6 +476,12 @@ pub enum Command {
     #[command(name = "__session-ended", hide = true)]
     SessionEnded,
 
+    /// Internal: record how the actual-cli plugin's mod handled one gate
+    /// denial, as one `actual.gate.delivered` event. Refused from an agent's
+    /// own shell, like `check-override --claude-hook`.
+    #[command(name = "__gate-delivered", hide = true)]
+    GateDelivered(GateDeliveredArgs),
+
     /// Print the version, how this copy was installed, and how to upgrade it
     Version(VersionArgs),
 
@@ -2210,6 +2216,83 @@ pub struct PlanCheckOverrideArgs {
     /// unrelated one.
     #[arg(long, value_name = "PATH")]
     pub rules_dir: Option<std::path::PathBuf>,
+}
+
+/// Whether the mod's override dialog showed for a denial, or why not, for
+/// `__gate-delivered --dialog`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveredDialog {
+    /// The dialog showed.
+    Shown,
+    /// Turned off, by its setting or by unattended mode.
+    Off,
+    /// Nothing to show it on, as in a `claude -p` run.
+    NoUi,
+    /// The CLI couldn't list the blocking rules, or its deny offers no
+    /// in-session override.
+    CliTooOld,
+    /// The gate had no blocking rules to list.
+    NoRules,
+}
+
+/// The user's answer to the dialog, for `__gate-delivered --answer`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveredAnswer {
+    Revise,
+    Override,
+    /// Words typed under "Other", which are never sent.
+    Other,
+    /// Either question dismissed.
+    Dismissed,
+}
+
+/// What reached the agent, for `__gate-delivered --delivery`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// The denial as the CLI wrote it.
+    AsWritten,
+    /// The denial with the user's answer in place of the override commands.
+    Rewritten,
+    /// The call went on, every listed rule overridden.
+    LetThrough,
+}
+
+/// Arguments for the hidden `__gate-delivered` command, which the actual-cli
+/// plugin's mod runs after it handles a denial.
+#[derive(Parser, Debug)]
+pub struct GateDeliveredArgs {
+    /// The session the denial came from.
+    #[arg(long, value_name = "SESSION_ID")]
+    pub session: String,
+
+    /// The rules directory the denying gate checked against, as passed to it.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: std::path::PathBuf,
+
+    /// The gate that denied.
+    #[arg(long, value_name = "GATE", value_enum)]
+    pub gate: OverrideGateArg,
+
+    /// Whether the dialog showed, or why not.
+    #[arg(long, value_name = "STATE", value_enum)]
+    pub dialog: DeliveredDialog,
+
+    /// The user's answer. Given exactly when `--dialog shown`.
+    #[arg(
+        long,
+        value_name = "ANSWER",
+        value_enum,
+        required_if_eq("dialog", "shown")
+    )]
+    pub answer: Option<DeliveredAnswer>,
+
+    /// What reached the agent.
+    #[arg(long, value_name = "WHAT", value_enum)]
+    pub delivery: Delivery,
+
+    /// How many rules the dialog listed.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub rules_listed: usize,
 }
 
 /// Arguments for the `version` command

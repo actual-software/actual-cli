@@ -3388,7 +3388,7 @@ fn test_session_end_sends_token_totals_signed_in() {
         list("actual.usage.cache_write_tokens", "intValue"),
         ["2000", "1000"]
     );
-    assert_eq!(value("actual.event.schema_version")["intValue"], "13");
+    assert_eq!(value("actual.event.schema_version")["intValue"], "14");
 }
 
 /// Codex's `SessionEnd` envelope, exactly as its hook schema defines it,
@@ -3499,7 +3499,7 @@ fn test_codex_session_end_sends_token_totals_signed_in() {
         ["2", "1"]
     );
     assert_eq!(value("actual.session.end_reason")["stringValue"], "other");
-    assert_eq!(value("actual.event.schema_version")["intValue"], "13");
+    assert_eq!(value("actual.event.schema_version")["intValue"], "14");
 }
 
 #[cfg(feature = "telemetry")]
