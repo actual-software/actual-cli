@@ -2966,6 +2966,14 @@ index 0000000..e69de29
     }
 
     #[test]
+    fn test_git_line_path_names_only_a_line_whose_sides_match() {
+        assert_eq!(git_line_path("a/x.ts b/x.ts").as_deref(), Some("x.ts"));
+        assert_eq!(git_line_path("a/x.ts b/yy.ts"), None);
+        assert_eq!(git_line_path("a/x.ts b/y.ts"), None);
+        assert_eq!(git_line_path(""), None);
+    }
+
+    #[test]
     fn test_for_diff_names_the_header_paths_and_drops_their_prefixed_copies() {
         let query = Query::for_diff(added_file_diff("packages/api/src/handler.ts", "x"));
         assert_eq!(query.paths, vec!["packages/api/src/handler.ts"]);

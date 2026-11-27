@@ -990,6 +990,21 @@ mod tests {
     }
 
     #[test]
+    fn test_exec_direct_selection_only_stops_before_the_judge() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.plan = vec!["Sign access tokens with RS256".to_string()];
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.selection_only = true;
+        args.no_rank = true;
+        assert!(exec(&args).is_ok());
+    }
+
+    #[test]
     fn test_exec_direct_json_output_with_no_applicable_rules() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();

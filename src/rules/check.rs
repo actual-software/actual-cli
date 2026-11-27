@@ -789,56 +789,49 @@ pub const MAX_DIFF_GROUPS: usize = 6;
 
 /// `rules` grouped by the files they govern, each with the part of `diff`
 /// those files make up: a rule sees only the code its scope covers. Rules
-/// with no `files` govern the whole diff. Groups keep the order their first
-/// rule had; past [`MAX_DIFF_GROUPS`], the two smallest are merged, again and
-/// again, into one that sees the union of their files.
+/// with no `files` govern the whole diff and come first, as one group. The
+/// other groups keep the order their first rule had; past
+/// [`MAX_DIFF_GROUPS`], the two smallest of them are merged, again and
+/// again, into one that sees the union of their files. A scoped group is
+/// never merged into the whole-diff group, which would judge its rules on
+/// files outside their scope.
 fn diff_groups(diff: &str, rules: &[RuleForJudging]) -> Vec<(String, Vec<RuleForJudging>)> {
-    let mut groups: Vec<(Option<Vec<String>>, Vec<RuleForJudging>)> = Vec::new();
+    let mut whole: Vec<RuleForJudging> = Vec::new();
+    let mut scoped: Vec<(Vec<String>, Vec<RuleForJudging>)> = Vec::new();
     for rule in rules {
-        match groups.iter_mut().find(|(files, _)| *files == rule.files) {
+        let Some(files) = &rule.files else {
+            whole.push(rule.clone());
+            continue;
+        };
+        match scoped.iter_mut().find(|(have, _)| have == files) {
             Some((_, members)) => members.push(rule.clone()),
-            None => groups.push((rule.files.clone(), vec![rule.clone()])),
+            None => scoped.push((files.clone(), vec![rule.clone()])),
         }
     }
-    // Merge the two smallest groups until the rest fit; ties keep the later
-    // group as the one merged away, so the first groups stay as they were.
-    // The whole-diff group (`None`) is never picked while two scoped groups
-    // remain, and at most one exists, so a scoped rule never ends up judged
-    // on the whole diff.
-    while groups.len() > MAX_DIFF_GROUPS {
-        let mut by_size: Vec<usize> = (0..groups.len()).collect();
-        by_size.sort_by_key(|&at| {
-            (
-                groups[at].0.is_none(),
-                groups[at].1.len(),
-                std::cmp::Reverse(at),
-            )
-        });
+    let cap = MAX_DIFF_GROUPS - usize::from(!whole.is_empty());
+    // Ties keep the later group as the one merged away, so the first groups
+    // stay as they were.
+    while scoped.len() > cap {
+        let mut by_size: Vec<usize> = (0..scoped.len()).collect();
+        by_size.sort_by_key(|&at| (scoped[at].1.len(), std::cmp::Reverse(at)));
         let (keep, take) = (by_size[0].min(by_size[1]), by_size[0].max(by_size[1]));
-        let (files, members) = groups.remove(take);
-        let kept = &mut groups[keep];
-        kept.0 = match (kept.0.take(), files) {
-            (Some(mut union), Some(more)) => {
-                union.extend(
-                    more.into_iter()
-                        .filter(|f| !union.contains(f))
-                        .collect::<Vec<_>>(),
-                );
-                Some(union)
+        let (files, members) = scoped.remove(take);
+        let kept = &mut scoped[keep];
+        for file in files {
+            if !kept.0.contains(&file) {
+                kept.0.push(file);
             }
-            _ => None,
-        };
+        }
         kept.1.extend(members);
     }
-    groups
+    let whole = (!whole.is_empty()).then(|| (diff.to_string(), whole));
+    whole
         .into_iter()
-        .map(|(files, members)| {
-            let text = match &files {
-                Some(files) => diff_for_files(diff, files),
-                None => diff.to_string(),
-            };
-            (text, members)
-        })
+        .chain(
+            scoped
+                .into_iter()
+                .map(|(files, members)| (diff_for_files(diff, &files), members)),
+        )
         .collect()
 }
 
@@ -1624,6 +1617,20 @@ mod tests {
         assert!(prompt.contains("\n2. doc: cross-cutting-token-signing-1c57\n   id: R-A-002\n"));
         assert!(prompt.contains("keyed by its number"));
         assert!(prompt.contains("give the verdict alone"));
+    }
+
+    /// Two candidates with the same document and id are one rule: the
+    /// first number's verdict stands.
+    #[test]
+    fn test_parse_numbered_keeps_one_verdict_for_a_repeated_rule() {
+        let rule = rules()[0].clone();
+        let value = verdicts_value(serde_json::json!({
+            "1": {"verdict": "followed", "span": "sign with RS256", "reason": "met"},
+            "2": {"verdict": "conflicting", "span": "HS256", "reason": "broken"},
+        }));
+        let verdicts = parse_verdicts(&value, &[rule.clone(), rule]).unwrap();
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].verdict, Verdict::Followed);
     }
 
     #[test]
