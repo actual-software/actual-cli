@@ -15,23 +15,12 @@
 //! the second should ever block a human's ExitPlanMode dialog; the first is
 //! flagged for review, not denied. See [`Verdict`].
 //!
-//! **One call per [`JUDGE_CHUNK`] rules, all at once.** The candidate set
-//! (already capped by `--max-rules`) is batched into structured-output
-//! requests of at most [`JUDGE_CHUNK`] rules, sent concurrently, and merged.
-//! A judge's time grows with the rules in its one answer — about 1.2 seconds
-//! a rule on claude-cli and codex-cli alike — so 40 rules in one call took
-//! about 47 seconds where two calls of 20 take about as long as one, 23.
-//! Splitting finer would spend the hook's budget on the fixed cost of each
-//! call instead of on the judgement, so the chunks stay large.
-//!
-//! **A verdict is keyed by the rule's number, and a rule that does not apply
-//! gets the verdict alone.** Most rules a gate sends do not apply to the
-//! change, and the judge's time is the time it spends writing: copying back a
-//! document slug, an id and a reason for each of those was most of the answer.
-//! The prompt numbers the rules, and the answer is one verdict per number, with
-//! a quote and a reason only for a rule that applies. Every rule still gets an
-//! explicit verdict, so an absence never stands for `not_applicable` — see
-//! "Coverage must be complete" below.
+//! **One call, not one per rule.** The candidate set (already capped by
+//! [`super::scope::select`]) is batched into a single structured-output
+//! request, the same shape [`super::scope::rank`] uses for document selection.
+//! A synchronous `PreToolUse` hook has one interactive latency budget to spend,
+//! and fanning out per-rule calls would spend it on network round trips
+//! instead of on the judgement itself.
 //!
 //! **One judge, two artifact kinds, different omission semantics.** The same
 //! module judges a plan (`plan-check`) and a `git diff` (`impl-check`), selected
@@ -53,13 +42,11 @@
 //! leaving the field empty, the same way [`super::scope::select`] falls back
 //! to its own evidence when a rank's reason is blank.
 //!
-//! **It may only judge, never invent or drop silently.** A verdict for a
-//! number that was not in the list is ignored. The array answer of earlier
-//! versions, keyed by `(doc, rule id)`, is still read, and there a pair that
-//! was never a candidate is dropped. Identity is the pair, not the rule id
-//! alone: two selected documents can share an id — the corpus already does —
-//! and an id-only match would let the second document's rule vanish into the
-//! dedup meant to catch a repeated answer.
+//! **It may only judge, never invent or drop silently.** A verdict naming a
+//! `(doc, rule id)` pair that was never a candidate is dropped. Identity is
+//! the pair, not the rule id alone: two selected documents can share an id —
+//! the corpus already does — and an id-only match would let the second
+//! document's rule vanish into the dedup meant to catch a repeated answer.
 //!
 //! **Coverage must be complete, not merely non-empty.** The prompt tells the
 //! model to return a verdict for every rule listed. A response that honors
@@ -168,17 +155,6 @@ pub const CHECK_TIMEOUT_SECS: u64 = CHECK_BUDGET.as_secs();
 /// classifying a deliberate rule deviation as `requires_decision`) in under
 /// half that time, at roughly half the cost.
 const JUDGE_EFFORT: &str = "low";
-
-/// The most rules one judge call reads; a longer list is split into calls of
-/// near-equal size, sent concurrently.
-///
-/// Measured on 8 merged pull requests, judging stage 1's top 20, 40, 60 and
-/// 80 rules on claude-cli: 23, 47, 81 and 97 seconds at the median, with two
-/// timeouts and two incomplete answers at 80. The same rules got the same
-/// verdict in a list of 20 as in a list of 80 as often as a repeat of one
-/// call did, so splitting costs no accuracy, only a second copy of the plan
-/// or diff in the prompt.
-pub const JUDGE_CHUNK: usize = 20;
 
 /// How the judge classified a rule against the artifact (a plan or a diff).
 ///
@@ -308,53 +284,51 @@ pub struct CheckedRule {
     pub reason: String,
 }
 
-/// The JSON schema the judge's structured output must satisfy, for `rules`
-/// numbered rules.
+/// The JSON schema the judge's structured output must satisfy.
 ///
-/// One verdict per number, every number required, so a schema-enforcing
-/// backend cannot skip a rule. Only `verdict` is required inside: a rule that
-/// does not apply is answered with its verdict alone. Built per count, as
-/// [`super::scope::rank::output_schema`] is.
-pub fn output_schema(rules: usize) -> String {
-    let entry = serde_json::json!({
+/// A verdict is keyed by `(doc_slug, rule_id)`, not `rule_id` alone: the rule
+/// corpus already has ids that repeat across documents, and an id-only key
+/// would make a second document's rule indistinguishable from the first's in
+/// both the prompt and the response.
+pub const CHECK_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "description": "One entry per rule, in any order.",
+      "items": {
         "type": "object",
         "properties": {
-            "verdict": {
-                "type": "string",
-                "enum": ["followed", "not_applicable", "conflicting", "requires_decision"],
-                "description": "followed: the input falls within the rule's domain and meets it. not_applicable: nothing in the input falls within the rule's domain. conflicting: the input violates the rule and this looks unintentional. requires_decision: the input deliberately supersedes the decision the rule encodes."
-            },
-            "span": {
-                "type": "string",
-                "description": "For conflicting or requires_decision, the exact, verbatim span of the provided material that conflicts. For followed, the one line of the provided material, verbatim, that shows the rule being met. Omitted for not_applicable."
-            },
-            "reason": {
-                "type": "string",
-                "description": "One sentence naming the rule id and what in the provided material it applies to. Omitted for not_applicable."
-            }
+          "doc_slug": {
+            "type": "string",
+            "description": "The rule's document slug, copied exactly."
+          },
+          "rule_id": {
+            "type": "string",
+            "description": "The rule's id, copied exactly."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["followed", "not_applicable", "conflicting", "requires_decision"],
+            "description": "followed: the input falls within the rule's domain and meets it. not_applicable: nothing in the input falls within the rule's domain. conflicting: the input violates the rule and this looks unintentional. requires_decision: the input deliberately supersedes the decision the rule encodes."
+          },
+          "span": {
+            "type": "string",
+            "description": "For conflicting or requires_decision, the exact, verbatim span of the provided material that conflicts. For followed, the one line of the provided material, verbatim, that shows the rule being met. Empty string for not_applicable."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One sentence naming the rule id and what in the provided material it applies to."
+          }
         },
-        "required": ["verdict"],
+        "required": ["doc_slug", "rule_id", "verdict", "span", "reason"],
         "additionalProperties": false
-    });
-    let numbers: Vec<String> = (1..=rules).map(|n| n.to_string()).collect();
-    let properties: serde_json::Map<String, serde_json::Value> =
-        numbers.iter().map(|n| (n.clone(), entry.clone())).collect();
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdicts": {
-                "type": "object",
-                "description": "One verdict per rule, keyed by the rule's number.",
-                "properties": properties,
-                "required": numbers,
-                "additionalProperties": false
-            }
-        },
-        "required": ["verdicts"],
-        "additionalProperties": false
-    })
-    .to_string()
-}
+      }
+    }
+  },
+  "required": ["verdicts"],
+  "additionalProperties": false
+}"#;
 
 /// The four verdict definitions (and, for a diff, the scope they apply
 /// within) that open the `=== task ===` criteria — the one part of the prompt
@@ -436,15 +410,17 @@ pub fn build_prompt(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) ->
     out.push_str(&fenced_plan_block(text));
 
     out.push_str("\n=== rules ===\n");
-    for (number, rule) in rules.iter().enumerate() {
-        out.push_str(&format!("\n{}. doc: {}\n", number + 1, rule.doc_slug));
-        out.push_str("   id: ");
+    for rule in rules {
+        out.push_str("\n- doc: ");
+        out.push_str(&rule.doc_slug);
+        out.push('\n');
+        out.push_str("  id: ");
         out.push_str(&rule.rule_id);
         out.push('\n');
-        out.push_str("   level: ");
+        out.push_str("  level: ");
         out.push_str(rule.level.as_str());
         out.push('\n');
-        out.push_str("   statement: ");
+        out.push_str("  statement: ");
         out.push_str(&rule.statement);
         out.push('\n');
     }
@@ -452,17 +428,17 @@ pub fn build_prompt(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) ->
     let criteria = verdict_criteria(kind);
     out.push_str(&format!(
         "\n=== task ===\n\
-         Return one verdict for every rule above, keyed by its number.\n\
+         Return one verdict for every rule above, copying each doc and id exactly. Two \
+         rules can share an id across different docs; treat `(doc, id)` together as the \
+         rule's identity.\n\
          {criteria}\
          For every rule you judge `conflicting` or `requires_decision`, quote the exact span \
          of {verb}, verbatim, that conflicts. For every rule you judge `followed`, quote the \
          one line of {verb}, verbatim, that shows the rule being met: a single line, never \
-         more. If no line shows it, the verdict is `not_applicable`. For those three \
-         verdicts, also give a one-sentence reason naming the rule id and what in {verb} it \
-         applies to.\n\
-         For a rule that is `not_applicable`, give the verdict alone, with no span or \
-         reason. Judge only the rules listed, and give exactly one verdict for every \
-         number.\n"
+         more. If no line shows it, the verdict is `not_applicable`. Judge only the rules \
+         listed. Do not invent a doc or id and do not omit one.\n\
+         Give a one-sentence reason for each, naming the rule id and what in {verb} it \
+         applies to.\n"
     ));
     out
 }
@@ -485,22 +461,19 @@ impl std::fmt::Display for CheckError {
 
 /// Validate a judge's raw output against the rules it was given.
 ///
-/// The answer the prompt asks for is an object of verdicts keyed by each
-/// rule's number; a verdict for a number not in the list is ignored. The array
-/// of earlier versions, one entry per rule keyed by `(doc_slug, rule_id)`, is
-/// still read, so an answer in that shape is not thrown away: there a pair
-/// that was never a candidate is dropped and a repeated pair keeps its first
-/// verdict. Identity there is the pair, never `rule_id` alone — matching only
-/// on id would let a second document's same-numbered rule silently collide
-/// with (and be dropped as a duplicate of) the first's.
-///
 /// Everything the model could get wrong is handled here rather than trusted:
-/// an unrecognized verdict word leaves that rule unjudged. A conflicting or
-/// requires-decision verdict with an empty span falls back to the rule's own
-/// statement, so the "names the span" contract holds regardless of what the
-/// model actually returned. A `followed` quote is cut to its first non-empty
-/// line, and a `followed` with no quote at all is recorded as
-/// `not_applicable`: the rule's statement is no evidence the change met it.
+/// a `(doc, id)` pair that was never a candidate is dropped, a repeated pair
+/// keeps its first verdict, an unrecognized verdict word leaves that rule
+/// unjudged. A conflicting or requires-decision verdict with an empty span
+/// falls back to the rule's own statement, so the "names the span" contract
+/// holds regardless of what the model actually returned. A `followed` quote
+/// is cut to its first non-empty line, and a `followed` with no quote at all
+/// is recorded as `not_applicable`: the rule's statement is no evidence the
+/// change met it.
+///
+/// Identity is matched on `(doc_slug, rule_id)`, never `rule_id` alone —
+/// matching only on id would let a second document's same-numbered rule
+/// silently collide with (and be dropped as a duplicate of) the first's.
 ///
 /// Coverage must be exact: every distinct candidate must receive a verdict,
 /// or the whole response is rejected. A response that judges 55 of 60
@@ -512,66 +485,11 @@ pub fn parse_verdicts(
     value: &serde_json::Value,
     candidates: &[RuleForJudging],
 ) -> Result<Vec<CheckedRule>, CheckError> {
-    let out = match value.get("verdicts") {
-        Some(serde_json::Value::Object(numbered)) => parse_numbered(numbered, candidates),
-        Some(serde_json::Value::Array(entries)) => parse_keyed(entries, candidates),
-        _ => {
-            return Err(CheckError::Malformed(
-                "no `verdicts` in the response".to_string(),
-            ))
-        }
-    };
+    let entries = value
+        .get("verdicts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| CheckError::Malformed("no `verdicts` array in the response".to_string()))?;
 
-    let distinct_candidates: HashSet<(&str, &str)> = candidates
-        .iter()
-        .map(|c| (c.doc_slug.as_str(), c.rule_id.as_str()))
-        .collect();
-    if out.len() != distinct_candidates.len() {
-        return Err(CheckError::Malformed(format!(
-            "only {} of {} candidate rules received a verdict",
-            out.len(),
-            distinct_candidates.len()
-        )));
-    }
-    Ok(out)
-}
-
-/// The verdicts of an answer keyed by rule number. An entry is an object with
-/// a `verdict` and, for a rule that applies, a `span` and a `reason`; a bare
-/// verdict word is read as the verdict alone.
-fn parse_numbered(
-    numbered: &serde_json::Map<String, serde_json::Value>,
-    candidates: &[RuleForJudging],
-) -> Vec<CheckedRule> {
-    let mut out: Vec<CheckedRule> = Vec::new();
-    for (number, candidate) in candidates.iter().enumerate() {
-        let Some(entry) = numbered.get(&(number + 1).to_string()) else {
-            continue;
-        };
-        let field = |name: &str| {
-            entry
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-        };
-        let word = entry.as_str().unwrap_or_else(|| field("verdict"));
-        let Some(verdict) = Verdict::parse(word) else {
-            continue;
-        };
-        if out
-            .iter()
-            .any(|v| v.doc_slug == candidate.doc_slug && v.rule_id == candidate.rule_id)
-        {
-            continue;
-        }
-        out.push(checked(candidate, verdict, field("span"), field("reason")));
-    }
-    out
-}
-
-/// The verdicts of an answer in the earlier array form, keyed by
-/// `(doc_slug, rule_id)`.
-fn parse_keyed(entries: &[serde_json::Value], candidates: &[RuleForJudging]) -> Vec<CheckedRule> {
     let mut out: Vec<CheckedRule> = Vec::new();
     for entry in entries {
         let Some(doc_slug) = entry.get("doc_slug").and_then(serde_json::Value::as_str) else {
@@ -606,43 +524,52 @@ fn parse_keyed(entries: &[serde_json::Value], candidates: &[RuleForJudging]) -> 
         else {
             continue;
         };
-        let text = |name: &str| {
-            entry
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
+        let reason = entry
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let span = entry
+            .get("span")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let (verdict, span) = match verdict {
+            Verdict::Conflicting | Verdict::RequiresDecision if span.is_empty() => {
+                (verdict, candidate.statement.clone())
+            }
+            Verdict::Conflicting | Verdict::RequiresDecision => (verdict, span),
+            Verdict::Followed => match span.lines().map(str::trim).find(|l| !l.is_empty()) {
+                Some(line) => (Verdict::Followed, line.to_string()),
+                None => (Verdict::NotApplicable, String::new()),
+            },
+            Verdict::NotApplicable => (Verdict::NotApplicable, String::new()),
         };
-        out.push(checked(candidate, verdict, text("span"), text("reason")));
+        out.push(CheckedRule {
+            doc_slug: candidate.doc_slug.clone(),
+            rule_id: candidate.rule_id.clone(),
+            level: candidate.level,
+            statement: candidate.statement.clone(),
+            verdict,
+            span,
+            reason,
+        });
     }
-    out
-}
 
-/// One validated verdict: the span falls back to the rule's statement for a
-/// verdict that must name one, and a `followed` with no quote is
-/// `not_applicable`.
-fn checked(candidate: &RuleForJudging, verdict: Verdict, span: &str, reason: &str) -> CheckedRule {
-    let span = span.trim();
-    let (verdict, span) = match verdict {
-        Verdict::Conflicting | Verdict::RequiresDecision if span.is_empty() => {
-            (verdict, candidate.statement.clone())
-        }
-        Verdict::Conflicting | Verdict::RequiresDecision => (verdict, span.to_string()),
-        Verdict::Followed => match span.lines().map(str::trim).find(|l| !l.is_empty()) {
-            Some(line) => (Verdict::Followed, line.to_string()),
-            None => (Verdict::NotApplicable, String::new()),
-        },
-        Verdict::NotApplicable => (Verdict::NotApplicable, String::new()),
-    };
-    let reason = reason.trim().to_string();
-    CheckedRule {
-        doc_slug: candidate.doc_slug.clone(),
-        rule_id: candidate.rule_id.clone(),
-        level: candidate.level,
-        statement: candidate.statement.clone(),
-        verdict,
-        span,
-        reason,
+    let distinct_candidates: HashSet<(&str, &str)> = candidates
+        .iter()
+        .map(|c| (c.doc_slug.as_str(), c.rule_id.as_str()))
+        .collect();
+    if out.len() != distinct_candidates.len() {
+        return Err(CheckError::Malformed(format!(
+            "only {} of {} candidate rules received a verdict",
+            out.len(),
+            distinct_candidates.len()
+        )));
     }
+    Ok(out)
 }
 
 /// Ask `runner` to judge `rules` against `text`, inside [`CHECK_BUDGET`].
@@ -652,15 +579,10 @@ fn checked(candidate: &RuleForJudging, verdict: Verdict, span: &str, reason: &st
 /// about the call (schema, budget, validation) is identical for a plan or a
 /// diff.
 ///
-/// More than [`JUDGE_CHUNK`] rules are judged in [`chunks`], concurrently, and
-/// the deadline is on all of them together. The verdicts come back in the
-/// order of `rules`.
-///
 /// Returns the validated verdicts, or the reason the check could not be used.
-/// A transport failure, an overrun budget, and an unusable answer — in any
-/// one chunk — all come back as an error the caller can catch and fail open
-/// on: a conformance check that could not run is never grounds to block a
-/// plan, and a chunk that did not answer is a part of the plan nobody judged.
+/// A transport failure, an overrun budget, and an unusable answer all come
+/// back as an error the caller can catch and fail open on — a conformance
+/// check that could not run is never grounds to block a plan.
 pub async fn check<R: StructuredRunner>(
     runner: &R,
     kind: ArtifactKind,
@@ -669,60 +591,23 @@ pub async fn check<R: StructuredRunner>(
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Result<Vec<CheckedRule>, ActualError> {
-    let calls = chunks(rules)
-        .into_iter()
-        .map(|chunk| judge_chunk(runner, kind, text, chunk, model_override, max_budget_usd));
-    let answers = tokio::time::timeout(CHECK_BUDGET, futures::future::join_all(calls))
+    let prompt = build_prompt(kind, text, rules);
+    let call = runner.run_structured_json(
+        &prompt,
+        CHECK_OUTPUT_SCHEMA,
+        model_override,
+        max_budget_usd,
+        Tuning {
+            effort: Some(JUDGE_EFFORT),
+            ..Tuning::default()
+        },
+    );
+    let value = tokio::time::timeout(CHECK_BUDGET, call)
         .await
         .map_err(|_| ActualError::RunnerTimeout {
             seconds: CHECK_BUDGET.as_secs(),
-        })?;
-    let mut verdicts = Vec::with_capacity(rules.len());
-    for answer in answers {
-        verdicts.extend(answer?);
-    }
-    Ok(verdicts)
-}
-
-/// One judge call over `rules`, validated.
-async fn judge_chunk<R: StructuredRunner>(
-    runner: &R,
-    kind: ArtifactKind,
-    text: &str,
-    rules: &[RuleForJudging],
-    model_override: Option<&str>,
-    max_budget_usd: Option<f64>,
-) -> Result<Vec<CheckedRule>, ActualError> {
-    let prompt = build_prompt(kind, text, rules);
-    let value = runner
-        .run_structured_json(
-            &prompt,
-            &output_schema(rules.len()),
-            model_override,
-            max_budget_usd,
-            Tuning {
-                effort: Some(JUDGE_EFFORT),
-                ..Tuning::default()
-            },
-        )
-        .await?;
+        })??;
     parse_verdicts(&value, rules).map_err(|e| ActualError::RuleCheckInvalid(e.to_string()))
-}
-
-/// `rules` split, in order, into the fewest calls of at most [`JUDGE_CHUNK`]
-/// rules, as near equal in size as they divide: 41 rules are three calls of
-/// 14, 14 and 13, never 20, 20 and 1, since the slowest call sets the time.
-pub fn chunks(rules: &[RuleForJudging]) -> Vec<&[RuleForJudging]> {
-    let calls = rules.len().div_ceil(JUDGE_CHUNK).max(1);
-    let (size, larger) = (rules.len() / calls, rules.len() % calls);
-    let mut out = Vec::with_capacity(calls);
-    let mut start = 0;
-    for call in 0..calls {
-        let end = start + size + usize::from(call < larger);
-        out.push(&rules[start..end]);
-        start = end;
-    }
-    out
 }
 
 #[cfg(test)]
@@ -761,23 +646,23 @@ mod tests {
         serde_json::json!({ "verdicts": entries })
     }
 
-    /// Every number is required, so a schema-enforcing backend cannot skip a
-    /// rule; inside, only the verdict is, so a rule that does not apply costs
-    /// one word.
     #[test]
-    fn test_schema_requires_a_verdict_for_every_number_and_nothing_else() {
-        let schema: serde_json::Value = serde_json::from_str(&output_schema(3)).unwrap();
+    fn test_schema_is_valid_json_with_the_agreed_shape() {
+        let schema: serde_json::Value = serde_json::from_str(CHECK_OUTPUT_SCHEMA).unwrap();
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["required"][0], "verdicts");
-        let verdicts = &schema["properties"]["verdicts"];
-        assert_eq!(verdicts["type"], "object");
-        assert_eq!(verdicts["additionalProperties"], false);
-        assert_eq!(verdicts["required"], serde_json::json!(["1", "2", "3"]));
-        let entry = &verdicts["properties"]["2"];
-        assert_eq!(entry["required"], serde_json::json!(["verdict"]));
-        assert_eq!(entry["additionalProperties"], false);
-        assert!(entry["properties"]["span"].is_object());
-        assert!(entry["properties"]["reason"].is_object());
+        let item = &schema["properties"]["verdicts"]["items"];
+        assert_eq!(item["additionalProperties"], false);
+        let required: Vec<&str> = item["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            required,
+            vec!["doc_slug", "rule_id", "verdict", "span", "reason"]
+        );
     }
 
     #[test]
@@ -875,7 +760,9 @@ mod tests {
 
         let task = concat!(
             "\n=== task ===\n",
-            "Return one verdict for every rule above, keyed by its number.\n",
+            "Return one verdict for every rule above, copying each doc and id exactly. ",
+            "Two rules can share an id across different docs; treat `(doc, id)` together ",
+            "as the rule's identity.\n",
             "- `followed`: the plan does something within this rule's domain and does it ",
             "the way the rule requires.\n",
             "- `not_applicable`: nothing in the plan falls within this rule's domain.\n",
@@ -888,11 +775,10 @@ mod tests {
             "span of the plan, verbatim, that conflicts. For every rule you judge ",
             "`followed`, quote the one line of the plan, verbatim, that shows the rule ",
             "being met: a single line, never more. If no line shows it, the verdict is ",
-            "`not_applicable`. For those three verdicts, also give a one-sentence reason ",
-            "naming the rule id and what in the plan it applies to.\n",
-            "For a rule that is `not_applicable`, give the verdict alone, with no span or ",
-            "reason. Judge only the rules listed, and give exactly one verdict for every ",
-            "number.\n",
+            "`not_applicable`. Judge only the rules listed. Do not invent a doc or id and ",
+            "do not omit one.\n",
+            "Give a one-sentence reason for each, naming the rule id and what in the plan ",
+            "it applies to.\n",
         );
         assert_eq!(&prompt[prompt.find("\n=== task ===\n").unwrap()..], task);
     }
@@ -963,7 +849,7 @@ mod tests {
     /// it must not tell a diff judge to describe "the plan".
     #[test]
     fn test_output_schema_is_artifact_neutral() {
-        assert!(!output_schema(2).contains("plan"));
+        assert!(!CHECK_OUTPUT_SCHEMA.contains("plan"));
     }
 
     /// Mirrors `scope::rank`'s own fencing test: a plan that imitates a
@@ -1208,216 +1094,6 @@ mod tests {
         ]));
         let err = parse_verdicts(&value, &rules()).unwrap_err();
         assert!(matches!(err, CheckError::Malformed(_)));
-    }
-
-    // ── the numbered answer ──────────────────────────────────────────────
-
-    #[test]
-    fn test_build_prompt_numbers_the_rules() {
-        let prompt = build_prompt(ArtifactKind::Diff, "diff", &rules());
-        assert!(prompt.contains("\n1. doc: cross-cutting-token-signing-1c57\n   id: R-A-001\n"));
-        assert!(prompt.contains("\n2. doc: cross-cutting-token-signing-1c57\n   id: R-A-002\n"));
-        assert!(prompt.contains("keyed by its number"));
-        assert!(prompt.contains("give the verdict alone"));
-    }
-
-    #[test]
-    fn test_parse_numbered_maps_each_number_to_its_rule() {
-        let value = verdicts_value(serde_json::json!({
-            "1": {"verdict": "followed", "span": "sign with RS256\nmore", "reason": "R-A-001 met"},
-            "2": {"verdict": "conflicting"},
-        }));
-        let verdicts = parse_verdicts(&value, &rules()).unwrap();
-        assert_eq!(verdicts[0].rule_id, "R-A-001");
-        assert_eq!(verdicts[0].verdict, Verdict::Followed);
-        assert_eq!(verdicts[0].span, "sign with RS256");
-        assert_eq!(verdicts[0].reason, "R-A-001 met");
-        // A conflict with no quote still names a span: the rule's statement.
-        assert_eq!(verdicts[1].verdict, Verdict::Conflicting);
-        assert_eq!(verdicts[1].span, "log the raw signing key.");
-    }
-
-    /// A rule that does not apply costs its verdict alone, and a bare word is
-    /// read as that.
-    #[test]
-    fn test_parse_numbered_reads_a_verdict_alone() {
-        let value = verdicts_value(serde_json::json!({
-            "1": {"verdict": "not_applicable"},
-            "2": "not_applicable",
-        }));
-        let verdicts = parse_verdicts(&value, &rules()).unwrap();
-        assert!(verdicts
-            .iter()
-            .all(|v| v.verdict == Verdict::NotApplicable && v.span.is_empty()));
-    }
-
-    /// A `followed` with no quote is no evidence the rule was met.
-    #[test]
-    fn test_parse_numbered_reads_an_unquoted_followed_as_not_applicable() {
-        let value = verdicts_value(serde_json::json!({
-            "1": {"verdict": "followed"},
-            "2": {"verdict": "not_applicable"},
-        }));
-        let verdicts = parse_verdicts(&value, &rules()).unwrap();
-        assert_eq!(verdicts[0].verdict, Verdict::NotApplicable);
-    }
-
-    /// An absence is never a pass: a number with no verdict, or with a word
-    /// that is not a verdict, rejects the whole answer.
-    #[test]
-    fn test_parse_numbered_requires_every_number() {
-        for answer in [
-            serde_json::json!({"1": {"verdict": "not_applicable"}}),
-            serde_json::json!({"1": "not_applicable", "2": {"verdict": "fine"}}),
-        ] {
-            let err = parse_verdicts(&verdicts_value(answer), &rules()).unwrap_err();
-            assert!(err.to_string().contains("only 1 of 2"), "{err}");
-        }
-    }
-
-    #[test]
-    fn test_parse_numbered_ignores_a_number_not_in_the_list() {
-        let value = verdicts_value(serde_json::json!({
-            "1": "not_applicable",
-            "2": "not_applicable",
-            "3": {"verdict": "conflicting", "span": "invented"},
-        }));
-        let verdicts = parse_verdicts(&value, &rules()).unwrap();
-        assert_eq!(verdicts.len(), 2);
-        assert!(verdicts.iter().all(|v| v.verdict == Verdict::NotApplicable));
-    }
-
-    // ── chunks ───────────────────────────────────────────────────────────
-
-    fn many_rules(count: usize) -> Vec<RuleForJudging> {
-        (0..count)
-            .map(|i| {
-                RuleForJudging::new(
-                    format!("cross-cutting-doc-{i:03}"),
-                    format!("R-X-{i:03}"),
-                    RuleLevel::Must,
-                    format!("statement {i}"),
-                )
-            })
-            .collect()
-    }
-
-    /// The slowest call sets the time, so a long list is split as evenly as
-    /// it divides, never into a full call and a straggler.
-    #[test]
-    fn test_chunks_split_into_the_fewest_near_equal_calls() {
-        let sizes =
-            |count| -> Vec<usize> { chunks(&many_rules(count)).iter().map(|c| c.len()).collect() };
-        assert_eq!(sizes(0), vec![0]);
-        assert_eq!(sizes(1), vec![1]);
-        assert_eq!(sizes(JUDGE_CHUNK), vec![JUDGE_CHUNK]);
-        assert_eq!(sizes(JUDGE_CHUNK + 1), vec![11, 10]);
-        assert_eq!(sizes(41), vec![14, 14, 13]);
-        assert_eq!(sizes(60), vec![20, 20, 20]);
-        let rules = many_rules(41);
-        let flat: Vec<&RuleForJudging> = chunks(&rules).into_iter().flatten().collect();
-        assert!(flat.iter().zip(&rules).all(|(a, b)| *a == b), "order kept");
-    }
-
-    /// Answers every call with `not_applicable` for every number its schema
-    /// asks for, after `delay`, and records how many rules each call held.
-    struct ChunkRunner {
-        delay: Duration,
-        calls: std::sync::Mutex<Vec<usize>>,
-        fail_on: Option<&'static str>,
-    }
-
-    impl StructuredRunner for ChunkRunner {
-        async fn run_structured_json(
-            &self,
-            prompt: &str,
-            schema: &str,
-            _model_override: Option<&str>,
-            _max_budget_usd: Option<f64>,
-            _tuning: crate::runner::structured::Tuning,
-        ) -> Result<serde_json::Value, ActualError> {
-            let schema: serde_json::Value = serde_json::from_str(schema).unwrap();
-            let numbers = schema["properties"]["verdicts"]["required"]
-                .as_array()
-                .unwrap()
-                .clone();
-            self.calls.lock().unwrap().push(numbers.len());
-            tokio::time::sleep(self.delay).await;
-            if self.fail_on.is_some_and(|id| prompt.contains(id)) {
-                return Ok(serde_json::json!({"verdicts": {}}));
-            }
-            let answer: serde_json::Map<String, serde_json::Value> = numbers
-                .iter()
-                .map(|n| (n.as_str().unwrap().to_string(), "not_applicable".into()))
-                .collect();
-            Ok(serde_json::json!({ "verdicts": answer }))
-        }
-    }
-
-    /// 45 rules are three calls of 15, made at once: the check takes as long
-    /// as one call, and the verdicts come back in the order of the rules.
-    #[tokio::test(start_paused = true)]
-    async fn test_check_judges_a_long_list_in_concurrent_chunks() {
-        let runner = ChunkRunner {
-            delay: Duration::from_secs(10),
-            calls: std::sync::Mutex::new(Vec::new()),
-            fail_on: None,
-        };
-        let rules = many_rules(45);
-        let started = tokio::time::Instant::now();
-        let verdicts = check(&runner, ArtifactKind::Diff, "diff", &rules, None, None)
-            .await
-            .unwrap();
-        assert_eq!(started.elapsed(), Duration::from_secs(10));
-        assert_eq!(*runner.calls.lock().unwrap(), vec![15, 15, 15]);
-        let ids: Vec<&str> = verdicts.iter().map(|v| v.rule_id.as_str()).collect();
-        let expected: Vec<&str> = rules.iter().map(|r| r.rule_id.as_str()).collect();
-        assert_eq!(ids, expected);
-    }
-
-    /// A chunk that did not answer is part of the change nobody judged, so
-    /// the whole check fails open rather than passing on the rest.
-    #[tokio::test(start_paused = true)]
-    async fn test_check_fails_when_any_chunk_fails() {
-        let runner = ChunkRunner {
-            delay: Duration::from_secs(1),
-            calls: std::sync::Mutex::new(Vec::new()),
-            fail_on: Some("R-X-030"),
-        };
-        let err = check(
-            &runner,
-            ArtifactKind::Diff,
-            "diff",
-            &many_rules(45),
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::RuleCheckInvalid(_)), "{err:?}");
-    }
-
-    /// The deadline is on every chunk together, not on each.
-    #[tokio::test(start_paused = true)]
-    async fn test_check_budget_covers_every_chunk_together() {
-        let runner = ChunkRunner {
-            delay: CHECK_BUDGET + Duration::from_secs(1),
-            calls: std::sync::Mutex::new(Vec::new()),
-            fail_on: None,
-        };
-        let started = tokio::time::Instant::now();
-        let err = check(
-            &runner,
-            ArtifactKind::Diff,
-            "diff",
-            &many_rules(45),
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::RunnerTimeout { .. }));
-        assert_eq!(started.elapsed(), CHECK_BUDGET);
     }
 
     #[test]

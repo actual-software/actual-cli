@@ -311,9 +311,7 @@ or cutoff can be tried on the same answer without asking the model again.
 
 `plan-check` and `impl-check` select the same way before they judge, and take
 `--limit`, `--candidates` and `--no-rank` with the same meaning, plus
-`--max-rules N` (default 40), the most individual rules one check judges. The
-judge reads them in calls of at most 20, sent at once, so its time follows the
-largest call rather than the whole list.
+`--max-rules N` (default 40), the most individual rules one judge call reads.
 `--selection-only` prints, as JSON, what the judge would be handed — the
 selection with every candidate's scores, the gathered rules, whether the cap
 cut any, and how long the rank took — and stops before the judge. It is for
