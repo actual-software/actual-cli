@@ -3531,6 +3531,43 @@ pub(crate) mod tests {
 
     /// Helper: an isolated config directory, so a runner-resolving test never
     /// touches the real `~/.actualai` cache or config.
+    #[test]
+    fn test_selection_report_stops_without_a_runner_and_errors_on_bad_rules() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let knobs = args.check_knobs();
+        let report = selection_report(
+            "Sign access tokens with RS256",
+            root.path(),
+            &crate::rules::rules_dir(root.path()),
+            &knobs,
+            check::ArtifactKind::Plan,
+            true,
+        )
+        .unwrap();
+        assert!(
+            report["stopped"].as_str().unwrap().starts_with("no runner"),
+            "{report}"
+        );
+
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        assert!(selection_report(
+            "plan",
+            root.path(),
+            &not_a_dir,
+            &knobs,
+            check::ArtifactKind::Plan,
+            false
+        )
+        .is_err());
+    }
+
     fn isolated_config(home: &TempDir) -> (EnvGuard, EnvGuard) {
         (
             EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
