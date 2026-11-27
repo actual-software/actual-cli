@@ -196,9 +196,6 @@ impl Candidate {
 pub struct RankedVerdict {
     pub slug: String,
     pub verdict: Verdict,
-    /// The score the verdict was read from, 0 to [`MAX_SCORE`]. Kept so a
-    /// caller can apply other cutoffs to the same answer.
-    pub score: u64,
 }
 
 /// The JSON schema the ranker's structured output must satisfy, for
@@ -360,7 +357,6 @@ pub fn parse_verdicts(
         out.push(RankedVerdict {
             slug: candidate.slug.clone(),
             verdict: Verdict::from_score(score),
-            score,
         });
     }
 
@@ -580,12 +576,10 @@ mod tests {
                 RankedVerdict {
                     slug: "cross-cutting-token-signing-1c57".to_string(),
                     verdict: Verdict::Governs,
-                    score: 8,
                 },
                 RankedVerdict {
                     slug: "cross-cutting-terraform-c340".to_string(),
                     verdict: Verdict::Unrelated,
-                    score: 1,
                 },
             ]
         );
