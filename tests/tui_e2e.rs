@@ -213,15 +213,6 @@ mod tests {
         script
     }
 
-    /// Answer a prompt the way a person does, some time after it appears. The
-    /// nav poller stays up through the prompt and reads the same queue, so a
-    /// key sent with the first frame gets lost or leaves the poller stuck in a
-    /// read that the next step then waits on.
-    fn answer_prompt(session: &mut TuiSession, key: Key) {
-        std::thread::sleep(Duration::from_millis(500));
-        session.send_key(key).unwrap();
-    }
-
     /// The fallback's name also passes through the second run's Environment
     /// step, so this waits for it and the prompt on one screen. Waiting for
     /// the name alone would pass with the prompt showing neither.
@@ -281,17 +272,64 @@ mod tests {
                 screen.contains("Proceed with sync?") && screen.contains("codex-cli")
             })
             .expect("The first prompt should name codex-cli");
-        answer_prompt(&mut session, Key::Enter);
+        session.send_key(Key::Enter).unwrap();
 
         session
             .wait_for(|screen| {
                 screen.contains("Proceed with sync?") && screen.contains("openai-api (fallback)")
             })
             .expect("The retry's prompt should name the fallback runner");
-        answer_prompt(&mut session, Key::Char('n'));
+        session.send_key(Key::Char('n')).unwrap();
 
         // 4 is the exit code for a user-cancelled run.
         assert_eq!(session.wait_for_exit().expect("Should exit"), 4);
+    }
+
+    /// Each key goes out on the first frame that shows its prompt. `y` is also
+    /// the copy key during a run, and the file review is the second prompt a
+    /// run without `--force` reaches.
+    #[test]
+    fn test_tui_prompts_take_a_key_sent_as_they_appear() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-tui-first-frame",
+            "TUI First Frame Rule",
+            &["Answer on the first frame"],
+            &[],
+            &["."],
+        );
+        setup_adr_server(&mut server, &format!("[{}]", adr));
+        let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+
+        let cmd = format!(
+            "{} adr-bot --no-tailor --runner claude-cli --api-url {}",
+            actual_binary_path(),
+            env.api_url
+        );
+        let mut session = TuiSession::new(&cmd)
+            .size(120, 40)
+            .timeout(Duration::from_secs(30))
+            .env("CLAUDE_BINARY", env.binary_path.to_str().unwrap())
+            .env("ACTUAL_CONFIG", env.config_path.to_str().unwrap())
+            .env("NO_COLOR", "1")
+            .workdir(env.dir.path())
+            .spawn()
+            .expect("Failed to spawn actual adr-bot");
+
+        session
+            .wait_for_text("Proceed with sync?")
+            .expect("Should ask about the projects");
+        session.send_key(Key::Char('y')).unwrap();
+
+        session
+            .wait_for_text("Select files to write")
+            .expect("y should accept the projects");
+        session.send_key(Key::Enter).unwrap();
+
+        wait_for_review_mode(&mut session);
+        session.send_key(Key::Char('q')).unwrap();
+        assert_eq!(session.wait_for_exit().expect("Should exit"), 0);
+        assert!(env.read_file("CLAUDE.md").contains("TUI First Frame Rule"));
     }
 
     #[test]

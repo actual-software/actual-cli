@@ -46,7 +46,10 @@ impl Drop for KbPoller {
 ///
 /// When `is_tui` is `false`, returns a no-op guard and `None`.
 ///
-/// Drop the returned [`KbPoller`] to stop the thread.
+/// Drop the returned [`KbPoller`] to stop the thread, and drop it before
+/// anything else reads keys, such as a prompt. Both read crossterm's one event
+/// queue, so a key can reach the wrong reader, and a poller that loses a key
+/// it has seen blocks in `read()` until the next event, holding up that drop.
 pub fn setup_nav_only(is_tui: bool) -> (KbPoller, Option<std::sync::mpsc::Receiver<NavCmd>>) {
     if is_tui {
         let (inner, nav_rx) = spawn_nav_thread();
