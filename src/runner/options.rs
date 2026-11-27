@@ -39,14 +39,6 @@ pub struct InvocationOptions {
     /// batch spent over 90 seconds in extended thinking alone before
     /// producing an answer, measured directly against a real judge call).
     pub effort: Option<String>,
-    /// Turn extended thinking off, via `alwaysThinkingEnabled: false` in the
-    /// `--settings` JSON.
-    ///
-    /// `--effort` does not do this: Haiku 4.5 still wrote about 5,000 thinking
-    /// tokens on a stage-2 rank under `--effort low`, and took 36 seconds over
-    /// an answer that needs about 120 tokens. With thinking off the same call
-    /// took 2.5 seconds.
-    pub disable_thinking: bool,
 }
 
 /// Default model for the Claude CLI runner.
@@ -61,11 +53,6 @@ const DEFAULT_MODEL: &str = "sonnet";
 /// off all hooks from the user's, project's, and plugins' own settings. See
 /// [`InvocationOptions::to_args`] for why.
 const DISABLE_HOOKS_SETTINGS: &str = r#"{"disableAllHooks":true}"#;
-
-/// [`DISABLE_HOOKS_SETTINGS`], with extended thinking turned off as well. See
-/// [`InvocationOptions::disable_thinking`].
-const DISABLE_HOOKS_AND_THINKING_SETTINGS: &str =
-    r#"{"disableAllHooks":true,"alwaysThinkingEnabled":false}"#;
 
 impl InvocationOptions {
     /// Create options for ADR tailoring.
@@ -87,7 +74,6 @@ impl InvocationOptions {
             max_budget_usd: None,
             skip_permissions: true,
             effort: None,
-            disable_thinking: false,
         }
     }
 
@@ -109,7 +95,6 @@ impl InvocationOptions {
             max_budget_usd: None,
             skip_permissions: true,
             effort: None,
-            disable_thinking: false,
         }
     }
 
@@ -160,14 +145,7 @@ impl InvocationOptions {
         // up. These subprocesses are internal model calls; no user hook is
         // meant for them.
         args.push("--settings".to_string());
-        args.push(
-            if self.disable_thinking {
-                DISABLE_HOOKS_AND_THINKING_SETTINGS
-            } else {
-                DISABLE_HOOKS_SETTINGS
-            }
-            .to_string(),
-        );
+        args.push(DISABLE_HOOKS_SETTINGS.to_string());
         args.push("--tools".to_string());
         args.push(self.tools.clone());
 
@@ -353,26 +331,6 @@ mod tests {
         opts.effort = Some("low".to_string());
         let args = opts.to_args();
         assert_arg_value(&args, "--effort", "low");
-    }
-
-    /// Thinking stays at the CLI's own default unless a caller turns it off,
-    /// and turning it off keeps hooks disabled.
-    #[test]
-    fn test_disable_thinking_adds_the_setting_and_keeps_hooks_off() {
-        let settings_of = |opts: &InvocationOptions| -> serde_json::Value {
-            let args = opts.to_args();
-            let at = args.iter().position(|a| a == "--settings").unwrap();
-            serde_json::from_str(&args[at + 1]).unwrap()
-        };
-
-        let default = settings_of(&InvocationOptions::for_selection(None));
-        assert!(default.get("alwaysThinkingEnabled").is_none(), "{default}");
-
-        let mut opts = InvocationOptions::for_selection(None);
-        opts.disable_thinking = true;
-        let off = settings_of(&opts);
-        assert_eq!(off["alwaysThinkingEnabled"], false, "{off}");
-        assert_eq!(off["disableAllHooks"], true, "{off}");
     }
 
     #[test]
