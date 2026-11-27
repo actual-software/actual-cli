@@ -46,7 +46,7 @@ It runs on macOS and Linux. [Getting Started](docs/GETTING_STARTED.md#installati
 
 ## Signing in (optional)
 
-The checks and `actual rules` run signed out, so you can skip this step. To connect the CLI to your Actual AI account, `actual login` signs you in through your browser and stores your credentials locally. `actual whoami` shows the signed-in account and organization, and `actual logout` signs you out.
+The checks and `actual rules` run signed out, so you can skip this step. To connect the CLI to your Actual AI account, `actual login` signs you in through your browser and stores your credentials locally. `actual whoami` shows the signed-in account and organization, and `actual logout` signs you out. On a machine with no browser, such as an Amp orb, set `ACTUAL_TOKEN` to a token from `actual auth create-token` instead; see [Agent authentication](docs/AGENT_AUTH.md).
 
 ## Adding decisions
 

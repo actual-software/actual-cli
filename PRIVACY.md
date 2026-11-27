@@ -14,6 +14,9 @@ in and on who processes it. This notice is explicit about both:
   events sent to the API address `actual advisor` uses while you're logged in
   carry your sign-in's access token, which names your account as well as the
   organization you signed in to, so Actual can tie them to that organization.
+  With the `ACTUAL_TOKEN` environment variable set to a personal access token,
+  as on an Amp orb, you count as logged in the same way, so those events,
+  hooks' included, are identity-linked too.
 - **Logged-out events are pseudonymous, not anonymous.** A logged-out run sends
   no account credential, but it still carries the installation's persistent
   `distinct_id` — the same id its logged-in runs use, which is not reset on
@@ -433,8 +436,8 @@ don't go to PostHog.
 endpoint has the scheme, host and port of the address `actual advisor` uses
 (`ACTUAL_API_URL` when it's set, otherwise
 `https://api-service.api.prod.actual.ai`) and you've signed in with
-`actual login`, each request carries your sign-in's access token in its
-`Authorization` header. The token names your account as well as the organization
+`actual login` or set `ACTUAL_TOKEN`, each request carries your sign-in's
+access token, or the `ACTUAL_TOKEN` token, in its `Authorization` header. The token names your account as well as the organization
 you signed in to, and Actual ties its events to that organization. Events you
 recorded while signed out, or signed in to another
 account or organization, go in a request of their own without the token. A
@@ -631,7 +634,8 @@ the address `actual advisor` uses, each spooled event also keeps a hash of
 the sign-in it was recorded under, which is never sent, and the uploader
 reads your sign-in from
 `~/.actualai/actual/credentials.yaml` when it sends, renewing it first when it's
-within a minute of expiring, as `actual advisor` does. Turning telemetry off
+within a minute of expiring, as `actual advisor` does, or, with `ACTUAL_TOKEN`
+set, uses that token, which it never renews. Turning telemetry off
 stops these events before anything is built: an opted-out run reads no ids or
 sign-in and writes no spool. Building and sending them reads no installation id
 either. Only the plan-governance events a run also builds need it, so a
@@ -822,6 +826,22 @@ The log holds no plan, diff, rule text or judge's reasoning, and no override rea
 
 The telemetry setting doesn't change it. The log is written with telemetry off and in a build without telemetry. Set `ACTUAL_ENFORCEMENT_LOG=off` (in any case) in the environment the checks run in to stop new lines. The lines already written stay until you delete the file, and `actual stats` says the log is off.
 
+### Sign-in commands and the ACTUAL_TOKEN identity cache (stays on your machine)
+
+`actual login`, `actual logout`, `actual whoami` and `actual auth create-token`
+send no telemetry event, signed in or out, and neither does the identity check
+`ACTUAL_TOKEN` makes: they only change or report which account the CLI acts
+as, and an event about that would carry the account itself and nothing about
+how the CLI's ADR guidance works.
+
+With `ACTUAL_TOKEN` set, the answer to "who does this token belong to" (the
+token's id and name, your organization and member ids, your email when
+Actual has one, the token's scopes and expiry, and when it was last checked or
+refused) is kept in `~/.actualai/actual/token-identity.yaml`, readable only by
+you (`0600`). It's keyed by a SHA-256 hash of the token, holds nothing from the
+token itself, holds only the current token's entry, and is removed by
+`actual logout`. It's never uploaded.
+
 ### Update check (sent to the npm registry)
 
 At most once a day, after a command run at a terminal, the CLI asks the npm
@@ -840,7 +860,7 @@ file, stops the request entirely. See [docs/UPDATE_CHECK.md](docs/UPDATE_CHECK.m
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), plan-governance events, ADR, check and session-end events from release builds unless you set another OTLP endpoint, and the decision requests the signed-in `actual adr` commands send, including the read of the connected repository's decisions that `actual adr refresh` makes each time the plugin's hooks run it and the path in the repository of each file `actual adr create --all` saves | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, `actual advisor` questions, `actual auth create-token` requests (your sign-in's access token, plus the new token's name and scopes), with `ACTUAL_TOKEN` set the token itself on each signed-in request and, at most once a day per token (more often only after a failure, or when you run `actual whoami --check`), a request asking who the token belongs to that holds nothing else, plan-governance events, ADR, check and session-end events from release builds unless you set another OTLP endpoint, and the decision requests the signed-in `actual adr` commands send, including the read of the connected repository's decisions that `actual adr refresh` makes each time the plugin's hooks run it and the path in the repository of each file `actual adr create --all` saves | HTTPS (enforced) |
 | PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | `app.actual.ai`, Actual's sign-in server, unless `actual login --api-url`, `actual mint-token --issuer` or `ACTUAL_AUTH_URL` names another address | Sign-in requests, with no repository or project data. `actual login` sends a one-time code and then the access token it gets back, after opening the sign-in page in your browser. `actual logout` sends the token it revokes, and `actual mint-token` sends a signed service-account assertion. Renewing an access token that expires within a minute sends your refresh token, which `actual advisor`, `actual auth create-token` and the telemetry uploader do for you | HTTPS (enforced; plain HTTP only to localhost) |
 | `files.pythonhosted.org`, PyPI's file host | A download of the `semgrep-core` scanner: a fixed file for your OS and CPU, requested by `actual adr-bot` when the CLI has no copy of its own, even if you've installed Semgrep yourself, and kept on your machine afterwards. It carries no account or repository data; like any web request, it shows PyPI your IP address. Turning telemetry off doesn't stop it | HTTPS |
