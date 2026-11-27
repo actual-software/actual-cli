@@ -89,13 +89,12 @@ pub enum ArtifactKind {
 /// The wall-clock budget for one conformance check.
 ///
 /// `actual plan-check --claude-hook` runs inside `hooks/plan-gate.sh`'s own
-/// `PreToolUse` hook timeout (`actual-skill`'s `hooks.json`, currently 200
-/// seconds, 180 before stage 2 ran in the hooks — not a Claude Code platform
-/// ceiling: a `command`-type hook on `PreToolUse` defaults to 600 seconds,
-/// and `plan-gate.sh` deliberately configures a much smaller one). Selection's
-/// stage-2 rank runs before this call, held to
-/// [`GATE_RANK_BUDGET`](super::scope::rank::GATE_RANK_BUDGET) so this call
-/// keeps the rest (see `crate::cli::commands::plan_check`). This
+/// `PreToolUse` hook timeout (`actual-skill`'s `hooks.json`, currently 180
+/// seconds — not a Claude Code platform ceiling: a `command`-type hook on
+/// `PreToolUse` defaults to 600 seconds, and `plan-gate.sh` deliberately
+/// configures a much smaller one), and selection's own stage-2 rank is
+/// skipped for this path precisely so the one model call this module makes
+/// has the budget to itself (see `crate::cli::commands::plan_check`). This
 /// deadline is on the whole call, not on inactivity between streamed events
 /// — the same reasoning [`super::scope::rank::RANK_BUDGET`] documents — so a
 /// backend that keeps talking past it still degrades to fail-open rather
@@ -111,11 +110,10 @@ pub enum ArtifactKind {
 /// landing over a too-tight budget on a slow run. 150 seconds leaves margin
 /// comparable in size to the variance actually observed (not a number with a
 /// rigorous bound behind it, since the variance itself didn't scale
-/// predictably with batch size either), while the gates' 200-second hook
-/// timeout leaves 50 seconds above that: up to 15 for the rank, and the rest
-/// for stage 1, the runner's auth probe, shell overhead, and this budget's
-/// own graceful unwind back through the hook rather than an abrupt kill. A
-/// plugin still on the 180-second timeout leaves 15 of those.
+/// predictably with batch size either), while `plan-gate.sh`'s own 180-second
+/// hook timeout leaves 30 seconds above that for selection, the runner's
+/// auth probe, shell overhead, and this budget's own graceful unwind back
+/// through the hook rather than an abrupt kill.
 pub const CHECK_BUDGET: Duration = Duration::from_secs(150);
 
 /// The inactivity-timeout cap a caller must resolve the judge's runner with.
@@ -613,17 +611,6 @@ pub async fn check<R: StructuredRunner>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A gate's rank and its judge run one after the other inside the hook's
-    /// timeout. Both deadlines together must leave room for everything else
-    /// the hook does, even under the plugin's older 180-second timeout.
-    #[test]
-    fn test_the_gate_rank_and_the_judge_fit_inside_the_older_hook_timeout() {
-        let older_hook_timeout = Duration::from_secs(180);
-        let spent = CHECK_BUDGET + crate::rules::scope::rank::GATE_RANK_BUDGET;
-        assert!(spent < older_hook_timeout, "{spent:?}");
-        assert!(older_hook_timeout - spent >= Duration::from_secs(15));
-    }
 
     fn rules() -> Vec<RuleForJudging> {
         vec![
