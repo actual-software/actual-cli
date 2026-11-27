@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - On codex-cli, a stage-2 rank or a `plan-check` or `impl-check` judge run outside a git repository no longer fails with "Not inside a trusted directory". These calls run read-only, so they pass `--skip-git-repo-check`. Tailoring, which writes files, still requires a git repository
 
+### Changed
+- The end-of-turn question about which ADRs the agent used now counts an ADR whose rule blocked the change and that the agent revised for, and one that settled which API, import or pattern it used. An ADR the change only happens to agree with still doesn't count, and `--none` is still a normal answer. A question that comes with a block also lists the ADR behind each blocking rule, marked `(blocked above: <rule ids>)`, even when no brief put that ADR in front of the agent, so a claim on it now verifies where it used to come back `adr_not_in_session`. That claim sends its own `actual.adr.reported`, where it used to share the one event for names the question never listed. The events' attributes are unchanged
+
 ## [0.17.0] - 2026-11-24
 
 ### Added
