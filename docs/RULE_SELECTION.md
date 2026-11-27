@@ -56,10 +56,9 @@ codex-cli. The other calls that resolve a runner — the conformance judge,
 **In the gates.** `plan-check` and `impl-check` rank before they judge, with
 the plan or the turn's diff as the query, and so do the plugin's plan and
 implementation gates, which run them from hooks. A hook's rank keeps to a
-35-second deadline instead of 90, so the conformance judge keeps the rest of
+15-second deadline instead of 90, so the conformance judge keeps the rest of
 the hook's timeout, and a rank that misses it falls back to stage 1 like any
-other failure. The gates retrieve more candidates than `rules select` and
-keep more of them: see [The gates' defaults](#the-gates-defaults). `--no-rank` skips the rank in every mode, and the plugin passes
+other failure. `--no-rank` skips the rank in every mode, and the plugin passes
 it when `ACTUAL_GATE_RANK=off`. The hooks used to skip stage 2, when a rank
 took about 16 seconds; the measurements below show why they no longer do.
 
@@ -72,16 +71,14 @@ candidate list, and the answer is a score per number. A number outside the list
 is ignored. A hallucinated rule file is impossible by construction, not merely
 unlikely.
 
-**It orders only by its score.** Each candidate's score is collapsed into one
-of three verdicts: 7 to 9 is `governs`, 3 to 6 is `related`, and 0 to 2 is
-`unrelated`. `unrelated` is dropped; the rest go highest score first, and equal
-scores keep stage 1's order. A language model is far better calibrated on "does
-this rule govern this change" than on "is this rule the third or the fourth
-most relevant", so the score is coarse on purpose. On a labelled set of 25
-merged pull requests, keeping stage 1's order inside each verdict picked
-governing rules for `rules select` as well as ordering by the score did; at the
-gates' larger limits, ordering by the score put 0.2 to 1.4 points more of the
-governing rules in front of the judge, so the score order is what ships.
+**It may not reorder within a verdict.** Each candidate's score is collapsed
+into one of three verdicts: 7 to 9 is `governs`, 3 to 6 is `related`, and 0 to 2
+is `unrelated`. `unrelated` is dropped; the rest keep stage 1's order inside
+their verdict. A language model is far better calibrated on "does this rule
+govern this change" than on "is this rule the third or the fourth most
+relevant", so the design takes only the judgement it is good at. On a labelled
+set of 25 merged pull requests, collapsing scores this way picked governing
+rules as well as ordering by the score itself did.
 
 **It may not empty the result.** A rank that keeps nothing is treated as a failed
 rank, and the caller falls back to stage 1. Returning nothing is never more
@@ -207,52 +204,6 @@ pooled precision never falls. Both follow from the design — stage 2 only remov
 and promotes, it never adds — and the tests exist so a later change cannot
 quietly break them.
 
-## The gates' defaults
-
-The plan and implementation gates send far more rules to their judge than
-`rules select` returns, because the judge now reads them in concurrent calls
-of at most 20 and its time barely grows with their number.
-
-| | Candidates (`--candidates`) | Documents kept (`--limit`) | Rules judged (`--max-rules`) |
-|---|---|---|---|
-| `plan-check` | 60 | 40 | 40 |
-| `impl-check` | 150 | 60 | 60 |
-
-They were chosen on 25 merged pull requests from one repository, labelled with
-the rules that govern each, with each PR's title and description standing in
-for the plan and its diff for the turn's diff.
-
-- **For a diff, the candidates matter most.** Stage 1 finds 17% of the
-  governing rules in its top 30, 46% in its top 100 and 61% in its top 150.
-  Ranking 150 and keeping up to 60 put 46% of the governing rules in front of
-  the judge with codex-cli's rank, and 36% with claude-cli's, which keeps
-  fewer; the earlier defaults (30, 20, 40) put 15%. On 8 of the pull
-  requests, the judge then found about three times as many governing rules
-  applying, and flagged under 0.1 rules per diff that were not labelled as
-  governing.
-- **For a plan, more rules mean more false alarms.** A plan says little about
-  what the change will touch, so stage 1 and the rank both find fewer of the
-  governing rules, and the judge reads a rule the plan does not mention as one
-  it leaves out. Sending stage 1's top 100 found more than twice as many
-  governing rules applying on codex-cli, but flagged 1.6 rules per plan that
-  were not labelled as governing, against 0.4 at these defaults, which reach
-  20% of the governing rules instead of 16%. Some of those may be rules the
-  labels missed; until that is checked by hand, the plan gate stays small.
-- **The rank's time bounds the candidates.** A rank takes about 4 seconds plus
-  0.13 a candidate on codex-cli: at 150 candidates, 25 seconds at the median
-  and 26 at the 95th percentile. claude-cli took 7 and 9. The hooks' deadline
-  of 35 seconds covers both, and with the judge's 150 seconds it stays inside
-  the plugin's 200-second gate timeout. A rank that misses the deadline falls
-  back to stage 1's top 60, which still reaches 28% for a diff.
-- **The judge's time.** At 60 to 80 rules the judge took 9 to 18 seconds at the
-  median and at most 27, over 8 pull requests on both runners, where one call
-  over the same rules took 76 to 101 seconds. A chunk that fails, or runs past
-  75 seconds, is made once more.
-
-Not yet measured: the gates end to end, a held-out set of pull requests, any
-second repository, and whether the plan gate's extra flags are rules the
-labels missed.
-
 ## Cost
 
 Stage 1 is sub-millisecond against a built index. Stage 2 is a single model
@@ -326,10 +277,12 @@ five.
 - **Stage-2 latency is a model call's.** A rank now typically answers in 4 to
   10 seconds, but it is still a network call to a model, and the deadline is
   what bounds the worst case. A caller that cannot tolerate a 90-second wait
-  should pass `--no-rank`. The gates' hooks wait at most 35 seconds.
-- **The gates' defaults were chosen on the same 25 pull requests.** See
-  [The gates' defaults](#the-gates-defaults) for what they rest on and what is
-  not yet measured.
+  should pass `--no-rank`. The gates' hooks wait at most 15 seconds.
+- **The gates keep twice the measured cap.** `plan-check` and `impl-check`
+  judge up to 20 documents by default, where the measurements above keep 10.
+  They rank only when stage 1 finds more than 20, and the rank's gain at that
+  cap is not measured; what carries over is that it drops the candidates it
+  scores unrelated, which the judge then never reads.
 - **Each round of a gate ranks afresh.** A plan the agent revises after a
   denial is ranked again, so every round of the revision loop costs a rank as
   well as a judgement. No scores are reused between rounds.
