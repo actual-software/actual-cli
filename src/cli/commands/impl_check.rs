@@ -103,7 +103,6 @@ impl ImplCheckArgs {
             runner: self.runner.as_ref(),
             model: self.model.as_deref(),
             default_runners: crate::cli::commands::rules_rank::DEFAULT_RUNNERS,
-            rank_budget: crate::rules::scope::rank::RANK_BUDGET,
         }
     }
 }
@@ -575,8 +574,9 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
 
-    // Stage 2 runs here, unless `--no-rank`, inside the hook's shorter rank
-    // budget, as in `plan_check::exec_hook_with`.
+    // `use_rank: false`, unconditionally, for the same reason
+    // `plan_check::exec_hook_with` always passes it: the hook's one model
+    // call stays reserved for the judge.
     // `filter` only feeds telemetry.
     #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
     let (outcome, filter) = match run_pipeline_filtered(
@@ -585,7 +585,7 @@ fn exec_hook_with(args: &ImplCheckArgs, host: HookHost, raw: &str) {
         &rules_dir,
         &args.check_knobs().for_host(host),
         ArtifactKind::Diff,
-        !args.no_rank,
+        false,
         &session,
     ) {
         Ok(run) => run,
@@ -792,11 +792,6 @@ mod tests {
 
     const OAUTH_DOC: &str = "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: log the raw signing key.\n";
 
-    /// A second document the token-signing plan and diff both match, so the
-    /// prefilter returns more candidates than a `--limit` of 1 and stage 2
-    /// has something to rank.
-    const KEY_ROTATION_DOC: &str = "# Rotate Signing Keys: Signing Key Rotation\n\nThese rules are ALWAYS ACTIVE for signing key handling.\n\n### Rules\n\n- **R-B-001** MUST: rotate the signing key every year.\n";
-
     fn seed(files: &[(&str, &str)]) -> TempDir {
         let root = tempdir().unwrap();
         let dir = crate::rules::rules_dir(root.path());
@@ -892,42 +887,6 @@ mod tests {
         let script = dir.join("fake-claude.sh");
         let body = format!(
             "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
-        );
-        std::fs::write(&script, body).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        script
-    }
-
-    /// A fake Claude Code binary that tells a stage-2 rank from a judge call
-    /// by the rank prompt's opening words, answers each in its own shape, and
-    /// appends `rank` or `judge` to `log` for every call it answers.
-    #[cfg(unix)]
-    fn rank_and_judge_claude(
-        dir: &StdPath,
-        judge_output: &serde_json::Value,
-        log: &StdPath,
-    ) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let envelope = |output: serde_json::Value| {
-            serde_json::json!({
-                "type": "result",
-                "subtype": "success",
-                "is_error": false,
-                "structured_output": output,
-            })
-            .to_string()
-        };
-        let rank = envelope(serde_json::json!({"scores": {"1": 9, "2": 9}}));
-        let judge = envelope(judge_output.clone());
-        let log = log.display();
-        let script = dir.join("fake-claude.sh");
-        let body = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\n\
-             case \"$*\" in\n\
-             *'Score how strongly'*) echo rank >> '{log}'; printf '%s' '{rank}' ;;\n\
-             *) echo judge >> '{log}'; printf '%s' '{judge}' ;;\n\
-             esac\n"
         );
         std::fs::write(&script, body).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1671,59 +1630,6 @@ mod tests {
             )),
             Some(&1)
         );
-    }
-
-    /// The implementation gate ranks before it judges, and `--no-rank` leaves
-    /// the judge as the hook's only model call.
-    #[cfg(unix)]
-    #[test]
-    fn test_exec_hook_with_ranks_before_judging_unless_no_rank() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempdir().unwrap();
-        let _guards = isolated_config(&home);
-        let repo = git_repo_with_baseline();
-        let rules = repo.path().join(".actual/rules");
-        std::fs::create_dir_all(&rules).unwrap();
-        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
-        std::fs::write(
-            rules.join("cross-cutting-key-rotation-77aa.md"),
-            KEY_ROTATION_DOC,
-        )
-        .unwrap();
-        std::fs::write(
-            repo.path().join("oauth.rs"),
-            "fn sign() { sign_with_rs256(); rotate_signing_key(); }\n",
-        )
-        .unwrap();
-
-        let bin = tempdir().unwrap();
-        let log = bin.path().join("calls.log");
-        let judge = check_output(serde_json::json!([
-            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "followed", "span": "sign_with_rs256", "reason": "uses RS256"},
-        ]));
-        let _binary = EnvGuard::set(
-            "CLAUDE_BINARY",
-            rank_and_judge_claude(bin.path(), &judge, &log)
-                .to_str()
-                .unwrap(),
-        );
-        let calls = || std::fs::read_to_string(&log).unwrap_or_default();
-
-        let mut args = base_args();
-        args.repo = Some(repo.path().to_path_buf());
-        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
-        args.limit = 1;
-        // A session of its own per run: a second run in the same session
-        // would find the first run's clearance and judge nothing.
-        let raw = serde_json::json!({"session_id": "sess-rank-1"}).to_string();
-        exec_hook_with(&args, HookHost::Claude, &raw);
-        assert_eq!(calls(), "rank\njudge\n");
-
-        std::fs::remove_file(&log).unwrap();
-        args.no_rank = true;
-        let raw = serde_json::json!({"session_id": "sess-rank-2"}).to_string();
-        exec_hook_with(&args, HookHost::Claude, &raw);
-        assert_eq!(calls(), "judge\n");
     }
 
     /// The acceptance criterion from the module doc: a `session_id` no prior

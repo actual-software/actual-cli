@@ -1820,19 +1820,22 @@ pub struct PlanCheckArgs {
     pub candidates: usize,
 
     /// Skip stage 2 (a runner-backed rank refining which documents apply) and
-    /// select with the deterministic prefilter alone. Applies in every mode,
-    /// hooks included: a hook ranks by default too, within a 15-second
-    /// deadline so the conformance judge keeps the rest of the hook's
-    /// timeout, and falls back to the prefilter when the rank misses it.
+    /// select with the deterministic prefilter alone. Direct-mode use only:
+    /// `--claude-hook` always uses the prefilter alone regardless of this
+    /// flag, so its one model call stays reserved for the conformance judge
+    /// inside Claude Code's 120-second `PreToolUse` timeout — see
+    /// `crate::cli::commands::plan_check` for why running both there risks
+    /// that budget. A human at a terminal has no such constraint, so direct
+    /// mode runs stage 2 by default, the same way `rules select` does.
     #[arg(long)]
     pub no_rank: bool,
 
-    /// Runner to use for stage 2 selection and the conformance judge. Probed
-    /// automatically when omitted.
+    /// Runner to use for stage 2 selection (direct mode only) and the
+    /// conformance judge. Probed automatically when omitted.
     #[arg(long, value_enum)]
     pub runner: Option<RunnerChoice>,
 
-    /// Model for stage 2 selection and the judge,
+    /// Model for stage 2 selection (direct mode only) and the judge,
     /// overriding the configured one.
     #[arg(long)]
     pub model: Option<String>,
@@ -1976,19 +1979,21 @@ pub struct ImplCheckArgs {
     pub candidates: usize,
 
     /// Skip stage 2 (a runner-backed rank refining which documents apply) and
-    /// select with the deterministic prefilter alone. Applies in every mode,
-    /// hooks included: a hook ranks by default too, within a 15-second
-    /// deadline so the conformance judge keeps the rest of the hook's
-    /// timeout, and falls back to the prefilter when the rank misses it.
+    /// select with the deterministic prefilter alone. Direct-mode use only:
+    /// `--claude-hook` always uses the prefilter alone regardless of this
+    /// flag, so its one model call stays reserved for the conformance judge —
+    /// see `crate::cli::commands::plan_check` for why running both there
+    /// risks that budget. A human at a terminal has no such constraint, so
+    /// direct mode runs stage 2 by default, the same way `rules select` does.
     #[arg(long)]
     pub no_rank: bool,
 
-    /// Runner to use for stage 2 selection and the conformance judge. Probed
-    /// automatically when omitted.
+    /// Runner to use for stage 2 selection (direct mode only) and the
+    /// conformance judge. Probed automatically when omitted.
     #[arg(long, value_enum)]
     pub runner: Option<RunnerChoice>,
 
-    /// Model for stage 2 selection and the judge,
+    /// Model for stage 2 selection (direct mode only) and the judge,
     /// overriding the configured one.
     #[arg(long)]
     pub model: Option<String>,
