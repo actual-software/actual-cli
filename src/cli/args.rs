@@ -1827,9 +1827,9 @@ pub struct PlanCheckArgs {
     #[arg(long)]
     pub no_rank: bool,
 
-    /// Most individual rules one check judges, in calls of at most 20 sent at
-    /// once. When the selected documents hold more, a prioritized window of
-    /// this many is judged and the rest are reported as not checked.
+    /// Most individual rules the conformance judge reads in one call. When
+    /// the selected documents hold more, a prioritized window of this many is
+    /// judged and the rest are reported as not checked.
     #[arg(
         long,
         default_value_t = crate::cli::commands::check_engine::MAX_RULES_JUDGED as u64,
@@ -2000,9 +2000,9 @@ pub struct ImplCheckArgs {
     #[arg(long)]
     pub no_rank: bool,
 
-    /// Most individual rules one check judges, in calls of at most 20 sent at
-    /// once. When the selected documents hold more, a prioritized window of
-    /// this many is judged and the rest are reported as not checked.
+    /// Most individual rules the conformance judge reads in one call. When
+    /// the selected documents hold more, a prioritized window of this many is
+    /// judged and the rest are reported as not checked.
     #[arg(
         long,
         default_value_t = crate::cli::commands::check_engine::MAX_RULES_JUDGED as u64,

@@ -41,7 +41,7 @@
 //! as its own env var only makes sense under that split.
 //!
 //! **Keying within a session.** A rule id is only unique within its document
-//! (`check::parse_verdicts`'s own doc notes the corpus repeats ids across
+//! (`check::CHECK_OUTPUT_SCHEMA`'s own doc notes the corpus repeats ids across
 //! documents), so every key here is `"{doc_slug}::{rule_id}"`, never a bare
 //! rule id.
 //!
