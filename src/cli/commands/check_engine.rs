@@ -707,10 +707,12 @@ fn gather_rules_capped(
                 excluded += 1;
                 continue;
             }
-            let mut candidate =
-                RuleForJudging::new(selected.slug.clone(), rule.id, rule.level, rule.statement);
-            candidate.files = selected.files.clone();
-            candidates.push(candidate);
+            candidates.push(RuleForJudging::new(
+                selected.slug.clone(),
+                rule.id,
+                rule.level,
+                rule.statement,
+            ));
         }
         if let Some(meta) = doc.meta {
             headers.insert(selected.slug.clone(), meta);
@@ -7924,99 +7926,6 @@ pub(crate) mod tests {
         assert_eq!(tally.excluded_path, 1);
     }
 
-    /// A metrics-lib rule document scoped like the two that misfired on
-    /// sprintreview's `feat/bug-report-survey` (2026-11-27).
-    fn metrics_doc(slug: &str, paths: &[&str]) -> String {
-        let paths: String = paths.iter().map(|p| format!("      - \"{p}\"\n")).collect();
-        format!(
-            "---\nversion: 2\nname: {slug}\nmetadata:\n  actual:\n    adr_id: adr-{slug}\n    status: accepted\n  scope:\n    root: apps/api-service\n    paths:\n{paths}---\n\n# Standardization on metrics-lib for Application Metrics: {slug}\n\n### Rules\n\n- **R-LM-001** MUST: emit application metrics and telemetry exclusively through metrics-lib.\n"
-        )
-    }
-
-    /// The diff touches one file the metrics rules govern
-    /// (`src/utils/supabaseUtils.ts`) and two they do not.
-    const BUG_REPORT_DIFF: &str = "diff --git a/apps/api-service/src/utils/supabaseUtils.ts b/apps/api-service/src/utils/supabaseUtils.ts\n--- a/apps/api-service/src/utils/supabaseUtils.ts\n+++ b/apps/api-service/src/utils/supabaseUtils.ts\n@@ -45,1 +45,2 @@\n   return admitted;\n+export async function analyticsIdForUser(userId: string) { return telemetry(userId); }\ndiff --git a/apps/api-service/src/bugReports/route.ts b/apps/api-service/src/bugReports/route.ts\nnew file mode 100644\n--- /dev/null\n+++ b/apps/api-service/src/bugReports/route.ts\n@@ -0,0 +1,2 @@\n+  const adapter = projectPosthogAdapter(\"WEB_POSTHOG_API_KEY\", \"api-service\");\n+  return adapter ? { surveyId, questionId, adapter } : undefined;\ndiff --git a/packages/posthog-adapter/src/index.ts b/packages/posthog-adapter/src/index.ts\n--- a/packages/posthog-adapter/src/index.ts\n+++ b/packages/posthog-adapter/src/index.ts\n@@ -4,0 +5,2 @@\n+export { projectPosthogAdapter } from \"./project-adapter.js\";\n+export { captureSurveyResponse, type SurveyResponseInput } from \"./survey-response.js\";\n";
-
-    /// Regression for the 2026-11-27 sprintreview run: two rules scoped to
-    /// `apps/api-service/src/{handlers,utils}/**` were selected because the
-    /// diff touched a `src/utils` file, then judged conflicting on PostHog
-    /// code in `bugReports/route.ts` and `posthog-adapter/src/index.ts`. Now
-    /// the judge is shown only the file the rules govern, so the PostHog code
-    /// never reaches it; a third document scoped to `src/handlers/**` governs
-    /// no changed file and is never judged; and a violation in the governed
-    /// file still blocks.
-    #[cfg(unix)]
-    #[test]
-    fn test_a_diff_rule_is_only_applied_to_the_files_in_its_scope() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempdir().unwrap();
-        let _guards = isolated_config(&home);
-        let root = seed(&[
-            (
-                "metrics-hoc-38fb.md",
-                &metrics_doc("metrics-hoc-38fb", &["src/handlers/**", "src/utils/**"]),
-            ),
-            (
-                "metrics-handlers-5c55.md",
-                &metrics_doc(
-                    "metrics-handlers-5c55",
-                    &["src/handlers/**", "src/utils/**"],
-                ),
-            ),
-            (
-                "metrics-only-handlers-77aa.md",
-                &metrics_doc("metrics-only-handlers-77aa", &["src/handlers/**"]),
-            ),
-        ]);
-        let bin = tempdir().unwrap();
-        let judge = fake_claude(
-            bin.path(),
-            &serde_json::json!({"verdicts": {
-                "1": {"verdict": "violates", "quote": "export async function analyticsIdForUser(userId: string) { return telemetry(userId); }", "reason": "ad-hoc telemetry"},
-                "2": {"verdict": "not_applicable"},
-            }}),
-        );
-        // Keep every prompt the judge is sent.
-        let prompts = bin.path().join("prompts.txt");
-        let body = std::fs::read_to_string(&judge).unwrap().replacen(
-            "fi\n",
-            &format!("fi\nprintf '%s\\n' \"$@\" >> '{}'\n", prompts.display()),
-            1,
-        );
-        std::fs::write(&judge, body).unwrap();
-        let _binary = EnvGuard::set("CLAUDE_BINARY", judge.to_str().unwrap());
-
-        let (outcome, tally) = run_pipeline_filtered(
-            BUG_REPORT_DIFF,
-            root.path(),
-            &crate::rules::rules_dir(root.path()),
-            &no_runner_args().check_knobs(),
-            check::ArtifactKind::Diff,
-            false,
-            &GovernanceSession::default(),
-        )
-        .unwrap();
-        let tally = tally.unwrap();
-        assert_eq!(tally.accounted(), tally.index_size, "{tally:?}");
-        assert_eq!(tally.excluded_path, 1, "{tally:?}");
-
-        let sent = std::fs::read_to_string(&prompts).unwrap();
-        assert!(sent.contains("analyticsIdForUser"), "{sent}");
-        assert!(!sent.contains("projectPosthogAdapter"), "{sent}");
-        assert!(!sent.contains("packages/posthog-adapter"), "{sent}");
-        assert!(!sent.contains("bugReports/route.ts"), "{sent}");
-
-        #[rustfmt::skip]
-        let Outcome::Verdicts { verdicts, .. } = outcome else { panic!("the judge must run") };
-        let blocking: Vec<&str> = verdicts
-            .iter()
-            .filter(|v| v.verdict == Verdict::Conflicting)
-            .map(|v| v.doc_slug.as_str())
-            .collect();
-        assert_eq!(verdicts.len(), 2);
-        assert_eq!(blocking.len(), 1, "{verdicts:?}");
-    }
-
     /// The candidate cap and stage 2's rank are counted from the selection:
     /// a candidate judged unrelated, and one the limit left out.
     #[test]
@@ -8079,7 +7988,6 @@ pub(crate) mod tests {
             candidate_group_id: None,
             root: None,
             score: 1.0,
-            files: None,
             stage: scope::Stage::Prefilter,
             verdict: None,
             reason: String::new(),

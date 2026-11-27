@@ -30,20 +30,14 @@
 /// `pub(crate)` rather than private: callers' own tests need it to compute
 /// the expected fence for an assertion, alongside [`fenced_plan_block`].
 pub(crate) fn plan_fence(plan: &str) -> String {
-    fence("PLAN", plan)
-}
-
-/// [`plan_fence`] for any `label`, such as `DIFF` for the diff the judge
-/// checks.
-pub(crate) fn fence(label: &str, text: &str) -> String {
-    // FNV-1a over the text's bytes: tiny, dependency-free, and stable across
+    // FNV-1a over the plan bytes: tiny, dependency-free, and stable across
     // platforms and runs, which is all that is wanted here.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.as_bytes() {
+    for byte in plan.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{label}-{hash:016x}")
+    format!("PLAN-{hash:016x}")
 }
 
 /// Wrap `plan` in its fence and a one-line explanation of what the fence

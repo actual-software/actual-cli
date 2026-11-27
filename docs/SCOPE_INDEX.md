@@ -147,18 +147,6 @@ judge `packages/web/src/x.ts` and not `b/packages/web/src/x.ts`. The prefixed
 copies those headers leave in the diff's text, and `/dev/null`, are not read as
 paths. Other paths named in the diff's lines still count.
 
-A diff is also held to each document's declared include `paths`, which for a
-plan or a brief only rank: a document is selected only when it governs one of
-the files the diff changes (inside its root, not excluded, and matched by an
-include; an include that does not compile matches by its literal prefix). When
-it governs only some of them, its rules are judged on those files' sections of
-the diff alone: rules that govern the same files share one judge call, so code
-outside a rule's scope never reaches the judge for it. At most six such
-groups are judged per check; past that the smallest are merged and see the
-union of their files, though never into the group of rules that govern the
-whole diff. A binary file, a mode-only change or an empty new file is named by
-its `diff --git` line.
-
 **Status.** `deleted`, `draft`, `archived-draft`, `deferred`, `rejected` and
 `suggested` mark a decision that does not govern, as do `superseded` and `deprecated`, which no
 generator emits today. Such a document is left out of the index, so it is never
