@@ -1,8 +1,12 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+/// The binary, with no `ACTUAL_TOKEN` from the machine running the tests, so
+/// each test reads only the sign-in it sets up.
 fn cmd() -> Command {
-    assert_cmd::cargo::cargo_bin_cmd!("actual")
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("actual");
+    cmd.env_remove("ACTUAL_TOKEN");
+    cmd
 }
 
 #[test]
@@ -1629,6 +1633,7 @@ fn test_impl_check_direct_mode_reads_the_diff_from_stdin() {
 fn test_impl_check_direct_mode_uses_git_diff_head_when_stdin_is_dev_null() {
     let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_actual"))
+        .env_remove("ACTUAL_TOKEN")
         .args([
             "impl-check",
             "--repo",
@@ -4520,5 +4525,148 @@ fn test_captured_codex_envelopes_drive_the_codex_hooks() {
                 "{name} through {args:?} replied with {key}: {keys:?}"
             );
         }
+    }
+}
+
+// ── ACTUAL_TOKEN ─────────────────────────────────────────────────────
+
+const PAT: &str = "actl_pat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+fn pat_identity() -> String {
+    serde_json::json!({
+        "id": "tok-1", "name": "amp-orbs", "organization_id": "org-pat",
+        "member_id": "member-pat", "email": null, "scopes": ["adr:query", "adr:review"],
+        "expires_at": "2099-01-01T00:00:00Z",
+    })
+    .to_string()
+}
+
+/// `stderr` with the error panel's borders and line wrapping taken out.
+fn unwrapped(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .replace(['│', '╭', '╮', '╰', '╯', '─'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Twenty hook runs on a cold cache, each recording telemetry for Actual's
+/// API under the token, ask who the token belongs to once between them.
+#[cfg(feature = "telemetry")]
+#[test]
+fn test_hooks_with_actual_token_check_the_token_once() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_v2_rules();
+    let mut server = mockito::Server::new();
+    let current = server
+        .mock("GET", "/v1/oauth/tokens/current")
+        .match_header("authorization", format!("Bearer {PAT}").as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(pat_identity())
+        .expect(1)
+        .create();
+    let logs = server
+        .mock("POST", "/v1/logs")
+        .match_header("authorization", format!("Bearer {PAT}").as_str())
+        .with_status(200)
+        .create();
+    std::fs::write(
+        config_dir.path().join("config.yaml"),
+        format!(
+            "telemetry:\n  otlp_logs_endpoint: {}/v1/logs\n",
+            server.url()
+        ),
+    )
+    .unwrap();
+    let envelope = serde_json::json!({
+        "session_id": "s1",
+        "cwd": repo.path(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": repo.path().join("services/auth/oauth/token.ts")},
+    });
+
+    for _ in 0..20 {
+        cmd()
+            .args(["rules", "brief", "--claude-hook", "--repo"])
+            .arg(repo.path())
+            .args(["--min-score", "0"])
+            .env("ACTUAL_CONFIG_DIR", config_dir.path())
+            .env("ACTUAL_API_URL", server.url())
+            .env("ACTUAL_TOKEN", PAT)
+            .env_remove("ACTUAL_CONFIG")
+            .env_remove("ACTUAL_NO_TELEMETRY")
+            .env_remove("ACTUAL_OTLP_LOGS_ENDPOINT")
+            .env_remove("ACTUAL_OTLP_FILE")
+            .write_stdin(envelope.to_string())
+            .assert()
+            .success();
+    }
+    // The detached uploader reads the sign-in too; once it has sent under the
+    // token, every reader has had its turn at the cache.
+    for _ in 0..100 {
+        if logs.matched() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(logs.matched(), "the uploader never sent under the token");
+    current.assert();
+}
+
+/// A token refused by another route is checked once more, and the command
+/// then says how to replace ACTUAL_TOKEN (exit 2), never `actual login`.
+#[test]
+fn test_a_refused_actual_token_never_asks_for_actual_login() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new();
+    let accepted = server
+        .mock("GET", "/v1/oauth/tokens/current")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(pat_identity())
+        .expect(1)
+        .create();
+    let api = server.url();
+    let run = |args: &[&str]| {
+        cmd()
+            .args(args)
+            .env("ACTUAL_CONFIG_DIR", config_dir.path())
+            .env("ACTUAL_API_URL", &api)
+            .env("ACTUAL_TOKEN", PAT)
+            .env("ACTUAL_NO_TELEMETRY", "1")
+            .env_remove("ACTUAL_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let whoami = run(&["whoami"]);
+    assert!(whoami.status.success(), "{whoami:?}");
+    accepted.assert();
+    accepted.remove();
+    let refused = server
+        .mock("GET", "/v1/oauth/tokens/current")
+        .with_status(401)
+        .expect(1)
+        .create();
+    let decisions = server
+        .mock("GET", mockito::Matcher::Regex("^/v1/".to_string()))
+        .with_status(401)
+        .create();
+
+    let listed = run(&["adr", "list", "--repo", "acme/app"]);
+
+    assert_eq!(listed.status.code(), Some(2), "{listed:?}");
+    let stderr = unwrapped(&listed.stderr);
+    assert!(
+        stderr.contains("Your ACTUAL_TOKEN has expired or was revoked."),
+        "{stderr}"
+    );
+    assert!(decisions.matched(), "the command never reached Actual AI");
+    refused.assert();
+    let checked = run(&["whoami", "--check"]);
+    assert_eq!(checked.status.code(), Some(2));
+    for out in [&listed, &checked] {
+        assert!(!unwrapped(&out.stderr).contains("actual login"), "{out:?}");
     }
 }

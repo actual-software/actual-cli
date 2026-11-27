@@ -222,6 +222,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let _ci = EnvGuard::remove("CI");
@@ -303,6 +304,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let _ci = EnvGuard::remove("CI");
@@ -386,6 +388,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let _ci = EnvGuard::remove("CI");
@@ -458,6 +461,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let _ci = EnvGuard::remove("CI");
@@ -510,6 +514,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let _ci = EnvGuard::remove("CI");
@@ -543,6 +548,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _ci = EnvGuard::remove("CI");
         let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
@@ -596,6 +602,7 @@ mod tests {
         let _fresh = FreshId::new();
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
         let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");
@@ -646,6 +653,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _off = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         let _ci = EnvGuard::remove("CI");
@@ -712,6 +720,7 @@ mod tests {
         let _fresh = FreshId::new();
         let home = tempdir().unwrap();
         let _home = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _config = EnvGuard::remove("ACTUAL_CONFIG");
         let _ci = EnvGuard::remove("CI");
         let _out = EnvGuard::set("ACTUAL_OTLP_FILE", "/tmp/session-end-test.jsonl");

@@ -441,6 +441,7 @@ pub(crate) mod tests {
         vec![
             EnvGuard::remove("ACTUAL_CONFIG"),
             EnvGuard::set("ACTUAL_CONFIG_DIR", home.to_str().unwrap()),
+            EnvGuard::remove("ACTUAL_TOKEN"),
             EnvGuard::set(ENV, "1"),
             EnvGuard::set(ID_ENV, id),
         ]
@@ -614,6 +615,7 @@ pub(crate) mod tests {
         let home = tempfile::tempdir().unwrap();
         let _guards = debug_on(home.path(), "unwritable");
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", "relative/dir");
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         record(Entry::new(Stream::Otlp, Stage::Queued));
         record_all(vec![Entry::new(Stream::Otlp, Stage::Queued)]);
         record_all(Vec::new());

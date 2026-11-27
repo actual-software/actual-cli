@@ -553,6 +553,7 @@ async fn run(
     let session_org = creds.organization_id.clone();
     let explicit_org = args.org.is_some();
     let base_url = resolve_api_url(args.api_url.as_deref());
+    crate::auth::actual_token::ensure_destination(&base_url)?;
     let client = ActualApiClient::new(&base_url)?.with_bearer(&creds.access_token);
 
     let repo_unique_id = determine_scope(
@@ -795,6 +796,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         // exec() itself resolves the working directory before running.
         let err = exec(&args("http://127.0.0.1:1", None)).unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
@@ -806,6 +808,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let err = run(
             &args("http://127.0.0.1:1", None),
             None,
@@ -823,6 +826,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -860,6 +864,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -891,6 +896,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -925,6 +931,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -963,6 +970,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -995,6 +1003,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1037,6 +1046,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1074,6 +1084,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1110,6 +1121,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1150,6 +1162,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1215,6 +1228,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1251,6 +1265,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1530,6 +1545,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1577,6 +1593,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -1940,6 +1957,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let repo_dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
@@ -2059,6 +2077,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut a = args("http://127.0.0.1:1", None);
         a.query = None;
@@ -2081,6 +2100,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut cfg = crate::config::paths::load().unwrap();
         sticky::set_scope(&mut cfg, "key1", StickyScope::repo("old-id", None));
@@ -2118,6 +2138,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut server = mockito::Server::new_async().await;
         let m = server
@@ -2164,6 +2185,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // A repo pin exists, but an explicit --org runs org-level for this call.
         let mut cfg = crate::config::paths::load().unwrap();
@@ -2197,6 +2219,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut cfg = crate::config::paths::load().unwrap();
         sticky::set_scope(
@@ -2220,6 +2243,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut cfg = crate::config::paths::load().unwrap();
         sticky::set_scope(&mut cfg, "key1", StickyScope::org_level());
@@ -2244,6 +2268,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         show_scope(Some("unpinned-key")).unwrap();
     }
 
@@ -2253,6 +2278,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut cfg = crate::config::paths::load().unwrap();
         sticky::set_scope(
@@ -2273,6 +2299,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let repo_dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
@@ -2324,6 +2351,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut a = args("http://127.0.0.1:1", None);
@@ -2341,6 +2369,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&test_creds()).unwrap();
 
         let mut a = args("http://127.0.0.1:1", None);

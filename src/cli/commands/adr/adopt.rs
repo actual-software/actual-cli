@@ -2404,6 +2404,7 @@ mod tests {
         let _key = EnvGuard::remove("ANTHROPIC_API_KEY");
         let config = tempdir().unwrap();
         let _cfg = EnvGuard::set("ACTUAL_CONFIG_DIR", config.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let dir = tempdir().unwrap();
         let root = dir.path();
         adr(root, "0008-cache.md", PROSE);
@@ -2474,6 +2475,7 @@ mod tests {
         // Signed out: the files alone.
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _telemetry = sending_to_a_file(home.path());
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -2573,6 +2575,7 @@ mod tests {
 
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _telemetry = sending_to_a_file(home.path());
         let dir = tempdir().unwrap();
         let root = dir.path();

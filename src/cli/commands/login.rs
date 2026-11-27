@@ -12,6 +12,10 @@ use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
 
 pub fn exec(args: &LoginArgs) -> Result<(), ActualError> {
+    if crate::auth::actual_token::token().is_some() {
+        println!("{}", crate::auth::actual_token::SIGN_IN_UNCHANGED);
+        return Ok(());
+    }
     let base_url = oauth::resolve_auth_url(args.api_url.as_deref())?;
     if args.device {
         return exec_device(base_url);
@@ -118,6 +122,7 @@ mod tests {
     fn test_exec_rejects_non_https_url() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         // resolve_auth_url now defaults to the prod HTTPS endpoint, so a missing
         // URL no longer errors. A non-HTTPS, non-loopback --api-url is still
         // rejected with a clear error before any browser/network work, so
@@ -139,6 +144,7 @@ mod tests {
     fn test_exec_device_rejects_non_https_url() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         // The device flow applies the same HTTPS/loopback guard before any
         // network work, so a non-HTTPS override is rejected up front.
         let args = LoginArgs {

@@ -9,6 +9,7 @@
 //! The browser OAuth + PKCE login flow and the `login` / `logout` / `whoami`
 //! commands build on top of the credential store provided here.
 
+pub mod actual_token;
 pub mod jwt_bearer;
 pub mod loopback;
 pub mod oauth;
@@ -16,6 +17,5 @@ pub mod pat;
 pub mod pkce;
 pub mod refresh;
 pub mod store;
-pub mod token_store;
 
 pub use store::StoredCredentials;

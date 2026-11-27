@@ -2325,6 +2325,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let server = mockito::Server::new();
         let repo = tempdir().unwrap();
         let root = repo.path();
@@ -2980,6 +2981,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         std::fs::write(store::credentials_path().unwrap(), "{ not: [yaml").unwrap();
         let repo = tempdir().unwrap();
         let root = repo.path();
@@ -3393,6 +3395,7 @@ mod tests {
         let config = tempdir().unwrap();
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", config.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         for remote in ["not a remote", ORIGIN] {
             let listed = unsent_paths(root, &decisions, ORG, remote, TODAY, None);
             assert_eq!(listed, ["docs/adr/a.md"], "{remote}");
@@ -3405,6 +3408,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let server = mockito::Server::new();
         // An empty root holds no file with an ADR header, so nothing is sent
         // either way.

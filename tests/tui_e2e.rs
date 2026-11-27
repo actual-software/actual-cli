@@ -595,7 +595,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "unset CI ACTUAL_CLI_SUBPROCESS ACTUAL_NO_UPDATE_CHECK ACTUAL_CONFIG\n\
+                "unset CI ACTUAL_CLI_SUBPROCESS ACTUAL_NO_UPDATE_CHECK ACTUAL_CONFIG ACTUAL_TOKEN\n\
                  ACTUAL_CONFIG_DIR={} {} {command}{redirect}\n\
                  echo run-finished with status $?\n",
                 quote(config_dir),

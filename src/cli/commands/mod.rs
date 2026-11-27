@@ -174,6 +174,7 @@ pub fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
+            let e = crate::auth::actual_token::explain(e);
             eprintln!("{}", render_error(&e, term_size::terminal_width()));
             e.exit_code()
         }

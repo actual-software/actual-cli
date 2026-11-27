@@ -488,6 +488,7 @@ impl TestEnv {
     #[allow(dead_code)]
     pub fn cmd(&self) -> assert_cmd::Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("actual");
+        cmd.env_remove("ACTUAL_TOKEN");
         cmd.env("CLAUDE_BINARY", self.binary_path.to_str().unwrap());
         cmd.env("ACTUAL_CONFIG", self.config_path.to_str().unwrap());
         cmd.current_dir(self.dir.path());

@@ -6,16 +6,28 @@
 //! `whoami --check` also asks the auth server whether the sign-in still
 //! works, renewing the access token first when it is about to expire, and
 //! errors with `NotLoggedIn` when the server no longer accepts it.
+//!
+//! With `ACTUAL_TOKEN` set, both show the token's sign-in instead: `whoami`
+//! from the identity cache, `whoami --check` from asking Actual's API now.
 
 use chrono::{DateTime, Utc};
 
 use crate::auth::store::{self, StoredCredentials};
-use crate::auth::{oauth, refresh};
+use crate::auth::{actual_token, oauth, refresh};
 use crate::cli::args::WhoamiArgs;
 use crate::cli::ui::theme;
 use crate::error::{sanitize_server_text, ActualError};
 
 pub fn exec(args: &WhoamiArgs) -> Result<(), ActualError> {
+    if let Some(token) = actual_token::token() {
+        let identity = if args.check {
+            actual_token::check(&token)?
+        } else {
+            actual_token::identity(&token)?
+        };
+        print!("{}", format_token_identity(&token, identity));
+        return Ok(());
+    }
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
     if args.check {
         let creds = build_runtime()?.block_on(check(creds))?;
@@ -62,11 +74,32 @@ fn print_identity(creds: &StoredCredentials) {
 /// supplied every field except the expiry, so control characters are dropped
 /// from each of them.
 fn format_identity(creds: &StoredCredentials, now: DateTime<Utc>) -> String {
-    let mut text = format!(
+    let header = format!(
         "{} Signed in to {}\n",
         theme::success(&theme::SUCCESS),
         theme::success("Actual AI")
     );
+    header + &identity_rows(creds, now)
+}
+
+/// `ACTUAL_TOKEN`'s sign-in as `whoami` prints it: the token's name, the rows
+/// of [`format_identity`], and the token's expiry.
+fn format_token_identity(token: &str, identity: actual_token::Identity) -> String {
+    let name = sanitize_server_text(&identity.name);
+    let expires = identity.expires_at.format("%Y-%m-%d %H:%M UTC").to_string();
+    let creds = actual_token::to_credentials(token, identity);
+    format!(
+        "{} Signed in to {} with ACTUAL_TOKEN ({name})\n{}  {:<14} {expires}\n",
+        theme::success(&theme::SUCCESS),
+        theme::success("Actual AI"),
+        identity_rows(&creds, Utc::now()),
+        "Expires:"
+    )
+}
+
+/// The rows under `whoami`'s header.
+fn identity_rows(creds: &StoredCredentials, now: DateTime<Utc>) -> String {
+    let mut text = String::new();
     text.push_str(&server_row("Organization:", &creds.organization_id));
     if let Some(email) = &creds.email {
         text.push_str(&server_row("Account:", email));
@@ -129,6 +162,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let err = exec(&WhoamiArgs { check: false }).unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
@@ -140,6 +174,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         store::save(&creds()).unwrap();
         assert!(exec(&WhoamiArgs { check: false }).is_ok());
@@ -169,6 +204,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // The fields as the auth server's JSON sent them, read back from the
         // credentials file the way `exec` reads them.
@@ -239,6 +275,7 @@ mod tests {
         let guards = vec![
             EnvGuard::remove("ACTUAL_CONFIG"),
             EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+            EnvGuard::remove("ACTUAL_TOKEN"),
         ];
         (home, guards)
     }
@@ -428,5 +465,64 @@ mod tests {
 
         c.auth_url = None;
         assert_eq!(format_checked(&c, now), format_identity(&c, now));
+    }
+
+    /// With ACTUAL_TOKEN set, `whoami --check` asks Actual's API even with a
+    /// fresh cache, a 401 exits 2 with the ACTUAL_TOKEN message, and the
+    /// stored `actual login` session is never consulted.
+    #[test]
+    fn test_whoami_check_with_actual_token_asks_now() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let mut server = mockito::Server::new();
+        let (_home, _env) = crate::auth::actual_token::tests::with_token(&server.url());
+        let ok = server
+            .mock("GET", crate::auth::actual_token::CURRENT_PATH)
+            .with_status(200)
+            .with_body(crate::auth::actual_token::tests::identity_json(
+                Utc::now() + chrono::Duration::days(90),
+            ))
+            .expect(2)
+            .create();
+        exec(&WhoamiArgs { check: false }).unwrap();
+        exec(&CHECK).unwrap();
+        ok.assert();
+        ok.remove();
+        let refused = server
+            .mock("GET", crate::auth::actual_token::CURRENT_PATH)
+            .with_status(401)
+            .expect(1)
+            .create();
+
+        let err = exec(&CHECK).unwrap_err();
+
+        refused.assert();
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.to_string(), crate::auth::actual_token::REJECTED);
+    }
+
+    #[test]
+    fn test_format_token_identity_names_the_token_and_its_expiry() {
+        let identity: crate::auth::actual_token::Identity =
+            serde_json::from_str(&crate::auth::actual_token::tests::identity_json(
+                DateTime::parse_from_rfc3339("2027-02-25T09:30:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ))
+            .unwrap();
+        let text = format_token_identity("actl_pat_x", identity);
+        let header = format!(
+            "{} Signed in to {} with ACTUAL_TOKEN (amp-orbs)\n",
+            theme::success(&theme::SUCCESS),
+            theme::success("Actual AI")
+        );
+        assert_eq!(
+            text,
+            format!(
+                "{header}  Organization:  org-pat\n  Account:       dev@example.com\n  \
+                 Member:        member-pat\n  Scopes:        adr:query adr:review\n  \
+                 Expires:       2027-02-25 09:30 UTC\n"
+            )
+        );
+        assert!(!text.contains("actl_pat_x"));
     }
 }

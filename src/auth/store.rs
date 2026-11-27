@@ -127,7 +127,14 @@ pub fn credentials_path() -> Result<PathBuf, ActualError> {
 }
 
 /// Load stored credentials, or `None` if the user is not logged in.
+///
+/// With `ACTUAL_TOKEN` set, the sign-in is the token's instead, and it is
+/// never `None`: a token that can't be used is an error, so no command runs
+/// signed out by accident. See [`crate::auth::actual_token`].
 pub fn load() -> Result<Option<StoredCredentials>, ActualError> {
+    if let Some(token) = crate::auth::actual_token::token() {
+        return crate::auth::actual_token::credentials(&token).map(Some);
+    }
     load_from(&credentials_path()?)
 }
 
@@ -171,8 +178,12 @@ pub struct Lock {
 }
 
 impl Lock {
-    /// The stored sign-in, or `None` when there is none.
+    /// The stored sign-in, or `None` when there is none. With `ACTUAL_TOKEN`
+    /// set, the token's sign-in, as [`load`] gives it.
     pub fn load(&self) -> Result<Option<StoredCredentials>, ActualError> {
+        if let Some(token) = crate::auth::actual_token::token() {
+            return crate::auth::actual_token::credentials(&token).map(Some);
+        }
         load_from(&self.path)
     }
 
@@ -480,6 +491,7 @@ mod tests {
 
         let tmp = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let path = credentials_path().unwrap();
         assert_eq!(path, tmp.path().join(CREDENTIALS_FILENAME));
@@ -491,6 +503,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let creds = sample();
         assert!(load().unwrap().is_none());
@@ -514,6 +527,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let held = lock().unwrap();
         assert!(try_lock().unwrap().is_none());
@@ -532,6 +546,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let mut earlier = sample();
         earlier.organization_id = "org-before".to_string();
         let mut later = sample();
@@ -562,6 +577,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("fresh");
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let _held = lock().unwrap();
 
@@ -581,6 +597,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         std::fs::create_dir(tmp.path().join(LOCK_FILENAME)).unwrap();
 
         let err = lock().err().expect("a directory can't be locked");
@@ -599,6 +616,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", "/dev/null/actual");
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         assert!(lock().is_err());
     }

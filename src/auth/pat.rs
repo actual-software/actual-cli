@@ -4,21 +4,18 @@
 //! issuance endpoint with the user's existing `actual login` session token as
 //! the bearer — no second browser dance, the established session *is* the
 //! authentication for issuance. The endpoint returns the raw `actl_pat_…`
-//! exactly once; the CLI prints it once and otherwise keeps it only behind the
-//! keychain / encrypted-file store (see [`crate::auth::token_store`]).
+//! exactly once; the CLI prints it once and keeps no copy. A machine uses it
+//! from the `ACTUAL_TOKEN` env var (see [`crate::auth::actual_token`]).
 //!
-//! ## Endpoint contract (developed against; confirm against the backend)
+//! ## Endpoint contract
 //!
-//! The backend issuance endpoint is still landing, so this module is written
-//! against the documented contract and is trivially repointed once the server
-//! ships:
-//!
-//! - `POST <base>/api/oauth/tokens`
+//! - `POST <base>/v1/oauth/tokens`
 //! - `Authorization: Bearer <session access token>`
 //! - request body: `{ "name": "<label>", "scopes": ["adr:query", …] }`
-//! - response body: `{ "token": "actl_pat_…", "id": …, "name": …, "scopes":
-//!   […], "created_at": …, "expires_at": … }` — the raw `token` is returned
-//!   exactly once.
+//! - response body (201): `{ "token": "actl_pat_…", "id": …, "name": …,
+//!   "scopes": […], "organization_id": …, "organization_name": … | null,
+//!   "created_at": …, "expires_at": … }` — the raw `token` is returned exactly
+//!   once.
 //!
 //! `<base>` is resolved by the command layer (the `--api-url` flag, the
 //! `ACTUAL_API_URL` env var, or the api-service default), so steering the call
@@ -34,7 +31,7 @@ use crate::error::ActualError;
 pub const PAT_PREFIX: &str = "actl_pat_";
 
 /// Path of the authenticated issuance endpoint, appended to the resolved base.
-pub const ISSUANCE_PATH: &str = "/api/oauth/tokens";
+pub const ISSUANCE_PATH: &str = "/v1/oauth/tokens";
 
 /// Request body for token issuance.
 #[derive(Debug, Serialize)]
@@ -55,6 +52,10 @@ struct IssueTokenResponse {
     #[serde(default)]
     scopes: Option<Vec<String>>,
     #[serde(default)]
+    organization_id: Option<String>,
+    #[serde(default)]
+    organization_name: Option<String>,
+    #[serde(default)]
     created_at: Option<String>,
     #[serde(default)]
     expires_at: Option<String>,
@@ -74,6 +75,10 @@ pub struct IssuedToken {
     pub name: Option<String>,
     /// Granted scopes echoed back by the server.
     pub scopes: Vec<String>,
+    /// The organization the token works in, when provided.
+    pub organization_id: Option<String>,
+    /// That organization's name, when provided.
+    pub organization_name: Option<String>,
     /// Creation timestamp, when provided.
     pub created_at: Option<String>,
     /// Expiry timestamp, when provided.
@@ -87,6 +92,8 @@ impl std::fmt::Debug for IssuedToken {
             .field("id", &self.id)
             .field("name", &self.name)
             .field("scopes", &self.scopes)
+            .field("organization_id", &self.organization_id)
+            .field("organization_name", &self.organization_name)
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
             .finish()
@@ -142,6 +149,8 @@ pub async fn issue(
         id: body.id,
         name: body.name,
         scopes: body.scopes.unwrap_or_default(),
+        organization_id: body.organization_id,
+        organization_name: body.organization_name,
         created_at: body.created_at,
         expires_at: body.expires_at,
     })
@@ -264,6 +273,8 @@ mod tests {
             id: Some("tok_1".to_string()),
             name: Some("agent".to_string()),
             scopes: scopes(),
+            organization_id: None,
+            organization_name: None,
             created_at: None,
             expires_at: None,
         };

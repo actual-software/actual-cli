@@ -8,37 +8,47 @@
 //! the session waits for the sign-out rather than slipping between the revoke
 //! and the delete, which would leave the rotated session live.
 
-use crate::auth::{oauth, store};
+use crate::auth::{actual_token, oauth, store};
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 
 pub fn exec() -> Result<(), ActualError> {
     let lock = store::lock()?;
+    actual_token::forget()?;
+    if actual_token::token().is_some() {
+        // The token's own sign-in is left alone; the `actual login` session
+        // stored beside it, if any, is signed out as without the token.
+        println!("{}", actual_token::SIGN_IN_UNCHANGED);
+        if let Some(creds) = store::load_from(&store::credentials_path()?)? {
+            sign_out(&lock, &creds)?;
+            println!("Signed out of this computer.");
+        }
+        return Ok(());
+    }
     let Some(creds) = lock.load()? else {
         println!("Not signed in to Actual AI.");
         return Ok(());
     };
-
-    // Best-effort server-side revoke. A failure here must not block clearing
-    // the local credentials.
-    if creds.auth_url.is_some() {
-        match build_runtime().and_then(|rt| rt.block_on(oauth::revoke(&creds))) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!(
-                    "warning: could not revoke the server-side session ({e}); \
-                     clearing local credentials anyway."
-                );
-            }
-        }
-    }
-
-    lock.delete()?;
+    sign_out(&lock, &creds)?;
     println!(
         "{} Signed out of Actual AI.",
         theme::success(&theme::SUCCESS)
     );
     Ok(())
+}
+
+/// Revoke `creds` on the server, best effort, then remove the stored sign-in.
+fn sign_out(lock: &store::Lock, creds: &store::StoredCredentials) -> Result<(), ActualError> {
+    // A failure here must not block clearing the local credentials.
+    if creds.auth_url.is_some() {
+        if let Err(e) = build_runtime().and_then(|rt| rt.block_on(oauth::revoke(creds))) {
+            eprintln!(
+                "warning: could not revoke the server-side session ({e}); \
+                 clearing local credentials anyway."
+            );
+        }
+    }
+    lock.delete()
 }
 
 /// Single-threaded tokio runtime for the async revoke call.
@@ -62,6 +72,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // No credentials present — should succeed quietly.
         assert!(exec().is_ok());
@@ -73,6 +84,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // auth_url = None => revoke is skipped (no network), but local creds
         // must still be removed.
@@ -119,6 +131,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         let mut server = mockito::Server::new();
         let m = server
@@ -138,6 +151,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // Unreachable auth server → revoke fails → warning branch; creds still cleared.
         store::save(&creds_with(Some("http://127.0.0.1:1".to_string()))).unwrap();
@@ -154,6 +168,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let mut server = mockito::Server::new();
         let revoke = server
             .mock("POST", "/api/oauth/revoke")
@@ -178,5 +193,54 @@ mod tests {
 
         revoke.assert();
         assert!(store::load().unwrap().is_none());
+    }
+
+    /// With ACTUAL_TOKEN set, logout never sends the token anywhere, clears
+    /// the identity cache, and still signs out the stored session beside it.
+    #[test]
+    fn test_logout_with_actual_token_signs_out_only_the_stored_session() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let mut server = mockito::Server::new();
+        let (home, _env) = crate::auth::actual_token::tests::with_token(&server.url());
+        let revoke = server
+            .mock("POST", "/api/oauth/revoke")
+            .match_body(mockito::Matcher::UrlEncoded("token".into(), "r".into()))
+            .with_status(200)
+            .expect(1)
+            .create();
+        let cache = home.path().join("token-identity.yaml");
+        std::fs::write(&cache, "key: k\n").unwrap();
+        store::save_to(
+            &creds_with(Some(server.url())),
+            &store::credentials_path().unwrap(),
+        )
+        .unwrap();
+
+        exec().unwrap();
+
+        revoke.assert();
+        assert!(!cache.exists());
+        assert!(!store::credentials_path().unwrap().exists());
+    }
+
+    /// With ACTUAL_TOKEN set and no stored session, logout clears the identity
+    /// cache, sends nothing, and leaves the token's sign-in in place.
+    #[test]
+    fn test_logout_with_actual_token_and_no_stored_session() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let mut server = mockito::Server::new();
+        let (home, _env) = crate::auth::actual_token::tests::with_token(&server.url());
+        let any = server
+            .mock("POST", mockito::Matcher::Any)
+            .expect(0)
+            .create();
+        let cache = home.path().join("token-identity.yaml");
+        std::fs::write(&cache, "key: k\n").unwrap();
+
+        exec().unwrap();
+
+        any.assert();
+        assert!(!cache.exists());
+        assert!(crate::auth::actual_token::token().is_some());
     }
 }

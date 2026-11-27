@@ -88,6 +88,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
         let repo = tempdir().unwrap();
         let cli = Cli::parse_from([
@@ -110,6 +111,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _clear = EnvGuard::remove("ACTUAL_CONFIG");
         let repo = tempdir().unwrap();
         let cli = Cli::parse_from([
@@ -151,6 +153,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // Exercises the Command::Whoami dispatch arm (not signed in → error).
         let cli = Cli::parse_from(["actual", "whoami"]);
@@ -166,6 +169,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // Exercises the Command::Logout dispatch arm (not signed in → ok).
         let cli = Cli::parse_from(["actual", "logout"]);
@@ -178,6 +182,7 @@ mod tests {
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // Exercises the Command::Login dispatch arm. resolve_auth_url now defaults
         // to the prod OAuth URL, so login no longer errors on a missing URL — pass
@@ -202,6 +207,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         // Exercises the Command::Advisor dispatch arm (not signed in → error,
         // before any network).
@@ -247,6 +253,7 @@ mod tests {
         let home = tempdir().unwrap();
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _off = EnvGuard::set(update_check::OPT_OUT_ENV, "1");
         assert!(run(Cli::parse_from(["actual", "version", "--check"])).is_ok());
         assert!(run(Cli::parse_from(["actual", "__update-check"])).is_ok());
@@ -263,6 +270,7 @@ mod tests {
         let home = tempdir().unwrap();
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _off = EnvGuard::set(update_check::OPT_OUT_ENV, "1");
         let result = run(Cli::parse_from(["actual", "self-update"]));
         assert!(

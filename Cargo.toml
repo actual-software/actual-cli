@@ -73,25 +73,6 @@ base64 = "0.22"
 # Checks a release's SHA256SUMS.minisig against release-keys/ before
 # `actual self-update` installs anything
 minisign-verify = "0.3"
-# Scoped personal-access-token storage: OS keychain (primary) with an
-# AEAD-encrypted-file fallback for headless Linux/CI where no OS keychain is
-# available. `keyring` is the portable keychain abstraction; chacha20poly1305 +
-# argon2 protect the fallback file at rest.
-#
-# The Linux backend is `linux-native` (kernel keyutils), NOT `sync-secret-service`.
-# The Secret Service backend links the system `libdbus` at build time through
-# pkg-config, so it fails to *compile* on a headless / CI Linux host that lacks
-# `libdbus-1-dev` — a harder failure than a runtime missing-daemon error. keyutils
-# is pure syscalls: no build-time system dependency, no D-Bus daemon, so it builds
-# everywhere and works headless. See docs/AGENT_AUTH.md for the finding.
-keyring = { version = "3", default-features = false, features = [
-    "apple-native",
-    "windows-native",
-    "linux-native",
-] }
-chacha20poly1305 = "0.10"
-argon2 = "0.5"
-
 # JWS signing for the headless RFC 7523 jwt-bearer client (RS256 / ES256)
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 

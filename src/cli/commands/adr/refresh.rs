@@ -393,8 +393,10 @@ async fn read_decisions(
     cached: Cached<'_>,
 ) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
     let unread = |e: ActualError| format!("Couldn't read your decisions in Actual AI ({e})");
+    let base = resolve_api_url(api.api_url.as_deref());
+    crate::auth::actual_token::ensure_destination(&base).map_err(|e| Unread::failed(unread(e)))?;
     let session = Session {
-        client: ActualApiClient::new(&resolve_api_url(api.api_url.as_deref()))
+        client: ActualApiClient::new(&base)
             .map_err(|e| Unread::failed(unread(e)))?
             .with_bearer(&creds.access_token),
         org_id: creds.organization_id.clone(),
@@ -759,10 +761,11 @@ mod tests {
 
     /// Signed out: a config directory with no sign-in, which the guards
     /// point at.
-    fn signed_out(config: &Path) -> (EnvGuard, EnvGuard) {
+    fn signed_out(config: &Path) -> (EnvGuard, EnvGuard, EnvGuard) {
         (
             EnvGuard::remove("ACTUAL_CONFIG"),
             EnvGuard::set("ACTUAL_CONFIG_DIR", config.to_str().unwrap()),
+            EnvGuard::remove("ACTUAL_TOKEN"),
         )
     }
 
