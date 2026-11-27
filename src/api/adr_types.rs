@@ -145,6 +145,11 @@ pub struct DecisionsResponse {
     pub adrs: Vec<WebDecision>,
     #[serde(default)]
     pub suggestions: Vec<WebDecision>,
+    /// The time the read covers changes up to, to send back as the next
+    /// read's `updated_since`. An api-service without changed-since reads
+    /// leaves it out.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 /// A decision as the list read returns it. Every decision is a group: a

@@ -9,6 +9,13 @@
 //! so a hook that runs it can't fail on it; what went wrong is in the
 //! report.
 //!
+//! Signed in, a refresh reads only the decisions that changed since the
+//! last one (`updated_since`, the last read's `as_of`), and reads every
+//! decision when the last full read is [`FULL_READ_EVERY`] old, the
+//! connected repository changed, or a changed-since read fails. Only a full
+//! read removes the rule file of a decision deleted outright, and lists the
+//! files `create --all` would send. It reads nothing between calls.
+//!
 //! It never renews a sign-in itself. Actual AI rotates refresh tokens, so a
 //! renewal cut off by the time box, or by the hook's own timeout, would spend
 //! the stored refresh token and sign the person out. An access token about to
@@ -34,8 +41,8 @@ use crate::adr::context_file::Policy;
 use crate::adr::files::{rule_files_by_id, DECISION_DIR, RULES_DIR};
 use crate::adr::header::REPOSITORY_ROOT;
 use crate::adr::refresh::{
-    self as core, Applied, CloudRule, ConnectedRepo, Governing, Origin, Planner, Record,
-    RuleSource, Unnormalized, Unresolved, RECORD_FORMAT,
+    self as core, Applied, ChangedSince, CloudRule, ConnectedRepo, Governing, Origin, Planner,
+    Record, RuleSource, Unnormalized, Unresolved, RECORD_FORMAT,
 };
 use crate::api::adr_types::Decision;
 use crate::api::{resolve_api_url, ActualApiClient};
@@ -120,6 +127,10 @@ pub(super) fn refresh(
     let mut repo = record.connected_repo.clone();
     let mut unresolved = record.unresolved.clone();
     let mut create_all = None;
+    // What this refresh learned of the changed-since point, applied to the
+    // record as it is at save time: a background read may have saved a
+    // newer one meanwhile.
+    let mut since = Since::Keep;
     let (mode, plan, governing) = match store::load() {
         Ok(None) => (
             Mode::SignedOut,
@@ -149,30 +160,48 @@ pub(super) fn refresh(
             let cached = Cached {
                 repo: repo.as_ref(),
                 unresolved: unresolved.as_ref(),
+                changed_since: record.changed_since.as_ref(),
+                // A rule file written from Actual AI that's gone from disk (a
+                // branch switch, a clean) comes back only with a full read.
+                full: args.full
+                    || record.rules.iter().any(|(id, entry)| {
+                        entry.origin == Origin::ActualAi && !on_disk.contains_key(id)
+                    }),
             };
             match read_cloud(root, &creds, &args.api, args.timeout_ms, cached) {
-                Ok((decisions, connected)) => {
-                    create_all = Some(super::batch::unsent_paths(
-                        root,
-                        &decisions,
-                        &connected.org_id,
-                        &connected.remote,
-                        today,
-                        None,
-                    ));
-                    repo = Some(connected);
+                Ok(read) => {
+                    let sources = rule_sources(&read.decisions);
+                    let plan =
+                        core::plan_from_cloud(root, &sources, &on_disk, &record, read.complete);
+                    since = Since::Set(read.as_of.map(|as_of| ChangedSince {
+                        repo_id: read.connected.repo_id.clone(),
+                        as_of,
+                        full_read_at: match (&record.changed_since, read.complete) {
+                            (Some(last), false) => last.full_read_at,
+                            _ => Utc::now(),
+                        },
+                        last_read_failed: false,
+                    }));
+                    // What every decision says, only a full read knows.
+                    let governing = read.complete.then(|| Governing {
+                        origin: Origin::ActualAi,
+                        any: sources
+                            .iter()
+                            .any(|(_, rule)| matches!(rule, CloudRule::Governs(_))),
+                    });
+                    if read.complete {
+                        create_all = Some(super::batch::unsent_paths(
+                            root,
+                            &read.decisions,
+                            &read.connected.org_id,
+                            &read.connected.remote,
+                            today,
+                            None,
+                        ));
+                    }
+                    repo = Some(read.connected);
                     unresolved = None;
-                    let sources = rule_sources(&decisions);
-                    (
-                        Mode::SignedIn,
-                        Some(core::plan_from_cloud(root, &sources, &on_disk, &record)),
-                        Some(Governing {
-                            origin: Origin::ActualAi,
-                            any: sources
-                                .iter()
-                                .any(|(_, rule)| matches!(rule, CloudRule::Governs(_))),
-                        }),
-                    )
+                    (Mode::SignedIn, Some(plan), governing)
                 }
                 Err(Unread::NoRepo(lookup)) => {
                     // Said once, and again only when the lookup finds
@@ -187,8 +216,29 @@ pub(super) fn refresh(
                     unresolved = Some(lookup);
                     (Mode::SignedIn, None, None)
                 }
-                Err(Unread::Failed { problem, found }) => {
-                    problems.push(problem);
+                Err(Unread::Failed {
+                    problem,
+                    found,
+                    full_cut_off,
+                }) => {
+                    // A read of every decision that never fits the time box
+                    // finishes in the background instead, so the repository
+                    // gets the as_of its next refresh reads changes from.
+                    // The slot is claimed under the record's lock first, so
+                    // refreshes cut off together (Codex runs a Stop's hooks at
+                    // once) start one between them.
+                    if full_cut_off
+                        && !args.full
+                        && dir.is_some_and(|dir| claim_background_read(dir, root))
+                    {
+                        spawn_background_read(root, &args.api);
+                        problems.push(format!("{problem} {BACKGROUND_READ_STARTED}"));
+                    } else {
+                        problems.push(problem);
+                    }
+                    // Alternate: after a failed read the next asks only for
+                    // what changed, and after that a due full read again.
+                    since = Since::ReadFailed;
                     if found.is_some() {
                         repo = found;
                         unresolved = None;
@@ -198,6 +248,7 @@ pub(super) fn refresh(
                 Err(Unread::Refused(problem)) => {
                     problems.push(problem);
                     repo = None;
+                    since = Since::Set(None);
                     (Mode::SignedIn, None, None)
                 }
             }
@@ -231,6 +282,15 @@ pub(super) fn refresh(
         record.connected_repo = repo;
         record.unresolved = unresolved;
         record.governing = governing.or(record.governing);
+        match since {
+            Since::Keep => {}
+            Since::Set(changed_since) => record.changed_since = changed_since,
+            Since::ReadFailed => {
+                if let Some(last) = record.changed_since.as_mut() {
+                    last.last_read_failed = !last.last_read_failed;
+                }
+            }
+        }
         if create_all_print.is_some() {
             record.create_all = create_all_print;
         }
@@ -311,11 +371,53 @@ const KEPT: &str = "so the rule files were left as they are";
 /// organization and origin remote, before a refresh looks again.
 const RECHECK_UNRESOLVED: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
+/// How old the last read of every decision gets before a refresh reads every
+/// decision again instead of only what changed, so a decision deleted
+/// outright loses its rule file. Counted when a refresh runs; nothing runs
+/// in between.
+const FULL_READ_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
+
+/// The time box of a read of every decision started in the background.
+const BACKGROUND_TIMEOUT_MS: u64 = 60_000;
+
+/// How long after starting a background read a refresh waits before it
+/// starts another, longer than one can take, so at most one runs.
+const BACKGROUND_READ_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(2);
+
+/// What a refresh that started a background read adds to its problem.
+const BACKGROUND_READ_STARTED: &str =
+    "Reading every decision in the background instead, which updates the rule files when it \
+     finishes.";
+
+/// How a refresh changes the record's changed-since point.
+enum Since {
+    Keep,
+    Set(Option<ChangedSince>),
+    /// Alternate: after a failed read the next asks only for what changed,
+    /// and after that a due full read again.
+    ReadFailed,
+}
+
 /// What the record remembers of the last signed-in read.
 #[derive(Clone, Copy)]
 struct Cached<'a> {
     repo: Option<&'a ConnectedRepo>,
     unresolved: Option<&'a Unresolved>,
+    changed_since: Option<&'a ChangedSince>,
+    /// Read every decision, though a changed-since read would do.
+    full: bool,
+}
+
+/// A signed-in read of a connected repository's decisions.
+#[derive(Debug)]
+struct CloudRead {
+    decisions: Vec<Decision>,
+    connected: ConnectedRepo,
+    /// The read's `as_of`, when the api-service sent one.
+    as_of: Option<String>,
+    /// Whether these are every decision, or only those changed since the
+    /// last read.
+    complete: bool,
 }
 
 /// Why a signed-in refresh read no decisions.
@@ -329,6 +431,8 @@ enum Unread {
     Failed {
         problem: String,
         found: Option<ConnectedRepo>,
+        /// The time box cut off a read of every decision.
+        full_cut_off: bool,
     },
     /// Actual AI turned the read down, as it would for a repository no
     /// longer connected, so the next refresh looks the repository up again.
@@ -340,6 +444,7 @@ impl Unread {
         Self::Failed {
             problem,
             found: None,
+            full_cut_off: false,
         }
     }
 }
@@ -352,20 +457,36 @@ fn read_cloud(
     api: &AdrApiOptions,
     timeout_ms: u64,
     cached: Cached<'_>,
-) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
+) -> Result<CloudRead, Unread> {
+    // Set while the read is of every decision, so a cut-off one is told apart.
+    let full = std::cell::Cell::new(cached.full || cached.changed_since.is_none());
     let rt =
         runtime().map_err(|e| Unread::failed(format!("Couldn't read Actual AI ({e}), {KEPT}.")))?;
-    match within(rt, timeout_ms, read_decisions(root, creds, api, cached)) {
+    match within(
+        rt,
+        timeout_ms,
+        read_decisions(root, creds, api, cached, &full),
+    ) {
         Some(Ok(read)) => Ok(read),
-        Some(Err(Unread::Failed { problem, found })) => Err(Unread::Failed {
+        Some(Err(Unread::Failed { problem, found, .. })) => Err(Unread::Failed {
             problem: format!("{problem}, {KEPT}."),
             found,
+            full_cut_off: false,
         }),
         Some(Err(Unread::Refused(problem))) => Err(Unread::Refused(format!("{problem}, {KEPT}."))),
         Some(Err(no_repo)) => Err(no_repo),
-        None => Err(Unread::failed(format!(
-            "Actual AI didn't answer within {timeout_ms} ms, {KEPT}."
-        ))),
+        None => {
+            let problem = format!("Actual AI didn't answer within {timeout_ms} ms, {KEPT}.");
+            Err(if full.get() {
+                Unread::Failed {
+                    problem,
+                    found: None,
+                    full_cut_off: true,
+                }
+            } else {
+                Unread::failed(problem)
+            })
+        }
     }
 }
 
@@ -391,7 +512,8 @@ async fn read_decisions(
     creds: &StoredCredentials,
     api: &AdrApiOptions,
     cached: Cached<'_>,
-) -> Result<(Vec<Decision>, ConnectedRepo), Unread> {
+    full: &std::cell::Cell<bool>,
+) -> Result<CloudRead, Unread> {
     let unread = |e: ActualError| format!("Couldn't read your decisions in Actual AI ({e})");
     let session = Session {
         client: ActualApiClient::new(&resolve_api_url(api.api_url.as_deref()))
@@ -435,14 +557,65 @@ async fn read_decisions(
         remote,
         repo_id,
     };
-    match super::cloud::decisions(&session, Some(&connected.repo_id)).await {
-        Ok(decisions) => Ok((decisions, connected)),
+    // Only what changed since the last read, while it was of this repository
+    // and the last full read is recent. A changed-since read that fails, such
+    // as one an api-service without it turns down, falls back to a full read.
+    let since = cached
+        .changed_since
+        .filter(|last| {
+            reuse.is_some()
+                && !cached.full
+                && last.repo_id == connected.repo_id
+                && (last.last_read_failed || Utc::now() - last.full_read_at < FULL_READ_EVERY)
+        })
+        .map(|last| last.as_of.as_str());
+    if let Some(since) = since {
+        if let Ok(response) = session
+            .client
+            .read_decisions_changed(&session.org_id, Some(&connected.repo_id), Some(since))
+            .await
+        {
+            // An api-service that ignores `updated_since` answers with every
+            // decision and no `as_of`: that's a full read.
+            let as_of = response.as_of.clone();
+            return Ok(CloudRead {
+                decisions: views(response),
+                connected,
+                complete: as_of.is_none(),
+                as_of,
+            });
+        }
+    }
+    full.set(true);
+    match session
+        .client
+        .read_decisions_changed(&session.org_id, Some(&connected.repo_id), None)
+        .await
+    {
+        Ok(response) => {
+            let as_of = response.as_of.clone();
+            Ok(CloudRead {
+                decisions: views(response),
+                connected,
+                as_of,
+                complete: true,
+            })
+        }
         Err(e) if refused(&e) => Err(Unread::Refused(unread(e))),
         Err(e) => Err(Unread::Failed {
             problem: unread(e),
             found: Some(connected),
+            full_cut_off: false,
         }),
     }
+}
+
+/// The decisions of a read as `list` prints them.
+fn views(response: crate::api::adr_types::DecisionsResponse) -> Vec<Decision> {
+    crate::adr::workflow::listed(response)
+        .iter()
+        .map(crate::adr::workflow::view)
+        .collect()
 }
 
 /// Whether Actual AI answered the read by turning it down, rather than
@@ -457,16 +630,34 @@ fn refused(e: &ActualError) -> bool {
     }
 }
 
-/// Renew the stored sign-in in a detached `actual whoami --check`, in its own
-/// process group as the telemetry uploader is, so the renewal outlives this
-/// process and a hook that kills its group. Best effort: a renewal that can't
-/// start leaves the next signed-in command to renew.
+/// Whether this refresh may start a background read: none started in the
+/// last [`BACKGROUND_READ_EVERY`], checked and recorded under the record's
+/// lock. A record that can't be saved starts none, since the read couldn't
+/// keep what it read either.
+fn claim_background_read(dir: &Path, root: &Path) -> bool {
+    let mut claimed = false;
+    let saved = save(dir, root, |record| {
+        let now = Utc::now();
+        if record
+            .background_read_at
+            .is_none_or(|at| now - at >= BACKGROUND_READ_EVERY)
+        {
+            record.background_read_at = Some(now);
+            claimed = true;
+        }
+    });
+    claimed && saved.is_ok()
+}
+
+/// Run `actual` with `args` detached, in its own process group as the
+/// telemetry uploader is, so it outlives this process and a hook that kills
+/// its group. Best effort: one that can't start is left to a later refresh.
 #[cfg(not(test))]
-fn spawn_renewal() {
+fn spawn_detached(args: &[std::ffi::OsString]) {
     if let Ok(exe) = std::env::current_exe() {
         let mut child = std::process::Command::new(exe);
         child
-            .args(["whoami", "--check"])
+            .args(args)
             .env(crate::update_check::OPT_OUT_ENV, "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -477,10 +668,39 @@ fn spawn_renewal() {
     }
 }
 
-/// The test binary isn't `actual`, so a test only counts the renewals.
+/// The test binary isn't `actual`, so a test only records what it would run.
 #[cfg(test)]
+fn spawn_detached(args: &[std::ffi::OsString]) {
+    let args = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    tests::SPAWNED.with(|spawned| spawned.borrow_mut().push(args));
+}
+
+/// Renew the stored sign-in in a detached `actual whoami --check`.
 fn spawn_renewal() {
-    tests::RENEWALS.with(|count| count.set(count.get() + 1));
+    spawn_detached(&["whoami".into(), "--check".into()]);
+}
+
+/// Finish a read of every decision that the time box cut off in a detached
+/// `actual adr refresh` with a longer one.
+fn spawn_background_read(root: &Path, api: &AdrApiOptions) {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "adr".into(),
+        "refresh".into(),
+        "--full".into(),
+        "--timeout-ms".into(),
+        BACKGROUND_TIMEOUT_MS.to_string().into(),
+        "--root".into(),
+        root.into(),
+    ];
+    args.extend(
+        api.api_url
+            .iter()
+            .flat_map(|url| ["--api-url".into(), url.into()]),
+    );
+    spawn_detached(&args);
 }
 
 /// Each decision's id, with what it asks of its rule file: what the file
@@ -729,8 +949,16 @@ mod tests {
     const OTHER: &str = "0b6f7e2a-2222-4222-8222-222222222222";
 
     thread_local! {
-        /// How many renewals this thread's refreshes started.
-        pub(super) static RENEWALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// The arguments of each detached `actual` this thread's refreshes
+        /// started.
+        pub(super) static SPAWNED: std::cell::RefCell<Vec<Vec<String>>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// How many detached runs this thread started whose arguments begin
+    /// with `first`.
+    fn spawned(first: &str) -> usize {
+        SPAWNED.with(|s| s.borrow().iter().filter(|args| args[0] == first).count())
     }
 
     fn decision_file(id: &str, status: &str, title: &str, policy: &str) -> String {
@@ -750,10 +978,18 @@ mod tests {
         AdrRefreshArgs {
             root: None,
             timeout_ms: 5_000,
+            full: false,
             api: AdrApiOptions {
                 api_url: server.map(mockito::Server::url),
                 json: true,
             },
+        }
+    }
+
+    fn args_timed(server: &mockito::Server, timeout_ms: u64) -> AdrRefreshArgs {
+        AdrRefreshArgs {
+            timeout_ms,
+            ..args(Some(server))
         }
     }
 
@@ -996,6 +1232,247 @@ mod tests {
     }
 
     #[test]
+    fn signed_in_refresh_reads_only_what_changed_until_a_full_read_is_due() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempdir().unwrap();
+        let _guards = sign_in(config.path());
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        git_repo(root, Some("git@github.com:actual-software/actual-cli.git"));
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(CONNECTED)
+            .create();
+        let full_query =
+            format!("organization_id={ORG}&repository_id={REPO}&include_summaries=false");
+        let with_as_of = |as_of: &str| {
+            DECISIONS.replacen(
+                "\"suggestions\":[]",
+                &format!("\"suggestions\":[],\"as_of\":\"{as_of}\""),
+                1,
+            )
+        };
+        let full = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(with_as_of("2026-11-25T10:00:00.000Z"))
+            .expect(1)
+            .create();
+        let records = config.path().join(DIR_NAME);
+        let dir = Some(records.as_path());
+        let name = rule_file_name(ID, "Use Postgres");
+        let rule = root.join(RULES_DIR).join(&name);
+
+        // The first read is full and keeps its as_of.
+        let first = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert_eq!(first.written, [format!("{RULES_DIR}/{name}")], "{first:?}");
+        assert!(first.create_all.is_some());
+        let since = load(&records, root).changed_since.unwrap();
+        assert_eq!(since.as_of, "2026-11-25T10:00:00.000Z");
+        assert_eq!(since.repo_id, REPO);
+        full.assert();
+        full.remove();
+        // `--full`, which the background read passes, reads every decision
+        // though a changed-since read would do.
+        let forced = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(with_as_of("2026-11-25T10:00:00.000Z"))
+            .expect(1)
+            .create();
+        let mut full_args = args(Some(&server));
+        full_args.full = true;
+        let again = refresh(root, &full_args, TODAY, dir);
+        assert!(again.create_all.is_some(), "{again:?}");
+        forced.assert();
+        forced.remove();
+        let since = load(&records, root).changed_since.unwrap();
+
+        // The next asks only for what changed since then: the decision's
+        // policy did, so its rule file is rewritten. The archived decision
+        // the delta leaves out keeps its place, and the list create --all
+        // sends isn't rebuilt.
+        let changed = with_as_of("2026-11-25T10:01:00.000Z")
+            .replace("Add a second database.", "Add a third database.");
+        let delta = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:00:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(changed)
+            .expect(1)
+            .create();
+        let second = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(
+            second.problems.is_empty() && second.removed.is_empty(),
+            "{second:?}"
+        );
+        assert_eq!(
+            second.rewritten,
+            [format!("{RULES_DIR}/{name}")],
+            "{second:?}"
+        );
+        assert!(std::fs::read_to_string(&rule)
+            .unwrap()
+            .contains("third database"));
+        assert!(second.create_all.is_none() && second.recommendation.is_none());
+        // An unchanged decision left out of a delta keeps its rule file.
+        delta.remove();
+        let quiet = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:01:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:01:00.000Z"}"#)
+            .expect(1)
+            .create();
+        let unchanged = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(
+            unchanged.removed.is_empty() && rule.exists(),
+            "{unchanged:?}"
+        );
+        quiet.assert();
+        quiet.remove();
+        let after = load(&records, root).changed_since.unwrap();
+        assert_eq!(after.as_of, "2026-11-25T10:01:00.000Z");
+        assert_eq!(after.full_read_at, since.full_read_at);
+
+        // A rule file deleted locally is written back by a full read, though a
+        // changed-since read would otherwise do.
+        std::fs::remove_file(&rule).unwrap();
+        let no_delta = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:01:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:01:00.000Z"}"#)
+            .expect(0)
+            .create();
+        let restore = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(with_as_of("2026-11-25T10:01:00.000Z"))
+            .expect(1)
+            .create();
+        let restored = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert_eq!(
+            restored.written,
+            [format!("{RULES_DIR}/{name}")],
+            "{restored:?}"
+        );
+        no_delta.assert();
+        restore.assert();
+        no_delta.remove();
+        restore.remove();
+
+        // A changed-since read that fails, as an older api-service turns
+        // `updated_since` down, falls back to a full read.
+        let refused = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:01:00.000Z".into(),
+            ))
+            .with_status(400)
+            .with_body(r#"{"error":"bad_request"}"#)
+            .expect(1)
+            .create();
+        let gone = r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:02:00.000Z"}"#;
+        let emptied = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(200)
+            .with_body(gone)
+            .expect(1)
+            .create();
+        let third = refresh(root, &args(Some(&server)), TODAY, dir);
+        // A full read that no longer lists the decision removes its rule file.
+        assert_eq!(third.removed, [format!("{RULES_DIR}/{name}")], "{third:?}");
+        assert!(third.problems.is_empty(), "{third:?}");
+        refused.assert();
+        emptied.assert();
+        refused.remove();
+        emptied.remove();
+
+        // Once the last full read is older than FULL_READ_EVERY, the next
+        // read is full though an as_of is kept.
+        save(&records, root, |record| {
+            let since = record.changed_since.as_mut().unwrap();
+            since.full_read_at = Utc::now() - FULL_READ_EVERY - chrono::TimeDelta::seconds(1);
+        })
+        .unwrap();
+        let skipped = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:02:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(gone)
+            .expect(0)
+            .create();
+        // The due full read fails: the rule files stay, the as_of is kept.
+        let failing = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query.clone()))
+            .with_status(500)
+            .expect(1)
+            .create();
+        let fourth = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(fourth.kept, "{fourth:?}");
+        skipped.assert();
+        failing.assert();
+        skipped.remove();
+        failing.remove();
+        let kept = load(&records, root).changed_since.unwrap();
+        assert_eq!(kept.as_of, "2026-11-25T10:02:00.000Z");
+        assert!(kept.last_read_failed);
+
+        // So the next asks only for what changed, though a full read is due...
+        let catch_up = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::UrlEncoded(
+                "updated_since".into(),
+                "2026-11-25T10:02:00.000Z".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:03:00.000Z"}"#)
+            .expect(1)
+            .create();
+        let fifth = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(!fifth.kept && fifth.create_all.is_none(), "{fifth:?}");
+        catch_up.assert();
+        catch_up.remove();
+
+        // ...and the one after that reads every decision.
+        let due = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(full_query))
+            .with_status(200)
+            .with_body(gone)
+            .expect(1)
+            .create();
+        let sixth = refresh(root, &args(Some(&server)), TODAY, dir);
+        assert!(sixth.create_all.is_some(), "{sixth:?}");
+        assert!(
+            Utc::now() - load(&records, root).changed_since.unwrap().full_read_at < FULL_READ_EVERY
+        );
+        due.assert();
+    }
+
+    #[test]
     fn signed_in_refresh_leaves_an_updated_decisions_rule_file_as_it_is() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let config = tempdir().unwrap();
@@ -1216,16 +1693,108 @@ mod tests {
             .create();
         let mut hurried = args(Some(&slow));
         hurried.timeout_ms = 50;
+        let started = spawned("adr");
         let report = refresh(root, &hurried, TODAY, dir);
         assert!(report.kept);
+        // A read of every decision cut off before the repository's first
+        // as_of finishes in the background, so a repository whose full read
+        // never fits the time box still gets one.
         assert_eq!(
             report.problems,
-            ["Actual AI didn't answer within 50 ms, so the rule files were left as they are."]
+            [format!(
+                "Actual AI didn't answer within 50 ms, so the rule files were left as they \
+                 are. {BACKGROUND_READ_STARTED}"
+            )]
         );
+        assert_eq!(spawned("adr"), started + 1);
         assert!(kept.exists());
         // A refresh cut off by the time box keeps the repository too.
         assert_eq!(load(&records, root).connected_repo, Some(found));
         no_lookup.assert();
+        // While that read can still be running, a cut-off refresh starts no
+        // other; once it can't be, one starts again.
+        let report = refresh(root, &hurried, TODAY, dir);
+        assert_eq!(report.problems.len(), 1, "{report:?}");
+        assert!(
+            !report.problems[0].contains(BACKGROUND_READ_STARTED),
+            "{report:?}"
+        );
+        assert_eq!(spawned("adr"), started + 1);
+        save(&records, root, |record| {
+            record.background_read_at =
+                Some(Utc::now() - BACKGROUND_READ_EVERY - chrono::TimeDelta::seconds(1));
+        })
+        .unwrap();
+        let report = refresh(root, &hurried, TODAY, dir);
+        assert!(
+            report.problems[0].contains(BACKGROUND_READ_STARTED),
+            "{report:?}"
+        );
+        assert_eq!(spawned("adr"), started + 2);
+        // It reads every decision of this checkout, for at most 60 s.
+        let last = SPAWNED.with(|s| s.borrow().last().cloned().unwrap());
+        assert_eq!(
+            last[..6],
+            [
+                "adr",
+                "refresh",
+                "--full",
+                "--timeout-ms",
+                "60000",
+                "--root"
+            ]
+        );
+        assert_eq!(last[6], root.to_string_lossy());
+        // A background read's own refresh (`--full`), cut off too, starts no
+        // other.
+        save(&records, root, |record| record.background_read_at = None).unwrap();
+        let mut background = args(Some(&slow));
+        background.timeout_ms = 50;
+        background.full = true;
+        let report = refresh(root, &background, TODAY, dir);
+        assert!(report.kept && !report.problems[0].contains(BACKGROUND_READ_STARTED));
+        assert_eq!(spawned("adr"), started + 2);
+        // An as_of a background read saves while a refresh is reading isn't
+        // lost when that refresh is cut off.
+        save(&records, root, |record| {
+            record.background_read_at = Some(Utc::now());
+            record.changed_since = None;
+        })
+        .unwrap();
+        let mut racing = mockito::Server::new();
+        let (meanwhile, checkout) = (records.clone(), root.to_path_buf());
+        racing
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_chunked_body(move |w| {
+                save(&meanwhile, &checkout, |record| {
+                    record.changed_since = Some(ChangedSince {
+                        repo_id: REPO.to_string(),
+                        as_of: "2026-11-25T10:09:00.000Z".to_string(),
+                        full_read_at: Utc::now(),
+                        last_read_failed: false,
+                    });
+                })
+                .unwrap();
+                std::thread::sleep(Duration::from_millis(400));
+                w.write_all(DECISIONS.as_bytes())
+            })
+            .create();
+        let report = refresh(root, &args_timed(&racing, 50), TODAY, dir);
+        assert!(report.kept, "{report:?}");
+        let kept_since = load(&records, root).changed_since.unwrap();
+        assert_eq!(kept_since.as_of, "2026-11-25T10:09:00.000Z");
+        // Now a read of only the changes is due; cut off, it starts no
+        // background read.
+        save(&records, root, |record| record.background_read_at = None).unwrap();
+        let report = refresh(root, &hurried, TODAY, dir);
+        assert!(
+            !report.problems[0].contains(BACKGROUND_READ_STARTED),
+            "{report:?}"
+        );
+        assert_eq!(spawned("adr"), started + 2);
+        save(&records, root, |record| record.changed_since = None).unwrap();
 
         // A read Actual AI turns down, as for a repository no longer
         // connected, lets the next refresh look the repository up again.
@@ -1368,10 +1937,10 @@ mod tests {
         let creds = expiring_sign_in();
         store::save(&creds).unwrap();
         let tmp = tempdir().unwrap();
-        let before = RENEWALS.with(std::cell::Cell::get);
+        let before = spawned("whoami");
         // No server: a read would fail with another problem.
         let report = refresh(tmp.path(), &args(None), TODAY, None);
-        assert_eq!(RENEWALS.with(std::cell::Cell::get), before + 1);
+        assert_eq!(spawned("whoami"), before + 1);
         assert_eq!(report.mode, Mode::SignedIn);
         assert!(report.kept);
         assert!(
@@ -1390,7 +1959,7 @@ mod tests {
                  they are. Sign in again with `actual login`."
             );
         }
-        assert_eq!(RENEWALS.with(std::cell::Cell::get), before + 1);
+        assert_eq!(spawned("whoami"), before + 1);
     }
 
     #[test]
@@ -1400,7 +1969,7 @@ mod tests {
         let _guards = signed_out(config.path());
         store::save(&expiring_sign_in()).unwrap();
         let tmp = tempdir().unwrap();
-        let before = RENEWALS.with(std::cell::Cell::get);
+        let before = spawned("whoami");
 
         // Another process's renewal holds the lock, as one waiting out an
         // outage does: each refresh reports the renewal and starts none.
@@ -1413,12 +1982,12 @@ mod tests {
                 "{report:?}"
             );
         }
-        assert_eq!(RENEWALS.with(std::cell::Cell::get), before);
+        assert_eq!(spawned("whoami"), before);
 
         // Once the lock is free, the next refresh starts exactly one.
         drop(held);
         refresh(tmp.path(), &args(None), TODAY, None);
-        assert_eq!(RENEWALS.with(std::cell::Cell::get), before + 1);
+        assert_eq!(spawned("whoami"), before + 1);
     }
 
     #[test]

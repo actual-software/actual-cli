@@ -30,11 +30,28 @@ impl ActualApiClient {
         org_id: &str,
         repository_id: Option<&str>,
     ) -> Result<DecisionsResponse, ActualError> {
+        self.read_decisions_changed(org_id, repository_id, None)
+            .await
+    }
+
+    /// [`Self::read_decisions`], limited with `updated_since` to the
+    /// decisions that changed at or after that time (a previous read's
+    /// `as_of`). Each changed decision comes back whole; one that didn't
+    /// change doesn't come back, and neither does one deleted outright.
+    pub async fn read_decisions_changed(
+        &self,
+        org_id: &str,
+        repository_id: Option<&str>,
+        updated_since: Option<&str>,
+    ) -> Result<DecisionsResponse, ActualError> {
         let mut query = vec![("organization_id", org_id)];
         if let Some(repository) = repository_id {
             query.push(("repository_id", repository));
         }
         query.push(("include_summaries", "false"));
+        if let Some(since) = updated_since {
+            query.push(("updated_since", since));
+        }
         let request = self
             .client
             .get(self.decision_url("decisions"))
@@ -292,6 +309,23 @@ mod tests {
         let read = client(&server).read_decisions(ORG, None).await.unwrap();
         assert!(read.adrs.is_empty());
         org_wide.assert_async().await;
+
+        // A changed-since read adds updated_since, and the answer's as_of is kept.
+        let changed = server
+            .mock("GET", "/v1/gcp/product/decisions")
+            .match_query(Matcher::Exact(format!(
+                "organization_id={ORG}&repository_id={REPO}&include_summaries=false&updated_since=2026-11-25T10%3A00%3A00.000Z"
+            )))
+            .with_status(200)
+            .with_body(r#"{"adrs":[],"suggestions":[],"as_of":"2026-11-25T10:01:00.000Z"}"#)
+            .create_async()
+            .await;
+        let read = client(&server)
+            .read_decisions_changed(ORG, Some(REPO), Some("2026-11-25T10:00:00.000Z"))
+            .await
+            .unwrap();
+        assert_eq!(read.as_of.as_deref(), Some("2026-11-25T10:01:00.000Z"));
+        changed.assert_async().await;
     }
 
     #[tokio::test]

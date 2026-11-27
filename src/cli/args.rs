@@ -881,7 +881,7 @@ pub enum AdrAction {
     Reject(AdrRejectArgs),
 
     /// Bring .actual/rules/ in step with docs/adr/ (signed out) or with
-    /// Actual AI (signed in), as the plugin's hooks do on every call
+    /// Actual AI (signed in), as the plugin's hooks do before their own work
     Refresh(AdrRefreshArgs),
 }
 
@@ -1221,6 +1221,11 @@ pub struct AdrRefreshArgs {
         value_parser = clap::value_parser!(u64).range(1..=60_000)
     )]
     pub timeout_ms: u64,
+
+    /// Read every decision, not only those changed since the last read: the
+    /// background read a cut-off refresh starts.
+    #[arg(long, hide = true)]
+    pub full: bool,
 
     #[command(flatten)]
     pub api: AdrApiOptions,
