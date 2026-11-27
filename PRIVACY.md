@@ -793,12 +793,12 @@ or a hook does. That rank prompt holds the same plan or diff the check sends,
 and the candidate rules' titles, scopes and path patterns. `--no-rank` skips
 it (the plugin passes it when `ACTUAL_GATE_RANK=off`), and so does
 `rules select --by-adr`. The rank prompt of an `impl-check` holds the whole
-diff. A `plan-check` with more than 20 rules to judge sends the plan in
-several prompts at once, each with up to 20 of the rules. An `impl-check`
-sends one prompt for each set of files its rules cover, at most six, each with
-that part of the diff and up to 20 of the rules, all at once. Either sends a
-prompt once more on the same runner when its answer fails or takes longer
-than 75 seconds.
+diff. A `plan-check` with more than 10 rules to judge sends the plan in
+several prompts at once, each with up to 10 of the rules. An `impl-check`
+groups its rules by the set of files they cover, at most six sets, and sends
+each set's part of the diff with up to 10 of its rules a prompt, all at once.
+Either sends a prompt once more on the same runner when its answer fails or
+takes longer than 75 seconds.
 `rules eval --rank` can make it for each case in the file you give it. No prompt
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.
