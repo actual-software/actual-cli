@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - On codex-cli, a stage-2 rank or a `plan-check` or `impl-check` judge run outside a git repository no longer fails with "Not inside a trusted directory". These calls run read-only, so they pass `--skip-git-repo-check`. Tailoring, which writes files, still requires a git repository
 
+### Changed
+- `PRIVACY.md` and the README say that review actions taken in the Actual web app (accept, reject, publish, move to draft, delete, restore and edit) are recorded by Actual's server as `actual.adr.reviewed`, each with the decision's id and your Actual user id. The CLI's telemetry setting doesn't stop these records, they're kept with no end date, and they're deleted when the organization is deleted or on a verified deletion request for it. What the CLI sends is unchanged
+
 ## [0.17.0] - 2026-11-24
 
 ### Added
