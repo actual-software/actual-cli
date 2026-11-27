@@ -114,6 +114,14 @@ pub fn render_rule_file(source: &RuleSource, name: Option<&str>) -> (String, Str
     (name, format!("{header}\n{body}"))
 }
 
+/// `text`, a rule file rendered for `source`, with the rule ids a CLI wrote
+/// before they took eight hex digits (`R-0B6F-001` for `R-0B6F2A1E-001`).
+fn four_hex_ids(source: &RuleSource, text: &str) -> String {
+    let prefix = rule_id_prefix(&source.adr_id);
+    let old: String = prefix.chars().take("R-".len() + 4).collect();
+    text.replace(&format!("**{prefix}-"), &format!("**{old}-"))
+}
+
 /// The [`digest`] a rule file records of what `source` governs.
 fn source_digest(source: &RuleSource) -> String {
     let doc = ContextFile {
@@ -145,7 +153,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// The id a rule file gives policy `n` (from 1) of decision `adr_id`, such as
-/// `R-0B6F-001`. A decision file stores no policy ids, so the signed-out
+/// `R-0B6F2A1E-001`. A decision file stores no policy ids, so the signed-out
 /// commands name a policy by this one.
 pub fn policy_rule_id(adr_id: &str, n: usize) -> String {
     format!("{}-{n:03}", rule_id_prefix(adr_id))
@@ -461,6 +469,16 @@ pub struct Planner<'a> {
     pub plan: Plan,
 }
 
+/// Whether the file at `path` is, byte for byte, what a CLI whose rule ids
+/// took four hex digits wrote for `source` under that name. TODO(rule-id
+/// rename): remove in 0.20, with `four_hex_ids` and `width_only`.
+fn written_with_four_hex_ids(root: &Path, path: &Path, source: &RuleSource) -> bool {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let new = render_rule_file(source, name).1;
+    let old = four_hex_ids(source, &new);
+    old != new && std::fs::read_to_string(root.join(path)).is_ok_and(|text| text == old)
+}
+
 impl<'a> Planner<'a> {
     pub fn new(root: &'a Path, on_disk: &'a BTreeMap<String, PathBuf>, record: &'a Record) -> Self {
         Self {
@@ -475,7 +493,9 @@ impl<'a> Planner<'a> {
     /// `None`. A governing decision with no rule file gets one; one whose
     /// file the record knows is rewritten when its fingerprint moved, or
     /// whenever `changed` says the caller just changed the decision; one
-    /// whose file the record doesn't know is recorded as the file stands. A
+    /// whose file the record doesn't know is recorded as the file stands,
+    /// unless it is the text a CLI wrote with four-digit rule ids, which is
+    /// rewritten once. A
     /// decision that doesn't govern loses the rule file naming it.
     pub fn decision(
         &mut self,
@@ -501,6 +521,14 @@ impl<'a> Planner<'a> {
             .rules
             .get(adr_id)
             .filter(|entry| entry.origin == origin);
+        // A fingerprint that moved only because rule ids went from four hex
+        // digits to eight is no change to the decision: the file is renamed
+        // only when it is this CLI's four-digit text, as it wrote it.
+        let width_only = known.is_some_and(|entry| {
+            let four =
+                sha256_hex(four_hex_ids(source, &render_rule_file(source, None).1).as_bytes());
+            entry.fingerprint == four && four != fingerprint
+        });
         match (self.on_disk.get(adr_id), known) {
             (None, _) => {
                 let (name, text) = render_rule_file(source, None);
@@ -509,7 +537,11 @@ impl<'a> Planner<'a> {
                     .push((adr_id.to_string(), Change::Write { path, text }));
             }
             (Some(path), known)
-                if changed || known.is_some_and(|entry| entry.fingerprint != fingerprint) =>
+                if changed
+                    || (known.is_some_and(|entry| entry.fingerprint != fingerprint)
+                        && !width_only)
+                    || ((known.is_none() || width_only)
+                        && written_with_four_hex_ids(self.root, path, source)) =>
             {
                 let name = path.file_name().and_then(|name| name.to_str());
                 let (_, text) = render_rule_file(source, name);
@@ -521,8 +553,10 @@ impl<'a> Planner<'a> {
                     },
                 ));
             }
-            (Some(_), Some(_)) => return,
-            (Some(_), None) => {}
+            // A file left as it is keeps its entry, or takes the eight-digit
+            // fingerprint when only the id width moved it.
+            (Some(_), Some(_)) if !width_only => return,
+            (Some(_), _) => {}
         }
         plan.set.insert(
             adr_id.to_string(),
@@ -784,8 +818,8 @@ mod tests {
         assert!(doc.is_active());
         assert_eq!(doc.rules.len(), 1);
         assert_eq!(doc.rules[0].level, RuleLevel::MustNot);
-        assert_eq!(doc.rules[0].id, "R-0B6F-001");
-        assert_eq!(policy_rule_id(ID, 1), "R-0B6F-001");
+        assert_eq!(doc.rules[0].id, "R-0B6F7E2A-001");
+        assert_eq!(policy_rule_id(ID, 1), "R-0B6F7E2A-001");
         assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
 
         // An existing file keeps its own name, which its header repeats.
@@ -1031,6 +1065,37 @@ mod tests {
     }
 
     #[test]
+    fn docs_refresh_gives_a_rule_file_written_with_four_hex_ids_the_eight_hex_ones() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "docs/adr/a.md",
+            &decision_file(ID, "accepted", "Use Postgres", "MUST: Use Postgres."),
+        );
+        let mut record = Record::default();
+        run(root, &mut record);
+        let path = root
+            .join(RULES_DIR)
+            .join(rule_file_name(ID, "Use Postgres"));
+        // What a CLI that took four hex digits wrote and recorded for the same decision.
+        let old = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("R-0B6F7E2A-", "R-0B6F-");
+        std::fs::write(&path, &old).unwrap();
+        record.rules.get_mut(ID).unwrap().fingerprint = sha256_hex(old.as_bytes());
+
+        assert_eq!(run(root, &mut record).rewritten.len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("- **R-0B6F7E2A-001** MUST: Use Postgres."),
+            "{text}"
+        );
+        assert!(!text.contains("R-0B6F-"), "{text}");
+        assert_eq!(run(root, &mut record), Applied::default());
+    }
+
+    #[test]
     fn docs_refresh_records_a_file_it_did_not_write_and_rewrites_it_only_after_a_change() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
@@ -1044,7 +1109,7 @@ mod tests {
             root,
             ".actual/rules/data-postgres-9f9f.md",
             &format!(
-                "---\nversion: 2\nname: data-postgres-9f9f\nmetadata:\n  actual:\n    adr_id: {ID}\n    status: accepted\n---\n\n# Postgres\n\n### Rules\n\n- **R-0B6F-001** MUST: Store data in Postgres.\n"
+                "---\nversion: 2\nname: data-postgres-9f9f\nmetadata:\n  actual:\n    adr_id: {ID}\n    status: accepted\n---\n\n# Postgres\n\n### Rules\n\n- **R-0B6F7E2A-001** MUST: Store data in Postgres.\n"
             ),
         );
         let before = std::fs::read_to_string(&synced).unwrap();
@@ -1183,6 +1248,75 @@ mod tests {
             [".actual/rules/old-draft.md"]
         );
         assert!(!draft_rule.exists());
+    }
+
+    #[test]
+    fn eight_hex_ids_leave_a_sync_written_file_as_it_is_and_rename_the_clis_own_unrecorded_one() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let active = source("Use Postgres", "Add a second database.");
+        let decisions = vec![(ID.to_string(), CloudRule::Governs(active.clone()))];
+        let (name, eight) = render_rule_file(&active, None);
+        let four = four_hex_ids(&active, &eight);
+        assert!(four.contains("**R-0B6F-001**") && eight.contains("**R-0B6F7E2A-001**"));
+
+        // A file the sync wrote, which a four-digit refresh recorded under its
+        // own rendering: kept byte for byte, the entry takes the new fingerprint.
+        let sync_text = format!(
+            "{}\n# Use Postgres\n\n### Rules\n\n- **R-LM-001** MUST NOT: Sync prose.\n",
+            eight.split("\n# ").next().unwrap()
+        );
+        let path = write(root, &format!("{RULES_DIR}/{name}"), &sync_text);
+        let mut record = Record::default();
+        record.rules.insert(
+            ID.to_string(),
+            Entry {
+                fingerprint: sha256_hex(four.as_bytes()),
+                origin: Origin::ActualAi,
+                path: None,
+            },
+        );
+        let plan = plan_from_cloud(root, &decisions, &on_disk(root), &record);
+        let (applied, set, drop) = apply(root, plan);
+        record.apply_edits(&set, &drop);
+        assert!(applied.rewritten.is_empty(), "{applied:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), sync_text);
+        assert_eq!(record.rules[ID].fingerprint, fingerprint(&active));
+        assert!(plan_from_cloud(root, &decisions, &on_disk(root), &record)
+            .changes
+            .is_empty());
+
+        // The CLI's own four-digit file in a checkout whose record never met it
+        // (a fresh clone): renamed once.
+        std::fs::write(&path, &four).unwrap();
+        let mut record = Record::default();
+        let plan = plan_from_cloud(root, &decisions, &on_disk(root), &record);
+        let (applied, set, drop) = apply(root, plan);
+        record.apply_edits(&set, &drop);
+        assert_eq!(applied.rewritten.len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), eight);
+        assert!(plan_from_cloud(root, &decisions, &on_disk(root), &record)
+            .changes
+            .is_empty());
+    }
+
+    #[test]
+    fn a_decision_with_no_rule_ids_is_not_rewritten_on_every_refresh() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let mut bare = source("Use Postgres", "Add a second database.");
+        bare.policies.clear();
+        let decisions = vec![(ID.to_string(), CloudRule::Governs(bare.clone()))];
+        let (name, text) = render_rule_file(&bare, None);
+        assert!(!text.contains("**R-"));
+        write(root, &format!("{RULES_DIR}/{name}"), &text);
+        let mut record = Record::default();
+        for _ in 0..3 {
+            let plan = plan_from_cloud(root, &decisions, &on_disk(root), &record);
+            let (applied, set, drop) = apply(root, plan);
+            record.apply_edits(&set, &drop);
+            assert!(applied.rewritten.is_empty(), "{applied:?}");
+        }
     }
 
     #[test]

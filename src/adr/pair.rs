@@ -151,7 +151,7 @@ mod tests {
         let text = decision.rule_text("cross-cutting-use-postgres-0b6f.md", "docs/adr/a.md");
         assert!(text.contains("    source:\n      origin: local\n      path: docs/adr/a.md\n"));
         assert!(text.contains(&decision.digest()));
-        assert!(text.contains("**R-0B6F-001** MUST NOT: Open SQLite files."));
+        assert!(text.contains("**R-0B6F2A1E-001** MUST NOT: Open SQLite files."));
     }
 
     #[test]

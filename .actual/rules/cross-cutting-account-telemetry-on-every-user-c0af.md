@@ -24,8 +24,8 @@ Scope: applies to `src/**`, `PRIVACY.md`, `CHANGELOG.md`.
 
 ### Rules
 
-- **R-C0AF-001** MUST: A change that adds or alters a user-facing command path makes that path send its command family's telemetry event, signed in and signed out, or adds to PRIVACY.md the reason that path sends none.
-- **R-C0AF-002** MUST: A change that adds or alters a telemetry event or attribute updates PRIVACY.md in the same pull request, with each new attribute's row and privacy class.
-- **R-C0AF-003** MUST: A change that adds or alters a telemetry attribute bumps SCHEMA_VERSION in src/telemetry/otlp.rs and records the new version in PRIVACY.md and CHANGELOG.md in the same pull request.
-- **R-C0AF-004** MUST NOT: A telemetry attribute carries decision titles, context, policy text, scope globs, file paths or other free text, apart from the identity-linked fields PRIVACY.md lists.
-- **R-C0AF-005** SHOULD: Each new command path has a test that asserts its event's attributes and outcome on every pathway it runs on.
+- **R-C0AF831B-001** MUST: A change that adds or alters a user-facing command path makes that path send its command family's telemetry event, signed in and signed out, or adds to PRIVACY.md the reason that path sends none.
+- **R-C0AF831B-002** MUST: A change that adds or alters a telemetry event or attribute updates PRIVACY.md in the same pull request, with each new attribute's row and privacy class.
+- **R-C0AF831B-003** MUST: A change that adds or alters a telemetry attribute bumps SCHEMA_VERSION in src/telemetry/otlp.rs and records the new version in PRIVACY.md and CHANGELOG.md in the same pull request.
+- **R-C0AF831B-004** MUST NOT: A telemetry attribute carries decision titles, context, policy text, scope globs, file paths or other free text, apart from the identity-linked fields PRIVACY.md lists.
+- **R-C0AF831B-005** SHOULD: Each new command path has a test that asserts its event's attributes and outcome on every pathway it runs on.
