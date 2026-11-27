@@ -2,7 +2,7 @@
 //! `docs/adr/`. A command that takes an id finds the file whose header names
 //! it, the id `list` prints, and each change brings that decision's rule file
 //! in step at once ([`refresh_decision`]). A file stores no policy ids, so a
-//! policy goes by the rule id its rule file gives it, such as `R-0B6F-001`.
+//! policy goes by the rule id its rule file gives it, such as `R-0B6F2A1E-001`.
 //!
 //! `restore`, `accept` and `reject` act on what only Actual AI keeps (its
 //! archive and its suggestions), so they need a sign-in. So does

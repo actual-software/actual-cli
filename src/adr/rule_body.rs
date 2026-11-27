@@ -65,12 +65,13 @@ pub fn scope_line(root: &str, paths: &[String]) -> String {
     format!("Scope: {applies}{excludes}.")
 }
 
-/// Rule IDs for a decision: `R-` and the first four hex digits of its id, uppercased (`R-0B6F`).
+/// Rule IDs for a decision: `R-` and the first eight hex digits of its id, uppercased (`R-0B6F2A1E`),
+/// as the repository sync writes them, so a rule id names one rule across a repository's decisions.
 pub fn rule_id_prefix(adr_id: &str) -> String {
     let digits: String = adr_id
         .chars()
         .filter(char::is_ascii_hexdigit)
-        .take(4)
+        .take(8)
         .collect();
     format!("R-{}", digits.to_ascii_uppercase())
 }
@@ -182,13 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn rule_id_prefix_takes_four_hex_digits() {
+    fn rule_id_prefix_takes_eight_hex_digits() {
         assert_eq!(
             rule_id_prefix("0b6f2a1e-1111-2222-3333-444455556666"),
-            "R-0B6F"
+            "R-0B6F2A1E"
         );
-        assert_eq!(rule_id_prefix("fdbbcb01-e293"), "R-FDBB");
-        assert_eq!(rule_id_prefix("\u{e9}-ab-zz-c9d"), "R-ABC9");
+        assert_eq!(rule_id_prefix("fdbbcb01-e293"), "R-FDBBCB01");
+        assert_eq!(rule_id_prefix("\u{e9}-ab-zz-c9d"), "R-ABC9D");
         assert_eq!(rule_id_prefix("xyz"), "R-");
     }
 
@@ -217,7 +218,7 @@ mod tests {
              adr_id: 0b6f2a1e-1111-2222-3333-444455556666\n    status: created-from-user\n  \
              scope:\n    root: .\n---\n\n# Use Postgres for storage\n\n\
              Scope: applies to the whole repository.\n\n### Rules\n\n\
-             - **R-0B6F-001** MUST: Store relational data in Postgres.\n"
+             - **R-0B6F2A1E-001** MUST: Store relational data in Postgres.\n"
         );
     }
 

@@ -479,7 +479,7 @@ mod tests {
         write(
             &rule,
             &format!(
-                "{}\n# Use Postgres for storage\n\n### Rules\n\n- **R-0B6F-001** MUST: Use it.\n",
+                "{}\n# Use Postgres for storage\n\n### Rules\n\n- **R-0B6F2A1E-001** MUST: Use it.\n",
                 header("rule", OLD, "accepted", &["src/**"])
             ),
         );
@@ -718,7 +718,8 @@ mod tests {
             .join(RULES_DIR)
             .join(rule_file_name(NEW, "Use Postgres for storage"));
         let rule_text = std::fs::read_to_string(&new_rule).unwrap();
-        assert!(rule_text.contains("- **R-0B6F-001** MUST: Use it."));
+        // The rules move as they stand, ids included.
+        assert!(rule_text.contains("- **R-0B6F2A1E-001** MUST: Use it."));
         assert_eq!(find_rule_file(root, NEW), Some(new_rule));
     }
 
