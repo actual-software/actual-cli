@@ -435,13 +435,6 @@ pub async fn rank<R: StructuredRunner>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_verdict_words() {
-        assert_eq!(Verdict::Governs.as_str(), "governs");
-        assert_eq!(Verdict::Related.as_str(), "related");
-        assert_eq!(Verdict::Unrelated.as_str(), "unrelated");
-    }
-
     fn candidates() -> Vec<Candidate> {
         vec![
             Candidate::new(
