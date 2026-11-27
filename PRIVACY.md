@@ -575,7 +575,7 @@ has only the classes its fields carry below:
 | `actual.filter.dropped.capped` | Rule files cut by the candidate cap or the selection's limit | anonymous |
 | `actual.filter.dropped.unrelated` | Rule files stage 2's rank judged unrelated. `0` when no rank ran: the first pass found no more rules than the limit keeps, the rank failed or missed its deadline, or `--no-rank` was given | anonymous |
 | `actual.filter.dropped.session` | Gates only: rule files whose every rule was already cleared or overridden in this session | anonymous |
-| `actual.filter.dropped.window` | Gates only: rule files with a rule still to judge, none of them inside the rules the judge sees in one round (`--max-rules`: 40 for `plan-check` and 60 for `impl-check` by default) | anonymous |
+| `actual.filter.dropped.window` | Gates only: rule files with a rule still to judge, none of them inside the 40 rules the judge sees in one round | anonymous |
 | `actual.filter.dropped.brief_cap` | Brief only: rule files cut by the brief's decision limit, by what the agent was already briefed on, or by the brief's size budget | anonymous |
 | `actual.filter.kept_count` | Rule files that reached the agent, or whose rules reached the judge | anonymous |
 | `actual.filter.kept_refs` | The ADRs of the kept rule files, each once, best first, named as `actual.adr.ref` names them. A kept file without a v2 header has no reference and isn't listed, so this can be shorter than `actual.filter.kept_count` | first-party identity-linked |
@@ -792,10 +792,7 @@ the diff standing in for the plan on `impl-check`, whether you run it yourself
 or a hook does. That rank prompt holds the same plan or diff the check sends,
 and the candidate rules' titles, scopes and path patterns. `--no-rank` skips
 it (the plugin passes it when `ACTUAL_GATE_RANK=off`), and so does
-`rules select --by-adr`. A check with more than 20 rules to judge sends the
-plan or diff in several prompts at once, each with up to 20 of the rules, and
-sends a prompt once more on the same runner when its answer fails or takes
-longer than 75 seconds; every one holds the same plan or diff.
+`rules select --by-adr`.
 `rules eval --rank` can make it for each case in the file you give it. No prompt
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.
