@@ -914,6 +914,7 @@ fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> V
                     score: rule.score,
                     contributions: Vec::new(),
                     matched_globs: Vec::new(),
+                    files: rule.files.clone(),
                 })
         })
         .collect()
