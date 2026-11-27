@@ -232,6 +232,10 @@ pub struct Record {
     /// decision, for the connected repository it was read for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_since: Option<ChangedSince>,
+    /// When a refresh last started a read of every decision in the
+    /// background, because its own ran out of time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_read_at: Option<DateTime<Utc>>,
 }
 
 /// A signed-in read's `as_of` for one connected repository, and when the
