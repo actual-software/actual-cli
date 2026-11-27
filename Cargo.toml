@@ -8,7 +8,7 @@ edition = "2021"
 description = "Align coding agents with your architecture decisions"
 license = "MIT"
 repository = "https://github.com/actual-software/actual-cli"
-homepage = "https://cli.actual.ai"
+homepage = "https://docs.actual.ai"
 autobenches = false
 default-run = "actual"
 
@@ -83,7 +83,8 @@ minisign-verify = "0.3"
 # pkg-config, so it fails to *compile* on a headless / CI Linux host that lacks
 # `libdbus-1-dev` — a harder failure than a runtime missing-daemon error. keyutils
 # is pure syscalls: no build-time system dependency, no D-Bus daemon, so it builds
-# everywhere and works headless. See docs/AGENT_AUTH.md for the finding.
+# everywhere and works headless. The finding is in docs/AGENT_AUTH.md as of v0.16.0:
+# https://github.com/actual-software/actual-cli/blob/v0.16.0/docs/AGENT_AUTH.md#headless-storage-finding
 keyring = { version = "3", default-features = false, features = [
     "apple-native",
     "windows-native",
