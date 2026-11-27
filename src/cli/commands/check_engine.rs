@@ -341,14 +341,23 @@ pub(super) fn run_pipeline_filtered(
     };
     let label = resolved_runner.label();
 
-    let outcome = match runtime.block_on(check::check(
+    let judge_started = std::time::Instant::now();
+    let answer = runtime.block_on(check::check(
         &resolved_runner.runner,
         kind,
         plan_text,
         &gathered.rules,
         resolved_runner.model.as_deref(),
         resolved_runner.max_budget_usd,
-    )) {
+    ));
+    tracing::info!(
+        "judge: {} rules in {} calls, {:.1} s, {}",
+        gathered.rules.len(),
+        check::chunks(&gathered.rules).len(),
+        judge_started.elapsed().as_secs_f64(),
+        if answer.is_ok() { "answered" } else { "failed" }
+    );
+    let outcome = match answer {
         Ok(verdicts) => Outcome::Verdicts {
             selection,
             verdicts,
@@ -461,7 +470,15 @@ fn prepare_round(
                 runner.max_budget_usd,
                 knobs.rank_budget,
             ));
-            (selection, Some(started.elapsed().as_secs_f64()))
+            let seconds = started.elapsed().as_secs_f64();
+            // Timing for anyone tuning the gates: `RUST_LOG=actual_cli=info`.
+            tracing::info!(
+                "stage 2: {} of {} candidates kept in {seconds:.1} s ({})",
+                selection.selected.len(),
+                prefiltered.len(),
+                selection.stage2.summary()
+            );
+            (selection, Some(seconds))
         }
         None => (prefiltered.finish(Stage2::NotRequested), None),
     };
