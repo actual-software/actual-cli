@@ -245,11 +245,17 @@ for the plan and its diff for the turn's diff.
   the plugin's 200-second gate timeout. A rank that misses the deadline falls
   back to stage 1's top 60, which still reaches 28% for a diff.
 - **The judge's time.** At 60 to 80 rules the judge took 9 to 18 seconds at the
-  median and at most 27, over 8 pull requests on both runners, where one call
-  over the same rules took 76 to 101 seconds. A chunk that fails, or runs past
-  75 seconds, is made once more.
+  median and at most 27, over 8 pull requests on both runners, in calls of 20,
+  where one call over the same rules took 76 to 101 seconds. Calls of 10 cut it
+  again: end to end on the 25 pull requests, `impl-check`'s judge took 18
+  seconds at the median and 26 at the 95th percentile on codex-cli, and 9 and
+  16 on claude-cli. A chunk that fails, or runs past 75 seconds, is made once
+  more.
+- **The whole check.** `impl-check` end to end with these defaults took 44
+  seconds at the median and 52 at the 95th percentile on codex-cli, and 17 and
+  25 on claude-cli, with no call failing.
 
-Not yet measured: the gates end to end, a held-out set of pull requests, any
+Not yet measured: `plan-check` end to end at calls of 10, a held-out set of pull requests, any
 second repository, and whether the plan gate's extra flags are rules the
 labels missed.
 
@@ -359,7 +365,7 @@ or cutoff can be tried on the same answer without asking the model again.
 `plan-check` and `impl-check` select the same way before they judge, and take
 `--limit`, `--candidates` and `--no-rank` with the same meaning, plus
 `--max-rules N` (default 40), the most individual rules one check judges. The
-judge reads them in calls of at most 20, sent at once, so its time follows the
+judge reads them in calls of at most 10, sent at once, so its time follows the
 largest call rather than the whole list.
 `--selection-only` prints, as JSON, what the judge would be handed — the
 selection with every candidate's scores, the gathered rules, whether the cap

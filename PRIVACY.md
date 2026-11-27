@@ -792,8 +792,8 @@ the diff standing in for the plan on `impl-check`, whether you run it yourself
 or a hook does. That rank prompt holds the same plan or diff the check sends,
 and the candidate rules' titles, scopes and path patterns. `--no-rank` skips
 it (the plugin passes it when `ACTUAL_GATE_RANK=off`), and so does
-`rules select --by-adr`. A check with more than 20 rules to judge sends the
-plan or diff in several prompts at once, each with up to 20 of the rules, and
+`rules select --by-adr`. A check with more than 10 rules to judge sends the
+plan or diff in several prompts at once, each with up to 10 of the rules, and
 sends a prompt once more on the same runner when its answer fails or takes
 longer than 75 seconds; every one holds the same plan or diff.
 `rules eval --rank` can make it for each case in the file you give it. No prompt

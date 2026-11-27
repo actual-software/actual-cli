@@ -21,11 +21,12 @@
 //! A judge's time grows with the rules in its one answer — about 1.2 seconds
 //! a rule on claude-cli and codex-cli alike — so 40 rules in one call took
 //! about 47 seconds where two calls of 20 take about as long as one, 23.
-//! Splitting finer would spend the hook's budget on the fixed cost of each
-//! call instead of on the judgement, so the chunks stay large. Measured on 8
-//! pull requests, 60 to 80 rules took 9 to 18 seconds at the median where one
-//! call had taken 76 to 101, with the verdicts on the same rules agreeing
-//! 97–99% about whether to block.
+//! Measured on 8 pull requests, 60 to 80 rules in calls of 20 took 9 to 18
+//! seconds at the median where one call had taken 76 to 101, with the
+//! verdicts on the same rules agreeing 97–99% about whether to block. Calls
+//! of 10 cut the judge's time again, end to end on 25 pull requests, and
+//! the fixed cost of a call is small next to the judgement, so the chunks
+//! are 10.
 //!
 //! **A failed chunk is made once more.** One chunk that does not answer
 //! fails the whole check open, so more chunks would mean more chances of a
@@ -184,9 +185,19 @@ const JUDGE_EFFORT: &str = "low";
 /// 80 rules on claude-cli: 23, 47, 81 and 97 seconds at the median, with two
 /// timeouts and two incomplete answers at 80. The same rules got the same
 /// verdict in a list of 20 as in a list of 80 as often as a repeat of one
-/// call did, so splitting costs no accuracy, only a second copy of the plan
+/// call did, so splitting costs no accuracy, only another copy of the plan
 /// or diff in the prompt.
-pub const JUDGE_CHUNK: usize = 20;
+///
+/// `impl-check` end to end on 25 merged pull requests, with its defaults,
+/// calls of 10 against calls of 20: on codex-cli the judge took 18 seconds
+/// at the median instead of 26, and at most 28 instead of 108, where four
+/// checks had needed a retry; the check took 44 instead of 56, and 52 at the
+/// 95th percentile instead of 150, part of which was a burst of slow ranks.
+/// On claude-cli the judge took 9 instead of 11 and at most 17 instead of
+/// 42, and the check 17 instead of 20. No call at 10 failed on either
+/// runner. codex-cli blocked the same 21 pull requests; claude-cli blocked
+/// 17 instead of 15, within its run-to-run variation.
+pub const JUDGE_CHUNK: usize = 10;
 
 /// How the judge classified a rule against the artifact (a plan or a diff).
 ///
@@ -1376,9 +1387,9 @@ mod tests {
         assert_eq!(sizes(0), vec![0]);
         assert_eq!(sizes(1), vec![1]);
         assert_eq!(sizes(JUDGE_CHUNK), vec![JUDGE_CHUNK]);
-        assert_eq!(sizes(JUDGE_CHUNK + 1), vec![11, 10]);
-        assert_eq!(sizes(41), vec![14, 14, 13]);
-        assert_eq!(sizes(60), vec![20, 20, 20]);
+        assert_eq!(sizes(JUDGE_CHUNK + 1), vec![6, 5]);
+        assert_eq!(sizes(41), vec![9, 8, 8, 8, 8]);
+        assert_eq!(sizes(60), vec![10; 6]);
         let rules = many_rules(41);
         let flat: Vec<&RuleForJudging> = chunks(&rules).into_iter().flatten().collect();
         assert!(flat.iter().zip(&rules).all(|(a, b)| *a == b), "order kept");
@@ -1442,7 +1453,7 @@ mod tests {
         }
     }
 
-    /// 45 rules are three calls of 15, made at once: the check takes as long
+    /// 45 rules are five calls of 9, made at once: the check takes as long
     /// as one call, and the verdicts come back in the order of the rules.
     #[tokio::test(start_paused = true)]
     async fn test_check_judges_a_long_list_in_concurrent_chunks() {
@@ -1456,7 +1467,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(started.elapsed(), Duration::from_secs(10));
-        assert_eq!(*runner.calls.lock().unwrap(), vec![15, 15, 15]);
+        assert_eq!(*runner.calls.lock().unwrap(), vec![9; 5]);
         let ids: Vec<&str> = verdicts.iter().map(|v| v.rule_id.as_str()).collect();
         let expected: Vec<&str> = rules.iter().map(|r| r.rule_id.as_str()).collect();
         assert_eq!(ids, expected);
@@ -1483,8 +1494,8 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, ActualError::RuleCheckInvalid(_)), "{err:?}");
-        // Three chunks, and the failing one made twice.
-        assert_eq!(runner.calls.lock().unwrap().len(), 4);
+        // Five chunks, and the failing one made twice.
+        assert_eq!(runner.calls.lock().unwrap().len(), 6);
     }
 
     /// A chunk that answers badly once is made again, and the check passes.
@@ -1508,7 +1519,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(verdicts.len(), 45);
-        assert_eq!(*runner.calls.lock().unwrap(), vec![15, 15, 15, 15]);
+        assert_eq!(*runner.calls.lock().unwrap(), vec![9; 6]);
         // The second call follows the first: two calls' time, not one.
         assert_eq!(started.elapsed(), Duration::from_secs(20));
     }
