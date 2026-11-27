@@ -160,22 +160,17 @@ impl CodexSandbox {
             Self::ReadOnly => "read-only",
         }
     }
-
-    fn is_read_only(self) -> bool {
-        matches!(self, Self::ReadOnly)
-    }
 }
 
 /// Build the argument list for the Codex CLI invocation.
 ///
-/// Produces: `exec --sandbox <mode> [--skip-git-repo-check]
-/// -c features.hooks=false [-c model_reasoning_effort=<effort>] [--model <model>]
+/// Produces: `exec --sandbox <mode> -c features.hooks=false
+/// [-c model_reasoning_effort=<effort>] [--model <model>]
 /// --output-last-message <path> <prompt>`
 ///
 /// The `exec` subcommand runs Codex in non-interactive mode, where it never
 /// stops for approval. `--sandbox` goes on every call so that a `sandbox_mode`
-/// in the user's Codex config can't widen it. `--skip-git-repo-check` goes on
-/// read-only calls only, so they run outside a git repository too.
+/// in the user's Codex config can't widen it.
 /// `--output-last-message <path>` writes the agent's final response to a file
 /// so we can read structured output after the process exits.
 ///
@@ -230,15 +225,6 @@ fn build_codex_args(
         "exec".to_string(),
         "--sandbox".to_string(),
         sandbox.as_arg().to_string(),
-    ];
-    // Codex refuses to start outside a git repository unless told otherwise,
-    // so a check or rank run from a plain directory failed. That guard is
-    // there so an agent's edits can be undone; a read-only call makes none,
-    // so it skips the guard. Tailoring writes files and keeps it.
-    if sandbox.is_read_only() {
-        args.push("--skip-git-repo-check".to_string());
-    }
-    args.extend([
         // The judge's own session must not run the user's hooks: the
         // actual-cli plugin's `Stop` hook would rerun `impl-check`, which
         // spawns this judge again. `-c` rather than `--disable hooks`, because
@@ -246,7 +232,7 @@ fn build_codex_args(
         // config key but rejects an unknown feature name.
         "-c".to_string(),
         "features.hooks=false".to_string(),
-    ]);
+    ];
     if let Some(e) = effort {
         args.push("-c".to_string());
         args.push(format!("model_reasoning_effort={e}"));
@@ -628,10 +614,7 @@ echo '{}' > "$OUTPUT_FILE"
         let captured = std::fs::read_to_string(&prompt_file).unwrap();
         assert!(captured.contains("rank these"), "{captured}");
         assert!(captured.contains(r#""title":"rank""#), "{captured}");
-        assert!(
-            captured.contains("--sandbox\nread-only\n--skip-git-repo-check\n"),
-            "{captured}"
-        );
+        assert!(captured.contains("--sandbox\nread-only\n"), "{captured}");
         // Without this, Codex runs at whatever effort the user's own config
         // sets, which can be slow enough to miss a stage-2 deadline.
         assert!(
@@ -857,10 +840,6 @@ echo '{json}' > "$OUTPUT_FILE"
             "--sandbox workspace-write missing"
         );
         assert!(
-            !captured.contains("--skip-git-repo-check"),
-            "tailoring writes files, so it keeps Codex's git check"
-        );
-        assert!(
             !captured.contains("--full-auto"),
             "Codex 0.147.0 and later reject --full-auto"
         );
@@ -974,12 +953,11 @@ echo '{json}' > "$OUTPUT_FILE"
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "--sandbox");
         assert_eq!(args[2], "read-only");
-        assert_eq!(args[3], "--skip-git-repo-check");
-        assert_eq!(args[4], "-c");
-        assert_eq!(args[5], "features.hooks=false");
-        assert_eq!(args[6], "--output-last-message");
-        assert_eq!(args[7], "/tmp/codex-output.txt");
-        assert_eq!(args[8], "my prompt");
+        assert_eq!(args[3], "-c");
+        assert_eq!(args[4], "features.hooks=false");
+        assert_eq!(args[5], "--output-last-message");
+        assert_eq!(args[6], "/tmp/codex-output.txt");
+        assert_eq!(args[7], "my prompt");
         // No --model flag — Codex CLI uses its own default
         assert!(
             !args.iter().any(|a| a == "--model"),
@@ -999,27 +977,10 @@ echo '{json}' > "$OUTPUT_FILE"
             CodexSandbox::ReadOnly,
         )
         .unwrap();
-        assert_eq!(args[6], "-c");
-        assert_eq!(args[7], "model_reasoning_effort=low");
-        assert_eq!(args[8], "--model");
-        assert_eq!(args[9], "gpt-5");
-    }
-
-    #[test]
-    fn test_build_codex_args_skips_the_git_check_only_when_read_only() {
-        use std::path::Path;
-        let p = Path::new("/tmp/out.txt");
-        let skips = |sandbox| {
-            build_codex_args("prompt", None, None, p, sandbox)
-                .unwrap()
-                .iter()
-                .any(|a| a == "--skip-git-repo-check")
-        };
-        // A check or rank run from a directory that is not a git repository
-        // fails without the flag.
-        assert!(skips(CodexSandbox::ReadOnly));
-        // Tailoring writes files, so it keeps Codex's guard.
-        assert!(!skips(CodexSandbox::WorkspaceWrite));
+        assert_eq!(args[5], "-c");
+        assert_eq!(args[6], "model_reasoning_effort=low");
+        assert_eq!(args[7], "--model");
+        assert_eq!(args[8], "gpt-5");
     }
 
     #[test]
