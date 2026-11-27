@@ -191,19 +191,6 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
-    if args.selection_only {
-        let report = check_engine::selection_report(
-            &plan_text,
-            &root,
-            &rules_dir,
-            &args.check_knobs(),
-            crate::rules::check::ArtifactKind::Plan,
-            !args.no_rank,
-        )?;
-        println!("{report}");
-        return Ok(());
-    }
-
     // The pass the hook runs before its judge, reported by `--json` and noted
     // nowhere, since there is no session outside a hook envelope.
     let folders = args
@@ -799,8 +786,6 @@ mod tests {
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
-            max_rules: 40,
-            selection_only: false,
             runner: None,
             model: None,
             json: false,

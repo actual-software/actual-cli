@@ -164,18 +164,6 @@ pub struct SelectedRule {
     pub reason: String,
 }
 
-/// One stage-1 candidate, whether or not it was selected.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ConsideredRule {
-    pub slug: String,
-    /// The stage-1 score.
-    pub score: f64,
-    /// The ranker's score, 0 to [`rank::MAX_SCORE`], when it scored this
-    /// candidate.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rank_score: Option<u64>,
-}
-
 /// A complete selection, and an account of how it was reached.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Selection {
@@ -184,10 +172,6 @@ pub struct Selection {
     pub indexed_documents: usize,
     pub limit: usize,
     pub selected: Vec<SelectedRule>,
-    /// Every candidate stage 1 retrieved, in its order, with the ranker's
-    /// score where there is one: what the limit and the cutoffs chose from,
-    /// so another limit or cutoff can be tried on the same answer.
-    pub considered: Vec<ConsideredRule>,
     pub stage2: Stage2,
 }
 
@@ -461,9 +445,8 @@ impl Prefiltered {
             .map(|(_, _, rule)| rule)
             .collect();
 
-        self.selection_scored(
+        self.selection(
             selected,
-            verdicts,
             Stage2::Applied {
                 candidates: self.candidates.len(),
                 governs,
@@ -475,34 +458,12 @@ impl Prefiltered {
     }
 
     fn selection(&self, selected: Vec<SelectedRule>, stage2: Stage2) -> Selection {
-        self.selection_scored(selected, &[], stage2)
-    }
-
-    fn selection_scored(
-        &self,
-        selected: Vec<SelectedRule>,
-        verdicts: &[RankedVerdict],
-        stage2: Stage2,
-    ) -> Selection {
-        let considered = self
-            .candidates
-            .iter()
-            .map(|hit| ConsideredRule {
-                slug: hit.slug.clone(),
-                score: hit.score,
-                rank_score: verdicts
-                    .iter()
-                    .find(|v| v.slug == hit.slug)
-                    .map(|v| v.score),
-            })
-            .collect();
         Selection {
             plan: self.plan.clone(),
             paths: self.paths.clone(),
             indexed_documents: self.indexed_documents,
             limit: self.limit,
             selected,
-            considered,
             stage2,
         }
     }
@@ -891,50 +852,6 @@ mod tests {
             assert_eq!(rule.reason, prefilter_reason(hit), "{}", rule.slug);
         }
         assert!(selection.selected[0].reason.contains(" on "));
-    }
-
-    /// Every stage-1 candidate is listed, in stage-1 order, with the score the
-    /// ranker gave it — the dropped and the capped too, so another limit or
-    /// cutoff can be tried on the same answer.
-    #[test]
-    fn test_apply_lists_every_candidate_with_its_rank_score() {
-        let (_root, index) = corpus();
-        let prefiltered = prefilter(&index, &token_query(), 1, 10);
-        let candidates = prefiltered.candidates();
-        assert!(candidates.len() >= 3, "{}", candidates.len());
-        let (first, second) = (candidates[0].slug.clone(), candidates[1].slug.clone());
-        let parsed = rank::parse_verdicts(
-            &scores(&candidates, &[(&first, "unrelated"), (&second, "governs")]),
-            &candidates,
-        )
-        .unwrap();
-        let selection = prefiltered.apply(&parsed);
-
-        assert_eq!(selection.selected.len(), 1);
-        let slugs: Vec<&str> = selection
-            .considered
-            .iter()
-            .map(|c| c.slug.as_str())
-            .collect();
-        let expected: Vec<&str> = candidates.iter().map(|c| c.slug.as_str()).collect();
-        assert_eq!(slugs, expected);
-        assert_eq!(selection.considered[0].rank_score, Some(0));
-        assert_eq!(selection.considered[1].rank_score, Some(rank::MAX_SCORE));
-        assert_eq!(selection.considered[2].rank_score, None);
-        assert_eq!(
-            selection.considered[0].score,
-            prefiltered.candidates[0].score
-        );
-    }
-
-    /// Without a rank the candidates are still listed, with no rank score.
-    #[test]
-    fn test_finish_lists_the_candidates_without_rank_scores() {
-        let (_root, index) = corpus();
-        let prefiltered = prefilter(&index, &token_query(), 1, 10);
-        let selection = prefiltered.finish(Stage2::NotRequested);
-        assert_eq!(selection.considered.len(), prefiltered.len());
-        assert!(selection.considered.iter().all(|c| c.rank_score.is_none()));
     }
 
     // ── the two stages together ─────────────────────────────────────────
