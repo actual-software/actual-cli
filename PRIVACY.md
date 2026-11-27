@@ -778,7 +778,7 @@ text goes out as you work, without anyone typing a command.
 | Command | What the prompt holds |
 |---------|-----------------------|
 | `plan-check` | The plan's full text, and each judged rule's document slug, id, level and statement |
-| `impl-check` | The diff's full text, including the whole of any new file git doesn't ignore, and the same rule fields |
+| `impl-check` | The part of the diff, including the whole of any new file git doesn't ignore, in the files each judged rule covers, and each rule's level and statement |
 | `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's title (its slug when it has none), scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
 
 `claude-cli` runs these calls with no tools, and the API runners have no file
@@ -792,10 +792,13 @@ the diff standing in for the plan on `impl-check`, whether you run it yourself
 or a hook does. That rank prompt holds the same plan or diff the check sends,
 and the candidate rules' titles, scopes and path patterns. `--no-rank` skips
 it (the plugin passes it when `ACTUAL_GATE_RANK=off`), and so does
-`rules select --by-adr`. A check with more than 20 rules to judge sends the
-plan or diff in several prompts at once, each with up to 20 of the rules, and
-sends a prompt once more on the same runner when its answer fails or takes
-longer than 75 seconds; every one holds the same plan or diff.
+`rules select --by-adr`. The rank prompt of an `impl-check` holds the whole
+diff. A `plan-check` with more than 20 rules to judge sends the plan in
+several prompts at once, each with up to 20 of the rules. An `impl-check`
+sends one prompt for each set of files its rules cover, at most six, each with
+that part of the diff and up to 20 of the rules, all at once. Either sends a
+prompt once more on the same runner when its answer fails or takes longer
+than 75 seconds.
 `rules eval --rank` can make it for each case in the file you give it. No prompt
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.

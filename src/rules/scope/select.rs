@@ -156,6 +156,10 @@ pub struct SelectedRule {
     /// The stage-1 score. Kept even on a ranked result so the two orderings can
     /// be compared.
     pub score: f64,
+    /// For a diff, the changed files this document governs when that is fewer
+    /// than all of them; see [`Match::files`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
     pub stage: Stage,
     /// The ranker's verdict, absent when stage 2 did not run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,6 +323,7 @@ impl Prefiltered {
                 candidate_group_id: hit.candidate_group_id.clone(),
                 root: hit.root.clone(),
                 score: hit.score,
+                files: hit.files.clone(),
                 stage: Stage::Prefilter,
                 verdict: None,
                 reason: prefilter_reason(hit),
@@ -452,6 +457,7 @@ impl Prefiltered {
                     candidate_group_id: hit.candidate_group_id.clone(),
                     root: hit.root.clone(),
                     score: hit.score,
+                    files: hit.files.clone(),
                     stage: if verdict.is_some() {
                         Stage::Ranked
                     } else {
@@ -1153,6 +1159,7 @@ mod tests {
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
+            files: None,
             contributions: vec![FieldContribution {
                 field: Field::Scope,
                 coverage: 0.5,
@@ -1199,6 +1206,7 @@ mod tests {
                 contribution(Field::Title, &["token"]),
             ],
             matched_globs: Vec::new(),
+            files: None,
         };
         assert!(prefilter_reason(&hit).contains("scope and title match on oauth, token"));
     }
@@ -1214,6 +1222,7 @@ mod tests {
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
+            files: None,
             contributions: Vec::new(),
             matched_globs: vec![GlobMatch {
                 glob: "services/auth/**".to_string(),
@@ -1243,6 +1252,7 @@ mod tests {
                 matched: (0..10).map(|i| format!("t{i}")).collect(),
             }],
             matched_globs: Vec::new(),
+            files: None,
         };
         let reason = prefilter_reason(&hit);
         assert_eq!(reason.matches(", ").count(), MAX_REASON_TERMS - 1);
@@ -1263,6 +1273,7 @@ mod tests {
             score: 1.0,
             contributions: Vec::new(),
             matched_globs: Vec::new(),
+            files: None,
         };
         assert_eq!(
             prefilter_reason(&hit),

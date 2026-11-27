@@ -256,6 +256,47 @@ impl IndexedDocument {
         })
     }
 
+    /// Whether this document governs the file at `path`: inside its root, not
+    /// excluded, and matched by one of its declared include globs when its v2
+    /// header declares any. Verify and prose globs never narrow a document
+    /// this way: they say where to look, not what it governs.
+    ///
+    /// An exclude is tested on the file itself, not on the directory probes
+    /// [`Self::excludes_path`] uses for plan paths: `!**/test*/**` must not
+    /// exclude `utils/testable.ts`. An include that does not compile, or that
+    /// holds a `[` the glob crate would read as a character set (Next's
+    /// `app/[orgId]/**`), matches by its literal prefix. A literal file
+    /// include such as `Dockerfile`, which normalization turned into
+    /// `Dockerfile/**`, matches that file.
+    fn governs_file(&self, path: &str) -> bool {
+        let glob = |pattern: &String| PathGlob {
+            pattern: pattern.clone(),
+        };
+        self.root_admits(path)
+            && !self
+                .exclude_globs
+                .iter()
+                .any(|pattern| glob(pattern).matches_path(path) == Some(true))
+            && (self.include_globs.is_empty()
+                || self.include_globs.iter().any(|pattern| {
+                    let include = glob(pattern);
+                    let literal = include.literal_segments();
+                    let under_literal = !literal.is_empty()
+                        && path
+                            .split('/')
+                            .take(literal.len())
+                            .eq(literal.iter().copied());
+                    match include.matches_path(path) {
+                        Some(true) => true,
+                        None => under_literal,
+                        Some(false) => {
+                            (pattern.contains('[') && under_literal)
+                                || pattern.strip_suffix("/**") == Some(path)
+                        }
+                    }
+                }))
+    }
+
     /// The globs, parsed back into the type that knows how to compare them.
     fn path_globs(&self) -> impl Iterator<Item = PathGlob> + '_ {
         self.globs.iter().map(|pattern| PathGlob {
@@ -297,6 +338,11 @@ pub struct Query {
     /// Documents scoring below this are dropped. Zero, the default, keeps
     /// everything that scored at all.
     pub min_score: f64,
+    /// `paths` are the files a change touches, not places a plan may go: a
+    /// document is held to the ones it governs (see
+    /// [`IndexedDocument::governs_file`]) and dropped when it governs none.
+    /// Set by [`Self::for_diff`].
+    pub per_file_scope: bool,
 }
 
 impl Query {
@@ -305,6 +351,7 @@ impl Query {
             text: text.into(),
             paths: Vec::new(),
             min_score: 0.0,
+            per_file_scope: false,
         }
     }
 
@@ -330,7 +377,10 @@ impl Query {
     pub fn for_diff(diff: impl Into<String>) -> Self {
         let text = diff.into();
         let paths = diff_header_paths(&text);
-        Self::new(text).with_paths(paths)
+        Self {
+            per_file_scope: true,
+            ..Self::new(text).with_paths(paths)
+        }
     }
 
     /// Paths the query names: those given explicitly, plus any path-shaped
@@ -370,11 +420,29 @@ impl Query {
 /// duplicates, with git's `a/` and `b/` prefixes removed. Only the lines
 /// between a `diff --git` line and that file's first `@@` are read, so an added
 /// line that happens to start `++ b/` is not taken for a header.
-fn diff_header_paths(diff: &str) -> Vec<String> {
+///
+/// A section with no `---`, `+++`, rename or copy line (a binary file, a
+/// mode-only change, an empty new file) is named by its `diff --git` line.
+pub(crate) fn diff_header_paths(diff: &str) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
     let mut in_header = false;
+    let mut git_line: Option<&str> = None;
+    let mut section_named = false;
+    let name_from_git_line = |git_line: Option<&str>, named: bool, paths: &mut Vec<String>| {
+        if named {
+            return;
+        }
+        if let Some(path) = git_line.and_then(git_line_path) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    };
     for line in diff.lines() {
-        if line.starts_with("diff --git ") {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            name_from_git_line(git_line, section_named, &mut paths);
+            git_line = Some(rest);
+            section_named = false;
             in_header = true;
             continue;
         }
@@ -395,12 +463,30 @@ fn diff_header_paths(diff: &str) -> Vec<String> {
                 .and_then(|name| header_name(name, ""))
         };
         if let Some(path) = path {
+            section_named = true;
             if !path.is_empty() && !paths.contains(&path) {
                 paths.push(path);
             }
         }
     }
+    name_from_git_line(git_line, section_named, &mut paths);
     paths
+}
+
+/// The one path a `diff --git a/P b/P` line names when both sides are the
+/// same file, quoted or not. A line whose sides differ is a rename or copy,
+/// which always has its own header lines.
+fn git_line_path(rest: &str) -> Option<String> {
+    let mid = rest.len().checked_sub(1)? / 2;
+    if rest.len().is_multiple_of(2) || rest.as_bytes().get(mid) != Some(&b' ') {
+        return None;
+    }
+    let (a, b) = (
+        header_name(&rest[..mid], "")?,
+        header_name(&rest[mid + 1..], "")?,
+    );
+    let (a, b) = (a.strip_prefix("a/")?, b.strip_prefix("b/")?);
+    (a == b && !a.is_empty()).then(|| a.to_string())
 }
 
 /// One header line's file name: unquoted, without the trailing tab git writes
@@ -458,6 +544,11 @@ pub struct Match {
     /// Document globs that matched a path the query named, with the number of
     /// agreeing leading segments.
     pub matched_globs: Vec<GlobMatch>,
+    /// For a diff query, the changed files this document governs, when that
+    /// is fewer than all of them. Absent, and then omitted from JSON, when it
+    /// governs every one or the query is not a diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
 }
 
 /// One decision a query matched, and the documents that carry it.
@@ -698,6 +789,15 @@ impl ScopeIndex {
         };
         let query_terms: Vec<String> = dedup(signals::terms(&query.text));
         let query_paths = query.all_paths();
+        // A diff's own files, which a document must govern to be judged on.
+        let changed_files: Option<Vec<String>> = (query.per_file_scope && !query.paths.is_empty())
+            .then(|| {
+                query
+                    .paths
+                    .iter()
+                    .map(|p| p.trim_start_matches("./").trim_end_matches('/').to_string())
+                    .collect()
+            });
 
         // Normalizing by the query's own total IDF makes coverage a 0..1
         // fraction, so scores are comparable across queries of different
@@ -719,6 +819,24 @@ impl ScopeIndex {
 
         let mut matches: Vec<Match> = Vec::new();
         for doc in &self.documents {
+            // For a diff, a document must also govern one of the files it
+            // changes; when it governs only some, the match names them so the
+            // judge is held to those.
+            let mut files = None;
+            if let Some(changed) = &changed_files {
+                let governed: Vec<String> = changed
+                    .iter()
+                    .filter(|path| doc.governs_file(path))
+                    .cloned()
+                    .collect();
+                if governed.is_empty() {
+                    tally.excluded_path += 1;
+                    continue;
+                }
+                if governed.len() < changed.len() {
+                    files = Some(governed);
+                }
+            }
             match self.score_document(doc, &query_terms, &idf, total_idf, &query_paths, weights) {
                 Scored::Excluded => tally.excluded_path += 1,
                 Scored::NoMatch => tally.no_match += 1,
@@ -726,7 +844,10 @@ impl ScopeIndex {
                 // about the match, not about the budget: a document below the
                 // floor is dropped whether or not there is room for it.
                 Scored::Hit(hit) if hit.score < query.min_score => tally.below_floor += 1,
-                Scored::Hit(hit) => matches.push(*hit),
+                Scored::Hit(mut hit) => {
+                    hit.files = files;
+                    matches.push(*hit);
+                }
             }
         }
 
@@ -919,6 +1040,7 @@ impl ScopeIndex {
             score,
             contributions,
             matched_globs,
+            files: None,
         }))
     }
 }
@@ -2014,6 +2136,7 @@ mod tests {
             score,
             contributions: Vec::new(),
             matched_globs: Vec::new(),
+            files: None,
         };
         let matches = vec![
             hit("a-first", "Decision A", 3.0),
@@ -2391,6 +2514,7 @@ mod tests {
             adr_id: None,
             candidate_group_id: None,
             score: 1.0,
+            files: None,
             contributions: Vec::new(),
             matched_globs: vec![GlobMatch {
                 glob: "services/api/**".to_string(),
@@ -2809,6 +2933,38 @@ copy to src/copy.rs
         );
     }
 
+    /// A binary file, a mode-only change and an empty new file have no
+    /// `---`/`+++` lines; their `diff --git` line names them.
+    #[test]
+    fn test_diff_header_paths_name_sections_without_file_lines() {
+        let diff = "\
+diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1 +1 @@
++x
+diff --git a/public/logo.png b/public/logo.png
+new file mode 100644
+index 0000000..1111111
+Binary files /dev/null and b/public/logo.png differ
+diff --git a/scripts/deploy.sh b/scripts/deploy.sh
+old mode 100644
+new mode 100755
+diff --git \"a/my dir/empty.ts\" \"b/my dir/empty.ts\"
+new file mode 100644
+index 0000000..e69de29
+";
+        assert_eq!(
+            diff_header_paths(diff),
+            vec![
+                "src/a.ts",
+                "public/logo.png",
+                "scripts/deploy.sh",
+                "my dir/empty.ts"
+            ]
+        );
+    }
+
     #[test]
     fn test_for_diff_names_the_header_paths_and_drops_their_prefixed_copies() {
         let query = Query::for_diff(added_file_diff("packages/api/src/handler.ts", "x"));
@@ -2845,6 +3001,93 @@ copy to src/copy.rs
         let diff = added_file_diff("src/generated/a.ts", "quux applies lot");
         assert!(index.search(&Query::for_diff(diff.clone()), 10).is_empty());
         assert!(!index.search(&Query::new(diff), 10).is_empty());
+    }
+
+    /// A diff holds each document to the files its declared include globs
+    /// govern, not just its root: a document rooted at `apps/api-service`
+    /// for `src/utils/**` is dropped for a diff touching only another file
+    /// under that root, and names the one file it governs when the diff also
+    /// touches others. An include that does not compile matches by its
+    /// literal prefix. A plan naming the same path is not narrowed.
+    #[test]
+    fn test_a_diff_holds_a_document_to_the_files_its_include_globs_govern() {
+        let index = index_of(vec![
+            v2_doc(
+                "utils",
+                "apps/api-service",
+                &["src/handlers/**", "src/utils/**"],
+            ),
+            v2_doc("broken", "apps/api-service", &["src/utils/{a,b"]),
+        ]);
+        let route = added_file_diff("apps/api-service/src/bugReports/route.ts", "quux");
+        assert!(index.search(&Query::for_diff(route.clone()), 10).is_empty());
+        // A plan naming the same file is not narrowed. (One document alone,
+        // so its words are not in every document and still score.)
+        let alone = index_of(vec![v2_doc("utils", "apps/api-service", &["src/utils/**"])]);
+        let plan = Query::new("quux applies lot")
+            .with_paths(["apps/api-service/src/bugReports/route.ts".to_string()]);
+        assert_eq!(alone.search(&plan, 10).len(), 1);
+
+        let both = format!(
+            "{}{route}{}",
+            added_file_diff("apps/api-service/src/utils/supabaseUtils.ts", "quux"),
+            added_file_diff("packages/posthog-adapter/src/index.ts", "quux"),
+        );
+        let mut hits = index.search(&Query::for_diff(both), 10);
+        hits.sort_by(|a, b| a.slug.cmp(&b.slug));
+        let files: Vec<(&str, Option<Vec<String>>)> = hits
+            .iter()
+            .map(|h| (h.slug.as_str(), h.files.clone()))
+            .collect();
+        let governed = Some(vec![
+            "apps/api-service/src/utils/supabaseUtils.ts".to_string()
+        ]);
+        assert_eq!(
+            files,
+            vec![("broken", governed.clone()), ("utils", governed)]
+        );
+
+        // A file-only exclude test, a bracketed route, a literal file.
+        let edge = index_of(vec![
+            v2_doc("ex", "apps/x", &["src/**", "!src/**/test*/**"]),
+            v2_doc("route", "apps/x", &["app/[orgId]/**"]),
+            v2_doc("docker", "apps/x", &["Dockerfile"]),
+        ]);
+        let governing = |path: &str| {
+            let mut slugs: Vec<String> = edge
+                .search(&Query::for_diff(added_file_diff(path, "quux")), 10)
+                .into_iter()
+                .map(|h| h.slug)
+                .collect();
+            slugs.sort();
+            slugs
+        };
+        // With another governed file in the diff, `testable.ts` is not
+        // narrowed away by the directory-shaped exclude.
+        let two = format!(
+            "{}{}",
+            added_file_diff("apps/x/src/utils/a.ts", "quux"),
+            added_file_diff("apps/x/src/utils/testable.ts", "quux"),
+        );
+        let hits = edge.search(&Query::for_diff(two), 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].files, None);
+        assert!(governing("apps/x/src/test/a.ts").is_empty());
+        // One document per index, so its words still score.
+        for (paths, file) in [
+            (&["app/[orgId]/**"][..], "apps/x/app/[orgId]/page.tsx"),
+            (&["Dockerfile"][..], "apps/x/Dockerfile"),
+        ] {
+            let alone = index_of(vec![v2_doc("d", "apps/x", paths)]);
+            let diff = added_file_diff(file, "quux applies lot");
+            assert_eq!(alone.search(&Query::for_diff(diff), 10).len(), 1, "{file}");
+        }
+
+        // Every changed file governed: nothing to narrow.
+        let only = added_file_diff("apps/api-service/src/handlers/x.ts", "quux");
+        let hits = index.search(&Query::for_diff(only), 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].files, None);
     }
 
     // ── adr_id as the decision key ───────────────────────────────────────

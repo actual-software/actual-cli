@@ -117,6 +117,7 @@ mod tests {
             score,
             contributions: Vec::new(),
             matched_globs: Vec::new(),
+            files: None,
         }
     }
 
