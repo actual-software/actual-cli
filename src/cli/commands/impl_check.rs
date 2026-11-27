@@ -1276,6 +1276,11 @@ mod tests {
         args.selection_only = true;
         args.no_rank = true;
         assert!(exec(&args).is_ok());
+
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        args.rules_dir = Some(not_a_dir);
+        assert!(exec(&args).is_err());
     }
 
     #[cfg(unix)]
