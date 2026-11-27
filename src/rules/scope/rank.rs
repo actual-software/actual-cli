@@ -688,6 +688,7 @@ mod tests {
             score: 1.0,
             contributions: Vec::new(),
             matched_globs: Vec::new(),
+            files: None,
         };
         let candidate = candidate_from(&hit, &["a/**".to_string()], Some("scope sentence"));
         assert_eq!(candidate.slug, "slug");
