@@ -353,7 +353,7 @@ pub(super) fn run_pipeline_filtered(
     tracing::info!(
         "judge: {} rules in {} calls, {:.1} s, {}",
         gathered.rules.len(),
-        check::chunks(&gathered.rules).len(),
+        check::calls(kind, plan_text, &gathered.rules),
         judge_started.elapsed().as_secs_f64(),
         if answer.is_ok() { "answered" } else { "failed" }
     );

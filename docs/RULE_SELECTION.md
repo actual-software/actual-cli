@@ -211,7 +211,7 @@ quietly break them.
 
 The plan and implementation gates send far more rules to their judge than
 `rules select` returns, because the judge now reads them in concurrent calls
-of at most 20 and its time barely grows with their number.
+of at most 10 and its time barely grows with their number.
 
 | | Candidates (`--candidates`) | Documents kept (`--limit`) | Rules judged (`--max-rules`) |
 |---|---|---|---|
@@ -253,9 +253,12 @@ for the plan and its diff for the turn's diff.
   more.
 - **The whole check.** `impl-check` end to end with these defaults took 44
   seconds at the median and 52 at the 95th percentile on codex-cli, and 17 and
-  25 on claude-cli, with no call failing.
+  25 on claude-cli, with no call failing. `plan-check` took 23 and 32 on
+  codex-cli, and 11 and 24 on claude-cli. The `impl-check` times predate
+  judging each rule on only the files it governs, and haven't been measured
+  since.
 
-Not yet measured: `plan-check` end to end at calls of 10, a held-out set of pull requests, any
+Not yet measured: `impl-check` end to end with the judge split by file, a held-out set of pull requests, any
 second repository, and whether the plan gate's extra flags are rules the
 labels missed.
 

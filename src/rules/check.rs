@@ -24,7 +24,8 @@
 //! Measured on 8 pull requests, 60 to 80 rules in calls of 20 took 9 to 18
 //! seconds at the median where one call had taken 76 to 101, with the
 //! verdicts on the same rules agreeing 97–99% about whether to block. Calls
-//! of 10 cut the judge's time again, end to end on 25 pull requests, and
+//! of 10 cut the judge's time again, end to end on 25 pull requests (before
+//! a diff was judged in groups by file), and
 //! the fixed cost of a call is small next to the judgement, so the chunks
 //! are 10.
 //!
@@ -190,7 +191,8 @@ const JUDGE_EFFORT: &str = "low";
 /// or diff in the prompt.
 ///
 /// `impl-check` end to end on 25 merged pull requests, with its defaults,
-/// calls of 10 against calls of 20: on codex-cli the judge took 18 seconds
+/// calls of 10 against calls of 20, both before a diff was judged in groups
+/// by the files each rule governs: on codex-cli the judge took 18 seconds
 /// at the median instead of 26, and at most 28 instead of 108, where four
 /// checks had needed a retry; the check took 44 instead of 56, and 52 at the
 /// 95th percentile instead of 150, part of which was a burst of slow ranks.
@@ -762,10 +764,7 @@ pub async fn check<R: StructuredRunner>(
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Result<Vec<CheckedRule>, ActualError> {
-    let groups = match kind {
-        ArtifactKind::Plan => vec![(text.to_string(), rules.to_vec())],
-        ArtifactKind::Diff => diff_groups(text, rules),
-    };
+    let groups = judge_groups(kind, text, rules);
     let calls = groups.iter().flat_map(|(text, rules)| {
         chunks(rules).into_iter().map(move |chunk| {
             judge_retrying(runner, kind, text, chunk, model_override, max_budget_usd)
@@ -790,6 +789,28 @@ pub async fn check<R: StructuredRunner>(
                 .map(|at| judged.swap_remove(at))
         })
         .collect())
+}
+
+/// The text each set of `rules` is judged on: a plan whole, a diff split by
+/// `diff_groups`.
+fn judge_groups(
+    kind: ArtifactKind,
+    text: &str,
+    rules: &[RuleForJudging],
+) -> Vec<(String, Vec<RuleForJudging>)> {
+    match kind {
+        ArtifactKind::Plan => vec![(text.to_string(), rules.to_vec())],
+        ArtifactKind::Diff => diff_groups(text, rules),
+    }
+}
+
+/// How many model calls [`check`] makes for `rules` against `text`: every
+/// group's [`chunks`]. For a log line; it makes no call itself.
+pub fn calls(kind: ArtifactKind, text: &str, rules: &[RuleForJudging]) -> usize {
+    judge_groups(kind, text, rules)
+        .iter()
+        .map(|(_, members)| chunks(members).len())
+        .sum()
 }
 
 /// The most groups of rules, by the files they govern, one diff check splits
@@ -1617,6 +1638,25 @@ mod tests {
             1,
             "only the unscoped rule sees the whole diff"
         );
+    }
+
+    /// A plan is chunked whole; a diff is chunked group by group, so two
+    /// scoped groups of 6 are two calls where 12 rules on a plan are also two.
+    #[test]
+    fn test_calls_counts_every_groups_chunks() {
+        assert_eq!(calls(ArtifactKind::Plan, "plan", &many_rules(25)), 3);
+        let diff = many_file_diff(2);
+        let rules: Vec<RuleForJudging> = (0..12)
+            .map(|n| {
+                let mut rule = RuleForJudging::new("doc", format!("R-{n}"), RuleLevel::Must, "s");
+                rule.files = Some(vec![format!("f{}.ts", n % 2)]);
+                rule
+            })
+            .collect();
+        assert_eq!(calls(ArtifactKind::Diff, &diff, &rules), 2);
+        let mut wide = many_rules(JUDGE_CHUNK + 1);
+        wide.extend(rules);
+        assert_eq!(calls(ArtifactKind::Diff, &diff, &wide), 4);
     }
 
     // ── the numbered answer ──────────────────────────────────────────────
