@@ -19,7 +19,7 @@ sees them; see [SCOPE_INDEX.md](SCOPE_INDEX.md#adr-file-header-v2). No model, no
 sub-millisecond against a built index. It is the whole answer whenever it can be.
 
 **Stage 2 is a runner-backed rank over what stage 1 retrieved.** It is asked one
-question — how strongly each of these candidates governs this change — and it is
+question — which of these candidates govern this change, and why — and it is
 asked only when stage 1 hands back more candidates than the caller may keep
 *and* the query has plan prose to judge against. A path-only query
 (`--file` with no `PLAN`) stops after stage 1: there is nothing for the model
@@ -36,40 +36,19 @@ codex-cli, cursor-cli — through `StructuredRunner`, a trait lifted out of the
 tailoring path. Each runner's structured-output plumbing is shared between the
 two callers rather than duplicated; only the schema and the prompt differ.
 
-**The answer is one score per candidate, and nothing else.** The prompt numbers
-the candidates and asks for a score from 0 to 9 for each, keyed by its number.
-Almost all of a rank's time is the model writing its answer: asked for a slug,
-a verdict and a one-sentence reason for each of 30 candidates, a model wrote
-about 2,400 tokens and took about 16 seconds; asked for a score each, it writes
-about 150 tokens and takes about 4. Each selected rule's reason is stage 1's
-evidence for it, the same reason `--no-rank` prints. A rank call also asks for
-low reasoning effort and no extended thinking, on the backends that take either
-(`--effort low` and `alwaysThinkingEnabled: false` for claude-cli,
-`model_reasoning_effort=low` for codex-cli): a model left to think wrote
-thousands of tokens over a list it then scored the same way.
-
-**Default models.** When neither `--model` nor the config names one, a rank uses
-`claude-sonnet-5-5` on claude-cli and anthropic-api and `gpt-6.2-sol` on
-codex-cli. The other calls that resolve a runner — the conformance judge,
-`adr adopt` — keep their own defaults.
-
 ## What the model is allowed to do
 
 Three constraints, each enforced in code rather than requested in the prompt.
 
-**It may only judge, never invent.** The prompt carries a fixed, numbered
-candidate list, and the answer is a score per number. A number outside the list
-is ignored. A hallucinated rule file is impossible by construction, not merely
-unlikely.
+**It may only judge, never invent.** The prompt carries a fixed candidate list.
+A verdict naming anything outside it is dropped. A hallucinated rule file is
+impossible by construction, not merely unlikely.
 
-**It may not reorder within a verdict.** Each candidate's score is collapsed
-into one of three verdicts: 7 to 9 is `governs`, 3 to 6 is `related`, and 0 to 2
-is `unrelated`. `unrelated` is dropped; the rest keep stage 1's order inside
-their verdict. A language model is far better calibrated on "does this rule
-govern this change" than on "is this rule the third or the fourth most
-relevant", so the design takes only the judgement it is good at. On a labelled
-set of 25 merged pull requests, collapsing scores this way picked governing
-rules as well as ordering by the score itself did.
+**It may not reorder within a verdict.** Each candidate gets one of `governs`,
+`related` or `unrelated`. `unrelated` is dropped; the rest keep stage 1's order
+inside their verdict. A language model is far better calibrated on "does this
+rule govern this change" than on "is this rule the third or the fourth most
+relevant", so the design takes only the judgement it is good at.
 
 **It may not empty the result.** A rank that keeps nothing is treated as a failed
 rank, and the caller falls back to stage 1. Returning nothing is never more
@@ -78,11 +57,11 @@ useful than returning the deterministic prefilter.
 ## Degrading
 
 Every path produces an answer. No runner configured, the runner down, the runner
-returning the wrong shape, the runner scoring only numbers it was never given,
-the runner rejecting everything: each degrades to the stage-1 answer and records
-why in the `Stage 2` line. None of them is an error, and none of them costs the
-caller a reason — every selected rule's reason is the deterministic one built
-from the index's own attribution, ranked or not.
+returning the wrong shape, the runner naming only invented rules, the runner
+rejecting everything: each degrades to the stage-1 answer and records why in the
+`Stage 2` line. None of them is an error, and none of them costs the caller a
+reason — the deterministic reason built from the index's own attribution stands
+in wherever the ranker has not supplied one.
 
 ```
 Stage 2: unavailable — no runner available: claude-cli: binary not found …
@@ -134,35 +113,16 @@ be free to trim a set the command returns whole, and would report a precision
 the command never achieves.
 
 **Fixture corpus** — 42 rule files, 19 plans, cap 5, stage 2 on `claude-cli`
-with `claude-sonnet-5-5`:
+with `claude-sonnet-4-6`:
 
 | selector | micro P | micro R | micro F1 |
 |---|---|---|---|
-| two-stage | 0.91 | 0.82 | **0.86** |
+| two-stage | 0.86 | 0.88 | **0.87** |
 | scope index | 0.62 | 0.89 | 0.73 |
 | filename scan | 0.58 | 0.63 | 0.60 |
 
 Precision is where the rank pays, and it pays where the design says it should:
-0.91 against the index's 0.62, with recall at 0.82 against 0.89. The earlier
-prompt, which asked for a verdict and a reason per candidate, scored F1 0.87 on
-the same model and 0.89 on `claude-sonnet-4-6`, at about four times the
-latency.
-
-**Merged pull requests** — 25 recent pull requests from one repository with 755
-rule files, each labelled by two judge models (Opus and a GPT model) reading the
-diff, cap 10, scored on the 23 with at least one governing rule:
-
-| selector | coverage@5 | coverage@10 | median latency |
-|---|---|---|---|
-| two-stage, `claude-cli` | 0.52 | 0.50 | 4.0 s |
-| two-stage, `codex-cli` | 0.56 | 0.52 | 8.6 s |
-| earlier prompt, `claude-cli` (Sonnet) | 0.55 | 0.50 | 15.7 s |
-| scope index | 0.38 | 0.42 | 0.1 s |
-
-coverage@k is the governing rules among the first k, over the number that fit
-in k. Against the earlier prompt on the same pull requests, the difference in
-coverage@5 is −0.03 [−0.11, +0.03] on `claude-cli` and +0.00 [−0.07, +0.07] on
-`codex-cli` (95% intervals, resampling pull requests).
+0.86 against the index's 0.62, with recall level at 0.88 against 0.89.
 
 Two further properties are asserted in `tests/integration_scope_select.rs`
 against a perfectly calibrated fake ranker, which measures the plumbing rather
@@ -181,11 +141,10 @@ It is bounded two ways, and only one of them binds everywhere.
 **Time.** A 90-second wall-clock deadline enforced in `rules::scope::rank`, not
 by the runner's own timeout. A runner timeout is an
 *inactivity* timer that resets on every streamed event, so a backend that keeps
-talking is never cut off by it: a measured `claude-cli` call under the earlier
-prompt ran 218 seconds under a 60-second runner timeout. On the 25 pull requests
-above, a rank took 4.0 seconds at the median and 4.3 at the 95th percentile on
-`claude-cli`, and 8.6 and 9.6 on `codex-cli`. Exceeding the deadline degrades to
-the prefilter like any other failure.
+talking is never cut off by it: a measured `claude-cli` call ran 218 seconds
+under a 60-second runner timeout. Two runs of the same plan took 6 and 218
+seconds, which is the real spread. Exceeding the deadline degrades to the
+prefilter like any other failure.
 
 **Money, on one backend.** A rank inherits `max_budget_usd` from the config, so
 a selection cannot outspend what tailoring is allowed. Only the Claude CLI
@@ -200,26 +159,18 @@ five.
   fenced in a delimiter derived from its own bytes so an imitated section header
   cannot close the block. That raises the cost of a blind injection; it does not
   end it, and a plan can still bias verdicts. What it cannot do is add a rule,
-  since a score for a number outside the list is ignored — so the worst case is
+  since a verdict naming a non-candidate is dropped — so the worst case is
   mis-ranking documents that genuinely govern the repository. Anyone feeding
   `rules select` a plan from an issue body, a webhook or a pull-request
   description is crossing that boundary and needs a defence at their own layer.
-- **A rank need not be a full judgement.** A model that returns one score and
+- **A rank need not be a full judgement.** A model that returns one verdict and
   omits the rest still produces a capped answer: the unjudged candidates are
   kept at their prefilter rank, below everything the ranker affirmed. The status
   line says `partly ranked` and gives the count when that happens, and each
   padded rule keeps `stage: prefilter` with no verdict in the JSON.
 - **Stage 2's quality is the model's quality.** The tests bound what the
   orchestration can do to a good answer; they say nothing about whether a given
-  model gives one. The verdict printed beside each rule is what makes a bad one
-  visible; the reason line under it is stage 1's evidence, not the model's.
-- **The score cutoffs were set on two small sets.** 7 for `governs` and 3 for
-  `related` were chosen on 25 merged pull requests from one repository and on
-  the fixture golden set, with Sonnet and a GPT model. The `related` cutoff is
-  the sensitive one: at 5, fixture recall fell from 0.91 to 0.60, because
-  models score many rules that do apply at 2 to 4. A model whose scores cluster
-  differently — Haiku and the smallest GPT models scored almost everything 0 or
-  9 — fits them poorly.
+  model gives one. The reason line is what makes a bad verdict visible.
 - **Recall is stage 1's ceiling.** Stage 2 can only re-rank what the prefilter
   retrieved. A rule the lexical index never surfaced cannot be promoted, however
   obviously it applies. Raising `--candidates` widens the window at the cost of
@@ -239,10 +190,10 @@ five.
   survives the cap. The verdict is printed for exactly this reason.
 - **One call, no retry.** A rank that fails degrades rather than retrying,
   because a second call spends the latency budget the trigger exists to protect.
-- **Stage-2 latency is a model call's.** A rank now typically answers in 4 to
-  10 seconds, but it is still a network call to a model, and the deadline is
-  what bounds the worst case. A caller that cannot tolerate a 90-second wait
-  should pass `--no-rank`.
+- **Stage-2 latency is not predictable.** The measured spread on one plan was 6
+  to 218 seconds. The deadline bounds the worst case; it does not make the
+  typical case fast, and a caller that cannot tolerate a 90-second wait should
+  pass `--no-rank`.
 - **The fixture corpus is synthetic.** It is the CI regression gate, not
   evidence on its own. See the limits section of
   [SCOPE_INDEX.md](SCOPE_INDEX.md).

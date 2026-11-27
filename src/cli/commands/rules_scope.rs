@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::cli::args::{RulesEvalArgs, RulesIndexArgs, RulesSelectArgs};
-use crate::cli::commands::rules_rank::{self, ResolvedRunner};
+use crate::cli::commands::rules_rank::{self, ResolvedRunner, RANK_TIMEOUT_SECS};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
@@ -679,11 +679,11 @@ fn run_selection(
     // nothing from it, and stage 2 degrades the same way it would with no
     // runner configured at all.
     let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved_runner = match rules_rank::resolve_for_rank(
+    let resolved_runner = match rules_rank::resolve(
         args.runner.as_ref(),
         args.model.as_deref(),
         &cfg,
-        rules_rank::DEFAULT_RUNNERS,
+        RANK_TIMEOUT_SECS,
     ) {
         Ok(runner) => runner,
         Err(reason) => {
@@ -1133,11 +1133,11 @@ fn evaluate_two_stage(
     args: &RulesEvalArgs,
 ) -> Result<EvaluationReport, ActualError> {
     let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved = rules_rank::resolve_for_rank(
+    let resolved = rules_rank::resolve(
         args.runner.as_ref(),
         args.model.as_deref(),
         &cfg,
-        rules_rank::DEFAULT_RUNNERS,
+        RANK_TIMEOUT_SECS,
     )
     .map_err(ActualError::ConfigError)?;
 
@@ -2265,7 +2265,7 @@ mod tests {
     /// resolution, the runtime bridge, and the verdict application — without a
     /// model, a key or a network.
     #[cfg(unix)]
-    fn fake_claude(dir: &Path, number: usize) -> PathBuf {
+    fn fake_claude(dir: &Path, slug: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
         let envelope = serde_json::json!({
@@ -2273,7 +2273,11 @@ mod tests {
             "subtype": "success",
             "is_error": false,
             "structured_output": {
-                "scores": { number.to_string(): rank::MAX_SCORE },
+                "verdicts": [{
+                    "slug": slug,
+                    "verdict": "governs",
+                    "reason": "it governs the change",
+                }],
             },
         })
         .to_string();
@@ -2306,7 +2310,7 @@ mod tests {
         let bin = tempdir().unwrap();
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), 2).to_str().unwrap(),
+            fake_claude(bin.path(), &promoted).to_str().unwrap(),
         );
 
         let args = RulesSelectArgs {
@@ -2327,8 +2331,7 @@ mod tests {
         assert!(label.starts_with("claude-cli ("), "{label}");
         assert_eq!(run.selection.selected.len(), 1);
         assert_eq!(run.selection.selected[0].slug, promoted);
-        // The ranker writes only scores, so the reason is stage 1's evidence.
-        assert!(!run.selection.selected[0].reason.is_empty());
+        assert_eq!(run.selection.selected[0].reason, "it governs the change");
     }
 
     /// A long stage-2 status reaches the panel across several lines. The
@@ -2455,7 +2458,7 @@ mod tests {
         let bin = tempdir().unwrap();
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), 1).to_str().unwrap(),
+            fake_claude(bin.path(), &promoted).to_str().unwrap(),
         );
 
         let golden_dir = tempdir().unwrap();
@@ -2730,7 +2733,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_panel_shows_the_verdict_and_the_stage_one_reason() {
+    fn test_select_panel_shows_the_verdict_and_the_ranker_reason() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
@@ -2741,7 +2744,9 @@ mod tests {
         let prefiltered = select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES);
         let slug = prefiltered.candidates()[1].slug.clone();
         let verdicts = rank::parse_verdicts(
-            &serde_json::json!({"scores": {"2": rank::MAX_SCORE}}),
+            &serde_json::json!({"verdicts": [
+                {"slug": slug, "verdict": "governs", "reason": "it pins the provider versions"}
+            ]}),
             &prefiltered.candidates(),
         )
         .unwrap();
@@ -2754,10 +2759,7 @@ mod tests {
         };
         let out = render_select_panel(&index, &query, &run, false, 110);
         assert!(out.contains("governs"));
-        // The promoted rule's reason line is the index's evidence for it.
-        let reason = &run.selection.selected[0].reason;
-        assert!(reason.contains(" match on "), "{reason}");
-        assert!(out.contains(reason.as_str()), "{out}");
+        assert!(out.contains("it pins the provider versions"));
         assert!(out.contains("Runner: anthropic-api (claude-sonnet-4-6)"));
         assert!(out.contains("1 governs"));
 

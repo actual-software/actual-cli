@@ -440,7 +440,7 @@ impl crate::runner::structured::StructuredRunner for AnthropicApiRunner {
         schema: &str,
         model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
-        _tuning: crate::runner::structured::Tuning,
+        _effort: Option<&str>,
     ) -> Result<Value, ActualError> {
         self.run_structured(SELECTION_SYSTEM_PROMPT, prompt, schema, model_override)
             .await
@@ -564,13 +564,7 @@ mod tests {
             .await;
 
         let value = make_runner(&server.url())
-            .run_structured_json(
-                "rank these",
-                r#"{"type":"object"}"#,
-                None,
-                None,
-                crate::runner::structured::Tuning::default(),
-            )
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
             .await
             .expect("expected Ok");
 
@@ -593,13 +587,7 @@ mod tests {
             .await;
 
         let err = make_runner(&server.url())
-            .run_structured_json(
-                "rank these",
-                r#"{"type":"object"}"#,
-                None,
-                None,
-                crate::runner::structured::Tuning::default(),
-            )
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
             .await
             .expect_err("expected Err");
 
