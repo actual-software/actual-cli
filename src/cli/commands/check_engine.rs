@@ -65,49 +65,7 @@ use crate::rules::types::AdrMeta;
 /// real, measured reduction in typical-case latency, paired with the raised
 /// `CHECK_BUDGET` for margin against the variance no batch size alone
 /// removes.
-///
-/// Since then the judge reads its rules in concurrent calls of at most
-/// [`crate::rules::check::JUDGE_CHUNK`], so its time no longer grows with the
-/// cap; this stays the plan gate's cap ([`PLAN_MAX_RULES`]) for a different
-/// reason, which [`PLAN_CANDIDATES`] gives.
 pub(crate) const MAX_RULES_JUDGED: usize = 40;
-
-/// The plan gate's defaults: stage 1 retrieves `PLAN_CANDIDATES` documents,
-/// stage 2 keeps up to [`PLAN_LIMIT`] of them, and the judge reads at most
-/// [`PLAN_MAX_RULES`] rules.
-///
-/// Chosen on 25 labelled pull requests from one repository, each PR's title
-/// and description standing in for the plan. Against 30, 20 and 40 these put
-/// 20% of the governing rules in front of the judge instead of 16%. Sending
-/// more finds more, but on a plan the judge also flags more rules that were
-/// not labelled as governing: with stage 1's top 100 unranked, codex-cli
-/// marked 1.6 such rules conflicting per plan, against 0.4 here. A plan says
-/// little about what the change will touch, so a rule it does not mention
-/// reads as one it leaves out.
-pub(crate) const PLAN_CANDIDATES: usize = 60;
-/// See [`PLAN_CANDIDATES`].
-pub(crate) const PLAN_LIMIT: usize = 40;
-/// See [`PLAN_CANDIDATES`].
-pub(crate) const PLAN_MAX_RULES: usize = MAX_RULES_JUDGED;
-
-/// The implementation gate's defaults: stage 1 retrieves `IMPL_CANDIDATES`
-/// documents, stage 2 keeps up to [`IMPL_LIMIT`] of them, and the judge reads
-/// at most [`IMPL_MAX_RULES`] rules.
-///
-/// Chosen on the same 25 pull requests, each PR's diff standing in for the
-/// turn's. Against 30, 20 and 40 these put 46% of the governing rules in
-/// front of the judge instead of 15% with the codex-cli rank, and 36% with
-/// the claude-cli rank, which keeps fewer. The judge found three times as
-/// many governing rules applying, and flagged under 0.1 rules per diff that
-/// were not labelled as governing. Stage 1 alone finds only 17% of the
-/// governing rules in its top 30 for a diff, and 61% in its top 150, so the
-/// candidates matter more than anything after them. The rank's time is what
-/// bounds them: see [`GATE_RANK_BUDGET`].
-pub(crate) const IMPL_CANDIDATES: usize = 150;
-/// See [`IMPL_CANDIDATES`].
-pub(crate) const IMPL_LIMIT: usize = 60;
-/// See [`IMPL_CANDIDATES`].
-pub(crate) const IMPL_MAX_RULES: usize = 60;
 
 // ── the shared pipeline ──────────────────────────────────────────────────
 

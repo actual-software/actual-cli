@@ -16,13 +16,12 @@
 //! list is ignored rather than trusted. That makes a hallucinated rule file
 //! impossible by construction rather than unlikely in practice.
 //!
-//! **It orders only by its score.** The model scores each candidate from 0
-//! to 9, and the score is collapsed into one of three verdicts. The kept
-//! candidates go highest score first, and ties keep stage 1's deterministic
-//! order, so a model that scores everything alike leaves stage 1's order as
-//! it was. The score is coarse on purpose: a language model is far better
-//! calibrated on "does this rule govern this change" than on "is this rule
-//! the third or fourth most relevant".
+//! **It may not reorder within a verdict.** The model scores each candidate
+//! from 0 to 9, and the score is collapsed into one of three verdicts; ties
+//! inside a verdict keep stage 1's deterministic order. A language model is
+//! far better calibrated on "does this rule govern this change" than on "is
+//! this rule the third or fourth most relevant", and taking only the judgement
+//! it is good at is what keeps the answer stable.
 //!
 //! **It may not empty the result.** A rank that rejects every candidate is
 //! treated as a failed rank, not as an answer, and the caller falls back to
@@ -77,18 +76,13 @@ pub const RANK_BUDGET: Duration = Duration::from_secs(90);
 /// [`RANK_BUDGET`] for a rank inside the plan and implementation gates' hooks.
 ///
 /// The gate's hook has a fixed timeout, and its conformance judge needs most
-/// of it (see [`crate::rules::check::CHECK_BUDGET`]), so the rank gets a
-/// deadline of its own and falls back to the prefilter when it misses. Rank
-/// time grows with the candidates: about 4 seconds plus 0.13 a candidate on
-/// codex-cli. At the gates' own candidate counts (see
-/// [`crate::cli::commands::check_engine::IMPL_CANDIDATES`] and
-/// [`crate::cli::commands::check_engine::PLAN_CANDIDATES`]) the default
-/// models took at most 26 seconds at the 95th percentile on codex-cli and 10
-/// on claude-cli, over 25 merged pull requests from one repository with each
-/// PR's description and diff standing in for the plan and the turn's diff.
-/// With the judge's [`crate::rules::check::CHECK_BUDGET`] it comes to 185
-/// seconds, inside the plugin's 200-second gate timeout.
-pub const GATE_RANK_BUDGET: Duration = Duration::from_secs(35);
+/// of it (see [`crate::rules::check::CHECK_BUDGET`]), so the rank gets a short
+/// deadline of its own and falls back to the prefilter when it misses. On the
+/// queries the gates send — a plan, or a diff — the default models' ranks took
+/// at most 6 seconds at the 95th percentile on claude-cli and 11 on codex-cli,
+/// measured over 25 merged pull requests from one repository with each PR's
+/// description and diff standing in for the plan and the turn's diff.
+pub const GATE_RANK_BUDGET: Duration = Duration::from_secs(15);
 
 /// How a rank call is tuned: low effort, and no extended thinking.
 ///

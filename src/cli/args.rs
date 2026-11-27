@@ -1811,17 +1811,17 @@ pub struct PlanCheckArgs {
     pub codex_picker: bool,
 
     /// Maximum number of rule documents to judge the plan against.
-    #[arg(long, default_value_t = crate::cli::commands::check_engine::PLAN_LIMIT)]
+    #[arg(long, default_value_t = 20)]
     pub limit: usize,
 
     /// How many candidates the deterministic prefilter retrieves before the
     /// limit is applied. Raised to `--limit` when smaller.
-    #[arg(long, default_value_t = crate::cli::commands::check_engine::PLAN_CANDIDATES)]
+    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
     pub candidates: usize,
 
     /// Skip stage 2 (a runner-backed rank refining which documents apply) and
     /// select with the deterministic prefilter alone. Applies in every mode,
-    /// hooks included: a hook ranks by default too, within a 35-second
+    /// hooks included: a hook ranks by default too, within a 15-second
     /// deadline so the conformance judge keeps the rest of the hook's
     /// timeout, and falls back to the prefilter when the rank misses it.
     #[arg(long)]
@@ -1832,7 +1832,7 @@ pub struct PlanCheckArgs {
     /// this many is judged and the rest are reported as not checked.
     #[arg(
         long,
-        default_value_t = crate::cli::commands::check_engine::PLAN_MAX_RULES as u64,
+        default_value_t = crate::cli::commands::check_engine::MAX_RULES_JUDGED as u64,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub max_rules: u64,
@@ -1984,17 +1984,17 @@ pub struct ImplCheckArgs {
     pub codex_picker: bool,
 
     /// Maximum number of rule documents to judge the diff against.
-    #[arg(long, default_value_t = crate::cli::commands::check_engine::IMPL_LIMIT)]
+    #[arg(long, default_value_t = 20)]
     pub limit: usize,
 
     /// How many candidates the deterministic prefilter retrieves before the
     /// limit is applied. Raised to `--limit` when smaller.
-    #[arg(long, default_value_t = crate::cli::commands::check_engine::IMPL_CANDIDATES)]
+    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
     pub candidates: usize,
 
     /// Skip stage 2 (a runner-backed rank refining which documents apply) and
     /// select with the deterministic prefilter alone. Applies in every mode,
-    /// hooks included: a hook ranks by default too, within a 35-second
+    /// hooks included: a hook ranks by default too, within a 15-second
     /// deadline so the conformance judge keeps the rest of the hook's
     /// timeout, and falls back to the prefilter when the rank misses it.
     #[arg(long)]
@@ -2005,7 +2005,7 @@ pub struct ImplCheckArgs {
     /// this many is judged and the rest are reported as not checked.
     #[arg(
         long,
-        default_value_t = crate::cli::commands::check_engine::IMPL_MAX_RULES as u64,
+        default_value_t = crate::cli::commands::check_engine::MAX_RULES_JUDGED as u64,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub max_rules: u64,
@@ -3726,9 +3726,8 @@ mod parse_tests {
         assert!(!args.no_rank);
         assert!(!args.json);
         assert!(!args.rebuild);
-        assert_eq!(args.limit, 40);
-        assert_eq!(args.candidates, 60);
-        assert_eq!(args.max_rules, 40);
+        assert_eq!(args.limit, 20);
+        assert_eq!(args.candidates, crate::rules::scope::DEFAULT_CANDIDATES);
         assert!(args.runner.is_none());
         assert!(args.model.is_none());
         assert!(args.rules_dir.is_none());
@@ -3847,9 +3846,8 @@ mod parse_tests {
         assert!(!args.no_rank);
         assert!(!args.json);
         assert!(!args.rebuild);
-        assert_eq!(args.limit, 60);
-        assert_eq!(args.candidates, 150);
-        assert_eq!(args.max_rules, 60);
+        assert_eq!(args.limit, 20);
+        assert_eq!(args.candidates, crate::rules::scope::DEFAULT_CANDIDATES);
         assert!(args.runner.is_none());
         assert!(args.model.is_none());
         assert!(args.rules_dir.is_none());
