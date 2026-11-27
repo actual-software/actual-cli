@@ -44,6 +44,8 @@ pub mod runners;
 pub mod self_update;
 pub mod session_end;
 pub mod session_summary;
+#[cfg(feature = "telemetry")]
+mod session_usage;
 pub mod stats;
 pub mod status;
 pub mod sync;

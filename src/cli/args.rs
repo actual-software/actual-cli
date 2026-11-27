@@ -472,7 +472,7 @@ pub enum Command {
     #[command(name = "__telemetry-flush", hide = true)]
     TelemetryFlush,
 
-    /// Internal: record a Claude Code SessionEnd envelope from stdin.
+    /// Internal: record a Claude Code or Codex SessionEnd envelope from stdin.
     #[command(name = "__session-ended", hide = true)]
     SessionEnded,
 

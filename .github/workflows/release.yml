@@ -60,6 +60,38 @@ jobs:
             echo "Dry run: everything is built and checked, nothing is published"
           fi
 
+      # A release publishes only a commit that reached main through review, at
+      # the version its Cargo.toml carries; otherwise npm and Homebrew would ship
+      # one version while `actual --version` reports another. The tag ruleset
+      # decides who may push a v* tag; this catches a tag on the wrong commit.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        if: steps.mode.outputs.publish == 'true' && steps.check.outputs.is-stable == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag is on main and matches Cargo.toml
+        if: steps.mode.outputs.publish == 'true' && steps.check.outputs.is-stable == 'true'
+        env:
+          VERSION: ${{ steps.mode.outputs.version }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main. Tag a commit on main."
+            exit 1
+          fi
+          CRATE_VERSION=$(awk -F'"' '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' Cargo.toml)
+          if [ "$CRATE_VERSION" != "$VERSION" ]; then
+            echo "::error::$GITHUB_REF_NAME does not match version $CRATE_VERSION in Cargo.toml. Merge the version bump to main first, then tag it."
+            exit 1
+          fi
+          # npm publishes every release as latest, so an older version would
+          # downgrade everyone who updates.
+          LATEST=$(git tag -l 'v*' | grep -vE -- '-(alpha|beta|rc|test)[.0-9]*$' | grep -vxF "$GITHUB_REF_NAME" | sed 's/^v//' | sort -V | tail -n1)
+          if [ -n "$LATEST" ] && [ "$(printf '%s\n' "$LATEST" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]; then
+            echo "::error::$GITHUB_REF_NAME is not newer than the latest release, v$LATEST. Raise the version in Cargo.toml above it."
+            exit 1
+          fi
+
   build-macos-arm64:
     name: Build (macOS arm64)
     needs: check-stable

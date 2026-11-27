@@ -164,6 +164,12 @@ impl Destination {
         self.send
     }
 
+    /// Whether records built now would go to Actual's API under a sign-in,
+    /// so the attributes only such a request holds are worth gathering.
+    pub(super) fn signed_in(&self) -> bool {
+        crate::telemetry::sign_in::recording_stamp(self.outputs.endpoint.as_deref()).is_some()
+    }
+
     /// Send `records`, or log them as not sent.
     pub(super) fn deliver(&self, records: Vec<otlp::LogRecord>) {
         if self.send {

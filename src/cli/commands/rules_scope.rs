@@ -1541,7 +1541,7 @@ mod tests {
     /// it can no longer know about.
     #[test]
     fn test_index_panel_renders_a_cache_hit_without_a_load_report() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = sample();
@@ -1559,7 +1559,7 @@ mod tests {
     /// ever rendered, so the winning sentence went out unchecked.
     #[test]
     fn test_eval_panel_states_that_the_index_beats_the_scan() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = sample();
@@ -1585,7 +1585,7 @@ mod tests {
     /// cache hit would have shipped unnoticed.
     #[test]
     fn test_index_json_reports_built_then_cached_then_rebuilt() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = sample();
@@ -1611,7 +1611,7 @@ mod tests {
         const GADGETS: &str =
             "# Gadgets\n\nConcerns gadgets.\n\n### Rules\n\n- **R-G-001** MUST: g.\n";
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1689,7 +1689,7 @@ mod tests {
 
     #[test]
     fn test_index_panel_reports_counts_and_the_dead_prefix() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1708,7 +1708,7 @@ mod tests {
 
     #[test]
     fn test_index_panel_reports_files_that_failed_to_parse() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1719,7 +1719,7 @@ mod tests {
 
     #[test]
     fn test_index_panel_for_an_empty_rule_set() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1731,7 +1731,7 @@ mod tests {
 
     #[test]
     fn test_index_json_carries_the_summary() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1753,7 +1753,7 @@ mod tests {
 
     #[test]
     fn test_exec_index_renders_both_formats() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1773,7 +1773,7 @@ mod tests {
     /// repositories, then rebuilds this one.
     #[test]
     fn test_exec_index_clear_prunes_every_cached_index() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1830,7 +1830,7 @@ mod tests {
 
     #[test]
     fn test_select_panel_ranks_the_matching_cluster() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1849,7 +1849,7 @@ mod tests {
 
     #[test]
     fn test_select_panel_reports_no_match() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1867,7 +1867,7 @@ mod tests {
     /// would read as a plan that matched nothing.
     #[test]
     fn test_select_panel_omits_the_plan_row_for_a_path_only_query() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1887,7 +1887,7 @@ mod tests {
     /// does not report on a plan nobody gave.
     #[test]
     fn test_select_panel_reports_no_match_for_a_path_only_query() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1909,7 +1909,7 @@ mod tests {
     /// model to rank on an empty plan would spend a round trip on nothing.
     #[test]
     fn test_path_only_selection_skips_stage_two() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1976,7 +1976,7 @@ mod tests {
     /// signal carried it, and what the status quo would have chosen instead.
     #[test]
     fn test_select_panel_explain_shows_evidence_and_the_status_quo() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -1998,7 +1998,7 @@ mod tests {
     /// `--explain` compares the two selectors on equal budget.
     #[test]
     fn test_select_explain_caps_the_filename_scan_at_the_selection_limit() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2029,7 +2029,7 @@ mod tests {
 
     #[test]
     fn test_select_panel_explain_reports_an_empty_filename_scan() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2041,7 +2041,7 @@ mod tests {
 
     #[test]
     fn test_select_panel_shows_a_matched_glob_for_a_named_path() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2061,7 +2061,7 @@ mod tests {
     /// counts, because the document count is what a brief actually spends.
     #[test]
     fn test_adr_panel_groups_documents_under_their_decision() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2086,7 +2086,7 @@ mod tests {
     /// names what was actually asked.
     #[test]
     fn test_adr_panel_reports_no_match() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2110,7 +2110,7 @@ mod tests {
     /// and a limit counted in decisions.
     #[test]
     fn test_adr_json_carries_decisions_and_their_documents() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2145,7 +2145,7 @@ mod tests {
     /// keyed on an `adr_id` or a title has no group id to report.
     #[test]
     fn test_adr_json_filename_scan_reports_the_group_id_for_grouped_decisions_only() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2178,7 +2178,7 @@ mod tests {
     /// with a filename scan regrouped under the same decision-level cap.
     #[test]
     fn test_adr_panel_and_json_explain_grouped_evidence() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2219,7 +2219,7 @@ mod tests {
 
     #[test]
     fn test_select_json_carries_matches_and_explanation() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2291,7 +2291,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_run_selection_applies_a_rank_from_a_resolved_runner() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2336,7 +2336,7 @@ mod tests {
     /// and the row is where a truncation would hide the reason.
     #[test]
     fn test_select_panel_wraps_a_long_stage_two_status() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2386,7 +2386,7 @@ mod tests {
     fn test_evaluate_two_stage_degrades_a_failed_case() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2441,7 +2441,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_exec_eval_rank_scores_the_two_stage_selector() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2494,7 +2494,7 @@ mod tests {
     /// something that never ran.
     #[test]
     fn test_exec_eval_rank_fails_when_no_runner_resolves() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let _no_key = EnvGuard::remove("ANTHROPIC_API_KEY");
@@ -2512,7 +2512,7 @@ mod tests {
 
     #[test]
     fn test_run_selection_degrades_when_no_runner_can_be_resolved() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         // Naming the backend explicitly keeps the test hermetic: the Anthropic
@@ -2543,7 +2543,7 @@ mod tests {
     /// leaves a surplus.
     #[test]
     fn test_run_selection_honours_no_rank() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2568,7 +2568,7 @@ mod tests {
     /// was still found.
     #[test]
     fn test_stage1_candidates_is_pre_cap_when_rank_not_requested() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2588,7 +2588,7 @@ mod tests {
     /// paths still matched two documents.
     #[test]
     fn test_stage1_candidates_is_pre_cap_with_no_plan() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2615,7 +2615,7 @@ mod tests {
     /// only honest candidate count is the prefilter's.
     #[test]
     fn test_stage1_candidates_is_pre_cap_when_runner_unavailable() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         // The Anthropic probe reads only an env var, so no subprocess is spawned.
@@ -2648,7 +2648,7 @@ mod tests {
     fn test_stage1_candidates_is_pre_cap_when_runner_fails() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2731,7 +2731,7 @@ mod tests {
 
     #[test]
     fn test_select_panel_shows_the_verdict_and_the_stage_one_reason() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2769,7 +2769,7 @@ mod tests {
 
     #[test]
     fn test_exec_select_renders_both_formats() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2800,7 +2800,7 @@ mod tests {
 
     #[test]
     fn test_exec_select_accepts_a_blank_plan_beside_a_file() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2818,7 +2818,7 @@ mod tests {
     /// floor is, so it has to be settable without passing a flag every call.
     #[test]
     fn test_min_score_prefers_the_flag_then_the_config() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = sample();
@@ -2853,7 +2853,7 @@ mod tests {
     /// repository's floor does not leak across.
     #[test]
     fn test_min_score_prefers_the_repo_floor_over_the_user_wide_one() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = sample();
@@ -2880,7 +2880,7 @@ mod tests {
     /// selection.
     #[test]
     fn test_min_score_rejects_an_invalid_configured_value() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = sample();
@@ -2897,7 +2897,7 @@ mod tests {
     /// it rather than looking like an index that found nothing.
     #[test]
     fn test_select_panel_reports_an_active_floor() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2935,7 +2935,7 @@ mod tests {
     /// The grouped panel reports the floor the same way.
     #[test]
     fn test_adr_panel_reports_an_active_floor() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -2953,7 +2953,7 @@ mod tests {
     /// `--by-adr` takes its own path out of `exec_select`, in both renderings.
     #[test]
     fn test_exec_select_renders_both_formats_by_adr() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3031,7 +3031,7 @@ mod tests {
 
     #[test]
     fn test_run_evaluation_scores_both_selectors_at_the_same_cap() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3053,7 +3053,7 @@ mod tests {
 
     #[test]
     fn test_eval_panel_states_the_comparison_and_lists_misses() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3080,7 +3080,7 @@ mod tests {
 
     #[test]
     fn test_eval_panel_names_the_signals_switched_off() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3103,7 +3103,7 @@ mod tests {
     /// human and machine-readable forms.
     #[test]
     fn test_eval_output_reports_an_active_floor() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3169,7 +3169,7 @@ mod tests {
 
     #[test]
     fn test_exec_eval_renders_both_formats() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3189,7 +3189,7 @@ mod tests {
 
     #[test]
     fn test_exec_eval_rejects_an_unknown_ablation() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 
@@ -3208,7 +3208,7 @@ mod tests {
     /// score against stale signal data.
     #[test]
     fn test_exec_eval_rebuild_ignores_a_cached_index() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
 

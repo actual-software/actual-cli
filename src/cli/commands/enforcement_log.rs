@@ -5,7 +5,8 @@
 //! `ACTUAL_ENFORCEMENT_LOG=off` stops new lines being written. The file is
 //! readable by its owner only and keeps at most 90 days and 10 MB of rounds.
 //! Writing is best-effort: a gate never fails because its line could not be
-//! recorded.
+//! recorded, and a round that can't take the log's lock within
+//! `brief_ledger::LOCK_WAIT` is dropped rather than written without it.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::brief_ledger;
 use crate::api::types::PlanGovernanceDecision;
 use crate::config::paths::{append_secure, config_dir, write_secure};
 use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
@@ -119,7 +121,8 @@ pub struct Round {
     /// The rules directory as the gate resolved it.
     pub rules_dir: String,
     pub decision: Decision,
-    /// The session's round counter for this gate; absent with `session_id`.
+    /// The session's round counter for this gate; absent without
+    /// `session_id`, and on a call where the judge didn't run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<u32>,
     #[serde(default)]
@@ -213,25 +216,37 @@ fn read_from(path: &Path, since: Option<DateTime<Utc>>) -> Vec<Round> {
 }
 
 fn append(path: &Path, round: &Round, limits: Limits) {
+    let Some(_guard) = path.parent().and_then(lock) else {
+        return;
+    };
     let mut line = serde_json::to_vec(round).unwrap_or_default();
     line.push(b'\n');
-    let _guard = path.parent().and_then(lock);
     let incoming = line.len() as u64;
     if needs_compaction(path, incoming, round.at, limits) {
         compact(path, incoming, round.at, limits);
+    }
+    // Closes off a line an earlier append left torn, so it is skipped alone
+    // instead of swallowing this one.
+    if ends_mid_line(path) {
+        line.insert(0, b'\n');
     }
     let _ = append_secure(path, &line);
 }
 
 fn lock(dir: &Path) -> Option<std::fs::File> {
     std::fs::create_dir_all(dir).ok()?;
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).write(true).truncate(false);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let file = options.open(dir.join(LOCK_NAME)).ok()?;
-    file.lock().ok()?;
-    Some(file)
+    brief_ledger::lock_file(dir, LOCK_NAME, brief_ledger::LOCK_WAIT)
+}
+
+fn ends_mid_line(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let mut last = [0; 1];
+    std::fs::File::open(path).is_ok_and(|mut file| {
+        file.seek(SeekFrom::End(-1)).is_ok() && file.read_exact(&mut last).is_ok()
+    }) && last[0] != b'\n'
 }
 
 #[derive(Deserialize)]
@@ -268,6 +283,8 @@ fn compact(path: &Path, incoming: u64, now: DateTime<Utc>, limits: Limits) {
     let Ok(bytes) = std::fs::read(path) else {
         return;
     };
+    #[cfg(test)]
+    tests::run_compaction_hook();
     let keep_after = limits.keep_after(now);
     let lines: Vec<&[u8]> = bytes
         .split(|byte| *byte == b'\n')
@@ -294,6 +311,19 @@ mod tests {
     use crate::rules::types::RuleLevel;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
     use tempfile::tempdir;
+
+    thread_local! {
+        static ON_COMPACTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn run_compaction_hook() {
+        let hook = ON_COMPACTION.with(|cell| cell.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 
     struct ConfigDir {
         home: tempfile::TempDir,
@@ -595,13 +625,113 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_appends_keep_every_line_whole() {
+    fn test_an_append_after_a_torn_last_line_survives() {
         let home = tempdir().unwrap();
         let path = home.path().join(LOG_NAME);
+        let first = sample();
+        let text = format!(
+            "{}\n{{\"at\":\"torn",
+            serde_json::to_string(&first).unwrap()
+        );
+        std::fs::write(&path, text).unwrap();
+
+        let next = sample().in_session("after-the-tear", 3);
+        append(&path, &next, LIMITS);
+        assert_eq!(read_from(&path, None), vec![first, next]);
+    }
+
+    #[test]
+    fn test_a_round_without_the_lock_leaves_the_log_alone() {
+        let home = tempdir().unwrap();
+        let path = home.path().join(LOG_NAME);
+        std::fs::create_dir(home.path().join(LOCK_NAME)).unwrap();
+        let now = Utc::now();
+        let text = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&at(sample(), now - TimeDelta::days(120))).unwrap(),
+            serde_json::to_string(&at(sample(), now)).unwrap(),
+        );
+        std::fs::write(&path, &text).unwrap();
+
+        append(&path, &at(sample(), now), LIMITS);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn test_a_round_that_waits_out_the_lock_is_dropped() {
+        let home = tempdir().unwrap();
+        let path = home.path().join(LOG_NAME);
+        let held = lock(home.path()).unwrap();
+
+        append(&path, &sample(), LIMITS);
+        assert!(!path.exists());
+
+        drop(held);
+        append(&path, &sample(), LIMITS);
+        assert_eq!(line_count(&path), 1);
+    }
+
+    #[test]
+    fn test_a_held_lock_delays_the_round_until_it_is_released() {
+        let home = tempdir().unwrap();
+        let path = home.path().join(LOG_NAME);
+        let held = lock(home.path()).unwrap();
+
+        brief_ledger::tests::release_on_retry(
+            move || drop(held),
+            || append(&path, &sample(), LIMITS),
+        );
+        assert_eq!(line_count(&path), 1);
+    }
+
+    /// A round another writer appends while a compaction is between its read
+    /// and its rename waits for the lock, so the rename can't discard it.
+    #[test]
+    fn test_an_append_during_a_compaction_survives_it() {
+        let home = tempdir().unwrap();
+        let path = home.path().join(LOG_NAME);
+        let now = Utc::now();
+        let stale = at(sample(), now - TimeDelta::days(120));
+        std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let current = at(sample(), now).in_session("compacting", 1);
+        let late = at(sample(), now).in_session("during-compaction", 1);
+
+        let (sent, racer) = std::sync::mpsc::channel();
+        let (racer_path, racer_round) = (path.clone(), late.clone());
+        ON_COMPACTION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(move || {
+                let thread = std::thread::spawn(move || append(&racer_path, &racer_round, LIMITS));
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                sent.send(thread).unwrap();
+            }));
+        });
+        append(&path, &current, LIMITS);
+        racer.recv().unwrap().join().unwrap();
+
+        assert_eq!(read_from(&path, None), vec![current, late]);
+    }
+
+    /// The first append finds rounds past the age budget and compacts while
+    /// the other threads append, so a round lost to the rewrite fails it.
+    #[test]
+    fn test_concurrent_appends_survive_a_compaction() {
+        let home = tempdir().unwrap();
+        let path = home.path().join(LOG_NAME);
+        let stale = at(sample(), Utc::now() - TimeDelta::days(120));
+        let mut seed = Vec::new();
+        for _ in 0..2_000 {
+            seed.extend(serde_json::to_vec(&stale).unwrap());
+            seed.push(b'\n');
+        }
+        std::fs::write(&path, seed).unwrap();
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
         let threads: Vec<_> = (0..8)
             .map(|t| {
                 let path = path.clone();
+                let start = start.clone();
                 std::thread::spawn(move || {
+                    start.wait();
                     for i in 0..25 {
                         let round = sample().in_session(&format!("t{t}-{i}"), i);
                         append(&path, &round, LIMITS);
@@ -613,7 +743,9 @@ mod tests {
             thread.join().unwrap();
         }
 
+        let rounds = read_from(&path, None);
         assert_eq!(line_count(&path), 200);
-        assert_eq!(read_from(&path, None).len(), 200);
+        assert_eq!(rounds.len(), 200);
+        assert!(rounds.iter().all(|round| round.at > stale.at));
     }
 }
