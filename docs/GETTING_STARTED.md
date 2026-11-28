@@ -93,6 +93,8 @@ actual login
 actual whoami   # show the signed-in account and organization
 ```
 
+On a machine with no browser, such as an Amp orb, run `actual auth create-token --name amp-orbs --scopes adr:query,adr:review` on a computer signed in to the CLI, and set the token it prints as `ACTUAL_TOKEN` on that machine. See [Agent authentication](AGENT_AUTH.md).
+
 ## Prerequisites
 
 The checks judge your rules with an AI runner. Pick one:
@@ -228,6 +230,7 @@ telemetry:
 | `ANTHROPIC_API_KEY` | Anthropic API key (overrides config file) |
 | `OPENAI_API_KEY` | OpenAI API key (overrides config file) |
 | `CURSOR_API_KEY` | Cursor API key (overrides config file) |
+| `ACTUAL_TOKEN` | A personal access token from `actual auth create-token`, used instead of `actual login`'s sign-in. Sent only to Actual AI's api-service (see [AGENT_AUTH.md](AGENT_AUTH.md)) |
 | `ACTUAL_NO_UPDATE_CHECK` | Set to any value to turn off the update check |
 | `ACTUAL_NO_TELEMETRY` | Set to any non-empty value for the same effect as `telemetry.enabled: false`, for CI and one-off runs |
 | `ACTUAL_OTLP_LOGS_ENDPOINT` | OTLP logs URL for ADR context, use, breach and override events, check events and session-end events (overrides config file) |

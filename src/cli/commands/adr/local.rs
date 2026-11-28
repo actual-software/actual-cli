@@ -626,7 +626,7 @@ mod tests {
     /// for a test whose command reports telemetry and so loads the config.
     /// Fields drop in order, restoring the env before the lock is released.
     struct ScratchConfig {
-        _env: [EnvGuard; 2],
+        _env: [EnvGuard; 3],
         _home: tempfile::TempDir,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -638,6 +638,7 @@ mod tests {
             _env: [
                 EnvGuard::remove("ACTUAL_CONFIG"),
                 EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+                EnvGuard::remove("ACTUAL_TOKEN"),
             ],
             _home: home,
             _lock: lock,
@@ -1069,6 +1070,7 @@ mod tests {
         let empty = tempdir().unwrap();
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", empty.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let report = block(run_check(&args, tmp.path(), TODAY));
         assert!(report.cloud.note.unwrap().contains("Not signed in"));
         drop(g2);
@@ -1076,6 +1078,7 @@ mod tests {
         // A credentials file that can't be read.
         let broken = tempdir().unwrap();
         let _g3 = EnvGuard::set("ACTUAL_CONFIG_DIR", broken.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let creds = crate::auth::store::credentials_path().unwrap();
         std::fs::create_dir_all(creds.parent().unwrap()).unwrap();
         std::fs::write(&creds, "not json").unwrap();
@@ -1162,6 +1165,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _telemetry = sending_to_a_file(home.path());
         let tmp = tempdir().unwrap();
         mixed_repository(tmp.path());
@@ -1214,6 +1218,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _telemetry = sending_to_a_file(home.path());
         let tmp = tempdir().unwrap();
         let mut args = new_args(

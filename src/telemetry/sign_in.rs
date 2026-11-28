@@ -179,6 +179,7 @@ pub(crate) mod tests {
         let guards = vec![
             EnvGuard::remove("ACTUAL_CONFIG"),
             EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+            EnvGuard::remove("ACTUAL_TOKEN"),
             EnvGuard::set("ACTUAL_API_URL", api),
         ];
         (home, guards)

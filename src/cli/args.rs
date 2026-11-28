@@ -724,6 +724,8 @@ pub struct WhoamiArgs {
     /// access token first when it is about to expire. Exits 2 when the server
     /// no longer accepts the sign-in, and 3 when the server can't be reached
     /// or fails. Without this flag, `whoami` reads only the local credentials.
+    /// With ACTUAL_TOKEN set, asks Actual AI who the token belongs to now,
+    /// whatever was cached.
     #[arg(long)]
     pub check: bool,
 }

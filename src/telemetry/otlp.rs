@@ -2265,6 +2265,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _trace = EnvGuard::set(
             "TRACEPARENT",
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
@@ -2805,6 +2806,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
 
         spool(&no_outputs(), &sample_records());
 
@@ -2820,6 +2822,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         std::fs::create_dir_all(home.path().join("otlp-logs-spool.lock")).unwrap();
 
         spool(&no_outputs(), &sample_records());
@@ -3306,6 +3309,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -3384,6 +3388,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let answered = AtomicUsize::new(0);
         let mut server = mockito::Server::new_async().await;
         let _slow = server
@@ -3432,6 +3437,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap().port()
@@ -3465,6 +3471,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let records = sample_records();
         spool(&no_outputs(), &records);
         let file = home.path().join("otlp.jsonl");
@@ -3482,6 +3489,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         spool(&no_outputs(), &sample_records());
         let file = home.path().join("otlp.jsonl");
 
@@ -3502,6 +3510,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         spool(&no_outputs(), &sample_records());
         let file = home.path().join("otlp.jsonl");
         std::fs::write(&file, "{}\n").unwrap();
@@ -3521,6 +3530,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         spool(&no_outputs(), &sample_records());
 
         flush(&Config::default()).await;
@@ -3538,6 +3548,7 @@ mod tests {
         let _env = clear_env();
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let damaged: Vec<String> = (0..MAX_RECORDS_PER_REQUEST)
             .map(|i| format!("damaged {i}"))
             .collect();

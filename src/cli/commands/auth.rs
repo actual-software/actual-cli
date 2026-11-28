@@ -585,6 +585,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempfile::tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let args = AuthArgs {
             command: Some(AuthCommand::CreateToken(
                 crate::cli::args::CreateTokenArgs {

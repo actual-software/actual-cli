@@ -169,10 +169,9 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 /// every module under `config_dir()` that writes a file of its own (config,
 /// tokens, credentials, plan-check session/audit state, the scope and model
 /// caches) so the secure-creation idiom is written once rather than
-/// re-implemented per caller — `crate::auth::store` and
-/// `crate::auth::token_store` each still keep a thin wrapper of their own,
-/// but only to create a parent directory and translate the error type, not
-/// to re-implement the write itself.
+/// re-implemented per caller — `crate::auth::store` still keeps a thin
+/// wrapper of its own, but only to create a parent directory and translate
+/// the error type, not to re-implement the write itself.
 #[cfg(unix)]
 pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;

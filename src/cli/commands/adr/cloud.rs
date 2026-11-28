@@ -1193,6 +1193,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let _g1 = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = crate::testutil::EnvGuard::remove("ACTUAL_TOKEN");
         let args = AdrListArgs {
             repo: None,
             state: None,

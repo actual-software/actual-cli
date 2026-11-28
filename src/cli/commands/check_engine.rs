@@ -3317,9 +3317,10 @@ pub(crate) mod tests {
 
     /// Helper: an isolated config directory, so a runner-resolving test never
     /// touches the real `~/.actualai` cache or config.
-    fn isolated_config(home: &TempDir) -> (EnvGuard, EnvGuard) {
+    fn isolated_config(home: &TempDir) -> (EnvGuard, EnvGuard, EnvGuard) {
         (
             EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+            EnvGuard::remove("ACTUAL_TOKEN"),
             EnvGuard::remove("ACTUAL_CONFIG"),
         )
     }
@@ -7707,6 +7708,7 @@ pub(crate) mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _dir = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let _guards: Vec<EnvGuard> = [
             "ACTUAL_CONFIG",
             "ACTUAL_NO_TELEMETRY",

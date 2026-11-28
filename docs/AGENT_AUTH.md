@@ -1,198 +1,119 @@
-# Scoped access tokens for non-interactive use
+# Access tokens for machines without a browser
 
 `actual login` signs you in through the browser. That's fine for a person at a
-keyboard. A CI job or an autonomous agent has no browser to click through,
-though, and that's the gap `actual auth create-token` closes: it mints a
-**scoped personal access token** (PAT) from your existing login session, so
-headless callers authenticate without one.
-
-> **Status: prototype.** This command is a proof of concept. The issuance
-> endpoint it calls is being finalized on the server; the CLI is built against
-> the documented contract and is repointed with a single flag or environment
-> variable once the endpoint ships. See [Endpoint](#endpoint-create-token)
-> below.
+keyboard. An Amp orb, a CI job or another machine nobody can open a browser on
+needs a different way in, and that's what `actual auth create-token` and the
+`ACTUAL_TOKEN` environment variable give it: you mint a **personal access
+token** (PAT) from your own sign-in, once, and the machine uses it in place of
+a sign-in.
 
 ## Two headless paths
 
-Which one you want depends on whether a human ever logs in.
-
-- **`actual auth create-token`** derives a PAT from *your* browser login. It
-  carries a subset of that person's access into CI, and it's what the rest of
-  this page describes until the last section.
+- **`actual auth create-token`** mints a PAT from *your* `actual login`. It
+  acts as you, in the organization you signed in to, with the scopes you ask
+  for, for 90 days. The rest of this page describes it until the last section.
 - **`actual mint-token`** needs no login at all. An agent holds a registered
   private key, signs a short-lived assertion with it, and trades that for an
   access token. See [Service-account keys](#service-account-keys).
 
-## Mint a token
+## Create a token
+
+On a computer signed in to the actual CLI:
 
 ```console
-$ actual login                       # once, interactively, in a browser
-$ actual auth create-token --name ci-deploy --scopes adr:query,adr:review
-✔ Created scoped access token "ci-deploy"
-  Token id:    tok_9f3c
-  Scopes:      adr:query adr:review
-  Stored in:   OS keychain
+$ actual auth create-token --name amp-orbs --scopes adr:query,adr:review
+actl_pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+✔ Created access token "amp-orbs"
+  Organization:  Mockingbird Maps
+  Expires:       2027-02-25T09:30:00Z
 
-Your token is shown once below. Copy it now:
-
-actl_pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-Keep this secret safe:
-  • Use a DEDICATED token per agent so actions are attributable and
-    individually revocable; never reuse your interactive login session.
-  • NEVER paste it into a prompt, commit it, or echo it to logs/history.
-  • For CI / non-interactive use, pass it via the ACTUAL_TOKEN env var.
+Add it in Amp Settings → Secrets & Env Vars → Personal as ACTUAL_TOKEN, then start a new thread (or run `amp orb restart-processes`). Don't paste it into a chat.
 ```
 
-The raw `actl_pat_…` value is printed **once**, to stdout, on its own line, so
-`TOKEN=$(actual auth create-token …)` captures just the secret. After that it
-lives only behind the OS keychain, or the encrypted-file fallback described
-below. It never reaches a log. Copy it now, because there's no second chance to
-read it back out in the clear.
+The token is printed **once**, to stdout, on its own line, so
+`TOKEN=$(actual auth create-token …)` captures just the secret; everything
+else goes to stderr. The CLI keeps no copy of it, so copy it now. `--name`
+(1 to 64 printable ASCII characters) and `--scopes` (comma- or space-separated)
+are required.
 
-`--name` is required and `--scopes` takes a comma- or space-separated list.
+`create-token` sends `POST <api>/v1/oauth/tokens` with your sign-in's access
+token as the bearer, where `<api>` is `--api-url`, else `ACTUAL_API_URL`, else
+`https://api-service.api.prod.actual.ai`. It refuses to run while
+`ACTUAL_TOKEN` is set: a token can't mint another.
+
+Revoke a token in Actual AI → User Settings → Access tokens, which lists your
+tokens in the organization you have open; switch organizations to see the
+others. When an admin revokes **Actual CLI** in Integrations → Connected Apps,
+every token in that organization stops working, and each person makes a new
+one. `actual logout` doesn't revoke a token.
+
+## Use it: `ACTUAL_TOKEN`
+
+Set `ACTUAL_TOKEN` to the token, through a secret store (in Amp, a personal
+secret), never in a prompt, a command line or a file a job logs. With it set,
+every command that needs a sign-in uses the token instead of
+`credentials.yaml`:
+
+```console
+$ actual whoami
+✔ Signed in to Actual AI with ACTUAL_TOKEN (amp-orbs)
+  Organization:  …
+  Account:       you@example.com
+  Member:        …
+  Scopes:        adr:query adr:review
+  Expires:       2027-02-25 09:30 UTC
+```
+
+How it works:
+
+- **Who the token belongs to.** The CLI asks
+  `GET <api>/v1/oauth/tokens/current` with the token as its bearer, and keeps
+  the answer (organization, member, email, scopes, expiry) in
+  `~/.actualai/actual/token-identity.yaml`, readable only by you. The file is
+  keyed by the token's SHA-256, holds nothing from the token itself, and only
+  the current token's entry. The answer is reused for 24 hours, and past that
+  whenever Actual AI can't be reached, until the token expires. Each request
+  gets 3 seconds; one that gets no usable answer (a timeout, a 404, a 5xx)
+  isn't tried again for 5 minutes. A 401 is remembered for an hour.
+  `actual whoami --check` always asks now.
+- **Where it goes.** Only to Actual AI's api-service
+  (`https://api-service.api.prod.actual.ai` or
+  `https://api-service.api.staging.actual.ai`, scheme, host and port exactly,
+  naming no user) or a loopback server. With `--api-url` or `ACTUAL_API_URL`
+  pointing anywhere else the CLI refuses (exit 2): "ACTUAL_TOKEN works only
+  with Actual AI. Unset ACTUAL_API_URL (or --api-url), or unset ACTUAL_TOKEN to
+  use another server." On-prem deployments don't use PATs yet.
+- **No renewal, no sign-out.** The token is never refreshed. `actual login` and
+  `actual logout` leave it alone and say so; `logout` still removes a stored
+  `actual login` session and the identity cache.
+- **Never signed out by accident.** A token that can't be used is an error,
+  not a signed-out run: `actual adr` reports it rather than falling back to
+  the files in `docs/adr/`. Hooks still fail open.
+
+| Situation | What you see | Exit |
+| --- | --- | --- |
+| Token expired or revoked (401) | "Your ACTUAL_TOKEN has expired or was revoked. …" with how to make a new one | 2 |
+| Value isn't an `actl_pat_` token | "ACTUAL_TOKEN isn't an Actual access token. …" | 2 |
+| Another server | "ACTUAL_TOKEN works only with Actual AI. …" | 2 |
+| Actual AI unreachable, with no earlier answer for this token | "Couldn't check ACTUAL_TOKEN with Actual AI: …" or "Couldn't reach Actual AI to check ACTUAL_TOKEN. …" (an earlier answer keeps commands working) | 3 |
+| Actual AI refuses one request but the token still works | "Actual AI refused this request, though your ACTUAL_TOKEN still works. …" | 2 |
+| `--api-url` names another server than `ACTUAL_API_URL` | "With ACTUAL_TOKEN set, choose the server with ACTUAL_API_URL, not --api-url." | 2 |
 
 ## Two rules for agents
 
-These two rules aren't optional hardening. They're the difference between a
-credential you can reason about and one you can't.
+### 1. A dedicated token per agent or machine pool
 
-### 1. A dedicated token per agent
-
-Mint a **separate** token for each agent instance, named after that agent
-(`--name <agent>`). Never hand an agent the human's interactive login session.
-
-One token per agent buys two things. Every action an agent takes is attributable
-to that agent's token rather than to a shared identity. And when one agent
-misbehaves or its host is compromised, you revoke that single token without
-disturbing every other agent and every human session.
+Mint a separate token for each agent or pool of machines (`--name amp-orbs`),
+never the human's interactive session. Every action is then attributable to
+that token, and you revoke one without disturbing anything else.
 
 ### 2. The token never enters the model's context
 
-A PAT lives in exactly one of two places. Those are the OS keychain, or the
-`ACTUAL_TOKEN` environment variable for a non-interactive run. It must **never**
-appear in:
-
-- an agent's prompt or conversation context,
-- the shell history,
-- a command-line argument that other processes can read,
-- a log line or an error report.
-
-The failure mode this guards against is specific to agents. An agent reads
-untrusted input: a web page, a file, a tool result. A prompt-injection payload
-hidden in that input can instruct the agent to exfiltrate any secret currently
-in its context. A token that is never in the context cannot be exfiltrated that
-way. Keep the secret in the keychain, or in an environment variable the model
-does not read, and that attack has nothing to reach.
-
-## Non-interactive use
-
-A headless caller resolves its token in this order:
-
-1. the `ACTUAL_TOKEN` environment variable, which is the CI path and needs no
-   storage;
-2. the OS keychain;
-3. the encrypted-file fallback.
-
-```console
-# CI: inject the secret as a masked environment variable, never echoed.
-$ export ACTUAL_TOKEN="actl_pat_…"     # from your CI secret store
-$ actual advisor "why is the build failing?"
-```
-
-In CI, pass the token through the platform's secret store as `ACTUAL_TOKEN`. Do
-not re-mint a token on every run, and do not write it to a file the job logs.
-That re-mint advice is about `create-token` PATs. With `mint-token` you mint
-once per job instead; see [Service-account keys](#service-account-keys).
-
-## Storage
-
-```mermaid
-flowchart TD
-    A[create-token mints actl_pat_] --> B{ACTUAL_TOKEN_STORE}
-    B -->|auto default| C[Try OS keychain]
-    B -->|keyring| C
-    B -->|file| F[Encrypted file]
-    C -->|available| D[Stored in keychain]
-    C -->|unavailable, e.g. headless Linux| E{ACTUAL_TOKEN_PASSPHRASE set?}
-    E -->|yes| F
-    E -->|no| G[Error: configure a fallback or use ACTUAL_TOKEN]
-    F --> H[Argon2id key + XChaCha20-Poly1305 AEAD, 0600 file]
-```
-
-The primary store is the OS keychain (macOS Keychain, Windows Credential
-Manager, or the Linux kernel keyutils keyring), reached through the portable
-[`keyring`](https://crates.io/crates/keyring) crate.
-
-Where no keychain is available, an **encrypted-file fallback** keeps the token at
-rest under the config directory. The file is sealed with XChaCha20-Poly1305,
-keyed by Argon2id over a passphrase read from `ACTUAL_TOKEN_PASSPHRASE`, and
-written `0600`. No passphrase, no fallback. The CLI refuses rather than write
-anything weaker, so a token is never stored in a form softer than the keychain.
-
-| Environment variable | Purpose |
-| --- | --- |
-| `ACTUAL_TOKEN` | A ready-to-use token for a non-interactive run; wins over stored credentials. |
-| `ACTUAL_TOKEN_STORE` | Backend select: `auto` (default), `keyring`, or `file`. |
-| `ACTUAL_TOKEN_PASSPHRASE` | Passphrase that seals the encrypted-file fallback. |
-
-## Headless-storage finding
-
-The question this prototype set out to answer: does the keychain library degrade
-gracefully on a headless Linux box or CI runner with no desktop keyring?
-
-The first cut used the `keyring` crate's **Secret Service** backend
-(`sync-secret-service`), and the finding was sharper than expected. Secret
-Service does not fail gracefully at runtime here; it fails at **build time**.
-That backend links the system `libdbus` through `pkg-config`, so a host without
-`libdbus-1-dev` cannot compile the CLI at all. On stock Linux CI runners every
-job went red on `The system library dbus-1 required by crate libdbus-sys was not
-found`, across build, lint, test, and coverage alike. A missing runtime daemon
-is recoverable. A binary that never builds is not.
-
-The fix is to pick a Linux backend with no build-time system dependency. This
-CLI now uses `linux-native`, the kernel **keyutils** keyring, reached through raw
-syscalls: no `libdbus`, no `pkg-config`, no D-Bus daemon. It compiles on any
-Linux, including a bare CI container, and it stores secrets headless without a
-desktop session. macOS and Windows keep their native keychains (`apple-native`,
-`windows-native`), which never had the problem.
-
-Runtime degradation is still handled explicitly. In the default `auto` mode a
-keychain error routes to the encrypted-file store **when a passphrase is
-configured**, and otherwise fails loudly with a message pointing at
-`ACTUAL_TOKEN` or `ACTUAL_TOKEN_PASSPHRASE`. The CLI never invents a weaker store
-behind your back. Silent degradation would leave a token written somewhere
-unprotected, and that is the outcome worth avoiding.
-
-One property of keyutils is worth knowing. Kernel keyrings are scoped to a
-session or the persistent per-user keyring, so a secret there is less durable
-across reboots than a Secret Service entry on a desktop. For durable
-non-interactive use that does not matter, because the recommended paths avoid the
-OS keychain entirely:
-
-- **CI**: pass `ACTUAL_TOKEN` from the platform's secret store. Nothing is
-  written to disk.
-- **Headless Linux that must persist a token**: set `ACTUAL_TOKEN_PASSPHRASE` to
-  enable the encrypted-file fallback, which survives reboots at `0600`.
-- **Interactive desktop** (macOS, Windows, Linux with keyutils): the OS keychain
-  is used with no extra configuration.
-
-### Prototype limitations
-
-- The endpoint contract is provisional; see below.
-- The encrypted-file fallback derives its key from a passphrase. Treat that
-  passphrase as a secret of the same weight as the token, and supply a
-  high-entropy value (the Argon2id work factor slows brute force but cannot
-  rescue a guessable passphrase).
-
-## Endpoint (create-token)
-
-`create-token` calls `POST <base>/api/oauth/tokens` with the login session token
-as the bearer, and reads back the minted `actl_pat_…`. The base URL is resolved
-from `--api-url`, then the `ACTUAL_API_URL` environment variable, then the
-api-service default, so a local mock or a future production path needs no code
-change. It isn't final yet. Until the server endpoint ships, treat the exact
-path and payload as provisional.
+Keep the token in an environment variable the model doesn't read. It must
+never appear in a prompt or conversation, the shell history, a command-line
+argument, a log line or an error report. An agent reads untrusted input, and a
+prompt-injection payload in it can ask the agent to send any secret in its
+context somewhere; a token that's never in the context can't be sent that way.
 
 ## Service-account keys
 
@@ -293,6 +214,10 @@ rejected before any assertion leaves the process.
 and the server mints the principal's full whitelist.
 
 ### In CI
+
+> **Not yet supported.** `ACTUAL_TOKEN` takes only `actl_pat_` tokens from
+> `actual auth create-token`, so the CLI refuses an access token from
+> `mint-token` placed there. The recipe below shows the intended flow.
 
 ```yaml
 - name: Mint a service-account token

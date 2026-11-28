@@ -230,6 +230,13 @@ pub enum ActualError {
         message: String,
         hint: Option<String>,
     },
+
+    /// `ACTUAL_TOKEN` is set but can't be used: it isn't an Actual access
+    /// token, Actual AI turned it down, or the command would send it to a
+    /// server other than Actual AI's. The message is the whole remedy, and it
+    /// replaces `NotLoggedIn`'s `actual login` hint, which can't help here.
+    #[error("{0}")]
+    ActualTokenRefused(String),
 }
 
 impl ActualError {
@@ -253,7 +260,8 @@ impl ActualError {
             | Self::SelfUpdateRefused { .. }
             | Self::AdrAccessDenied { .. }
             | Self::AdrRepoRequired(_)
-            | Self::AdrPathway(_) => 2,
+            | Self::AdrPathway(_)
+            | Self::ActualTokenRefused(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_)
             | Self::ApiResponseError { .. }

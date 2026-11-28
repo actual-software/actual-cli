@@ -123,8 +123,9 @@ struct Session {
 async fn session(api: &AdrApiOptions) -> Result<Session, ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
     let creds = ensure_fresh(creds).await?;
-    let client = ActualApiClient::new(&resolve_api_url(api.api_url.as_deref()))?
-        .with_bearer(&creds.access_token);
+    let base = resolve_api_url(api.api_url.as_deref());
+    crate::auth::actual_token::ensure_destination(&base)?;
+    let client = ActualApiClient::new(&base)?.with_bearer(&creds.access_token);
     Ok(Session {
         client,
         org_id: creds.organization_id,
@@ -248,9 +249,10 @@ mod tests {
 
     /// A signed-in session whose token expires in an hour, saved under a
     /// temporary config directory the guards point at.
-    pub(super) fn sign_in(dir: &Path) -> (EnvGuard, EnvGuard) {
+    pub(super) fn sign_in(dir: &Path) -> (EnvGuard, EnvGuard, EnvGuard) {
         let g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.to_str().unwrap());
+        let g3 = EnvGuard::remove("ACTUAL_TOKEN");
         store::save(&StoredCredentials {
             access_token: "tok".to_string(),
             refresh_token: String::new(),
@@ -264,7 +266,7 @@ mod tests {
             auth_url: None,
         })
         .unwrap();
-        (g1, g2)
+        (g1, g2, g3)
     }
 
     pub(super) fn api(server: &mockito::Server) -> AdrApiOptions {
@@ -369,6 +371,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         assert!(!signed_in());
         // Each stops, with the reason, before it reads or writes a file.
         for args in [
@@ -571,6 +574,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _no_token = EnvGuard::remove("ACTUAL_TOKEN");
         let rt = runtime().unwrap();
         assert!(matches!(
             rt.block_on(session(&AdrApiOptions::default())),
