@@ -573,9 +573,9 @@ has only the classes its fields carry below:
 | `actual.filter.dropped.no_match` | Rule files that matched nothing in the plan, diff or path. For the brief this includes files that matched on fewer than two words when the path alone matched nothing | anonymous |
 | `actual.filter.dropped.below_floor` | Rule files that matched but scored under `actual.filter.min_score` | anonymous |
 | `actual.filter.dropped.capped` | Rule files cut by the candidate cap or the selection's limit | anonymous |
-| `actual.filter.dropped.unrelated` | Rule files stage 2's rank judged unrelated. A hook never runs stage 2, so it sends `0` | anonymous |
+| `actual.filter.dropped.unrelated` | Rule files stage 2's rank judged unrelated. `0` when no rank ran: the first pass found no more rules than the limit keeps, the rank failed or missed its deadline, or `--no-rank` was given | anonymous |
 | `actual.filter.dropped.session` | Gates only: rule files whose every rule was already cleared or overridden in this session | anonymous |
-| `actual.filter.dropped.window` | Gates only: rule files with a rule still to judge, none of them inside the 40 rules the judge sees in one round | anonymous |
+| `actual.filter.dropped.window` | Gates only: rule files with a rule still to judge, none of them inside the rules the judge sees in one round (`--max-rules`: 40 for `plan-check` and 60 for `impl-check` by default) | anonymous |
 | `actual.filter.dropped.brief_cap` | Brief only: rule files cut by the brief's decision limit, by what the agent was already briefed on, or by the brief's size budget | anonymous |
 | `actual.filter.kept_count` | Rule files that reached the agent, or whose rules reached the judge | anonymous |
 | `actual.filter.kept_refs` | The ADRs of the kept rule files, each once, best first, named as `actual.adr.ref` names them. A kept file without a v2 header has no reference and isn't listed, so this can be shorter than `actual.filter.kept_count` | first-party identity-linked |
@@ -778,8 +778,8 @@ text goes out as you work, without anyone typing a command.
 | Command | What the prompt holds |
 |---------|-----------------------|
 | `plan-check` | The plan's full text, and each judged rule's document slug, id, level and statement |
-| `impl-check` | The diff's full text, including the whole of any new file git doesn't ignore, and the same rule fields |
-| `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's slug, title, scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
+| `impl-check` | The part of the diff, including the whole of any new file git doesn't ignore, in the files each judged rule covers, and each rule's level and statement |
+| `rules select` | The plan, the paths it names or `--file` adds, and each candidate rule's title (its slug when it has none), scope and up to four path patterns. Sent only when the first pass finds more rules than `--limit` keeps |
 
 `claude-cli` runs these calls with no tools, and the API runners have no file
 tools. `codex-cli` and `cursor-cli` still run as agents in your repository,
@@ -787,9 +787,18 @@ tools. `codex-cli` and `cursor-cli` still run as agents in your repository,
 reading them. These prompts don't ask them to open other files, but the CLI
 doesn't stop them, and anything they read goes to their provider.
 
-A `plan-check` or `impl-check` you run yourself can make that `rules select`
-call first, with the diff standing in for the plan on `impl-check`. The hook
-paths never make it, `--no-rank` skips it, and so does `rules select --by-adr`.
+A `plan-check` or `impl-check` can make that `rules select` call first, with
+the diff standing in for the plan on `impl-check`, whether you run it yourself
+or a hook does. That rank prompt holds the same plan or diff the check sends,
+and the candidate rules' titles, scopes and path patterns. `--no-rank` skips
+it (the plugin passes it when `ACTUAL_GATE_RANK=off`), and so does
+`rules select --by-adr`. The rank prompt of an `impl-check` holds the whole
+diff. A `plan-check` with more than 10 rules to judge sends the plan in
+several prompts at once, each with up to 10 of the rules. An `impl-check`
+groups its rules by the set of files they cover, at most six sets, and sends
+each set's part of the diff with up to 10 of its rules a prompt, all at once.
+Either sends a prompt once more on the same runner when its answer fails or
+takes longer than 75 seconds.
 `rules eval --rank` can make it for each case in the file you give it. No prompt
 goes out when no rule applies or no runner is available. Turning telemetry off
 doesn't stop any of these calls.

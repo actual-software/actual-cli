@@ -156,12 +156,28 @@ pub struct SelectedRule {
     /// The stage-1 score. Kept even on a ranked result so the two orderings can
     /// be compared.
     pub score: f64,
+    /// For a diff, the changed files this document governs when that is fewer
+    /// than all of them; see [`Match::files`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
     pub stage: Stage,
     /// The ranker's verdict, absent when stage 2 did not run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Verdict>,
     /// Why this rule was selected. Never empty.
     pub reason: String,
+}
+
+/// One stage-1 candidate, whether or not it was selected.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ConsideredRule {
+    pub slug: String,
+    /// The stage-1 score.
+    pub score: f64,
+    /// The ranker's score, 0 to [`rank::MAX_SCORE`], when it scored this
+    /// candidate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank_score: Option<u64>,
 }
 
 /// A complete selection, and an account of how it was reached.
@@ -172,6 +188,10 @@ pub struct Selection {
     pub indexed_documents: usize,
     pub limit: usize,
     pub selected: Vec<SelectedRule>,
+    /// Every candidate stage 1 retrieved, in its order, with the ranker's
+    /// score where there is one: what the limit and the cutoffs chose from,
+    /// so another limit or cutoff can be tried on the same answer.
+    pub considered: Vec<ConsideredRule>,
     pub stage2: Stage2,
 }
 
@@ -303,6 +323,7 @@ impl Prefiltered {
                 candidate_group_id: hit.candidate_group_id.clone(),
                 root: hit.root.clone(),
                 score: hit.score,
+                files: hit.files.clone(),
                 stage: Stage::Prefilter,
                 verdict: None,
                 reason: prefilter_reason(hit),
@@ -315,18 +336,35 @@ impl Prefiltered {
     ///
     /// **This is the only place the stage-2 trigger is decided.** Every caller
     /// that has a runner goes through here — the `rules select` command,
-    /// `rules eval --rank`, and [`select`] — so a measurement cannot report a
+    /// `rules eval --rank`, `plan-check` and `impl-check`, and [`select`] — so
+    /// a measurement cannot report a
     /// number for a path the shipped command does not take. An earlier version
     /// had the gate in two of the three and the tests pointed at the third.
     ///
     /// Never fails: a runner that is down, slow or wrong produces the stage-1
     /// answer with the reason recorded, because a degraded selection is the
     /// acceptance criterion and an error is not.
+    ///
+    /// The rank gets [`rank::RANK_BUDGET`]; [`Self::rank_within`] takes another.
     pub async fn rank_with<R: StructuredRunner>(
         &self,
         runner: &R,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+    ) -> Selection {
+        self.rank_within(runner, model_override, max_budget_usd, rank::RANK_BUDGET)
+            .await
+    }
+
+    /// [`Self::rank_with`] with a deadline of `budget` on the rank: the gates'
+    /// hooks pass [`rank::GATE_RANK_BUDGET`]. A rank that misses it falls back
+    /// to the prefilter like any other failure.
+    pub async fn rank_within<R: StructuredRunner>(
+        &self,
+        runner: &R,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+        budget: std::time::Duration,
     ) -> Selection {
         if !self.needs_rank() {
             // `finish` rewrites this to `NotNeeded`, which is the honest
@@ -349,6 +387,7 @@ impl Prefiltered {
             &self.candidates(),
             model_override,
             max_budget_usd,
+            budget,
         )
         .await
         {
@@ -364,15 +403,22 @@ impl Prefiltered {
 
     /// Apply `verdicts` to the candidate set.
     ///
-    /// The ranker partitions; this function orders. A candidate judged
-    /// `unrelated` is dropped, one judged `governs` outranks one judged
-    /// `related`, and one the ranker did not judge falls below both — but
-    /// within every group the deterministic stage-1 order is preserved
-    /// unchanged, so the same verdicts always produce the same list.
+    /// The ranker scores; this function orders. A candidate judged
+    /// `unrelated` is dropped, the rest go highest score first (so one judged
+    /// `governs` still outranks one judged `related`), and one the ranker did
+    /// not judge falls below all of them. Ties keep the deterministic stage-1
+    /// order, so the same verdicts always produce the same list.
+    ///
+    /// Score order rather than stage-1 order within each verdict: when
+    /// `--limit` cuts the list, a rule scored 9 should not lose its place to
+    /// one scored 7 that stage 1 happened to rank higher. Over 25 labelled
+    /// pull requests it put 0.2 to 1.4 points more of the governing rules in
+    /// front of the gates' judge at the same limit.
     pub fn apply(&self, verdicts: &[RankedVerdict]) -> Selection {
         let verdict_for = |slug: &str| verdicts.iter().find(|v| v.slug == slug);
 
-        let mut kept: Vec<(u8, usize, SelectedRule)> = Vec::new();
+        // (tier, score descending, stage-1 position): the sort key.
+        let mut kept: Vec<(u8, std::cmp::Reverse<u64>, usize, SelectedRule)> = Vec::new();
         let (mut governs, mut related, mut unrelated, mut unjudged) = (0, 0, 0, 0);
 
         for (position, hit) in self.candidates.iter().enumerate() {
@@ -395,15 +441,13 @@ impl Prefiltered {
                     (2, None)
                 }
             };
-            // A ranker that returns a blank reason still owes the caller one,
-            // so the stage-1 evidence stands in rather than an empty line.
-            let reason = judged
-                .map(|v| v.reason.trim())
-                .filter(|reason| !reason.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| prefilter_reason(hit));
+            // The ranker writes only a score, so every rule's reason is the
+            // stage-1 evidence for it.
+            let reason = prefilter_reason(hit);
+            let score = std::cmp::Reverse(judged.map_or(0, |v| v.score));
             kept.push((
                 tier,
+                score,
                 position,
                 SelectedRule {
                     slug: hit.slug.clone(),
@@ -413,6 +457,7 @@ impl Prefiltered {
                     candidate_group_id: hit.candidate_group_id.clone(),
                     root: hit.root.clone(),
                     score: hit.score,
+                    files: hit.files.clone(),
                     stage: if verdict.is_some() {
                         Stage::Ranked
                     } else {
@@ -424,15 +469,19 @@ impl Prefiltered {
             ));
         }
 
-        kept.sort_by_key(|(tier, position, _)| (*tier, *position));
+        // Governs is 7 and up and related 3 to 6, so score order alone would
+        // keep the tiers apart; the tier stays in the key so an unjudged
+        // candidate (no score) sorts last however the scores fall.
+        kept.sort_by_key(|(tier, score, position, _)| (*tier, *score, *position));
         let selected: Vec<SelectedRule> = kept
             .into_iter()
             .take(self.limit)
-            .map(|(_, _, rule)| rule)
+            .map(|(_, _, _, rule)| rule)
             .collect();
 
-        self.selection(
+        self.selection_scored(
             selected,
+            verdicts,
             Stage2::Applied {
                 candidates: self.candidates.len(),
                 governs,
@@ -444,12 +493,34 @@ impl Prefiltered {
     }
 
     fn selection(&self, selected: Vec<SelectedRule>, stage2: Stage2) -> Selection {
+        self.selection_scored(selected, &[], stage2)
+    }
+
+    fn selection_scored(
+        &self,
+        selected: Vec<SelectedRule>,
+        verdicts: &[RankedVerdict],
+        stage2: Stage2,
+    ) -> Selection {
+        let considered = self
+            .candidates
+            .iter()
+            .map(|hit| ConsideredRule {
+                slug: hit.slug.clone(),
+                score: hit.score,
+                rank_score: verdicts
+                    .iter()
+                    .find(|v| v.slug == hit.slug)
+                    .map(|v| v.score),
+            })
+            .collect();
         Selection {
             plan: self.plan.clone(),
             paths: self.paths.clone(),
             indexed_documents: self.indexed_documents,
             limit: self.limit,
             selected,
+            considered,
             stage2,
         }
     }
@@ -600,7 +671,7 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
-            _effort: Option<&str>,
+            _tuning: crate::runner::structured::Tuning,
         ) -> Result<serde_json::Value, crate::error::ActualError> {
             *self.seen.lock().unwrap() = Some(prompt.to_string());
             self.answer
@@ -612,15 +683,22 @@ mod tests {
         }
     }
 
-    fn verdicts(entries: &[(&str, &str, &str)]) -> serde_json::Value {
-        serde_json::json!({
-            "verdicts": entries
-                .iter()
-                .map(|(slug, verdict, reason)| serde_json::json!({
-                    "slug": slug, "verdict": verdict, "reason": reason,
-                }))
-                .collect::<Vec<_>>()
-        })
+    /// A ranker's `{"scores": …}` answer giving each named candidate the
+    /// score for `verdict`, keyed by its number among `candidates`.
+    fn scores(candidates: &[Candidate], entries: &[(&str, &str)]) -> serde_json::Value {
+        let scores: serde_json::Map<String, serde_json::Value> = entries
+            .iter()
+            .map(|(slug, verdict)| {
+                let number = candidates.iter().position(|c| c.slug == *slug).unwrap() + 1;
+                let score = match *verdict {
+                    "governs" => rank::MAX_SCORE,
+                    "related" => rank::RELATED_AT,
+                    _ => 0,
+                };
+                (number.to_string(), score.into())
+            })
+            .collect();
+        serde_json::json!({ "scores": scores })
     }
 
     // ── stage 1 ─────────────────────────────────────────────────────────
@@ -705,10 +783,10 @@ mod tests {
         let second = prefiltered.candidates()[1].slug.clone();
 
         let parsed = rank::parse_verdicts(
-            &verdicts(&[
-                (&first, "unrelated", "not about this change"),
-                (&second, "governs", "constrains the revocation check"),
-            ]),
+            &scores(
+                &prefiltered.candidates(),
+                &[(&first, "unrelated"), (&second, "governs")],
+            ),
             &prefiltered.candidates(),
         )
         .unwrap();
@@ -718,9 +796,10 @@ mod tests {
         assert_eq!(selection.selected[0].slug, second);
         assert_eq!(selection.selected[0].verdict, Some(Verdict::Governs));
         assert_eq!(selection.selected[0].stage, Stage::Ranked);
+        // The ranker writes no reason, so the promoted rule carries stage 1's.
         assert_eq!(
             selection.selected[0].reason,
-            "constrains the revocation check"
+            prefilter_reason(&prefiltered.candidates[1])
         );
     }
 
@@ -738,10 +817,10 @@ mod tests {
         // The first candidate is demoted to `related`, the second promoted to
         // `governs`, and the third left unjudged.
         let parsed = rank::parse_verdicts(
-            &verdicts(&[
-                (&slugs[0], "related", "same area"),
-                (&slugs[1], "governs", "constrains it"),
-            ]),
+            &scores(
+                &prefiltered.candidates(),
+                &[(&slugs[0], "related"), (&slugs[1], "governs")],
+            ),
             &prefiltered.candidates(),
         )
         .unwrap();
@@ -755,7 +834,7 @@ mod tests {
         assert!(!selection.selected[2].reason.is_empty());
     }
 
-    /// Within one verdict the deterministic stage-1 order is preserved, which
+    /// Among equal scores the deterministic stage-1 order is preserved, which
     /// is what keeps the answer stable when the ranker judges everything alike.
     #[test]
     fn test_apply_preserves_stage_one_order_inside_a_verdict() {
@@ -766,15 +845,54 @@ mod tests {
             .iter()
             .map(|c| c.slug.clone())
             .collect();
-        let entries: Vec<(&str, &str, &str)> = slugs
+        let entries: Vec<(&str, &str)> = slugs
             .iter()
-            .map(|slug| (slug.as_str(), "governs", "all equal"))
+            .map(|slug| (slug.as_str(), "governs"))
             .collect();
-        let parsed = rank::parse_verdicts(&verdicts(&entries), &prefiltered.candidates()).unwrap();
+        let parsed = rank::parse_verdicts(
+            &scores(&prefiltered.candidates(), &entries),
+            &prefiltered.candidates(),
+        )
+        .unwrap();
 
         let selection = prefiltered.apply(&parsed);
         let got: Vec<String> = selection.selected.iter().map(|r| r.slug.clone()).collect();
         assert_eq!(got, slugs);
+    }
+
+    /// A higher score goes first, even inside one verdict, so a cut by
+    /// `--limit` keeps the rules the ranker is surest of.
+    #[test]
+    fn test_apply_puts_the_higher_score_first_inside_a_verdict() {
+        let (_root, index) = corpus();
+        let prefiltered = prefilter(&index, &token_query(), 2, 10);
+        let slugs: Vec<String> = prefiltered
+            .candidates()
+            .iter()
+            .map(|c| c.slug.clone())
+            .collect();
+        assert!(slugs.len() >= 3, "corpus should offer three candidates");
+        let numbered = |slug: &str| {
+            prefiltered
+                .candidates()
+                .iter()
+                .position(|c| c.slug == slug)
+                .unwrap()
+                + 1
+        };
+        // Stage 1's first is a 7 (governs), its second a 4 (related) and its
+        // third a 9 (governs): the 9 goes first, then the 7, and the limit of
+        // two cuts the related rule.
+        let answer = serde_json::json!({ "scores": {
+            numbered(&slugs[0]).to_string(): rank::GOVERNS_AT,
+            numbered(&slugs[1]).to_string(): rank::RELATED_AT + 1,
+            numbered(&slugs[2]).to_string(): rank::MAX_SCORE,
+        }});
+        let parsed = rank::parse_verdicts(&answer, &prefiltered.candidates()).unwrap();
+
+        let selection = prefiltered.apply(&parsed);
+        let got: Vec<&str> = selection.selected.iter().map(|r| r.slug.as_str()).collect();
+        assert_eq!(got, vec![slugs[2].as_str(), slugs[0].as_str()]);
     }
 
     #[test]
@@ -787,11 +905,14 @@ mod tests {
             .map(|c| c.slug.clone())
             .collect();
         let parsed = rank::parse_verdicts(
-            &verdicts(&[
-                (&slugs[0], "governs", "a"),
-                (&slugs[1], "related", "b"),
-                (&slugs[2], "unrelated", "c"),
-            ]),
+            &scores(
+                &prefiltered.candidates(),
+                &[
+                    (&slugs[0], "governs"),
+                    (&slugs[1], "related"),
+                    (&slugs[2], "unrelated"),
+                ],
+            ),
             &prefiltered.candidates(),
         )
         .unwrap();
@@ -806,20 +927,67 @@ mod tests {
         assert!(selection.stage2.summary().contains("1 governs"));
     }
 
-    /// A ranker that answers with a blank reason still owes the caller one.
+    /// Every selected rule has a reason, ranked or not, and it is the
+    /// stage-1 evidence: the ranker writes only scores.
     #[test]
-    fn test_apply_falls_back_to_the_stage_one_reason_when_the_ranker_gives_none() {
+    fn test_apply_gives_every_rule_the_stage_one_reason() {
         let (_root, index) = corpus();
         let prefiltered = prefilter(&index, &token_query(), 10, 10);
         let slug = prefiltered.candidates()[0].slug.clone();
         let parsed = rank::parse_verdicts(
-            &verdicts(&[(&slug, "governs", "   ")]),
+            &scores(&prefiltered.candidates(), &[(&slug, "governs")]),
             &prefiltered.candidates(),
         )
         .unwrap();
         let selection = prefiltered.apply(&parsed);
-        assert!(!selection.selected[0].reason.is_empty());
+        for (rule, hit) in selection.selected.iter().zip(&prefiltered.candidates) {
+            assert_eq!(rule.reason, prefilter_reason(hit), "{}", rule.slug);
+        }
         assert!(selection.selected[0].reason.contains(" on "));
+    }
+
+    /// Every stage-1 candidate is listed, in stage-1 order, with the score the
+    /// ranker gave it — the dropped and the capped too, so another limit or
+    /// cutoff can be tried on the same answer.
+    #[test]
+    fn test_apply_lists_every_candidate_with_its_rank_score() {
+        let (_root, index) = corpus();
+        let prefiltered = prefilter(&index, &token_query(), 1, 10);
+        let candidates = prefiltered.candidates();
+        assert!(candidates.len() >= 3, "{}", candidates.len());
+        let (first, second) = (candidates[0].slug.clone(), candidates[1].slug.clone());
+        let parsed = rank::parse_verdicts(
+            &scores(&candidates, &[(&first, "unrelated"), (&second, "governs")]),
+            &candidates,
+        )
+        .unwrap();
+        let selection = prefiltered.apply(&parsed);
+
+        assert_eq!(selection.selected.len(), 1);
+        let slugs: Vec<&str> = selection
+            .considered
+            .iter()
+            .map(|c| c.slug.as_str())
+            .collect();
+        let expected: Vec<&str> = candidates.iter().map(|c| c.slug.as_str()).collect();
+        assert_eq!(slugs, expected);
+        assert_eq!(selection.considered[0].rank_score, Some(0));
+        assert_eq!(selection.considered[1].rank_score, Some(rank::MAX_SCORE));
+        assert_eq!(selection.considered[2].rank_score, None);
+        assert_eq!(
+            selection.considered[0].score,
+            prefiltered.candidates[0].score
+        );
+    }
+
+    /// Without a rank the candidates are still listed, with no rank score.
+    #[test]
+    fn test_finish_lists_the_candidates_without_rank_scores() {
+        let (_root, index) = corpus();
+        let prefiltered = prefilter(&index, &token_query(), 1, 10);
+        let selection = prefiltered.finish(Stage2::NotRequested);
+        assert_eq!(selection.considered.len(), prefiltered.len());
+        assert!(selection.considered.iter().all(|c| c.rank_score.is_none()));
     }
 
     // ── the two stages together ─────────────────────────────────────────
@@ -865,7 +1033,7 @@ mod tests {
         let prefiltered = prefilter(&index, &token_query(), 1, DEFAULT_CANDIDATES);
         assert!(prefiltered.needs_rank());
         let slug = prefiltered.candidates()[1].slug.clone();
-        let runner = FakeRunner::ok(verdicts(&[(&slug, "governs", "it governs the change")]));
+        let runner = FakeRunner::ok(scores(&prefiltered.candidates(), &[(&slug, "governs")]));
 
         let selection = prefiltered.rank_with(&runner, None, None).await;
         assert!(runner.was_called());
@@ -895,7 +1063,7 @@ mod tests {
         let query = Query::new("").with_paths(["services/auth/oauth/token.ts".to_string()]);
         let prefiltered = prefilter(&index, &query, 1, DEFAULT_CANDIDATES);
         assert!(prefiltered.needs_rank(), "fixture must have a surplus");
-        let runner = FakeRunner::ok(verdicts(&[]));
+        let runner = FakeRunner::ok(serde_json::json!({ "scores": {} }));
 
         let selection = prefiltered.rank_with(&runner, None, None).await;
 
@@ -912,7 +1080,7 @@ mod tests {
         let (_root, index) = corpus();
         let prefiltered = prefilter(&index, &token_query(), 1, DEFAULT_CANDIDATES);
         let slug = prefiltered.candidates()[1].slug.clone();
-        let runner = FakeRunner::ok(verdicts(&[(&slug, "governs", "it governs the change")]));
+        let runner = FakeRunner::ok(scores(&prefiltered.candidates(), &[(&slug, "governs")]));
 
         let selection = select(
             &index,
@@ -927,7 +1095,7 @@ mod tests {
         assert!(runner.was_called());
         assert!(selection.stage2.is_applied());
         assert_eq!(selection.selected[0].slug, slug);
-        assert_eq!(selection.selected[0].reason, "it governs the change");
+        assert!(selection.selected[0].reason.contains(" on "));
     }
 
     /// The degraded path: the runner is reachable and useless, and the caller
@@ -960,9 +1128,9 @@ mod tests {
     #[tokio::test]
     async fn test_select_falls_back_when_the_ranker_keeps_nothing() {
         let (_root, index) = corpus();
-        // The only slug the ranker names was never a candidate, so nothing
+        // The only number the ranker scores names no candidate, so nothing
         // survives validation and the rank is treated as a failure.
-        let runner = FakeRunner::ok(verdicts(&[("not-a-candidate", "governs", "invented")]));
+        let runner = FakeRunner::ok(serde_json::json!({ "scores": { "99": 9 } }));
 
         let selection = select(
             &index,
@@ -991,6 +1159,7 @@ mod tests {
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
+            files: None,
             contributions: vec![FieldContribution {
                 field: Field::Scope,
                 coverage: 0.5,
@@ -1037,6 +1206,7 @@ mod tests {
                 contribution(Field::Title, &["token"]),
             ],
             matched_globs: Vec::new(),
+            files: None,
         };
         assert!(prefilter_reason(&hit).contains("scope and title match on oauth, token"));
     }
@@ -1052,6 +1222,7 @@ mod tests {
             relative_path: "p".to_string(),
             title: None,
             score: 1.0,
+            files: None,
             contributions: Vec::new(),
             matched_globs: vec![GlobMatch {
                 glob: "services/auth/**".to_string(),
@@ -1081,6 +1252,7 @@ mod tests {
                 matched: (0..10).map(|i| format!("t{i}")).collect(),
             }],
             matched_globs: Vec::new(),
+            files: None,
         };
         let reason = prefilter_reason(&hit);
         assert_eq!(reason.matches(", ").count(), MAX_REASON_TERMS - 1);
@@ -1101,6 +1273,7 @@ mod tests {
             score: 1.0,
             contributions: Vec::new(),
             matched_globs: Vec::new(),
+            files: None,
         };
         assert_eq!(
             prefilter_reason(&hit),

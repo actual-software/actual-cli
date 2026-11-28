@@ -21,6 +21,26 @@
 
 use crate::error::ActualError;
 
+/// How much a backend should deliberate on one call, for backends that can be
+/// told.
+///
+/// The default leaves every backend at its own default. A field a backend has
+/// no equivalent for is ignored, the same way every backend but `claude-cli`
+/// ignores `max_budget_usd`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tuning {
+    /// A reasoning-effort level, e.g. `"low"` or `"high"`. `claude-cli` passes
+    /// it as `--effort` and `codex-cli` as `model_reasoning_effort`. `None`
+    /// means the backend's own default, never a fixed level — a caller that
+    /// always wants a specific level passes it explicitly every time.
+    pub effort: Option<&'static str>,
+    /// Turn extended thinking off. `claude-cli` thinks by default on some
+    /// models whatever `--effort` says — Haiku 4.5 wrote about 5,000 thinking
+    /// tokens on a stage-2 rank under `--effort low` — so effort alone cannot
+    /// stop it.
+    pub disable_thinking: bool,
+}
+
 /// A runner that can answer any schema, not only the tailoring one.
 ///
 /// Implemented by all five backends. The caller supplies the prompt and the
@@ -31,20 +51,15 @@ pub trait StructuredRunner: Send + Sync {
     /// `model_override` and `max_budget_usd` carry the same meaning they do for
     /// tailoring: each runner applies whichever of them its backend supports.
     ///
-    /// `effort` is a reasoning-effort override (e.g. `"low"`, `"high"`) for
-    /// backends that support one — currently only the `claude-cli` runner,
-    /// which maps it to `claude`'s own `--effort` flag. A backend with no such
-    /// concept ignores it, the same way every backend but `claude-cli` already
-    /// ignores `max_budget_usd`. `None` means "the backend's own default,"
-    /// never a fixed level — a caller that always wants a specific level
-    /// passes it explicitly every time.
+    /// `tuning` sets reasoning effort and extended thinking on the backends
+    /// that support them; see [`Tuning`].
     fn run_structured_json(
         &self,
         prompt: &str,
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
-        effort: Option<&str>,
+        tuning: Tuning,
     ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> + Send;
 }
 
@@ -64,7 +79,7 @@ mod tests {
             _schema: &str,
             model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
-            _effort: Option<&str>,
+            _tuning: Tuning,
         ) -> Result<serde_json::Value, ActualError> {
             Ok(serde_json::json!({
                 "prompt": prompt,
@@ -76,7 +91,7 @@ mod tests {
     #[tokio::test]
     async fn test_a_fake_runner_satisfies_the_trait() {
         let value = EchoRunner
-            .run_structured_json("plan", "{}", Some("haiku"), None, None)
+            .run_structured_json("plan", "{}", Some("haiku"), None, Tuning::default())
             .await
             .unwrap();
         assert_eq!(value["prompt"], "plan");

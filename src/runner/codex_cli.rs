@@ -160,17 +160,28 @@ impl CodexSandbox {
             Self::ReadOnly => "read-only",
         }
     }
+
+    fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
 }
 
 /// Build the argument list for the Codex CLI invocation.
 ///
-/// Produces: `exec --sandbox <mode> [--model <model>] --output-last-message <path> <prompt>`
+/// Produces: `exec --sandbox <mode> [--skip-git-repo-check]
+/// -c features.hooks=false [-c model_reasoning_effort=<effort>] [--model <model>]
+/// --output-last-message <path> <prompt>`
 ///
 /// The `exec` subcommand runs Codex in non-interactive mode, where it never
 /// stops for approval. `--sandbox` goes on every call so that a `sandbox_mode`
-/// in the user's Codex config can't widen it.
+/// in the user's Codex config can't widen it. `--skip-git-repo-check` goes on
+/// read-only calls only, so they run outside a git repository too.
 /// `--output-last-message <path>` writes the agent's final response to a file
 /// so we can read structured output after the process exits.
+///
+/// When `effort` is `None`, Codex runs at the reasoning effort the user's own
+/// config sets, which can be `high` — slow enough to push a stage-2 rank past
+/// its deadline.
 ///
 /// When `model` is `None`, the `--model` flag is omitted and Codex CLI uses
 /// its own default model (currently `gpt-5` for ChatGPT OAuth accounts).
@@ -185,10 +196,12 @@ impl CodexSandbox {
 ///
 /// Returns `ActualError::ConfigError` if:
 /// - `model` is `Some` and does not match `^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}$`
+/// - `effort` is `Some` and is not a single lowercase word
 /// - `prompt` starts with `-` (would be interpreted as a flag by the CLI parser)
 fn build_codex_args(
     prompt: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     output_path: &std::path::Path,
     sandbox: CodexSandbox,
 ) -> Result<Vec<String>, ActualError> {
@@ -196,6 +209,15 @@ fn build_codex_args(
         if !model_name_regex().is_match(m) {
             return Err(ActualError::ConfigError(format!(
                 "Invalid model name: {m:?}. Must match [a-zA-Z0-9][a-zA-Z0-9._/-]{{0,99}}"
+            )));
+        }
+    }
+    // The value is read as TOML, so anything but a plain word is refused
+    // rather than passed through.
+    if let Some(e) = effort {
+        if e.is_empty() || !e.bytes().all(|b| b.is_ascii_lowercase()) {
+            return Err(ActualError::ConfigError(format!(
+                "Invalid reasoning effort: {e:?}. Must be a lowercase word such as \"low\""
             )));
         }
     }
@@ -208,6 +230,15 @@ fn build_codex_args(
         "exec".to_string(),
         "--sandbox".to_string(),
         sandbox.as_arg().to_string(),
+    ];
+    // Codex refuses to start outside a git repository unless told otherwise,
+    // so a check or rank run from a plain directory failed. That guard is
+    // there so an agent's edits can be undone; a read-only call makes none,
+    // so it skips the guard. Tailoring writes files and keeps it.
+    if sandbox.is_read_only() {
+        args.push("--skip-git-repo-check".to_string());
+    }
+    args.extend([
         // The judge's own session must not run the user's hooks: the
         // actual-cli plugin's `Stop` hook would rerun `impl-check`, which
         // spawns this judge again. `-c` rather than `--disable hooks`, because
@@ -215,7 +246,11 @@ fn build_codex_args(
         // config key but rejects an unknown feature name.
         "-c".to_string(),
         "features.hooks=false".to_string(),
-    ];
+    ]);
+    if let Some(e) = effort {
+        args.push("-c".to_string());
+        args.push(format!("model_reasoning_effort={e}"));
+    }
     if let Some(m) = model {
         args.push("--model".to_string());
         args.push(m.to_string());
@@ -390,6 +425,7 @@ impl CodexCliRunner {
         prompt: &str,
         schema: &str,
         sandbox: CodexSandbox,
+        effort: Option<&str>,
     ) -> Result<T, ActualError> {
         let model = self.model.as_deref();
 
@@ -409,7 +445,7 @@ impl CodexCliRunner {
              conforming to this JSON schema:\n{schema}"
         );
 
-        let args = build_codex_args(&augmented_prompt, model, &output_path, sandbox)?;
+        let args = build_codex_args(&augmented_prompt, model, effort, &output_path, sandbox)?;
         run_codex_subprocess(
             &self.binary_path,
             self.timeout,
@@ -429,7 +465,7 @@ impl TailoringRunner for CodexCliRunner {
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
-        self.run_structured(prompt, schema, CodexSandbox::WorkspaceWrite)
+        self.run_structured(prompt, schema, CodexSandbox::WorkspaceWrite, None)
             .await
     }
 }
@@ -441,9 +477,11 @@ impl crate::runner::structured::StructuredRunner for CodexCliRunner {
         schema: &str,
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
-        _effort: Option<&str>,
+        tuning: crate::runner::structured::Tuning,
     ) -> Result<serde_json::Value, ActualError> {
-        self.run_structured(prompt, schema, CodexSandbox::ReadOnly)
+        // `disable_thinking` has no separate switch here: the lowest effort is
+        // as little reasoning as Codex offers.
+        self.run_structured(prompt, schema, CodexSandbox::ReadOnly, tuning.effort)
             .await
     }
 }
@@ -573,7 +611,10 @@ echo '{}' > "$OUTPUT_FILE"
                 r#"{"type":"object","title":"rank"}"#,
                 None,
                 None,
-                None,
+                crate::runner::structured::Tuning {
+                    effort: Some("low"),
+                    disable_thinking: true,
+                },
             )
             .await
             .unwrap();
@@ -587,7 +628,16 @@ echo '{}' > "$OUTPUT_FILE"
         let captured = std::fs::read_to_string(&prompt_file).unwrap();
         assert!(captured.contains("rank these"), "{captured}");
         assert!(captured.contains(r#""title":"rank""#), "{captured}");
-        assert!(captured.contains("--sandbox\nread-only\n"), "{captured}");
+        assert!(
+            captured.contains("--sandbox\nread-only\n--skip-git-repo-check\n"),
+            "{captured}"
+        );
+        // Without this, Codex runs at whatever effort the user's own config
+        // sets, which can be slow enough to miss a stage-2 deadline.
+        assert!(
+            captured.contains("-c\nmodel_reasoning_effort=low\n"),
+            "{captured}"
+        );
     }
 
     #[tokio::test]
@@ -609,7 +659,13 @@ exit 3
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let err = CodexCliRunner::new(script, None, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object"}"#,
+                None,
+                None,
+                crate::runner::structured::Tuning::default(),
+            )
             .await
             .expect_err("expected Err");
         assert!(err.to_string().to_lowercase().contains("codex"), "{err}");
@@ -801,6 +857,10 @@ echo '{json}' > "$OUTPUT_FILE"
             "--sandbox workspace-write missing"
         );
         assert!(
+            !captured.contains("--skip-git-repo-check"),
+            "tailoring writes files, so it keeps Codex's git check"
+        );
+        assert!(
             !captured.contains("--full-auto"),
             "Codex 0.147.0 and later reject --full-auto"
         );
@@ -888,6 +948,7 @@ echo '{json}' > "$OUTPUT_FILE"
         let args = build_codex_args(
             "my prompt",
             Some("gpt-5"),
+            None,
             output_path,
             CodexSandbox::WorkspaceWrite,
         )
@@ -909,20 +970,76 @@ echo '{json}' > "$OUTPUT_FILE"
         use std::path::Path;
         let output_path = Path::new("/tmp/codex-output.txt");
         let args =
-            build_codex_args("my prompt", None, output_path, CodexSandbox::ReadOnly).unwrap();
+            build_codex_args("my prompt", None, None, output_path, CodexSandbox::ReadOnly).unwrap();
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "--sandbox");
         assert_eq!(args[2], "read-only");
-        assert_eq!(args[3], "-c");
-        assert_eq!(args[4], "features.hooks=false");
-        assert_eq!(args[5], "--output-last-message");
-        assert_eq!(args[6], "/tmp/codex-output.txt");
-        assert_eq!(args[7], "my prompt");
+        assert_eq!(args[3], "--skip-git-repo-check");
+        assert_eq!(args[4], "-c");
+        assert_eq!(args[5], "features.hooks=false");
+        assert_eq!(args[6], "--output-last-message");
+        assert_eq!(args[7], "/tmp/codex-output.txt");
+        assert_eq!(args[8], "my prompt");
         // No --model flag — Codex CLI uses its own default
         assert!(
             !args.iter().any(|a| a == "--model"),
             "--model should not be present when model is None"
         );
+    }
+
+    #[test]
+    fn test_build_codex_args_passes_reasoning_effort_before_the_model() {
+        use std::path::Path;
+        let output_path = Path::new("/tmp/codex-output.txt");
+        let args = build_codex_args(
+            "my prompt",
+            Some("gpt-5"),
+            Some("low"),
+            output_path,
+            CodexSandbox::ReadOnly,
+        )
+        .unwrap();
+        assert_eq!(args[6], "-c");
+        assert_eq!(args[7], "model_reasoning_effort=low");
+        assert_eq!(args[8], "--model");
+        assert_eq!(args[9], "gpt-5");
+    }
+
+    #[test]
+    fn test_build_codex_args_skips_the_git_check_only_when_read_only() {
+        use std::path::Path;
+        let p = Path::new("/tmp/out.txt");
+        let skips = |sandbox| {
+            build_codex_args("prompt", None, None, p, sandbox)
+                .unwrap()
+                .iter()
+                .any(|a| a == "--skip-git-repo-check")
+        };
+        // A check or rank run from a directory that is not a git repository
+        // fails without the flag.
+        assert!(skips(CodexSandbox::ReadOnly));
+        // Tailoring writes files, so it keeps Codex's guard.
+        assert!(!skips(CodexSandbox::WorkspaceWrite));
+    }
+
+    #[test]
+    fn test_build_codex_args_rejects_an_effort_that_is_not_a_word() {
+        use std::path::Path;
+        let p = Path::new("/tmp/out.txt");
+        for bad in [
+            "",
+            "Low",
+            "low\"\nsandbox_mode=\"danger-full-access",
+            "low high",
+            "-low",
+        ] {
+            let err =
+                build_codex_args("prompt", None, Some(bad), p, CodexSandbox::ReadOnly).unwrap_err();
+            assert!(
+                matches!(err, ActualError::ConfigError(_)),
+                "effort {bad:?} should be refused, got: {err:?}"
+            );
+        }
     }
 
     // ---- Security: build_codex_args rejects flag-like model names ----
@@ -934,6 +1051,7 @@ echo '{json}' > "$OUTPUT_FILE"
         let err = build_codex_args(
             "valid prompt",
             Some("--dangerous-flag"),
+            None,
             p,
             CodexSandbox::ReadOnly,
         )
@@ -953,6 +1071,7 @@ echo '{json}' > "$OUTPUT_FILE"
         let err = build_codex_args(
             "valid prompt",
             Some("model with spaces"),
+            None,
             p,
             CodexSandbox::ReadOnly,
         )
@@ -965,8 +1084,14 @@ echo '{json}' > "$OUTPUT_FILE"
         use std::path::Path;
         let p = Path::new("/tmp/out.txt");
         for bad_model in &["model|cmd", "model;cmd", "model$var", "model`cmd`"] {
-            let err = build_codex_args("valid prompt", Some(bad_model), p, CodexSandbox::ReadOnly)
-                .unwrap_err();
+            let err = build_codex_args(
+                "valid prompt",
+                Some(bad_model),
+                None,
+                p,
+                CodexSandbox::ReadOnly,
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, ActualError::ConfigError(_)),
                 "expected ConfigError for model {bad_model:?}, got: {err:?}"
@@ -978,8 +1103,8 @@ echo '{json}' > "$OUTPUT_FILE"
     fn test_build_codex_args_rejects_flag_prompt() {
         use std::path::Path;
         let p = Path::new("/tmp/out.txt");
-        let err =
-            build_codex_args("--bad-flag", Some("gpt-5"), p, CodexSandbox::ReadOnly).unwrap_err();
+        let err = build_codex_args("--bad-flag", Some("gpt-5"), None, p, CodexSandbox::ReadOnly)
+            .unwrap_err();
         assert!(
             matches!(err, ActualError::ConfigError(_)),
             "expected ConfigError, got: {err:?}"
@@ -1003,7 +1128,7 @@ echo '{json}' > "$OUTPUT_FILE"
         ];
         for model in &valid_models {
             assert!(
-                build_codex_args("prompt", Some(model), p, CodexSandbox::ReadOnly).is_ok(),
+                build_codex_args("prompt", Some(model), None, p, CodexSandbox::ReadOnly).is_ok(),
                 "expected Ok for model {model:?}"
             );
         }
