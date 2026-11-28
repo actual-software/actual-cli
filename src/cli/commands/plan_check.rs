@@ -75,15 +75,20 @@
 //! directory, select the documents that apply, gather their individual
 //! rules, and hand the whole batch to [`crate::rules::check`] in one call.
 //!
-//! **Selection's stage 2 is a hook-only restriction, not a blanket one.**
+//! **Selection's stage 2 runs in the hook too, on a shorter deadline.**
 //! `rules select`'s stage 2 spends a model call improving *which documents*
-//! are chosen. `--claude-hook` skips it unconditionally and keeps the
-//! deterministic prefilter's answer, because that call has exactly one model
-//! call to spend inside Claude Code's 120-second `PreToolUse` timeout, and it
-//! belongs to the conformance judge — running both risks the judge never
-//! getting its turn, which is a worse failure than an imprecise selection
-//! (see AK-734). Direct mode has no such deadline, so it runs stage 2 by
-//! default, the same way `rules select` does, with `--no-rank` opting out.
+//! are chosen. The hook used to skip it (AK-734): a rank took about 16
+//! seconds then, and the hook's timeout belongs to the conformance judge
+//! first. A rank now scores each candidate in one short answer, about 4
+//! seconds on claude-cli and 9 on codex-cli, and it adds 0.10 to 0.20 to the
+//! share of governing rules among the first ten selected, on a plan and on a
+//! diff (measured over 25 merged pull requests from one repository;
+//! `docs/RULE_SELECTION.md` has the numbers). It runs only when the prefilter
+//! finds more documents than `--limit` (20 here) keeps. So every mode runs it unless
+//! `--no-rank` is given, and in a hook it keeps to
+//! [`GATE_RANK_BUDGET`](crate::rules::scope::rank::GATE_RANK_BUDGET), falling
+//! back to the prefilter when it misses, so the judge keeps
+//! [`CHECK_BUDGET`](crate::rules::check::CHECK_BUDGET).
 //!
 //! # The revision loop (AK-677)
 //!
@@ -185,6 +190,19 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
+
+    if args.selection_only {
+        let report = check_engine::selection_report(
+            &plan_text,
+            &root,
+            &rules_dir,
+            &args.check_knobs(),
+            crate::rules::check::ArtifactKind::Plan,
+            !args.no_rank,
+        )?;
+        println!("{report}");
+        return Ok(());
+    }
 
     // The pass the hook runs before its judge, reported by `--json` and noted
     // nowhere, since there is no session outside a hook envelope.
@@ -430,8 +448,8 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
     #[cfg(feature = "telemetry")]
     let started = super::check_telemetry::Started::now();
 
-    // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
-    // hook's one model call stays reserved for the judge. See the module doc.
+    // Stage 2 runs here as it does by hand, unless `--no-rank`, inside the
+    // hook's shorter rank budget (`for_host`). See the module doc.
     // `filter` only feeds telemetry.
     #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
     let (outcome, filter) = match run_pipeline_filtered(
@@ -440,7 +458,7 @@ fn exec_hook_with(args: &PlanCheckArgs, host: HookHost, raw: &str) {
         &rules_dir,
         &args.check_knobs().for_host(host),
         crate::rules::check::ArtifactKind::Plan,
-        false,
+        !args.no_rank,
         &session,
     ) {
         Ok(run) => run,
@@ -753,6 +771,11 @@ mod tests {
 
     const OAUTH_DOC: &str = "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: log the raw signing key.\n";
 
+    /// A second document the token-signing plan and diff both match, so the
+    /// prefilter returns more candidates than a `--limit` of 1 and stage 2
+    /// has something to rank.
+    const KEY_ROTATION_DOC: &str = "# Rotate Signing Keys: Signing Key Rotation\n\nThese rules are ALWAYS ACTIVE for signing key handling.\n\n### Rules\n\n- **R-B-001** MUST: rotate the signing key every year.\n";
+
     fn seed(files: &[(&str, &str)]) -> TempDir {
         let root = tempdir().unwrap();
         let dir = crate::rules::rules_dir(root.path());
@@ -776,6 +799,8 @@ mod tests {
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
             no_rank: false,
+            max_rules: 40,
+            selection_only: false,
             runner: None,
             model: None,
             json: false,
@@ -820,6 +845,38 @@ mod tests {
         script
     }
 
+    /// A fake Claude Code binary that tells a stage-2 rank from a judge call
+    /// by the rank prompt's opening words, answers each in its own shape, and
+    /// appends `rank` or `judge` to `log` for every call it answers.
+    #[cfg(unix)]
+    fn rank_and_judge_claude(dir: &Path, judge_output: &serde_json::Value, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let envelope = |output: serde_json::Value| {
+            serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "structured_output": output,
+            })
+            .to_string()
+        };
+        let rank = envelope(serde_json::json!({"scores": {"1": 9, "2": 9}}));
+        let judge = envelope(judge_output.clone());
+        let log = log.display();
+        let script = dir.join("fake-claude.sh");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\n\
+             case \"$*\" in\n\
+             *'Score how strongly'*) echo rank >> '{log}'; printf '%s' '{rank}' ;;\n\
+             *) echo judge >> '{log}'; printf '%s' '{judge}' ;;\n\
+             esac\n"
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
     /// [`fake_claude`] with a judge that takes 300 ms to answer, so a test can
     /// tell a time read before the judge ran from one read after it.
     #[cfg(all(unix, feature = "telemetry"))]
@@ -836,14 +893,12 @@ mod tests {
         serde_json::json!({ "verdicts": entries })
     }
 
-    /// `structured_output` shaped for the *rank* schema (`slug`/`verdict`/
-    /// `reason`) — valid input for stage 2's rank, and deliberately the wrong
-    /// shape for the judge, so reusing it for a check call exercises the
-    /// "judge output was malformed" path.
-    fn rank_output(slug: &str) -> serde_json::Value {
-        serde_json::json!({
-            "verdicts": [{"slug": slug, "verdict": "governs", "reason": "it governs the change"}]
-        })
+    /// `structured_output` shaped for the *rank* schema (a score per
+    /// numbered candidate, here the first) — valid input for stage 2's rank,
+    /// and deliberately the wrong shape for the judge, so reusing it for a
+    /// check call exercises the "judge output was malformed" path.
+    fn rank_output() -> serde_json::Value {
+        serde_json::json!({ "scores": { "1": 9 } })
     }
 
     #[test]
@@ -932,6 +987,26 @@ mod tests {
         args.plan = vec!["a plan".to_string()];
         args.repo = Some(repo.path().to_path_buf());
         assert!(exec(&args).is_ok());
+    }
+
+    #[test]
+    fn test_exec_direct_selection_only_stops_before_the_judge() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.plan = vec!["Sign access tokens with RS256".to_string()];
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.selection_only = true;
+        args.no_rank = true;
+        assert!(exec(&args).is_ok());
+
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        args.rules_dir = Some(not_a_dir);
+        assert!(exec(&args).is_err());
     }
 
     #[test]
@@ -1393,9 +1468,7 @@ mod tests {
         let bin = tempdir().unwrap();
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
-                .to_str()
-                .unwrap(),
+            fake_claude(bin.path(), &rank_output()).to_str().unwrap(),
         );
 
         let mut args = base_args();
@@ -1429,6 +1502,49 @@ mod tests {
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
         exec_hook_with(&args, HookHost::Claude, &raw);
+    }
+
+    /// The plan gate ranks before it judges, as `plan-check` run by hand does,
+    /// and `--no-rank` leaves the judge as the hook's only model call.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_ranks_before_judging_unless_no_rank() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[
+            ("cross-cutting-token-signing-1c57.md", OAUTH_DOC),
+            ("cross-cutting-key-rotation-77aa.md", KEY_ROTATION_DOC),
+        ]);
+        let bin = tempdir().unwrap();
+        let log = bin.path().join("calls.log");
+        // A numbered answer is valid whichever rule the limit of one keeps;
+        // an answer keyed to the other rule would be rejected, and the judge
+        // made a second time.
+        let judge = serde_json::json!({"verdicts": {"1": "not_applicable", "2": "not_applicable"}});
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            rank_and_judge_claude(bin.path(), &judge, &log)
+                .to_str()
+                .unwrap(),
+        );
+        let raw = serde_json::json!({
+            "tool_input": {"plan": "Sign access tokens with RS256 and rotate the signing key"}
+        })
+        .to_string();
+        let calls = || std::fs::read_to_string(&log).unwrap_or_default();
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.limit = 1;
+        exec_hook_with(&args, HookHost::Claude, &raw);
+        assert_eq!(calls(), "rank\njudge\n");
+
+        std::fs::remove_file(&log).unwrap();
+        args.no_rank = true;
+        exec_hook_with(&args, HookHost::Claude, &raw);
+        assert_eq!(calls(), "judge\n");
     }
 
     /// AK-678: a real deny must emit a `block`-decision batch with exactly

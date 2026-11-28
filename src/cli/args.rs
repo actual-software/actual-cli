@@ -1811,31 +1811,45 @@ pub struct PlanCheckArgs {
     pub codex_picker: bool,
 
     /// Maximum number of rule documents to judge the plan against.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = crate::cli::commands::check_engine::PLAN_LIMIT)]
     pub limit: usize,
 
     /// How many candidates the deterministic prefilter retrieves before the
     /// limit is applied. Raised to `--limit` when smaller.
-    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    #[arg(long, default_value_t = crate::cli::commands::check_engine::PLAN_CANDIDATES)]
     pub candidates: usize,
 
     /// Skip stage 2 (a runner-backed rank refining which documents apply) and
-    /// select with the deterministic prefilter alone. Direct-mode use only:
-    /// `--claude-hook` always uses the prefilter alone regardless of this
-    /// flag, so its one model call stays reserved for the conformance judge
-    /// inside Claude Code's 120-second `PreToolUse` timeout — see
-    /// `crate::cli::commands::plan_check` for why running both there risks
-    /// that budget. A human at a terminal has no such constraint, so direct
-    /// mode runs stage 2 by default, the same way `rules select` does.
+    /// select with the deterministic prefilter alone. Applies in every mode,
+    /// hooks included: a hook ranks by default too, within a 35-second
+    /// deadline so the conformance judge keeps the rest of the hook's
+    /// timeout, and falls back to the prefilter when the rank misses it.
     #[arg(long)]
     pub no_rank: bool,
 
-    /// Runner to use for stage 2 selection (direct mode only) and the
-    /// conformance judge. Probed automatically when omitted.
+    /// Most individual rules one check judges, in calls of at most 20 sent at
+    /// once. When the selected documents hold more, a prioritized window of
+    /// this many is judged and the rest are reported as not checked.
+    #[arg(
+        long,
+        default_value_t = crate::cli::commands::check_engine::PLAN_MAX_RULES as u64,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub max_rules: u64,
+
+    /// Print, as JSON, what the conformance judge would be handed — every
+    /// stage-1 candidate with its stage-2 score, the selected documents and
+    /// the rules gathered from them — and stop before the judge. Direct mode
+    /// only.
+    #[arg(long, conflicts_with_all = ["claude_hook", "codex_hook"])]
+    pub selection_only: bool,
+
+    /// Runner to use for stage 2 selection and the conformance judge. Probed
+    /// automatically when omitted.
     #[arg(long, value_enum)]
     pub runner: Option<RunnerChoice>,
 
-    /// Model for stage 2 selection (direct mode only) and the judge,
+    /// Model for stage 2 selection and the judge,
     /// overriding the configured one.
     #[arg(long)]
     pub model: Option<String>,
@@ -1970,30 +1984,45 @@ pub struct ImplCheckArgs {
     pub codex_picker: bool,
 
     /// Maximum number of rule documents to judge the diff against.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = crate::cli::commands::check_engine::IMPL_LIMIT)]
     pub limit: usize,
 
     /// How many candidates the deterministic prefilter retrieves before the
     /// limit is applied. Raised to `--limit` when smaller.
-    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    #[arg(long, default_value_t = crate::cli::commands::check_engine::IMPL_CANDIDATES)]
     pub candidates: usize,
 
     /// Skip stage 2 (a runner-backed rank refining which documents apply) and
-    /// select with the deterministic prefilter alone. Direct-mode use only:
-    /// `--claude-hook` always uses the prefilter alone regardless of this
-    /// flag, so its one model call stays reserved for the conformance judge —
-    /// see `crate::cli::commands::plan_check` for why running both there
-    /// risks that budget. A human at a terminal has no such constraint, so
-    /// direct mode runs stage 2 by default, the same way `rules select` does.
+    /// select with the deterministic prefilter alone. Applies in every mode,
+    /// hooks included: a hook ranks by default too, within a 35-second
+    /// deadline so the conformance judge keeps the rest of the hook's
+    /// timeout, and falls back to the prefilter when the rank misses it.
     #[arg(long)]
     pub no_rank: bool,
 
-    /// Runner to use for stage 2 selection (direct mode only) and the
-    /// conformance judge. Probed automatically when omitted.
+    /// Most individual rules one check judges, in calls of at most 20 sent at
+    /// once. When the selected documents hold more, a prioritized window of
+    /// this many is judged and the rest are reported as not checked.
+    #[arg(
+        long,
+        default_value_t = crate::cli::commands::check_engine::IMPL_MAX_RULES as u64,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub max_rules: u64,
+
+    /// Print, as JSON, what the conformance judge would be handed — every
+    /// stage-1 candidate with its stage-2 score, the selected documents and
+    /// the rules gathered from them — and stop before the judge. Direct mode
+    /// only.
+    #[arg(long, conflicts_with_all = ["claude_hook", "codex_hook"])]
+    pub selection_only: bool,
+
+    /// Runner to use for stage 2 selection and the conformance judge. Probed
+    /// automatically when omitted.
     #[arg(long, value_enum)]
     pub runner: Option<RunnerChoice>,
 
-    /// Model for stage 2 selection (direct mode only) and the judge,
+    /// Model for stage 2 selection and the judge,
     /// overriding the configured one.
     #[arg(long)]
     pub model: Option<String>,
@@ -3697,8 +3726,9 @@ mod parse_tests {
         assert!(!args.no_rank);
         assert!(!args.json);
         assert!(!args.rebuild);
-        assert_eq!(args.limit, 20);
-        assert_eq!(args.candidates, crate::rules::scope::DEFAULT_CANDIDATES);
+        assert_eq!(args.limit, 40);
+        assert_eq!(args.candidates, 60);
+        assert_eq!(args.max_rules, 40);
         assert!(args.runner.is_none());
         assert!(args.model.is_none());
         assert!(args.rules_dir.is_none());
@@ -3753,6 +3783,55 @@ mod parse_tests {
     // ---- ImplCheckArgs / `impl-check` parsing tests ----
 
     /// Extract `impl-check` arguments from a parsed command.
+    #[test]
+    fn test_gate_checks_parse_max_rules_and_selection_only() {
+        let plan = plan_check_args_from(&["actual", "plan-check", "a plan"]).unwrap();
+        assert_eq!(plan.max_rules, 40);
+        assert!(!plan.selection_only);
+        let plan = plan_check_args_from(&[
+            "actual",
+            "plan-check",
+            "--max-rules",
+            "80",
+            "--selection-only",
+            "a plan",
+        ])
+        .unwrap();
+        assert_eq!(plan.max_rules, 80);
+        assert!(plan.selection_only);
+        let diff = impl_check_args_from(&[
+            "actual",
+            "impl-check",
+            "--max-rules",
+            "60",
+            "--selection-only",
+        ])
+        .unwrap();
+        assert_eq!(diff.max_rules, 60);
+        assert!(diff.selection_only);
+    }
+
+    /// A cap of no rules would judge nothing, and a hook never stops before
+    /// its judge.
+    #[test]
+    fn test_gate_checks_refuse_a_zero_cap_and_selection_only_in_a_hook() {
+        assert!(plan_check_args_from(&["actual", "plan-check", "--max-rules", "0", "p"]).is_none());
+        assert!(plan_check_args_from(&[
+            "actual",
+            "plan-check",
+            "--selection-only",
+            "--claude-hook"
+        ])
+        .is_none());
+        assert!(impl_check_args_from(&[
+            "actual",
+            "impl-check",
+            "--selection-only",
+            "--codex-hook"
+        ])
+        .is_none());
+    }
+
     fn impl_check_args_from(argv: &[&str]) -> Option<ImplCheckArgs> {
         match Cli::try_parse_from(argv).ok()?.command {
             Command::ImplCheck(args) => Some(args),
@@ -3768,8 +3847,9 @@ mod parse_tests {
         assert!(!args.no_rank);
         assert!(!args.json);
         assert!(!args.rebuild);
-        assert_eq!(args.limit, 20);
-        assert_eq!(args.candidates, crate::rules::scope::DEFAULT_CANDIDATES);
+        assert_eq!(args.limit, 60);
+        assert_eq!(args.candidates, 150);
+        assert_eq!(args.max_rules, 60);
         assert!(args.runner.is_none());
         assert!(args.model.is_none());
         assert!(args.rules_dir.is_none());
